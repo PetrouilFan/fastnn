@@ -7,7 +7,7 @@ import fastnn as fnn
 def benchmark_tensor_from_numpy(num_iters=1000):
     """Benchmark tensor creation from numpy array."""
     arr = np.random.randn(32, 32).astype(np.float32)
-    shape = list(arr.shape)
+    shape = arr.shape
     
     timer = BenchmarkTimer(warmup=10, iterations=num_iters, unit="ms")
     def create_from_numpy():
@@ -29,12 +29,11 @@ def benchmark_tensor_from_list(num_iters=1000):
 def benchmark_collate_fastnn(num_iters=500):
     """Benchmark collate with fastnn tensors (fast path)."""
     from fastnn.data import default_collate
-    tensors = [fnn.randn([3, 32, 32]) for _ in range(16)]
+    tensors = [fnn.randn([3, 32, 32]) for _ in range(2)]
     
     timer = BenchmarkTimer(warmup=10, iterations=num_iters, unit="ms")
     def run_collate():
-        batch = [t for t in tensors[:2]]
-        default_collate(batch)
+        default_collate(tensors)
     return timer.value(run_collate)
 
 

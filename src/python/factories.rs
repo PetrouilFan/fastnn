@@ -1,4 +1,5 @@
 use pyo3::exceptions::PyValueError;
+use smallvec::SmallVec;
 
 // Helper to resolve device from optional string parameter
 fn resolve_device(device: Option<String>) -> Device {
@@ -174,17 +175,24 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyRe
 #[pyfunction]
 #[pyo3(signature = (data, shape, dtype = None))]
 fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> PyResult<PyTensor> {
+    let dtype = resolve_dtype(dtype);
     let n: usize = shape.iter().product::<i64>() as usize;
-    let expected_bytes = n * 4;
+    let expected_bytes = n * dtype.size();
     if data.len() != expected_bytes {
         return Err(PyValueError::new_err(format!(
-            "tensor_from_bytes: expected {expected_bytes} bytes for shape {:?}, got {}",
-            shape, data.len()
+            "tensor_from_bytes: expected {expected_bytes} bytes for shape {:?} and dtype {}, got {}",
+            shape, dtype.as_str(), data.len()
         )));
     }
-    let _dtype = resolve_dtype(dtype);
-    let floats: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-    Ok(PyTensor::from_tensor(Tensor::from_vec(floats, shape)))
+    let sizes: SmallVec<[i64; 8]> = shape.into();
+    let storage = Arc::new(crate::storage::Storage::Cpu(crate::storage::CpuStorage {
+        data: Arc::new(data),
+        nbytes: expected_bytes,
+        #[cfg(feature = "gpu")]
+        gpu_buffer_cache: Default::default(),
+    }));
+    let tensor = Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, dtype));
+    Ok(PyTensor::from_tensor(tensor))
 }
 
 #[pyfunction]

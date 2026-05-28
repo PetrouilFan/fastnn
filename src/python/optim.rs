@@ -248,6 +248,15 @@ impl PyMuon {
         }
     }
 
+    fn params(&self) -> Vec<PyTensor> {
+        self.inner
+            .params
+            .iter()
+            .cloned()
+            .map(PyTensor::from_tensor)
+            .collect()
+    }
+
     fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use pyo3::types::PyDict;
         let dict = PyDict::new(py);

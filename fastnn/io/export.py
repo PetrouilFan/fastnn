@@ -73,7 +73,6 @@ def add_prefixed_config(config, prefix):
 
 def create_conv2d_from_config(layer_info, prefix):
     """Create Conv2d layer from config with given prefix."""
-    import fastnn as fnn
     return fnn.Conv2d(
         layer_info[f"{prefix}_in_channels"],
         layer_info[f"{prefix}_out_channels"],
@@ -88,7 +87,6 @@ def create_conv2d_from_config(layer_info, prefix):
 
 def create_batchnorm_from_config(layer_info, prefix):
     """Create BatchNorm1d layer from config with given prefix."""
-    import fastnn as fnn
     return fnn.BatchNorm1d(
         layer_info[f"{prefix}_num_features"],
         eps=layer_info.get(f"{prefix}_eps", 1e-5),
@@ -148,7 +146,8 @@ def export_pytorch_model(
         if BasicBlock is not None and isinstance(module, BasicBlock):
             basicblock_names.add(name)
 
-    for name, module in model.named_modules():
+    module_items = list(model.named_modules())
+    for idx, (name, module) in enumerate(module_items):
         # Skip empty name (root module) only if it's a container
         if not name:
             if isinstance(module, torch.nn.Sequential):
@@ -224,13 +223,17 @@ def export_pytorch_model(
 
         elif isinstance(module, torch.nn.AdaptiveAvgPool2d):
             layer_info["type"] = "AdaptiveAvgPool2d"
-            # output size may be stored; we assume (1,1)
             layer_info["output_size"] = (1, 1)
             layers.append(layer_info)
-            # Add Flatten layer after AdaptiveAvgPool2d if next layer is Linear
-            # This is needed for ResNet-like models where AdaptiveAvgPool2d output
-            # is [batch, channels, 1, 1] but Linear expects [batch, channels]
-            layers.append({"name": name + ".flatten", "type": "Flatten"})
+            next_is_linear = False
+            for peek_idx in range(idx + 1, len(module_items)):
+                peek_name, peek_module = module_items[peek_idx]
+                if peek_name and peek_name not in processed_names:
+                    if isinstance(peek_module, torch.nn.Linear):
+                        next_is_linear = True
+                    break
+            if next_is_linear:
+                layers.append({"name": name + ".flatten", "type": "Flatten"})
             continue
 
         elif isinstance(module, torch.nn.Flatten):
@@ -376,8 +379,14 @@ def export_pytorch_model(
 
 
 def save_fnn_model(model, path: str) -> None:
-    """Export a fastnn model to .fnn format (alias for export_pytorch_model)."""
-    export_pytorch_model(model, path)
+    """Export a fastnn model to .fnn format."""
+    if hasattr(model, "named_modules") or (_torch_available and isinstance(model, torch.nn.Module)):
+        export_pytorch_model(model, path)
+    else:
+        raise TypeError(
+            "save_fnn_model requires a PyTorch model (torch.nn.Module). "
+            "FastNN native model serialization is not yet supported."
+        )
 
 
 def get_param_setter(layer, param_name):

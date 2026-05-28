@@ -98,10 +98,9 @@ class BaseModel(ModuleWrapperMixin):
             obj = target
             for part in parts[:-1]:
                 obj = getattr(obj, part)
-            if hasattr(obj, 'set_weight') and parts[-1] == 'weight':
-                obj.set_weight(param)
-            elif hasattr(obj, 'set_bias') and parts[-1] == 'bias':
-                obj.set_bias(param)
+            setter = getattr(obj, f'set_{parts[-1]}', None)
+            if callable(setter):
+                setter(param)
             else:
                 setattr(obj, parts[-1], param)
 

@@ -96,6 +96,10 @@ pub enum Instruction {
 pub struct ExecutablePlan {
     pub instructions: Vec<Instruction>,
     pub arena_size: usize,
+    /// Topological level for each instruction (same index as `instructions`).
+    /// Instructions with the same level have no data dependencies and can
+    /// execute in parallel. Levels increase monotonically.
+    pub levels: Vec<usize>,
 }
 
 impl ExecutablePlan {
@@ -121,6 +125,7 @@ pub mod executor;
 pub mod cpu;
 
 /// Wgpu (GPU) backend implementation (WGSL compute shaders)
+#[cfg(feature = "gpu")]
 pub mod wgpu;
 
 /// Standalone runtime for executing pre-compiled plans

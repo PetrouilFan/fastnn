@@ -1,6 +1,7 @@
 use crate::autograd;
 use crate::autograd::AutogradMeta;
 use crate::error::{FastnnError, FastnnResult};
+use crate::storage::{CpuStorage, Storage};
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub(crate) fn compute_strides(sizes: &[i64]) -> SmallVec<[i64; 8]> {
     let mut stride = 1i64;
     for i in (0..sizes.len()).rev() {
         strides[i] = stride;
-        stride *= sizes[i];
+        stride = stride.saturating_mul(sizes[i]);
     }
     strides
 }
@@ -31,15 +32,25 @@ impl TensorImpl {
     }
 
     pub fn is_contiguous(&self) -> bool {
+        let cached = self
+            .contiguous_cache
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cached != -1 {
+            return cached == 1;
+        }
         let mut expected_stride = 1i64;
         for (size, &stride) in self.sizes.iter().rev().zip(self.strides.iter().rev()) {
             if *size != 1 {
                 if stride != expected_stride {
+                    self.contiguous_cache
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                     return false;
                 }
                 expected_stride *= *size;
             }
         }
+        self.contiguous_cache
+            .store(1, std::sync::atomic::Ordering::Relaxed);
         true
     }
 
@@ -49,28 +60,30 @@ impl TensorImpl {
         }
         let numel = self.numel() as usize;
         let ndim = self.ndim();
-        let mut data = vec![0.0f32; numel];
-        // SAFETY: We verified the storage is `Storage::Cpu`. The pointer is derived
-        // from the backing `Vec<u8>` allocation, which is valid for the duration of
-        // this function. The length `len` is within the bounds of the allocation.
-        let src = unsafe {
-            let crate::storage::Storage::Cpu(cpu) = &self.storage.as_ref() else {
-                panic!("contiguous(): only supported for CPU tensors");
-            };
-            let ptr = cpu.data.as_ref().as_ptr() as *const f32;
-            let len = cpu.data.len() / 4;
-            std::slice::from_raw_parts(ptr, len)
+        let elem_size = self.dtype.size();
+        let mut data = vec![0u8; numel * elem_size];
+        let src_ptr = match self.storage.as_ref() {
+            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+            #[cfg(feature = "gpu")]
+            Storage::Wgpu(_) => panic!("contiguous(): only supported for CPU tensors"),
         };
         let strides = &self.strides;
         let sizes = &self.sizes;
         let offset = self.storage_offset;
         let mut indices: SmallVec<[i64; 6]> = smallvec![0i64; ndim];
+        let dst = data.as_mut_ptr();
         for i in 0..numel {
             let mut src_idx = offset;
             for d in 0..ndim {
                 src_idx += indices[d] * strides[d];
             }
-            data[i] = src[src_idx as usize];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src_ptr.add((src_idx as usize) * elem_size),
+                    dst.add(i * elem_size),
+                    elem_size,
+                );
+            }
             for d in (0..ndim).rev() {
                 indices[d] += 1;
                 if indices[d] < sizes[d] {
@@ -80,11 +93,16 @@ impl TensorImpl {
             }
         }
         let sizes = self.sizes.clone();
-        let mut new_tensor = Tensor::from_vec(data, sizes.to_vec());
+        let nbytes = data.len();
+        let storage = Arc::new(Storage::Cpu(CpuStorage {
+            data: Arc::new(data),
+            nbytes,
+            #[cfg(feature = "gpu")]
+            gpu_buffer_cache: Default::default(),
+        }));
+        let mut new_tensor = Tensor::new(TensorImpl::new(storage, sizes, self.dtype));
         if let Some(meta) = &self.autograd_meta {
-            let Ok(meta_lock) = meta.lock() else {
-                return new_tensor;
-            };
+            let meta_lock = meta.lock();
             if meta_lock.requires_grad {
                 let new_meta = AutogradMeta::new_non_leaf(true);
                 Arc::make_mut(&mut new_tensor.inner).set_autograd_meta(new_meta);
@@ -265,12 +283,10 @@ impl TensorImpl {
         let mut tensor = self.new_view_from(sizes, strides, self.storage_offset);
 
         if self.requires_grad() {
-            let edges = autograd::make_edge(&_input_tensor);
             let inputs = vec![_input_tensor.clone()];
-            let backward = Arc::new(autograd::UnsqueezeBackward::new(edges, inputs));
             let meta = AutogradMeta {
                 grad: None,
-                grad_fn: Some(backward.clone()),
+                grad_fn: Some(autograd::make_node_info("UnsqueezeBackward", inputs)),
                 requires_grad: true,
                 is_leaf: false,
             };
@@ -386,10 +402,8 @@ impl Tensor {
         let output: Tensor = self.inner.view(sizes).into();
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -400,10 +414,8 @@ impl Tensor {
         let output = self.inner.reshape(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -414,10 +426,8 @@ impl Tensor {
         let output = reshaped.permute(perm);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -427,10 +437,11 @@ impl Tensor {
         let output = self.inner.transpose(dim0, dim1);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::TransposeBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("TransposeBackward", inputs),
+            )
         } else {
             output
         }
@@ -441,10 +452,8 @@ impl Tensor {
         let output = self.inner.permute(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::PermuteBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("PermuteBackward", inputs))
         } else {
             output
         }
@@ -454,10 +463,8 @@ impl Tensor {
         let output = self.inner.squeeze(dim);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ViewBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
         }
@@ -472,10 +479,8 @@ impl Tensor {
         let output = self.inner.expand(sizes);
 
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ExpandBackward::new(edges, inputs));
-            Self::attach_grad_fn(output, backward)
+            Self::attach_grad_fn(output, autograd::make_node_info("ExpandBackward", inputs))
         } else {
             output
         }

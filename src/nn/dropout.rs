@@ -30,7 +30,11 @@ impl Module for Dropout {
             let numel = x_data.len();
 
             let mut rng = rand::thread_rng();
-            let mut mask_data = vec![0.0f32; numel];
+            // SAFETY: We immediately fill all numel elements in the branches below.
+            let mut mask_data: Vec<f32> = Vec::with_capacity(numel);
+            unsafe {
+                mask_data.set_len(numel);
+            }
 
             if numel > 100_000 {
                 let chunk_size = 4096;
@@ -42,9 +46,11 @@ impl Module for Dropout {
                     rng.fill(&mut rand_vals[..]);
 
                     for i in 0..chunk_len {
-                        if rand_vals[i] < keep_prob as f32 {
-                            mask_data[chunk_start + i] = scale;
-                        }
+                        mask_data[chunk_start + i] = if rand_vals[i] < keep_prob as f32 {
+                            scale
+                        } else {
+                            0.0
+                        };
                     }
                 }
             } else {
@@ -59,29 +65,17 @@ impl Module for Dropout {
             let mut out = x.mul(&mask);
 
             if x.requires_grad() {
-                let edges = crate::autograd::make_edge(x);
-                let inputs = vec![x.clone()];
-                let backward = crate::autograd::DropoutBackward::new(edges, inputs);
+                let inputs = vec![x.clone(), mask.clone()];
                 let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                meta.grad_fn = Some(crate::autograd::make_node_info("DropoutBackward", inputs));
                 std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
-                    Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+                    Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
             }
             out
         } else {
             x.clone()
         }
     }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
 
     impl_training_state!(self, self.training);
 }
@@ -114,13 +108,20 @@ impl Module for Dropout2d {
             // Generate mask: [N, C, 1, 1] that will broadcast
             let mut rng = rand::thread_rng();
             let num_masks = batch * channels;
-            let mut channel_mask_data = vec![0.0f32; num_masks];
+            // Avoid zero-initialization
+            let mut channel_mask_data: Vec<f32> = Vec::with_capacity(num_masks);
+            // SAFETY: We immediately fill all num_masks elements below.
+            unsafe {
+                channel_mask_data.set_len(num_masks);
+            }
             let mut rand_vals = vec![0.0f32; num_masks];
             rng.fill(&mut rand_vals[..]);
             for i in 0..num_masks {
-                if rand_vals[i] < keep_prob as f32 {
-                    channel_mask_data[i] = scale;
-                }
+                channel_mask_data[i] = if rand_vals[i] < keep_prob as f32 {
+                    scale
+                } else {
+                    0.0
+                };
             }
 
             let channel_mask =
@@ -128,29 +129,17 @@ impl Module for Dropout2d {
             let mut out = x.mul(&channel_mask);
 
             if x.requires_grad() {
-                let edges = crate::autograd::make_edge(x);
-                let inputs = vec![x.clone()];
-                let backward = crate::autograd::Dropout2dBackward::new(edges, inputs);
+                let inputs = vec![x.clone(), channel_mask.clone()];
                 let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                meta.grad_fn = Some(crate::autograd::make_node_info("Dropout2dBackward", inputs));
                 std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
-                    Some(std::sync::Arc::new(std::sync::Mutex::new(meta)));
+                    Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
             }
             out
         } else {
             x.clone()
         }
     }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
 
     impl_training_state!(self, self.training);
 }

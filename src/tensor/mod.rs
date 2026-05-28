@@ -7,7 +7,7 @@ use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -31,14 +31,22 @@ pub struct TensorImpl {
     pub dtype: DType,
     pub device: Device,
     pub version_counter: Arc<AtomicU64>,
-    pub autograd_meta: Option<Arc<std::sync::Mutex<AutogradMeta>>>,
+    pub autograd_meta: Option<Arc<parking_lot::Mutex<AutogradMeta>>>,
     pub requires_grad: bool,
+    /// Cached contiguity: -1=unknown, 0=false, 1=true.
+    /// Set to 1 when strides are known to be contiguous (new tensors from factories),
+    /// set to -1 when strides may be non-contiguous (views, clones, device transfers).
+    pub contiguous_cache: AtomicI8,
 }
 
 impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
         let device = storage.device(); // Get device from storage
-        let numel: i64 = sizes.iter().product();
+        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
+        if numel > i64::MAX as i128 {
+            panic!("Tensor too large");
+        }
+        let numel = numel as i64;
         let nbytes = (numel * dtype.size() as i64) as usize;
         // Validate storage is large enough for the declared shape.
         // This catches mismatches between shape inference and actual data size.
@@ -66,6 +74,7 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
+            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
         }
     }
 
@@ -76,7 +85,11 @@ impl TensorImpl {
         device: Device,
         dtype: DType,
     ) -> Self {
-        let numel: i64 = sizes.iter().product();
+        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
+        if numel > i64::MAX as i128 {
+            panic!("Tensor too large");
+        }
+        let numel = numel as i64;
         let _nbytes = (numel * dtype.size() as i64) as usize;
 
         let strides = compute_strides(&sizes);
@@ -91,6 +104,7 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
+            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
         }
     }
 
@@ -108,13 +122,20 @@ impl TensorImpl {
         ptr as usize
     }
 
-    /// Create a view sharing storage, version_counter, and autograd_meta from self.
+    /// Create a view sharing storage and version_counter from self.
+    /// Creates a fresh autograd_meta for the view to prevent the view from modifying the source's grad_fn.
     pub(crate) fn new_view_from(
         &self,
         sizes: SmallVec<[i64; 8]>,
         strides: SmallVec<[i64; 8]>,
         storage_offset: i64,
     ) -> Self {
+        let autograd_meta = self.autograd_meta.as_ref().map(|meta| {
+            let lock = meta.lock();
+            Arc::new(parking_lot::Mutex::new(AutogradMeta::new(
+                lock.requires_grad,
+            )))
+        });
         Self {
             storage: Arc::clone(&self.storage),
             sizes,
@@ -123,8 +144,9 @@ impl TensorImpl {
             dtype: self.dtype,
             device: self.device,
             version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: self.autograd_meta.clone(),
+            autograd_meta,
             requires_grad: self.requires_grad,
+            contiguous_cache: AtomicI8::new(-1), // strides may be non-contiguous
         }
     }
 
@@ -140,6 +162,7 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: self.autograd_meta.clone(),
             requires_grad: self.requires_grad,
+            contiguous_cache: AtomicI8::new(-1), // strides copied from self, may be non-contiguous
         }
     }
 
@@ -152,63 +175,59 @@ impl TensorImpl {
     /// cached `requires_grad` field consistent.
     pub fn set_autograd_meta(&mut self, meta: AutogradMeta) {
         let rg = meta.requires_grad;
-        self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        self.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(meta)));
         self.requires_grad = rg;
     }
 
     pub fn set_requires_grad(&mut self, requires_grad: bool) {
         self.requires_grad = requires_grad;
         if self.autograd_meta.is_none() {
-            self.autograd_meta = Some(Arc::new(std::sync::Mutex::new(AutogradMeta::new(
+            self.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(AutogradMeta::new(
                 requires_grad,
             ))));
         } else if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.requires_grad = requires_grad;
-            }
+            let mut lock = meta.lock();
+            lock.requires_grad = requires_grad;
         }
     }
 
     pub fn requires_grad_(mut self, requires_grad: bool) -> Tensor {
         self.requires_grad = requires_grad;
         if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.requires_grad = requires_grad;
-            }
+            let mut lock = meta.lock();
+            lock.requires_grad = requires_grad;
         }
         self.into()
     }
 
     pub fn grad(&self) -> Option<Tensor> {
-        self.autograd_meta.as_ref()?.lock().ok()?.grad.clone()
+        self.autograd_meta.as_ref()?.lock().grad.clone()
     }
 
     pub fn set_grad(&mut self, grad: Option<Tensor>) {
         if let Some(meta) = &mut self.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            let mut lock = meta.lock();
+            lock.grad = grad;
         }
     }
 
     pub fn set_grad_for_tensor(tensor: &Tensor, grad: Option<Tensor>) {
         if let Some(meta) = &tensor.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            let mut lock = meta.lock();
+            lock.grad = grad;
         }
     }
 
     pub fn is_leaf(&self) -> bool {
         self.autograd_meta
             .as_ref()
-            .and_then(|m| m.lock().ok())
+            .map(|m| m.lock())
             .map(|m| m.is_leaf)
             .unwrap_or(true)
     }
 
-    pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
-        self.autograd_meta.as_ref()?.lock().ok()?.grad_fn.clone()
+    pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
+        self.autograd_meta.as_ref()?.lock().grad_fn.clone()
     }
 
     pub fn detach(&self) -> Tensor {
@@ -235,6 +254,7 @@ impl TensorImpl {
                 // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
@@ -251,12 +271,10 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr();
-                // storage_offset is in elements, cast to f32 pointer first
-                let f32_ptr = ptr as *const f32;
-                // SAFETY: The storage allocation is valid for the lifetime of `self`,
-                // and `storage_offset` has been validated to be within bounds of the allocation.
-                unsafe { f32_ptr.add(self.storage_offset as usize) }
+                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                unsafe { ptr.add(byte_offset) as *const f32 }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 let location = std::panic::Location::caller();
                 panic!(
@@ -271,15 +289,15 @@ impl TensorImpl {
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        match self.storage.as_ref() {
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
             Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut f32;
-                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
-                // and `storage_offset` is within bounds of the storage allocation.
-                unsafe { ptr.add(self.storage_offset as usize) }
+                let data = Arc::make_mut(&mut cpu.data);
+                let ptr = data.as_mut_ptr();
+                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                unsafe { ptr.add(byte_offset) as *mut f32 }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
@@ -287,16 +305,15 @@ impl TensorImpl {
     }
 
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        match self.storage.as_ref() {
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
             Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
+                let data = Arc::make_mut(&mut cpu.data);
+                let ptr = data.as_mut_ptr();
                 let elem_size = self.dtype.size();
-                // SAFETY: The caller guarantees exclusive ownership via `&mut self`,
-                // and `storage_offset * elem_size` is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
             }
@@ -309,11 +326,13 @@ impl TensorImpl {
             // is derived from the CPU storage's backing `Vec<u8>` and is valid for
             // the lifetime of `self`.
             Storage::Cpu(cpu) => unsafe {
-                let ptr = cpu.data.as_ref().as_ptr() as *const f32;
-                let ptr = ptr.add(self.storage_offset as usize);
+                let ptr = cpu.data.as_ref().as_ptr();
+                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                let ptr = ptr.add(byte_offset) as *const f32;
                 let numel = self.numel() as usize;
                 // Unconditional bounds validation to prevent UB in release builds
-                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                let elem_size = self.dtype.size();
+                let storage_len = cpu.data.len() / elem_size;
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
                     "as_f32_slice: offset + numel exceeds storage bounds. \
@@ -326,6 +345,7 @@ impl TensorImpl {
                 );
                 std::slice::from_raw_parts(ptr, numel)
             },
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot slice GPU storage. Use .to_cpu() first.");
             }
@@ -339,8 +359,10 @@ impl TensorImpl {
         // is derived from `data_ptr_f32_mut()` which ensures exclusive ownership.
         unsafe {
             // Unconditional bounds validation to prevent UB in release builds
+            #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
             if let Storage::Cpu(cpu) = self.storage.as_ref() {
-                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                let elem_size = self.dtype.size();
+                let storage_len = cpu.data.len() / elem_size;
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
                     "as_f32_slice_mut: offset + numel exceeds storage bounds. \
@@ -369,6 +391,7 @@ impl Clone for TensorImpl {
             version_counter: Arc::clone(&self.version_counter),
             autograd_meta: self.autograd_meta.clone(),
             requires_grad: self.requires_grad,
+            contiguous_cache: AtomicI8::new(self.contiguous_cache.load(Ordering::Relaxed)),
         }
     }
 }
@@ -407,14 +430,11 @@ impl Tensor {
         self.inner.device
     }
 
-    pub(crate) fn attach_grad_fn(
-        mut output: Tensor,
-        backward: Arc<dyn autograd::Node + 'static>,
-    ) -> Tensor {
+    pub(crate) fn attach_grad_fn(mut output: Tensor, backward: Arc<autograd::NodeInfo>) -> Tensor {
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
         meta.grad_fn = Some(backward);
         let inner = Arc::make_mut(&mut output.inner);
-        inner.autograd_meta = Some(Arc::new(std::sync::Mutex::new(meta)));
+        inner.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(meta)));
         inner.requires_grad = true;
         output
     }
@@ -435,9 +455,8 @@ impl Tensor {
 
     pub fn set_grad(&self, grad: Option<Tensor>) {
         if let Some(meta) = &self.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = grad;
-            }
+            let mut lock = meta.lock();
+            lock.grad = grad;
         }
     }
 
@@ -445,7 +464,7 @@ impl Tensor {
         self.inner.is_leaf()
     }
 
-    pub fn grad_fn(&self) -> Option<Arc<dyn autograd::Node>> {
+    pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
         self.inner.grad_fn()
     }
 
@@ -460,6 +479,7 @@ impl Tensor {
 
         let ptr = match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot call item() on GPU tensor. Use .cpu() first.");
             }
@@ -544,12 +564,12 @@ impl Tensor {
                             // Increment indices and update linear_idx incrementally
                             for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                linear_idx += strides[dim];
+                                linear_idx = linear_idx.saturating_add(strides[dim]);
                                 if indices[dim] < sizes[dim] {
                                     break;
                                 }
                                 // Wrap: subtract size * stride, reset to 0
-                                linear_idx -= sizes[dim] * strides[dim];
+                                linear_idx = linear_idx.saturating_sub(sizes[dim] * strides[dim]);
                                 indices[dim] = 0;
                             }
                         }
@@ -571,11 +591,11 @@ impl Tensor {
                             }
                             for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                linear_idx += strides[dim];
+                                linear_idx = linear_idx.saturating_add(strides[dim]);
                                 if indices[dim] < sizes[dim] {
                                     break;
                                 }
-                                linear_idx -= sizes[dim] * strides[dim];
+                                linear_idx = linear_idx.saturating_sub(sizes[dim] * strides[dim]);
                                 indices[dim] = 0;
                             }
                         }
@@ -597,11 +617,11 @@ impl Tensor {
                             }
                             for dim in (0..ndim).rev() {
                                 indices[dim] += 1;
-                                linear_idx += strides[dim];
+                                linear_idx = linear_idx.saturating_add(strides[dim]);
                                 if indices[dim] < sizes[dim] {
                                     break;
                                 }
-                                linear_idx -= sizes[dim] * strides[dim];
+                                linear_idx = linear_idx.saturating_sub(sizes[dim] * strides[dim]);
                                 indices[dim] = 0;
                             }
                         }
@@ -662,6 +682,7 @@ impl Tensor {
                     _ => panic!("Unsupported dtype for to_numpy"),
                 }
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
                 panic!("Cannot convert GPU tensor to numpy directly. Use .cpu() first.");
             }
@@ -686,35 +707,22 @@ impl Tensor {
     /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
     /// Note: storage_offset is in elements, so we need to multiply by element size
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        let inner = &self.inner;
-        match inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                // Unsafe: caller must ensure exclusive ownership of storage
-                // This is guaranteed by &mut self if Arc is not shared
-                let ptr = cpu.data.as_ref().as_ptr() as *mut u8;
-                let elem_size = inner.dtype.size();
-                unsafe { ptr.add(inner.storage_offset as usize * elem_size) }
-            }
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
-        }
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.data_ptr_mut()
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        // For BF16/F16 types, we need to convert to F32
         match self.inner.dtype {
-            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                self.inner.as_f32_slice()
+            DType::F32 => self.inner.as_f32_slice(),
+            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
+                panic!("as_f32_slice: use dtype-specific access methods instead of f32 reinterpretation. \
+                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
             }
             DType::BF16 | DType::F16 => {
-                // For half-precision types, we need to convert to F32
-                // This requires creating a new tensor with F32 dtype
-                // For now, we'll panic as this is not yet fully implemented
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
             DType::U4 | DType::U8 => {
-                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32. Use the IR pipeline to dequantize first.")
+                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32.");
             }
         }
     }
@@ -739,19 +747,14 @@ impl Tensor {
                 }
                 Some(&data[start..][..byte_len])
             }
+            #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => None,
         }
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        // For BF16/F16 types, we cannot directly get a mutable f32 slice
-        // The data is stored in half-precision format
-        // For operations that need f32, use the dtype-specific operations
         match self.inner.dtype {
-            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                // Use Arc::make_mut to ensure exclusive ownership
-                // This will clone the TensorImpl if there are multiple Arc owners,
-                // ensuring we have unique access before getting a mutable slice
+            DType::F32 => {
                 let inner = if Arc::strong_count(&self.inner) == 1 {
                     Arc::get_mut(&mut self.inner).unwrap()
                 } else {
@@ -759,11 +762,15 @@ impl Tensor {
                 };
                 inner.as_f32_slice_mut()
             }
+            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
+                panic!("as_f32_slice_mut: use dtype-specific access methods instead of f32 reinterpretation. \
+                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
+            }
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
             }
             DType::U4 | DType::U8 => {
-                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32. Use the IR pipeline to dequantize first.")
+                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32.");
             }
         }
     }
@@ -1042,27 +1049,27 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
     for t in tensors {
         if let Some(g) = t.grad() {
             let g_data = g.as_f32_slice();
-            let param_norm = if norm_type == 2.0 {
-                g_data.iter().map(|x| x * x).sum::<f32>().sqrt()
+            if norm_type == 2.0 {
+                let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
+                total_norm += param_norm * param_norm;
             } else {
-                g_data
-                    .iter()
-                    .map(|x| x.abs().powf(norm_type))
-                    .sum::<f32>()
-                    .powf(1.0 / norm_type)
-            };
-            total_norm += param_norm * param_norm;
+                total_norm += g_data.iter().map(|x| x.abs().powf(norm_type)).sum::<f32>();
+            }
         }
     }
-    total_norm = total_norm.sqrt();
-    let clip_coef = max_norm / (total_norm + 1e-6);
+    if norm_type == 2.0 {
+        total_norm = total_norm.sqrt();
+    } else {
+        total_norm = total_norm.powf(1.0 / norm_type);
+    }
+    let clip_coef = max_norm / (total_norm.max(1e-6));
     if clip_coef < 1.0 {
         for t in tensors {
-            if let Some(g) = t.grad() {
-                let g_data = g.as_f32_slice();
-                let clipped: Vec<f32> = g_data.iter().map(|x| x * clip_coef).collect();
-                let clipped_tensor = Tensor::from_vec(clipped, g.shape());
-                t.set_grad(Some(clipped_tensor));
+            if let Some(mut g) = t.grad() {
+                for x in g.as_f32_slice_mut().iter_mut() {
+                    *x *= clip_coef;
+                }
+                t.set_grad(Some(g));
             }
         }
     }
@@ -1071,14 +1078,11 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
 
 pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
     for t in tensors {
-        if let Some(g) = t.grad() {
-            let g_data = g.as_f32_slice();
-            let clipped: Vec<f32> = g_data
-                .iter()
-                .map(|x| x.max(-clip_value).min(clip_value))
-                .collect();
-            let clipped_tensor = Tensor::from_vec(clipped, g.shape());
-            t.set_grad(Some(clipped_tensor));
+        if let Some(mut g) = t.grad() {
+            for x in g.as_f32_slice_mut().iter_mut() {
+                *x = x.max(-clip_value).min(clip_value);
+            }
+            t.set_grad(Some(g));
         }
     }
 }
@@ -1136,6 +1140,7 @@ impl Tensor {
                 let num_bytes = self.inner.numel() as usize * elem_size;
                 &cpu.data[offset..offset + num_bytes]
             }
+            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
             _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
         }
     }
@@ -1168,20 +1173,21 @@ impl Tensor {
         let graph_outputs = build_graph(&g, &graph_inputs);
 
         let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
-        let use_gpu = inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_)));
-        let result_bytes = if use_gpu {
-            g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
-                &graph_outputs.iter().collect::<Vec<_>>(),
-                crate::backend::wgpu::WgpuBackend,
-                &input_bytes,
-            )?
-        } else {
+        let result_bytes = (|| -> Result<Vec<Vec<u8>>, BackendError> {
+            #[cfg(feature = "gpu")]
+            if inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_))) {
+                return g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
+                    &graph_outputs.iter().collect::<Vec<_>>(),
+                    crate::backend::wgpu::WgpuBackend,
+                    &input_bytes,
+                );
+            }
             g.compile_and_execute::<CpuBackend>(
                 &graph_outputs.iter().collect::<Vec<_>>(),
                 CpuBackend,
                 &input_bytes,
-            )?
-        };
+            )
+        })()?;
 
         Ok(graph_outputs
             .into_iter()
@@ -1220,6 +1226,7 @@ impl Tensor {
                 let storage = Storage::Cpu(crate::storage::CpuStorage {
                     data: Arc::new(data),
                     nbytes: num_bytes,
+                    #[cfg(feature = "gpu")]
                     gpu_buffer_cache: parking_lot::RwLock::new(std::collections::HashMap::new()),
                 });
                 Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))

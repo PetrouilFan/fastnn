@@ -19,6 +19,55 @@ where
     Tensor::exec_aot(inputs, build_graph).map(|mut v| v.remove(0))
 }
 
+/// Generate try_xxx + xxx for a unary op.
+macro_rules! impl_unary_op {
+    ($try_name:ident, $name:ident, $ir_method:ident, $backward:literal) => {
+        pub fn $try_name(&self) -> Result<Tensor, BackendError> {
+            let output = exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0])])?;
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                let inputs = vec![self.clone()];
+                Ok(Self::attach_grad_fn(
+                    output,
+                    autograd::make_node_info($backward, inputs),
+                ))
+            } else {
+                Ok(output)
+            }
+        }
+
+        pub fn $name(&self) -> Tensor {
+            self.$try_name().expect(concat!(
+                "Tensor::",
+                stringify!($name),
+                ": AOT execution failed"
+            ))
+        }
+    };
+}
+
+/// Generate try_xxx + xxx for a unary op with extra parameters.
+/// The last arguments are the IR method name followed by the extra args to pass
+/// after `&ins[0]` (e.g. `leaky_relu, negative_slope` produces `g.leaky_relu(&ins[0], negative_slope)`).
+macro_rules! impl_unary_op_extra {
+    ($try_name:ident, $name:ident, $backward:literal, ($($param:ident: $ptype:ty),*), $ir_method:ident $(, $extra_arg:expr)*) => {
+        #[allow(unused_variables)]
+        pub fn $try_name(&self, $($param: $ptype),*) -> Result<Tensor, BackendError> {
+            let output = exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0] $(, $extra_arg)*)])?;
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                let inputs = vec![self.clone()];
+                Ok(Self::attach_grad_fn(output, autograd::make_node_info($backward, inputs)))
+            } else {
+                Ok(output)
+            }
+        }
+
+        pub fn $name(&self, $($param: $ptype),*) -> Tensor {
+            self.$try_name($($param),*)
+                .expect(concat!("Tensor::", stringify!($name), ": AOT execution failed"))
+        }
+    };
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::{
     _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
@@ -30,7 +79,7 @@ use std::arch::x86_64::{
 macro_rules! impl_inplace_binary_op {
     ($fn_name:ident, $immutable_fn:ident, $simd_intrin:ident, $assign_op:tt, $binop:tt) => {
         pub fn $fn_name(&mut self, other: &Tensor) -> &mut Self {
-            if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() {
+            if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() || self.inner.dtype != DType::F32 || other.inner.dtype != DType::F32 {
                 let result = (self as &Tensor).$immutable_fn(other);
                 *self = result;
                 return self;
@@ -43,6 +92,7 @@ macro_rules! impl_inplace_binary_op {
                 *self = result;
                 return self;
             }
+            self.inner.version_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let self_ptr = self.data_ptr_f32_mut();
             let other_ptr = other.data_ptr_f32();
             match dtype {
@@ -110,13 +160,13 @@ macro_rules! impl_inplace_binary_op {
                     }
                 }
                 DType::F64 => {
-                    let sp = self_ptr as *mut f64;
-                    let op = other_ptr as *const f64;
+                    let sp = self.data_ptr_mut() as *mut f64;
+                    let op = other.data_ptr() as *const f64;
                     for i in 0..numel { unsafe { *sp.add(i) $assign_op *op.add(i); } }
                 }
                 DType::I32 => {
-                    let sp = self_ptr as *mut i32;
-                    let op = other_ptr as *const i32;
+                    let sp = self.data_ptr_mut() as *mut i32;
+                    let op = other.data_ptr() as *const i32;
                     for i in 0..numel { unsafe { *sp.add(i) $assign_op *op.add(i); } }
                 }
                 DType::BF16 => {
@@ -171,7 +221,9 @@ impl Tensor {
             {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
-                let Storage::Cpu(cpu_storage) = storage else {
+                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
+                let Storage::Cpu(cpu_storage) = storage
+                else {
                     unreachable!("add fast path only runs when both tensors are on CPU")
                 };
                 let out_data = Arc::make_mut(&mut cpu_storage.data);
@@ -212,15 +264,9 @@ impl Tensor {
                 }
             }
             if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-                let edges = {
-                    let mut edges = autograd::make_edge(self);
-                    edges.extend(autograd::make_edge(other));
-                    edges
-                };
                 let inputs = vec![self.clone(), other.clone()];
-                let backward = autograd::AddBackward::new(edges, inputs);
                 let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(std::sync::Arc::new(backward));
+                meta.grad_fn = Some(autograd::make_node_info("AddBackward", inputs));
                 Arc::make_mut(&mut output.inner).set_autograd_meta(meta);
             }
             return Ok(output);
@@ -228,14 +274,11 @@ impl Tensor {
 
         let output = exec_single(&[self, other], |g, ins| vec![g.add(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let edges = {
-                let mut edges = autograd::make_edge(self);
-                edges.extend(autograd::make_edge(other));
-                edges
-            };
             let inputs = vec![self.clone(), other.clone()];
-            let backward = Arc::new(autograd::AddBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("AddBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -250,7 +293,7 @@ impl Tensor {
     /// In-place scalar multiplication: self *= scalar
     /// Avoids allocating a scalar tensor for optimizer hot paths.
     pub fn mul_scalar_(&mut self, scalar: f32) -> &mut Self {
-        if self.inner.is_gpu() {
+        if self.inner.is_gpu() || self.inner.dtype != DType::F32 {
             let scalar_t = Tensor::from_scalar(scalar);
             let result = (self as &Tensor).mul(&scalar_t);
             *self = result;
@@ -298,7 +341,7 @@ impl Tensor {
 
     /// In-place scalar addition: self += scalar
     pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
-        if self.inner.is_gpu() {
+        if self.inner.is_gpu() || self.inner.dtype != DType::F32 {
             let scalar_t = Tensor::from_scalar(scalar);
             let result = (self as &Tensor).add(&scalar_t);
             *self = result;
@@ -359,6 +402,7 @@ impl Tensor {
             && self.inner.sizes == tensor2.inner.sizes
         {
             let numel = self.inner.numel() as usize;
+            self.inner.increment_version();
             let self_ptr = self.data_ptr_f32_mut();
             let t1_ptr = tensor1.data_ptr_f32();
             let t2_ptr = tensor2.data_ptr_f32();
@@ -455,14 +499,11 @@ impl Tensor {
     pub fn try_sub(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         let output = exec_single(&[self, other], |g, ins| vec![g.sub(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let edges = {
-                let mut edges = autograd::make_edge(self);
-                edges.extend(autograd::make_edge(other));
-                edges
-            };
             let inputs = vec![self.clone(), other.clone()];
-            let backward = Arc::new(autograd::SubBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("SubBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -476,14 +517,11 @@ impl Tensor {
     pub fn try_mul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         let output = exec_single(&[self, other], |g, ins| vec![g.mul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let edges = {
-                let mut edges = autograd::make_edge(self);
-                edges.extend(autograd::make_edge(other));
-                edges
-            };
             let inputs = vec![self.clone(), other.clone()];
-            let backward = Arc::new(autograd::MulBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("MulBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -497,14 +535,11 @@ impl Tensor {
     pub fn try_div(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         let output = exec_single(&[self, other], |g, ins| vec![g.div(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let edges = {
-                let mut edges = autograd::make_edge(self);
-                edges.extend(autograd::make_edge(other));
-                edges
-            };
             let inputs = vec![self.clone(), other.clone()];
-            let backward = Arc::new(autograd::DivBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("DivBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -518,14 +553,11 @@ impl Tensor {
     pub fn try_matmul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         let output = exec_single(&[self, other], |g, ins| vec![g.matmul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let edges = {
-                let mut edges = autograd::make_edge(self);
-                edges.extend(autograd::make_edge(other));
-                edges
-            };
             let inputs = vec![self.clone(), other.clone()];
-            let backward = Arc::new(autograd::MatmulBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("MatmulBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -536,255 +568,23 @@ impl Tensor {
             .expect("Tensor::matmul: AOT execution failed")
     }
 
-    pub fn try_neg(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.neg(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::NegBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
+    impl_unary_op!(try_neg, neg, neg, "NegBackward");
+    impl_unary_op!(try_relu, relu, relu, "ReluBackward");
+    impl_unary_op!(try_exp, exp, exp, "ExpBackward");
+    impl_unary_op!(try_ln, ln, log, "LogBackward");
+    impl_unary_op!(try_sigmoid, sigmoid, sigmoid, "SigmoidBackward");
+    impl_unary_op!(try_tanh, tanh, tanh, "TanhBackward");
+    impl_unary_op!(try_silu, silu, silu, "SiLUBackward");
+    impl_unary_op!(try_gelu, gelu, gelu, "GeluBackward");
+    impl_unary_op_extra!(try_leaky_relu, leaky_relu, "LeakyReLUBackward", (negative_slope: f32), leaky_relu, negative_slope);
+    impl_unary_op_extra!(try_softplus, softplus, "SoftplusBackward", (beta: f32, threshold: f32), softplus);
+    impl_unary_op!(try_hardswish, hardswish, hardswish, "HardswishBackward");
+    impl_unary_op!(try_mish, mish, mish, "MishBackward");
+    impl_unary_op_extra!(try_elu, elu, "EluBackward", (alpha: f32), elu, alpha);
+    impl_unary_op_extra!(try_softmax, softmax, "SoftmaxBackward", (dim: i32), softmax, dim as i64);
+    impl_unary_op!(try_sqrt, sqrt, sqrt, "SqrtBackward");
 
-    pub fn neg(&self) -> Tensor {
-        self.try_neg().expect("Tensor::neg: AOT execution failed")
-    }
-
-    pub fn try_relu(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.relu(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ReluBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn relu(&self) -> Tensor {
-        self.try_relu().expect("Tensor::relu: AOT execution failed")
-    }
-
-    pub fn try_exp(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.exp(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ExpBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn exp(&self) -> Tensor {
-        self.try_exp().expect("Tensor::exp: AOT execution failed")
-    }
-
-    pub fn try_ln(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.log(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::LogBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn ln(&self) -> Tensor {
-        self.try_ln().expect("Tensor::ln: AOT execution failed")
-    }
-
-    pub fn try_sigmoid(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.sigmoid(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::SigmoidBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn sigmoid(&self) -> Tensor {
-        self.try_sigmoid()
-            .expect("Tensor::sigmoid: AOT execution failed")
-    }
-
-    pub fn try_tanh(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.tanh(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::TanhBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn tanh(&self) -> Tensor {
-        self.try_tanh().expect("Tensor::tanh: AOT execution failed")
-    }
-
-    pub fn try_silu(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.silu(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::SiLUBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn silu(&self) -> Tensor {
-        self.try_silu().expect("Tensor::silu: AOT execution failed")
-    }
-
-    pub fn try_gelu(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.gelu(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::GeluBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn gelu(&self) -> Tensor {
-        self.try_gelu().expect("Tensor::gelu: AOT execution failed")
-    }
-
-    pub fn try_leaky_relu(&self, negative_slope: f32) -> Result<Tensor, BackendError> {
-        let output = exec_single(
-            &[self],
-            |g, ins| vec![g.leaky_relu(&ins[0], negative_slope)],
-        )?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::LeakyReLUBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn leaky_relu(&self, negative_slope: f32) -> Tensor {
-        self.try_leaky_relu(negative_slope)
-            .expect("Tensor::leaky_relu: AOT execution failed")
-    }
-
-    pub fn try_softplus(&self, _beta: f32, _threshold: f32) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.softplus(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::SoftplusBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn softplus(&self, beta: f32, threshold: f32) -> Tensor {
-        self.try_softplus(beta, threshold)
-            .expect("Tensor::softplus: AOT execution failed")
-    }
-
-    pub fn try_hardswish(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.hardswish(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::HardswishBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn hardswish(&self) -> Tensor {
-        self.try_hardswish()
-            .expect("Tensor::hardswish: AOT execution failed")
-    }
-
-    pub fn try_mish(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.mish(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::MishBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn mish(&self) -> Tensor {
-        self.try_mish().expect("Tensor::mish: AOT execution failed")
-    }
-
-    pub fn try_elu(&self, alpha: f32) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.elu(&ins[0], alpha)])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::EluBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn elu(&self, alpha: f32) -> Tensor {
-        self.try_elu(alpha)
-            .expect("Tensor::elu: AOT execution failed")
-    }
-
-    pub fn try_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.softmax(&ins[0], dim as i64)])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::SoftmaxBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn softmax(&self, dim: i32) -> Tensor {
-        self.try_softmax(dim)
-            .expect("Tensor::softmax: AOT execution failed")
-    }
-
-    pub fn try_sqrt(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.sqrt(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::SqrtBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn sqrt(&self) -> Tensor {
-        self.try_sqrt().expect("Tensor::sqrt: AOT execution failed")
-    }
-
+    /// Fused linear + gelu — single graph node.
     pub fn fused_linear_gelu(&self, weight: &Tensor, bias: Option<&Tensor>) -> Tensor {
         let inputs: Vec<&Tensor> = if let Some(b) = bias.as_ref() {
             vec![self, weight, b]
@@ -807,31 +607,17 @@ impl Tensor {
         .unwrap()
     }
 
-    pub fn try_clamp(&self, min_val: f32, max_val: f32) -> Result<Tensor, BackendError> {
-        let result = exec_single(&[self], |g, ins| vec![g.clamp(&ins[0], min_val, max_val)])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::ClampBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(result, backward))
-        } else {
-            Ok(result)
-        }
-    }
-
-    pub fn clamp(&self, min_val: f32, max_val: f32) -> Tensor {
-        self.try_clamp(min_val, max_val)
-            .expect("Tensor::clamp: AOT execution failed")
-    }
+    impl_unary_op_extra!(try_clamp, clamp, "ClampBackward", (min_val: f32, max_val: f32), clamp, min_val, max_val);
 
     pub fn try_pow(&self, exponent: f32) -> Result<Tensor, BackendError> {
         let exp = Tensor::from_scalar(exponent);
         let output = exec_single(&[self, &exp], |g, ins| vec![g.pow(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::PowBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("PowBackward", inputs),
+            ))
         } else {
             Ok(output)
         }
@@ -842,59 +628,92 @@ impl Tensor {
             .expect("Tensor::pow: AOT execution failed")
     }
 
-    pub fn try_abs(&self) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.abs(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::AbsBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn abs(&self) -> Tensor {
-        self.try_abs().expect("Tensor::abs: AOT execution failed")
-    }
-
-    pub fn try_log_softmax(&self, _dim: i32) -> Result<Tensor, BackendError> {
-        let output = exec_single(&[self], |g, ins| vec![g.log_softmax(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = Arc::new(autograd::LogSoftmaxBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(output, backward))
-        } else {
-            Ok(output)
-        }
-    }
-
-    pub fn log_softmax(&self, dim: i32) -> Tensor {
-        self.try_log_softmax(dim)
-            .expect("Tensor::log_softmax: AOT execution failed")
-    }
+    impl_unary_op!(try_abs, abs, abs, "AbsBackward");
+    impl_unary_op_extra!(try_log_softmax, log_softmax, "LogSoftmaxBackward", (dim: i32), log_softmax, dim as i64);
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
         let src = self.to_cpu();
-        let data = src.as_f32_slice();
-        data.iter().map(|&v| v as i64).collect()
-    }
-
-    pub fn try_erf(&self) -> Result<Tensor, BackendError> {
-        let result = exec_single(&[self], |g, ins| vec![g.erf(&ins[0])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let backward = std::sync::Arc::new(autograd::ErfBackward::new(edges, inputs));
-            Ok(Self::attach_grad_fn(result, backward))
-        } else {
-            Ok(result)
+        match src.inner.dtype {
+            DType::I32 => {
+                let data = src.as_byte_slice().expect("contiguous CPU tensor");
+                bytemuck::cast_slice::<_, i32>(data)
+                    .iter()
+                    .map(|&v| v as i64)
+                    .collect()
+            }
+            DType::I64 => {
+                let data = src.as_byte_slice().expect("contiguous CPU tensor");
+                bytemuck::cast_slice::<_, i64>(data)
+                    .iter()
+                    .copied()
+                    .collect()
+            }
+            DType::F32 => {
+                let data = src.as_f32_slice();
+                data.iter().map(|&v| v as i64).collect()
+            }
+            _ => {
+                panic!(
+                    "as_i64_slice: unsupported dtype {:?}. Use explicit conversion.",
+                    src.inner.dtype
+                )
+            }
         }
     }
 
-    pub fn erf(&self) -> Tensor {
-        self.try_erf().expect("Tensor::erf: AOT execution failed")
+    impl_unary_op!(try_erf, erf, erf, "ErfBackward");
+
+    /// Fused AdamW weight update — single graph node replaces ~12 intermediate tensors.
+    /// Returns [updated_weight, updated_m, updated_v].
+    pub fn adamw_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+        weight_decay: f32,
+    ) -> Vec<Tensor> {
+        Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
+            let updated = g.apply_adamw(
+                &ins[0],
+                &ins[1],
+                &ins[2],
+                &ins[3],
+                lr,
+                beta1,
+                beta2,
+                eps,
+                t,
+                weight_decay,
+            );
+            vec![updated, ins[2].clone(), ins[3].clone()]
+        })
+        .expect("Tensor::adamw_update: AOT execution failed")
+    }
+
+    /// Fused Adam weight update — single graph node replaces ~12 intermediate tensors.
+    /// Returns [updated_weight, updated_m, updated_v].
+    pub fn adam_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+    ) -> Vec<Tensor> {
+        Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
+            let updated =
+                g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
+            vec![updated, ins[2].clone(), ins[3].clone()]
+        })
+        .expect("Tensor::adam_update: AOT execution failed")
     }
 }
 

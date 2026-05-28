@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::ir::node::{ComputeGraph, DimExpr, IRNode, Opcode};
+use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
 use std::collections::HashMap;
 
 pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
@@ -61,6 +62,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             | Opcode::Hardswish
             | Opcode::Clamp
             | Opcode::Sign
+            | Opcode::Round
             | Opcode::LogicalNot
             | Opcode::LogSoftmax
             | Opcode::Mish => inputs.first().map(|i| i.output_type.shape.clone()),
@@ -242,14 +244,22 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                             .enumerate()
                             .map(|(i, dim)| {
                                 if i >= 2 {
+                                    let total_pad = if i == 2 { pad_h } else { pad_w };
                                     match dim {
-                                        DimExpr::Known(w) => {
-                                            let total_pad = if i == 2 { pad_h } else { pad_w };
-                                            DimExpr::Known(
-                                                ((*w as i64 + total_pad - kernel) / stride + 1)
+                                        DimExpr::Known(w) => DimExpr::Known(
+                                            ((*w as i64 + total_pad - kernel) / stride + 1).max(1)
+                                                as u64,
+                                        ),
+                                        DimExpr::Bounded { sym, max } => {
+                                            // Apply spatial reduction to Bounded dims
+                                            let reduced =
+                                                ((*max as i64 + total_pad - kernel) / stride + 1)
                                                     .max(1)
-                                                    as u64,
-                                            )
+                                                    as u64;
+                                            DimExpr::Bounded {
+                                                sym: format!("pool({})", sym),
+                                                max: reduced,
+                                            }
                                         }
                                         other => other.clone(),
                                     }
@@ -639,59 +649,15 @@ fn conv2d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
 
-    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
-    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
+    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
 
     Ok(vec![n, f, h_out, w_out])
-}
-
-fn spatial_output_dim(
-    input_dim: &DimExpr,
-    kernel_dim: &DimExpr,
-    stride: i64,
-    padding: i64,
-) -> Result<DimExpr, String> {
-    match (input_dim, kernel_dim) {
-        (DimExpr::Known(h), DimExpr::Known(k)) => {
-            let result = (*h as i64 + 2 * padding - *k as i64) / stride + 1;
-            if result <= 0 {
-                return Err(format!(
-                    "Conv2d: output spatial dimension is non-positive ({})",
-                    result
-                ));
-            }
-            Ok(DimExpr::Known(result as u64))
-        }
-        _ => {
-            let h_val = input_dim.evaluate();
-            let k_val = kernel_dim.evaluate();
-            match (h_val, k_val) {
-                (Some(h), Some(k)) => {
-                    let result = (h as i64 + 2 * padding - k as i64) / stride + 1;
-                    if result <= 0 {
-                        return Err(format!(
-                            "Conv2d: output spatial dimension is non-positive ({})",
-                            result
-                        ));
-                    }
-                    Ok(DimExpr::Known(result as u64))
-                }
-                _ => Ok(DimExpr::Symbol("?".to_string())),
-            }
-        }
-    }
 }
 
 fn conv1d_output_shape(
@@ -712,18 +678,11 @@ fn conv1d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
+    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
 
     Ok(vec![n, f, w_out])
 }
@@ -746,20 +705,13 @@ fn conv3d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
-    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
-    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding)?;
+    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
+    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding, dilation)?;
 
     Ok(vec![n, f, d_out, h_out, w_out])
 }
@@ -782,20 +734,15 @@ fn conv_transpose2d_output_shape(
         ));
     }
 
-    let stride: i64 = attrs
-        .get("stride")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let padding: i64 = attrs
-        .get("padding")
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[1].clone();
 
-    let h_out = conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding)?;
-    let w_out = conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding)?;
+    let h_out =
+        conv_transpose_spatial_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let w_out =
+        conv_transpose_spatial_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
 
     Ok(vec![n, f, h_out, w_out])
 }
@@ -805,9 +752,10 @@ fn conv_transpose_spatial_dim(
     kernel_dim: &DimExpr,
     stride: i64,
     padding: i64,
+    dilation: i64,
 ) -> Result<DimExpr, String> {
     let result = |input: i64, kernel: i64| -> DimExpr {
-        DimExpr::Known(((input - 1) * stride - 2 * padding + kernel) as u64)
+        DimExpr::Known(((input - 1) * stride - 2 * padding + dilation * (kernel - 1) + 1) as u64)
     };
     match (input_dim, kernel_dim) {
         (DimExpr::Known(h), DimExpr::Known(k)) => {
@@ -823,30 +771,6 @@ fn conv_transpose_spatial_dim(
             }
         }
     }
-}
-
-fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
-    let trimmed = s.trim();
-    let inner = trimmed
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(trimmed);
-    if inner.is_empty() {
-        return Vec::new();
-    }
-    inner
-        .split(',')
-        .map(|part| {
-            let p = part.trim();
-            if let Ok(v) = p.parse::<u64>() {
-                DimExpr::Known(v)
-            } else if p.is_empty() {
-                DimExpr::Known(1)
-            } else {
-                DimExpr::Symbol(p.to_string())
-            }
-        })
-        .collect()
 }
 
 fn add_dim_exprs(a: DimExpr, b: DimExpr) -> DimExpr {

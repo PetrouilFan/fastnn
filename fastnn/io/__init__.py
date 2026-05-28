@@ -328,8 +328,8 @@ def read_tensor_auto(f, version: int) -> tuple:
         version: Model file version (2 or 3).
 
     Returns:
-        Tuple of (name, data, dtype, scales, zeros).
-        For v2: dtype=DTYPE_F32, scales=[], zeros=[].
+        Tuple of (name, data, dtype, scales, zeros, shape).
+        For v2: dtype=DTYPE_F32, scales=[], zeros=[], shape=[].
         For v3: uses dtype tag from file.
     """
     if version >= 3:
@@ -337,13 +337,13 @@ def read_tensor_auto(f, version: int) -> tuple:
     else:
         # v2 format: all params are F32
         name, arr = read_tensor(f)
-        return name, arr, DTYPE_F32, [], []
+        return name, arr, DTYPE_F32, [], [], []
 
 
 from fastnn.io.serialization import _save_model as save_model, _load_model as load_model
 from fastnn.io.export import save_fnn_model
 from fastnn.io.onnx import import_onnx
-from fastnn.io.graph_builder import build_model_from_fnn
+from fastnn.io.graph_builder import build_model_from_fnn, build_dag_model
 from fastnn.io.dag_model import DAGModel
 import fastnn._core as _core
 AotExecutor = getattr(_core, 'AotExecutor', None)
@@ -426,6 +426,7 @@ __all__ = [
     "convert_from_onnx",
     "load_onnx_model",
     "build_model_from_fnn",
+    "build_dag_model",
     "DAGModel",
     "AotExecutor",
 ]

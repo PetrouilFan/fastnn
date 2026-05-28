@@ -25,14 +25,73 @@
 //! ```
 
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use crate::backend::executor::GraphExecutor;
 use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::ir::node::*;
+
+// ============================================================
+// Plan cache — avoids recompilation when the same graph is
+// executed with the same input shapes.
+// ============================================================
+
+/// Key: hash of (graph topological structure + input byte lengths).
+/// Value: cached (ExecutablePlan, MemoryPlan, compiled_graph).
+static PLAN_CACHE: std::sync::LazyLock<
+    Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
+
+/// Compute a ~unique hash for a graph + its input shapes.
+fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]]) -> u64 {
+    use std::hash::Hash;
+    let mut hasher = DefaultHasher::new();
+    let order = graph.topological_sort();
+    for &nid in &order {
+        if let Some(node) = graph.get_node(nid) {
+            // Hash the opcode discriminant (ignoring data in e.g. Constant)
+            let op_discriminant = std::mem::discriminant(&node.opcode);
+            op_discriminant.hash(&mut hasher);
+            // Hash the number and order of input edges
+            node.inputs.len().hash(&mut hasher);
+            for &inp in &node.inputs {
+                inp.hash(&mut hasher);
+            }
+            // Hash shape attributes that affect compilation
+            for dim in &node.output_type.shape {
+                if let DimExpr::Known(v) = dim {
+                    v.hash(&mut hasher);
+                }
+            }
+        }
+    }
+    // Hash input data sizes (shapes affect memory planning)
+    for bytes in inputs {
+        bytes.len().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Insert a plan into the cache.
+fn cache_plan(key: u64, plan: ExecutablePlan, mp: MemoryPlan, graph: ComputeGraph) {
+    if let Ok(mut cache) = PLAN_CACHE.lock() {
+        cache.insert(key, (plan, mp, graph));
+    }
+}
+
+/// Look up a plan in the cache.
+fn lookup_plan(key: u64) -> Option<(ExecutablePlan, MemoryPlan, ComputeGraph)> {
+    PLAN_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+}
 
 // =============================================================================
 // GraphBuilder — inner state (shared via Rc<RefCell<>>)
@@ -190,6 +249,38 @@ pub struct GraphBuilder {
     inner: Rc<RefCell<BuilderInner>>,
 }
 
+/// Macro to generate a unary activation op method.
+macro_rules! impl_unary_op {
+    ($method:ident, $opcode:ident) => {
+        pub fn $method(&self, input: &GraphTensor) -> GraphTensor {
+            let output_type = input.tensor_type.clone();
+            let mut inner = self.inner.borrow_mut();
+            let node_id =
+                inner
+                    .graph
+                    .add_node(Opcode::$opcode, vec![input.node_id], output_type.clone());
+            GraphTensor::new(self.clone(), node_id, output_type)
+        }
+    };
+}
+
+/// Macro to generate a binary elementwise op method.
+macro_rules! impl_binary_op {
+    ($method:ident, $opcode:ident) => {
+        pub fn $method(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
+            let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
+            let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
+            let mut inner = self.inner.borrow_mut();
+            let node_id = inner.graph.add_node(
+                Opcode::$opcode,
+                vec![a.node_id, b.node_id],
+                output_type.clone(),
+            );
+            GraphTensor::new(self.clone(), node_id, output_type)
+        }
+    };
+}
+
 impl GraphBuilder {
     /// Create a new empty graph builder.
     pub fn new() -> Self {
@@ -258,49 +349,10 @@ impl GraphBuilder {
 
     // ── Graph construction ops ────────────────────────────────────────────
 
-    /// Element-wise addition.
-    pub fn add(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Add, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise subtraction.
-    pub fn sub(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Sub, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise multiplication.
-    pub fn mul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Mul, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise division.
-    pub fn div(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Div, vec![a.node_id, b.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_binary_op!(add, Add);
+    impl_binary_op!(sub, Sub);
+    impl_binary_op!(mul, Mul);
+    impl_binary_op!(div, Div);
 
     /// Matrix multiplication: `a @ b`.
     pub fn matmul(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
@@ -398,13 +450,13 @@ impl GraphBuilder {
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
 
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
 
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
-            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding)
+            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
@@ -427,106 +479,16 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Activation: ReLU.
-    pub fn relu(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Relu, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: GELU.
-    pub fn gelu(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Gelu, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: SiLU (Swish).
-    pub fn silu(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Silu, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: Sigmoid.
-    pub fn sigmoid(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Sigmoid, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Activation: Tanh.
-    pub fn tanh(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Tanh, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Exponential.
-    pub fn exp(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Exp, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Natural logarithm.
-    pub fn log(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Log, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Square root.
-    pub fn sqrt(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Sqrt, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Negation.
-    pub fn neg(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Neg, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Absolute value.
-    pub fn abs(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Abs, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_unary_op!(relu, Relu);
+    impl_unary_op!(gelu, Gelu);
+    impl_unary_op!(silu, Silu);
+    impl_unary_op!(sigmoid, Sigmoid);
+    impl_unary_op!(tanh, Tanh);
+    impl_unary_op!(exp, Exp);
+    impl_unary_op!(log, Log);
+    impl_unary_op!(sqrt, Sqrt);
+    impl_unary_op!(neg, Neg);
+    impl_unary_op!(abs, Abs);
 
     // =========================================================================
     // Activations added for PPO / control / RL pipelines
@@ -562,27 +524,8 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Softplus activation.
-    pub fn softplus(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Softplus, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Hardswish activation.
-    pub fn hardswish(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Hardswish, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_unary_op!(softplus, Softplus);
+    impl_unary_op!(hardswish, Hardswish);
 
     /// Clamp (clip) tensor values to [min, max].
     pub fn clamp(&self, input: &GraphTensor, min: f32, max: f32) -> GraphTensor {
@@ -600,75 +543,30 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Sign function: -1 for negative, 0 for zero, 1 for positive.
-    pub fn sign(&self, input: &GraphTensor) -> GraphTensor {
+    impl_unary_op!(round, Round);
+    impl_unary_op!(sign, Sign);
+    impl_unary_op!(logical_not, LogicalNot);
+    pub fn log_softmax(&self, input: &GraphTensor, dim: i64) -> GraphTensor {
         let output_type = input.tensor_type.clone();
+        let mut attrs = HashMap::new();
+        attrs.insert("axis".to_string(), dim.to_string());
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Sign, vec![input.node_id], output_type.clone());
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::LogSoftmax,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
         GraphTensor::new(self.clone(), node_id, output_type)
     }
-
-    /// Logical NOT (binary mask inversion).
-    pub fn logical_not(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::LogicalNot, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Log softmax activation.
-    pub fn log_softmax(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::LogSoftmax, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Mish activation: x * tanh(softplus(x)).
-    pub fn mish(&self, input: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner
-            .graph
-            .add_node(Opcode::Mish, vec![input.node_id], output_type.clone());
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_unary_op!(mish, Mish);
 
     // =========================================================================
     // Binary element-wise ops for RL / control
     // =========================================================================
 
-    /// Element-wise maximum.
-    pub fn maximum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone(); // broadcast shapes are validated at compile/runtime
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Maximum,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
-
-    /// Element-wise minimum.
-    pub fn minimum(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
-        let output_type = a.tensor_type.clone();
-        let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node(
-            Opcode::Minimum,
-            vec![a.node_id, b.node_id],
-            output_type.clone(),
-        );
-        GraphTensor::new(self.clone(), node_id, output_type)
-    }
+    impl_binary_op!(maximum, Maximum);
+    impl_binary_op!(minimum, Minimum);
 
     // =========================================================================
     // Reductions
@@ -676,10 +574,15 @@ impl GraphBuilder {
 
     /// Max reduction along a dimension.
     pub fn reduce_max(&self, input: &GraphTensor, axis: usize, keepdim: bool) -> GraphTensor {
-        let mut output_type = input.tensor_type.clone();
-        if axis < output_type.shape.len() {
-            output_type.shape.remove(axis);
+        let mut output_shape = input.shape().to_vec();
+        if axis < output_shape.len() {
+            if keepdim {
+                output_shape[axis] = DimExpr::Known(1);
+            } else {
+                output_shape.remove(axis);
+            }
         }
+        let output_type = TensorType::new(output_shape, input.dtype());
         let mut inner = self.inner.borrow_mut();
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("axis".to_string(), axis.to_string());
@@ -714,10 +617,14 @@ impl GraphBuilder {
     }
 
     /// Fused Top-K: returns (values, indices) from a single sort.
-    /// Both output tensors have the same shape as the input.
+    /// The axis dimension is reduced to k in the output.
     pub fn topk(&self, input: &GraphTensor, k: usize, axis: i64) -> (GraphTensor, GraphTensor) {
-        let val_type = TensorType::new(input.shape().to_vec(), input.dtype());
-        let idx_type = TensorType::new(input.shape().to_vec(), IrDType::I64);
+        let mut output_shape = input.shape().to_vec();
+        if (axis as usize) < output_shape.len() {
+            output_shape[axis as usize] = DimExpr::Known(k as u64);
+        }
+        let val_type = TensorType::new(output_shape.clone(), input.dtype());
+        let idx_type = TensorType::new(output_shape, IrDType::I64);
         let mut attrs = HashMap::new();
         attrs.insert("k".to_string(), k.to_string());
         attrs.insert("axis".to_string(), axis.to_string());
@@ -988,6 +895,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -998,6 +906,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -1048,6 +957,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -1058,6 +968,7 @@ impl GraphBuilder {
                 &DimExpr::Known(kernel_size as u64),
                 stride,
                 padding,
+                1,
             )
         } else {
             DimExpr::Known(1)
@@ -1121,6 +1032,10 @@ impl GraphBuilder {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
+        // Store the number of normalized trailing dims so the backward
+        // can compute N (number of normalized elements) correctly.
+        let ndims = weight.tensor_type.shape.len();
+        attrs.insert("normalized_ndims".to_string(), ndims.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::LayerNorm,
@@ -1204,11 +1119,16 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Returns the shape of the input tensor as a 1D I64 tensor.
+    /// Returns the shape of the input tensor as a 1D F32 tensor.
+    ///
+    /// The arena stores all tensor data as f32 (4 bytes/element), so Shape
+    /// must produce F32 output for downstream ops (Gather, Cast, Concat, etc.)
+    /// to read correct values.  ONNX specifies I64 output, but the runtime
+    /// is F32-only — any Cast from Shape to I64 will widen via the cast kernel.
     pub fn shape_op(&self, input: &GraphTensor) -> GraphTensor {
         let input_rank = input.shape().len();
         let output_shape = vec![DimExpr::Known(input_rank as u64)];
-        let output_type = TensorType::new(output_shape, IrDType::I64);
+        let output_type = TensorType::new(output_shape, IrDType::F32);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner
             .graph
@@ -1392,8 +1312,14 @@ impl GraphBuilder {
     }
 
     /// Tile (repeat) tensor along each axis.
+    /// The `repeats` tensor provides per-axis repeat counts at runtime.
+    /// Output shape is the same as input shape (dynamic at graph-build time).
     pub fn tile_op(&self, input: &GraphTensor, repeats: &GraphTensor) -> GraphTensor {
-        let output_type = TensorType::new(input.shape().to_vec(), input.dtype());
+        let input_shape = input.shape();
+        // NOTE: repeats are runtime-dynamic (second graph input). We can't
+        // know their values at graph-build time, so output shape = input shape.
+        // The backward pass infers repeats by comparing input/output shapes.
+        let output_type = TensorType::new(input_shape.to_vec(), input.dtype());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Tile,
@@ -1433,13 +1359,14 @@ impl GraphBuilder {
         weight: &GraphTensor,
         stride: usize,
         padding: usize,
+        dilation: usize,
     ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let w_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
@@ -1447,6 +1374,7 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Conv1d,
@@ -1457,30 +1385,31 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Convolution 3D.
+    /// Convolution 3D: `out = (input + 2p - d*(k-1) - 1)/s + 1`.
     pub fn conv3d(
         &self,
         input: &GraphTensor,
         weight: &GraphTensor,
         stride: usize,
         padding: usize,
+        dilation: usize,
     ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let out_channels = w_shape.first().cloned().unwrap_or(DimExpr::Known(1));
         let d_out = if a_shape.len() > 2 && w_shape.len() > 2 {
-            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding)
+            conv_spatial_dim(&a_shape[2], &w_shape[2], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
         let h_out = if a_shape.len() > 3 && w_shape.len() > 3 {
-            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding)
+            conv_spatial_dim(&a_shape[3], &w_shape[3], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
         let w_out = if a_shape.len() > 4 && w_shape.len() > 4 {
-            conv_spatial_dim(&a_shape[4], &w_shape[4], stride, padding)
+            conv_spatial_dim(&a_shape[4], &w_shape[4], stride, padding, dilation)
         } else {
             DimExpr::Known(1)
         };
@@ -1491,6 +1420,7 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Conv3d,
@@ -1508,6 +1438,7 @@ impl GraphBuilder {
         weight: &GraphTensor,
         stride: usize,
         padding: usize,
+        dilation: usize,
     ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
@@ -1515,14 +1446,16 @@ impl GraphBuilder {
         let out_channels = w_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
         let h_out = if a_shape.len() > 2 && w_shape.len() > 2 {
             match (&a_shape[2], &w_shape[2]) {
-                (DimExpr::Known(h), DimExpr::Known(kh)) => {
-                    DimExpr::Known((h - 1) * stride as u64 + kh - 2 * padding as u64)
-                }
+                (DimExpr::Known(h), DimExpr::Known(kh)) => DimExpr::Known(
+                    (h - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kh - 1) + 1,
+                ),
                 _ => {
                     let h_val = a_shape[2].evaluate().unwrap_or(0);
                     let kh_val = w_shape[2].evaluate().unwrap_or(1);
-                    let estimated =
-                        (h_val.saturating_sub(1)) * stride as u64 + kh_val - 2 * padding as u64;
+                    let estimated = (h_val.saturating_sub(1)) * stride as u64
+                        + dilation as u64 * (kh_val.saturating_sub(1))
+                        + 1
+                        - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1534,14 +1467,16 @@ impl GraphBuilder {
         };
         let w_out = if a_shape.len() > 3 && w_shape.len() > 3 {
             match (&a_shape[3], &w_shape[3]) {
-                (DimExpr::Known(w), DimExpr::Known(kw)) => {
-                    DimExpr::Known((w - 1) * stride as u64 + kw - 2 * padding as u64)
-                }
+                (DimExpr::Known(w), DimExpr::Known(kw)) => DimExpr::Known(
+                    (w - 1) * stride as u64 - 2 * padding as u64 + dilation as u64 * (kw - 1) + 1,
+                ),
                 _ => {
                     let w_val = a_shape[3].evaluate().unwrap_or(0);
                     let kw_val = w_shape[3].evaluate().unwrap_or(1);
-                    let estimated =
-                        (w_val.saturating_sub(1)) * stride as u64 + kw_val - 2 * padding as u64;
+                    let estimated = (w_val.saturating_sub(1)) * stride as u64
+                        + dilation as u64 * (kw_val.saturating_sub(1))
+                        + 1
+                        - 2 * padding as u64;
                     DimExpr::Bounded {
                         sym: format!("conv_trans_spatial({})", estimated),
                         max: estimated,
@@ -1555,6 +1490,7 @@ impl GraphBuilder {
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
+        attrs.insert("dilation".to_string(), dilation.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::ConvTranspose2d,
@@ -1586,6 +1522,8 @@ impl GraphBuilder {
         let output_type = input.tensor_type.clone();
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
+        let ndims = weight.tensor_type.shape.len();
+        attrs.insert("normalized_ndims".to_string(), ndims.to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::RMSNorm,
@@ -1622,7 +1560,8 @@ impl GraphBuilder {
 
     /// Element-wise power.
     pub fn pow(&self, input: &GraphTensor, exponent: &GraphTensor) -> GraphTensor {
-        let output_type = input.tensor_type.clone();
+        let output_shape = broadcast_shape(&input.tensor_type.shape, &exponent.tensor_type.shape);
+        let output_type = TensorType::new(output_shape, input.tensor_type.dtype.clone());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Pow,
@@ -1894,7 +1833,9 @@ impl GraphBuilder {
         y: &GraphTensor,
     ) -> GraphTensor {
         let x_shape = x.shape();
-        let out_tt = TensorType::new(x_shape.to_vec(), x.dtype());
+        let y_shape = y.shape();
+        let output_shape = broadcast_shape(&x_shape, &y_shape);
+        let out_tt = TensorType::new(output_shape, IrDType::F32);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node(
@@ -1960,10 +1901,17 @@ impl GraphBuilder {
     /// If `weight` has a packed quantized dtype (U4/U8), the optimizer step
     /// is automatically wrapped with Dequantize/Quantize so the update
     /// happens in full precision.
-    pub fn apply_sgd(&self, weight: &GraphTensor, grad: &GraphTensor, lr: f32) -> GraphTensor {
+    pub fn apply_sgd(
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        lr: f32,
+        weight_decay: f32,
+    ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
+        attrs.insert("weight_decay".to_string(), weight_decay.to_string());
         let tt = w.tensor_type().clone(); // F32 after dequantize
         let node_id = {
             let mut inner = self.inner.borrow_mut();
@@ -2121,12 +2069,14 @@ impl GraphBuilder {
         lr: f32,
         beta1: f32,
         beta2: f32,
+        weight_decay: f32,
     ) -> GraphTensor {
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
         attrs.insert("beta1".to_string(), beta1.to_string());
         attrs.insert("beta2".to_string(), beta2.to_string());
+        attrs.insert("weight_decay".to_string(), weight_decay.to_string());
         let tt = w.tensor_type().clone();
         let node_id = {
             let mut inner = self.inner.borrow_mut();
@@ -2204,7 +2154,7 @@ impl GraphBuilder {
         // mapping from forward node IDs to their gradient accumulator node IDs.
         let (grad_graph, grads) = {
             let inner = self.inner.borrow();
-            crate::autograd::build_backward_graph(&inner.graph, loss.node_id)?
+            crate::autograd::build_backward_graph(&inner.graph, loss.node_id, None)?
         };
 
         // Update the shared inner state with the combined forward+backward graph
@@ -2304,10 +2254,30 @@ impl GraphBuilder {
         graph.inputs = recorded_inputs;
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
-        let executor = GraphExecutor::new(backend);
-        let (plan, memory_plan, compiled_graph) =
+        // ── Plan cache: skip compilation when graph+shapes match ──
+        let cache_key = plan_cache_key(&graph, inputs);
+        if let Some((mut plan, memory_plan, compiled_graph)) = lookup_plan(cache_key) {
+            return GraphExecutor::new(backend).execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                inputs,
+            );
+        }
+
+        let mut executor = GraphExecutor::new(backend);
+        let (mut plan, memory_plan, compiled_graph) =
             executor.compile_with_plan_and_quantize(&graph, quantize)?;
-        executor.execute(&compiled_graph, &plan, &memory_plan, inputs)
+
+        // Cache the compiled plan (clone only what's needed for reuse)
+        cache_plan(
+            cache_key,
+            plan.clone(),
+            memory_plan.clone(),
+            compiled_graph.clone(),
+        );
+
+        executor.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
     /// Return the current number of nodes in the graph.
@@ -2332,11 +2302,50 @@ impl GraphBuilder {
     pub fn to_graph(&self) -> ComputeGraph {
         self.inner.borrow().graph.clone()
     }
+
+    /// Return the recorded input node IDs in registration order.
+    pub fn recorded_input_ids(&self) -> Vec<NodeId> {
+        self.inner.borrow().recorded_inputs.clone()
+    }
+
+    /// Replace the inner state with a pre-built graph and its recorded input IDs.
+    /// Used by the autograd backward cache to skip forward replay on repeated calls.
+    pub fn replace_graph(&self, graph: ComputeGraph, recorded_inputs: Vec<NodeId>) {
+        let mut inner = self.inner.borrow_mut();
+        inner.graph = graph;
+        inner.recorded_inputs = recorded_inputs;
+    }
 }
 
 // =============================================================================
 // DimExpr arithmetic helpers
 // =============================================================================
+
+/// Compute the broadcasted shape of two tensor shapes per numpy broadcasting rules.
+/// Shapes are aligned on the right; dimensions of size 1 broadcast to match.
+fn broadcast_shape(a_shape: &[DimExpr], b_shape: &[DimExpr]) -> Vec<DimExpr> {
+    let max_rank = a_shape.len().max(b_shape.len());
+    let mut result = Vec::with_capacity(max_rank);
+    for i in 0..max_rank {
+        let da = if i < a_shape.len() {
+            &a_shape[a_shape.len() - 1 - i]
+        } else {
+            &DimExpr::Known(1)
+        };
+        let db = if i < b_shape.len() {
+            &b_shape[b_shape.len() - 1 - i]
+        } else {
+            &DimExpr::Known(1)
+        };
+        result.push(match (da, db) {
+            (DimExpr::Known(1), other) => other.clone(),
+            (other, DimExpr::Known(1)) => other.clone(),
+            _ => da.clone(),
+        });
+    }
+    result.reverse();
+    result
+}
 
 /// Multiply two `DimExpr` values symbolically.
 fn dim_mul(a: &DimExpr, b: &DimExpr) -> DimExpr {
@@ -2359,32 +2368,36 @@ where
 }
 
 /// Compute the spatial output dimension for a convolution:
-/// `out = (input + 2*padding - kernel) / stride + 1`.
+/// `out = (input + 2p - d*(k-1) - 1)/s + 1`.
 fn conv_spatial_dim(
     input_dim: &DimExpr,
     kernel_dim: &DimExpr,
     stride: usize,
     padding: usize,
+    dilation: usize,
 ) -> DimExpr {
     let s = stride as u64;
     let p = padding as u64;
+    let d = dilation as u64;
     match (input_dim, kernel_dim) {
         (DimExpr::Known(h), DimExpr::Known(k)) => {
-            DimExpr::Known(((h + 2 * p).saturating_sub(*k)) / s + 1)
+            DimExpr::Known(((h + 2 * p).saturating_sub(d * (k - 1) + 1)) / s + 1)
         }
         _ => {
             // Attempt partial evaluation
             let h_val = input_dim.evaluate();
             let k_val = kernel_dim.evaluate();
             match (h_val, k_val) {
-                (Some(h), Some(k)) => DimExpr::Known(((h + 2 * p).saturating_sub(k)) / s + 1),
+                (Some(h), Some(k)) => {
+                    DimExpr::Known(((h + 2 * p).saturating_sub(d * (k - 1) + 1)) / s + 1)
+                }
                 _ => {
                     // Cannot fully evaluate — produce a Bounded expression with provenance
                     let h_eval = input_dim
                         .evaluate()
                         .unwrap_or(SYMBOL_DIM_MAX.load(Ordering::Relaxed));
                     let k_eval = kernel_dim.evaluate().unwrap_or(1);
-                    let estimated = ((h_eval + 2 * p).saturating_sub(k_eval)) / s + 1;
+                    let estimated = ((h_eval + 2 * p).saturating_sub(d * (k_eval - 1) + 1)) / s + 1;
                     let sym_name = match (input_dim, kernel_dim) {
                         (DimExpr::Symbol(s), DimExpr::Symbol(t)) => {
                             format!("conv_spatial({},{})", s, t)
@@ -2613,8 +2626,8 @@ mod tests {
         let logits = g.matmul(&x, &w);
 
         // Compile ONCE, execute with multiple batch sizes.
-        let (plan, memory_plan, compiled_graph) = g.compile(&[&logits], CpuBackend).unwrap();
-        let executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = g.compile(&[&logits], CpuBackend).unwrap();
+        let mut executor = GraphExecutor::new(CpuBackend);
 
         // Two different batch sizes — both should work at runtime
         // Batch = 3: input data is 3*64*4 = 768 bytes
@@ -2623,7 +2636,12 @@ mod tests {
 
         // Execute with batch=3
         let result_3 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_3, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_3, &w_data],
+            )
             .unwrap();
         let out_3 = read_f32(&result_3[0]);
         // Output should be [3, 10] = 30 elements
@@ -2637,7 +2655,12 @@ mod tests {
         // Batch = 1: input data is 1*64*4 = 256 bytes — same compiled plan
         let x_data_1 = f32_data(&(0..64).map(|i| i as f32).collect::<Vec<_>>());
         let result_1 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_1, &w_data],
+            )
             .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // Output should be [1, 10] = 10 elements
@@ -2662,7 +2685,12 @@ mod tests {
         // Batch = 7 (another shape) — verify the pattern generalizes
         let x_data_7 = f32_data(&(0..448).map(|i| i as f32).collect::<Vec<_>>()); // 7*64 = 448 f32s
         let result_7 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_7, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_7, &w_data],
+            )
             .unwrap();
         let out_7 = read_f32(&result_7[0]);
         assert_eq!(
@@ -2795,14 +2823,19 @@ mod tests {
         let out = g.matmul(&x, &w);
 
         // Compile ONCE
-        let (plan, memory_plan, compiled_graph) = g.compile(&[&out], CpuBackend).unwrap();
-        let executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = g.compile(&[&out], CpuBackend).unwrap();
+        let mut executor = GraphExecutor::new(CpuBackend);
 
         // Execute with batch=2
         let x_data_2 = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let w_data = f32_data(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
         let result_2 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_2, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_2, &w_data],
+            )
             .unwrap();
         let out_2 = read_f32(&result_2[0]);
         // batch=2, feat=3 → 6 elements
@@ -2815,7 +2848,12 @@ mod tests {
         // Execute SAME plan with batch=1 — no recompilation
         let x_data_1 = f32_data(&[10.0, 20.0, 30.0, 40.0]);
         let result_1 = executor
-            .execute(&compiled_graph, &plan, &memory_plan, &[&x_data_1, &w_data])
+            .execute(
+                &compiled_graph,
+                &mut plan,
+                &memory_plan,
+                &[&x_data_1, &w_data],
+            )
             .unwrap();
         let out_1 = read_f32(&result_1[0]);
         // batch=1, feat=3 → 3 elements
@@ -3193,7 +3231,7 @@ mod tests {
 
         // Test optimizer step
         let dW = &grads[1];
-        let updated_W = g.apply_sgd(&W, dW, 0.1);
+        let updated_W = g.apply_sgd(&W, dW, 0.1, 0.0);
 
         let opt_result = g
             .compile_and_execute(&[&updated_W], CpuBackend, &[&x_data, &W_data, &b_data])
@@ -3422,7 +3460,7 @@ mod tests {
         let inv_scale_bytes = bytemuck::cast_slice::<_, u8>(&[1.0 / scale]).to_vec();
         let inv_scale_t = g.constant(&inv_scale_bytes, TensorType::new(vec![], IrDType::F32));
         let dW = g.mul_scalar(dW_scaled, &inv_scale_t);
-        let updated_W = g.apply_sgd(&W, &dW, 0.1);
+        let updated_W = g.apply_sgd(&W, &dW, 0.1, 0.0);
 
         // Without scaling: grads should be different
         let g2 = GraphBuilder::new();
@@ -3432,7 +3470,7 @@ mod tests {
         let loss2 = g2.reduce_mean(&mm2, 0, false);
         let grads2 = g2.backward(&loss2).unwrap();
         let dW2 = &grads2[1];
-        let updated_W2 = g2.apply_sgd(&W2, dW2, 0.1);
+        let updated_W2 = g2.apply_sgd(&W2, dW2, 0.1, 0.0);
 
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
         let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);

@@ -1,6 +1,6 @@
-# Development Architecture (v2.2.0)
+# Development Architecture
 
-FastNN v2.2.0+ uses an ahead-of-time (AOT) compilation pipeline backed by a graph IR, compiler passes, and backend code generation. The v1 eager-mode path (`PackedLinear`, `PackedConv2d`, `backends/`) has been removed in favor of the unified AOT pipeline. v2.2 adds compiled training (forward+backward+optimizer pipeline), FlashAttention SIMD, WGPU quantized inference, and residual+add+norm fusion.
+FastNN uses an ahead-of-time (AOT) compilation pipeline backed by a graph IR, compiler passes, and backend code generation. The legacy v1 `backends/` directory has been removed in favor of the unified `backend/` pipeline.
 
 ## Rust Source Layout
 
@@ -17,25 +17,39 @@ src/
   packed_tensor.rs        # PackedTensor<T> — packed precision tensor (used by AOT quantized dispatch)
   ir/
     mod.rs                # IR module root
-    node.rs               # ComputeGraph, IRNode, Opcode, IrDType, DimExpr, TensorType, ShapeEnv, QuantizedWeightMeta
+    node.rs               # ComputeGraph, IRNode, Opcode (90 variants), IrDType, DimExpr, TensorType, ShapeEnv
     builder.rs            # GraphBuilder and GraphTensor — fluent IR construction API
   compiler/
     mod.rs                # Compiler module root
     passes/
       mod.rs              # Pass registry
-      shape_inference.rs  # Symbolic shape inference pass (DimExpr evaluation)
-      operator_fusion.rs  # MatMul+Add, Conv2d+Add, +ReLU fusion
+      shape_inference.rs  # Symbolic shape inference (DimExpr evaluation)
+      operator_fusion.rs  # Re-exports from fusion/ subdirectory
+      fusion/             # Modular fusion passes (forward + backward)
+        mod.rs            # FusionPass trait
+        op_relu.rs        # Op+Relu forward fusion
+        matmul_add_relu.rs # MatMul+BiasAdd+Relu forward fusion
+        backward.rs       # Backward fusion (dRelu+Transpose+MatMul)
+        residual_add_norm.rs # Residual+Add+LayerNorm fusion
       quantization.rs     # Weight quantization pass (U4/U8 with per-channel scales)
+      auto_cast.rs        # Auto-cast pass for mixed precision
+      type_inference.rs   # Dtype propagation pass
+      constant_folding.rs # Compile-time constant evaluation
+      dead_code_elimination.rs # Node removal pass
+      activation_quantization.rs # Activation quantization
+      arithmetic_simplify.rs # Arithmetic simplification
       memory_planning.rs  # Arena-based memory planning with live-range analysis
+      training.rs         # Optimizer injection (SGD, AdamW, Muon, Lion, RMSprop)
   backend/
     mod.rs                # Backend trait + dispatch
-    executor.rs           # GraphExecutor, ExecutablePlan, MemoryPlan, compile_with_plan_and_quantize
+    executor.rs           # GraphExecutor, ExecutablePlan, MemoryPlan, compile_train
     cpu/
-      mod.rs              # CpuBackend — f32, fused, matmul_u4/u8, conv2d_u4/u8, softmax, reduce, etc.
+      mod.rs              # CpuBackend — f32, fused, quantized matmul/conv, softmax, reduce
       blas.rs             # BLAS matmul backend
       im2col.rs            # Im2col for conv2d
-      microkernels.rs     # AVX2/AVX-512/SWAR microkernels
+      microkernels.rs     # AVX2/AVX-512/NEON/SWAR microkernels
       reductions_fast.rs  # Optimized reduction kernels
+      flash_attn.rs       # FlashAttention SIMD (tiled online-softmax)
     wgpu/
       mod.rs              # WgpuBackend dispatch
       argmax.rs           # WGPU argmax shader
@@ -47,18 +61,10 @@ src/
       norm.rs             # WGPU normalization
       pipeline.rs         # WGPU pipeline cache
       pool.rs             # WGPU pooling shaders
+      quantized.rs        # WGPU quantized matmul/conv shaders
       reduce.rs           # WGPU reduction
       softmax.rs          # WGPU softmax
       transpose.rs        # WGPU transpose
-  backends/               # v1 eagremode packed-layer backend (legacy)
-    mod.rs
-    cpu.rs                # CPU backend registration
-    packed_simd.rs        # SIMD-accelerated packed GEMV kernels
-    packed_blas.rs        # BLIS-style tiled packed micro-kernel
-    arm_neon.rs           # ARM NEON SIMD kernels for packed GEMV
-    wgpu/
-      mod.rs
-      mod_impl.rs
   dtypes/
     mod.rs                # PackedWord trait
     u4x8.rs               # 4-bit packed type (8 × i4 per u32 word)
@@ -169,11 +175,15 @@ ComputeGraph with loss node
 ```
 
 1. **IR construction** — Build a `ComputeGraph` programmatically via `GraphBuilder`, or import an ONNX model through `OnnxConverter`.
-2. **Compiler passes** — The graph is lowered through four mandatory passes:
+2. **Compiler passes** — The graph is lowered through these passes in order:
    - `shape_inference` resolves `DimExpr` symbols into concrete or symbolic shapes.
-   - `operator_fusion` fuses eligible patterns (MatMul+Add, Conv2d+Add+ReLU, etc.) into single fused nodes.
+   - `auto_cast` inserts type conversion nodes for mixed-precision support.
+   - `type_inference` propagates dtypes through the graph.
+   - `operator_fusion` fuses eligible patterns (MatMul+Add, Conv2d+Add+ReLU, residual+add+norm) into single fused nodes.
    - `quantization` replaces eligible `MatMul`/`Conv2d` weight nodes with quantized variants carrying `QuantizedWeightMeta` (U4 or U8 with per-channel scales and zero-points).
-   - `memory_planning` performs live-range analysis and emits an `MemoryPlan` that aliases output buffers to minimize peak memory.
+   - `constant_folding` evaluates constant subexpressions at compile time.
+   - `dead_code_elimination` removes unused nodes.
+   - `memory_planning` performs live-range analysis and emits a `MemoryPlan` that aliases output buffers to minimize peak memory.
 3. **Backend dispatch** — The compiled `ExecutablePlan` is handed to `CpuBackend` or `WgpuBackend`, each of which maps every `Opcode` variant to a concrete implementation.
 4. **Execution** — `GraphExecutor::run()` allocates arenas per the `MemoryPlan` and executes nodes in topological order.
 
@@ -187,7 +197,7 @@ The IR is the core data structure for v2.0.0. Key types:
 |------|------|---------|
 | `ComputeGraph` | `ir/node.rs` | A DAG of `IRNode`s with named inputs and outputs |
 | `IRNode` | `ir/node.rs` | A single operation: opcode, inputs, outputs, metadata |
-| `Opcode` | `ir/node.rs` | Enum of 30+ ops (MatMul, Conv2d, ReLU, Quantize, etc.) |
+| `Opcode` | `ir/node.rs` | Enum of 90 variants (MatMul, Conv2d, ReLU, optimizer updates, etc.) |
 | `IrDType` | `ir/node.rs` | Tensor dtype including `U4`, `U8` with per-channel `QuantizedWeightMeta` |
 | `DimExpr` | `ir/node.rs` | Symbolic dimension expressions for shape inference |
 | `TensorType` | `ir/node.rs` | Describes a tensor's shape and dtype |
@@ -199,14 +209,13 @@ The IR is the core data structure for v2.0.0. Key types:
 `GraphBuilder` is the recommended entry point for programmatic graph construction. Example:
 
 ```rust
-let mut b = GraphBuilder::new("my_model");
-let x = b.input("x", TensorType::f32(&[1, 3, 224, 224]));
-let w = b.constant("weight", weight_data);
-let b_bias = b.constant("bias", bias_data);
-let t = b.matmul(x, w)?;
-let t = b.add(t, b_bias)?;
-let t = b.relu(t)?;
-let graph = b.finish();
+let gb = GraphBuilder::new();
+let x = gb.input(&[1, 3, 224, 224], IrDType::F32);
+let w = gb.constant(&weight_bytes, weight_tt);
+let t = gb.matmul(&x, &w);
+let t = gb.bias_add(&t, &b);
+let t = gb.relu(&t);
+let graph = gb.to_graph();
 ```
 
 ### `compiler/` — Compilation passes
@@ -216,10 +225,10 @@ All passes implement a common `Pass` trait registered in `passes/mod.rs`. They t
 | Pass | File | Description |
 |------|------|-------------|
 | `ShapeInferencePass` | `passes/shape_inference.rs` | Propagates `DimExpr` through the graph, resolving symbolic dims via `ShapeEnv` |
-| `OperatorFusionPass` | `passes/operator_fusion.rs` | Fuses MatMul+Add, Conv2d+Add, +ReLU, and residual+add+norm into single fused op nodes |
+| `OperatorFusionPass` | `passes/fusion/` (modular) | Fuses MatMul+Add, Conv2d+Add, +ReLU, and residual+add+norm into single fused op nodes |
 | `QuantizationPass` | `passes/quantization.rs` | Replaces weight-bearing ops with U4/U8 quantized variants; attaches `QuantizedWeightMeta` with per-channel scales |
 | `MemoryPlanningPass` | `passes/memory_planning.rs` | Arena-based memory planning using live-range analysis; emits a `MemoryPlan` that maximizes buffer reuse |
-| `TrainingPass` | `passes/training.rs` | (v2.2) Compiles forward+backward+optimizer pipeline into a single `ExecutablePlan` with persistent arena |
+| `inject_optimizer()` | `passes/training.rs` | Inserts optimizer update nodes (SGD, AdamW, Muon, Lion, RMSprop) into a backward graph |
 
 Passes are run in order: shape inference → fusion → quantization → memory planning. The `compile_with_plan_and_quantize` function in `backend/executor.rs` orchestrates the full pipeline.
 
@@ -246,7 +255,7 @@ The `Backend::execute_node` method receives a single `IRNode`, its input buffers
 
 ### `onnx/` — ONNX import
 
-`OnnxConverter` in `onnx/converter.rs` maps ONNX operator sets into `ComputeGraph` IR. It supports 55+ ops including all standard arithmetic, reduction, convolution, normalization, and activation ops. The output feeds directly into `GraphBuilder` and the compiler pipeline.
+`OnnxConverter` in `onnx/converter.rs` maps ONNX operator sets into `ComputeGraph` IR. It supports ~67 ops including all standard arithmetic, reduction, convolution, normalization, and activation ops. The output feeds directly into `GraphBuilder` and the compiler pipeline.
 
 ### `autograd` — Automatic differentiation
 
@@ -277,6 +286,25 @@ These modules continue to serve their v1 roles:
 - **`io/`** — Serialization and DLPack interop
 - **`python/`** — PyO3 bindings; `nn.rs` includes `AotExecutor` bindings with a `quantize` parameter for v2 AOT execution
 
+## Local quality gates
+
+Use the pinned stable toolchain from `rust-toolchain.toml` so local runs match CI.
+
+```bash
+# Minimum PR gate set (same sequence as the CI quality job)
+./scripts/ci/check-rustfmt-baseline.sh
+python3 ./scripts/ci/check-clippy-baseline.py
+cargo test --lib
+cargo test --test quantized_pipeline
+cargo test --test optim_test
+```
+
+Policy notes:
+
+- `rustfmt` currently uses a file baseline in `ci/rustfmt-baseline.txt`; CI fails only when a newly touched file adds formatting debt outside that list.
+- `clippy` currently uses a diagnostic baseline in `ci/clippy-baseline.txt`; CI fails on new warnings, while existing debt stays tracked until cleanup lands.
+- When you fix an entry already covered by either baseline, remove it from the corresponding file in the same PR.
+
 ## Adding a New Operation
 
 Adding a new op in v2.0.0 requires touching multiple modules in a specific order. Use an existing op (e.g., `Gelu`) as a reference.
@@ -289,12 +317,12 @@ Adding a new op in v2.0.0 requires touching multiple modules in a specific order
 ### Step 2: Compiler passes
 
 3. If the op introduces new shape semantics, add a case in `compiler/passes/shape_inference.rs`.
-4. If the op can participate in fusion (e.g., it is an activation that follows a MatMul or Conv2d), add a fusion rule in `compiler/passes/operator_fusion.rs`.
+4. If the op can participate in fusion (e.g., it is an activation that follows a MatMul or Conv2d), add a fusion rule in `compiler/passes/fusion/`.
 5. If the op can be quantized, add handling in `compiler/passes/quantization.rs`. Most non-linear ops act on the dequantized values, so they typically do not need quantization logic.
 
 ### Step 3: Backend implementations
 
-6. Add a handler in `CpuBackend` (`backend/cpu/mod.rs`) implementing the op via existing kernels or new microkernels. If the op needs specialized inner loops, add them to `microkernels.rs` or `reductions_fast.rs`.
+6. Add a handler in `CpuBackend` (`backend/cpu/mod.rs`) implementing the op via existing kernels or new microkernels. If the op needs specialized inner loops, add them to `microkernels.rs`, `reductions_fast.rs`, or `flash_attn.rs`.
 7. Add a handler in `WgpuBackend` (`backend/wgpu/mod.rs`). Either write a new WGSL shader in the appropriate `backend/wgpu/*.rs` file or return `UnsupportedOp` if GPU execution is not yet available. Register the shader pipeline in `pipeline.rs`.
 
 ### Step 4: ONNX converter
@@ -355,7 +383,7 @@ Avoid host scalar reads inside optimizer or model inner loops. If a GPU algorith
 
 In v2.0.0, fusion is handled by `OperatorFusionPass` at the IR level, not by hand-written fused kernels. The flow is:
 
-1. Define the fusion pattern in `compiler/passes/operator_fusion.rs` (e.g., MatMul + Add → FusedMatMulAdd).
+1. Define the fusion pattern in `compiler/passes/fusion/` (e.g., MatMul + Add → FusedMatMulAdd).
 2. Add the fused `Opcode` variant to `ir/node.rs`.
 3. Implement the fused op in `CpuBackend` and/or `WgpuBackend` as a single node handler.
 
@@ -366,16 +394,14 @@ Existing fused patterns:
 
 To add a new fusion, extend `OperatorFusionPass` with the pattern, add the new `Opcode`, and implement it in backends. The compiler pipeline picks it up automatically.
 
-## Key Differences from v1.x
+## v1.x vs v2.x Comparison
 
-| Aspect | v1.x | v2.0.0 |
+| Aspect | v1.x (removed) | v2.x (current) |
 |--------|------|--------|
 | Kernel dispatch | `kernels/` with runtime dispatch | `backend/` with AOT-compiled `ExecutablePlan` |
-| Quantization | Compiler pass (`QuantizationPass`) with per-channel `QuantizedWeightMeta` | Compiler pass (`QuantizationPass`) with per-channel `QuantizedWeightMeta` |
-| Graph representation | None (eager mode) | `ComputeGraph` IR with `IRNode`, `Opcode`, `DimExpr` |
+| Graph representation | None (eager mode) | `ComputeGraph` IR (90 opcodes, `DimExpr`, `IrDType`) |
 | Shape handling | Runtime only | Symbolic `DimExpr` with `ShapeEnv` via `ShapeInferencePass` |
 | Memory management | Per-op allocation | Arena-based `MemoryPlan` with live-range aliasing |
 | Fusion | Fused layer types in `nn/fused.rs` | `OperatorFusionPass` in compiler pipeline |
 | Backend code | `kernels/cpu/`, `kernels/gpu/` | `backend/cpu/`, `backend/wgpu/` (structured per-op) |
 | ONNX import | Python-side `dag.py` | Rust `OnnxConverter` → `ComputeGraph` → compiler pipeline |
-| Legacy layer runtime | _Removed_ | _Unified AOT pipeline_ |

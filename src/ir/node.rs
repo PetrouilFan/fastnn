@@ -2,7 +2,7 @@
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -33,6 +33,7 @@ pub enum Opcode {
     Hardswish,
     Clamp,
     Sign,
+    Round,
     Maximum,
     Minimum,
     LogicalNot,
@@ -365,6 +366,20 @@ impl ShapeEnv {
         self.symbols.insert(name.to_string(), value);
     }
 
+    /// Bind a symbol name to a concrete value, returning an error on conflicts.
+    pub fn try_bind(&mut self, name: &str, value: u64) -> Result<(), String> {
+        if let Some(&existing) = self.symbols.get(name) {
+            if existing != value {
+                return Err(format!(
+                    "ShapeEnv: symbol '{}' bound to {} then inconsistently to {}",
+                    name, existing, value
+                ));
+            }
+        }
+        self.symbols.insert(name.to_string(), value);
+        Ok(())
+    }
+
     /// Resolve a symbol name to its concrete value, if bound.
     pub fn resolve(&self, name: &str) -> Option<u64> {
         self.symbols.get(name).copied()
@@ -437,7 +452,7 @@ impl ShapeEnv {
                     .collect();
 
                 if symbolic.len() == 1 {
-                    env.bind(&symbolic[0], unknown_numel as u64);
+                    env.try_bind(&symbolic[0], unknown_numel as u64)?;
                 } else if symbolic.len() > 1 {
                     input_infos.push((input_id, known_numel, total_numel, symbolic));
                 }
@@ -465,7 +480,7 @@ impl ShapeEnv {
                 }
                 let val = total_numel / known_product;
                 if val > 0 {
-                    env.bind(unbound[0], val as u64);
+                    env.try_bind(unbound[0], val as u64)?;
                 }
             }
         }
@@ -535,26 +550,43 @@ pub enum IrDType {
     },
 }
 
-impl IrDType {
-    /// Logical byte size per element for arena planning.
-    /// For packed types this is a conservative over-estimate (safe for
-    /// worst-case memory planning).  Use [`packed_byte_size`] for the
-    /// actual storage size needed for a given logical element count.
-    pub fn byte_size(&self) -> usize {
-        match self {
-            IrDType::F32 => 4,
-            IrDType::F16 => 2,
-            IrDType::BF16 => 2,
-            IrDType::I32 => 4,
-            IrDType::I64 => 8,
-            IrDType::Bool => 1,
-            IrDType::I8 => 1,
-            // Conservative logical overestimate (packed data fits in 1 byte/elem).
-            IrDType::U4 { .. } => 1,
-            IrDType::U8 { .. } => 1,
-        }
-    }
+/// Macro that generates simple per-variant constant lookup methods for IrDType.
+macro_rules! impl_ir_dtype_props {
+    ($(($variant:pat, $byte_size:expr, $as_str:expr, $bit_width:expr, $items_per_word:expr)),* $(,)?) => {
+        impl IrDType {
+            /// Logical byte size per element (conservative over-estimate for packed types).
+            pub fn byte_size(&self) -> usize {
+                match self { $( $variant => $byte_size, )* }
+            }
 
+            pub fn as_str(&self) -> &'static str {
+                match self { $( $variant => $as_str, )* }
+            }
+
+            pub fn bit_width(&self) -> usize {
+                match self { $( $variant => $bit_width, )* }
+            }
+
+            pub fn items_per_word(&self) -> usize {
+                match self { $( $variant => $items_per_word, )* }
+            }
+        }
+    };
+}
+
+impl_ir_dtype_props!(
+    (Self::F32, 4, "f32", 32, 1),
+    (Self::F16, 2, "f16", 16, 2),
+    (Self::BF16, 2, "bf16", 16, 2),
+    (Self::I32, 4, "i32", 32, 1),
+    (Self::I64, 8, "i64", 64, 1),
+    (Self::Bool, 1, "bool", 1, 32),
+    (Self::I8, 1, "i8", 8, 4),
+    (Self::U4 { .. }, 1, "u4", 4, 8),
+    (Self::U8 { .. }, 1, "u8", 8, 4),
+);
+
+impl IrDType {
     /// Actual packed storage size in bytes for a given logical element
     /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
     /// For packed types it computes word-level packing plus the SIMD margin
@@ -579,48 +611,6 @@ impl IrDType {
                 let words = numel.div_ceil(4) + 16; // +16 SIMD_MARGIN
                 words * 4
             }
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            IrDType::F32 => "f32",
-            IrDType::F16 => "f16",
-            IrDType::BF16 => "bf16",
-            IrDType::I32 => "i32",
-            IrDType::I64 => "i64",
-            IrDType::Bool => "bool",
-            IrDType::I8 => "i8",
-            IrDType::U4 { .. } => "u4",
-            IrDType::U8 { .. } => "u8",
-        }
-    }
-
-    pub fn bit_width(&self) -> usize {
-        match self {
-            IrDType::F32 => 32,
-            IrDType::F16 => 16,
-            IrDType::BF16 => 16,
-            IrDType::I32 => 32,
-            IrDType::I64 => 64,
-            IrDType::I8 => 8,
-            IrDType::Bool => 1,
-            IrDType::U4 { .. } => 4,
-            IrDType::U8 { .. } => 8,
-        }
-    }
-
-    pub fn items_per_word(&self) -> usize {
-        match self {
-            IrDType::F32 => 1,
-            IrDType::F16 => 2,
-            IrDType::BF16 => 2,
-            IrDType::I32 => 1,
-            IrDType::I64 => 1,
-            IrDType::I8 => 4,
-            IrDType::Bool => 32,
-            IrDType::U4 { .. } => 8,
-            IrDType::U8 { .. } => 4,
         }
     }
 }
@@ -674,12 +664,51 @@ impl TensorType {
                 },
             })
             .product();
-        // For packed types, use the actual packed byte size (accounts for
-        // word-level packing and SIMD margin) rather than the logical per-element
-        // overestimate.  The packed data stored in TensorValue::Data already
-        // includes the SIMD margin, so the slot must be large enough to hold it.
+        // For packed types, compute per-row packed byte size to match
+        // PackedTensor's actual storage layout (rows * ceil(inner / ITEMS) + MARGIN).
+        // This differs from flat packing (ceil(total / ITEMS)) when the inner
+        // dimension is not a multiple of ITEMS, which would cause slot under-allocation.
         match &self.dtype {
-            IrDType::U4 { .. } | IrDType::U8 { .. } => self.dtype.packed_byte_size(numel),
+            IrDType::U4 { .. } => {
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 8,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
+                let words = rows * inner_dim.div_ceil(8) + 16;
+                words * 4
+            }
+            IrDType::U8 { .. } => {
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 4,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
+                let words = rows * inner_dim.div_ceil(4) + 16;
+                words * 4
+            }
+            IrDType::I8 => {
+                // I8 activation payload includes 8-byte scale/zp header
+                numel + 8
+            }
             _ => numel * self.dtype.byte_size(),
         }
     }
@@ -731,7 +760,7 @@ pub struct ComputeGraph {
     pub nodes: Vec<IRNode>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
-    pub required_nodes: Vec<NodeId>,
+    pub required_nodes: HashSet<NodeId>,
     pub next_id: NodeId,
     #[serde(skip)]
     node_index: FxHashMap<NodeId, usize>,
@@ -772,7 +801,7 @@ impl ComputeGraph {
             nodes: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
-            required_nodes: Vec::new(),
+            required_nodes: HashSet::new(),
             next_id: 1,
             node_index: FxHashMap::default(),
             consumers_map: Mutex::new(FxHashMap::default()),
@@ -932,9 +961,7 @@ impl ComputeGraph {
     }
 
     pub fn add_required_node(&mut self, node_id: NodeId) {
-        if !self.required_nodes.contains(&node_id) {
-            self.required_nodes.push(node_id);
-        }
+        self.required_nodes.insert(node_id);
     }
 
     pub fn topological_sort(&self) -> Vec<NodeId> {
@@ -970,25 +997,25 @@ impl ComputeGraph {
             }
         }
 
-        let mut queue: Vec<NodeId> = {
+        let mut queue: VecDeque<NodeId> = {
             let mut zero_deg: Vec<NodeId> = in_degree
                 .iter()
                 .filter(|(_, &deg)| deg == 0)
                 .map(|(&id, _)| id)
                 .collect();
             zero_deg.sort(); // deterministic order for zero-degree nodes
-            zero_deg
+            VecDeque::from(zero_deg)
         };
 
         let mut sorted = Vec::with_capacity(self.nodes.len());
-        while let Some(node_id) = queue.pop() {
+        while let Some(node_id) = queue.pop_front() {
             sorted.push(node_id);
             if let Some(children) = adjacency.get(&node_id) {
                 for &child_id in children {
                     if let Some(deg) = in_degree.get_mut(&child_id) {
                         *deg -= 1;
                         if *deg == 0 {
-                            queue.push(child_id);
+                            queue.push_back(child_id);
                         }
                     }
                 }
