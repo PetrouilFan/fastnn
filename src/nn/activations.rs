@@ -49,30 +49,6 @@ macro_rules! impl_activation_via_tensor {
             fn forward(&self, x: &Tensor) -> Tensor {
                 x.$method()
             }
-            impl_stateless_activation_methods!();
-        }
-    };
-}
-
-/// Macro to implement the standard empty methods for stateless modules.
-macro_rules! impl_stateless_activation_methods {
-    () => {
-        fn parameters(&self) -> Vec<Tensor> {
-            vec![]
-        }
-
-        fn named_parameters(&self) -> Vec<(String, Tensor)> {
-            vec![]
-        }
-
-        fn zero_grad(&self) {}
-
-        fn train_mode(&self) {}
-
-        fn eval_mode(&self) {}
-
-        fn is_training(&self) -> bool {
-            false
         }
     };
 }
@@ -101,8 +77,6 @@ impl Module for LeakyReLU {
     fn forward(&self, x: &Tensor) -> Tensor {
         x.leaky_relu(self.negative_slope as f32)
     }
-
-    impl_stateless_activation_methods!();
 }
 
 #[derive(Clone)]
@@ -141,14 +115,8 @@ impl Module for PReLU {
         vec![("weight".to_string(), self.weight.clone())]
     }
 
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
+    fn zero_grad(&self) {
+        crate::nn::clear_grad(&self.weight);
     }
 }
 
@@ -173,24 +141,6 @@ impl Module for Softmax {
     fn forward(&self, x: &Tensor) -> Tensor {
         x.softmax(self.dim as i32)
     }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Clone)]
@@ -209,8 +159,6 @@ impl Module for Softplus {
     fn forward(&self, x: &Tensor) -> Tensor {
         x.softplus(self.beta as f32, self.threshold as f32)
     }
-
-    impl_stateless_activation_methods!();
 }
 
 #[derive(Clone)]
@@ -228,8 +176,6 @@ impl Module for Elu {
     fn forward(&self, x: &Tensor) -> Tensor {
         x.elu(self.alpha as f32)
     }
-
-    impl_stateless_activation_methods!();
 }
 
 #[derive(Clone)]
@@ -253,23 +199,5 @@ impl Module for AdaptiveAvgPool2d {
         .into_iter()
         .next()
         .unwrap()
-    }
-
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![]
-    }
-
-    fn zero_grad(&self) {}
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
     }
 }

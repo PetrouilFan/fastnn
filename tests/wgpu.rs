@@ -1,3 +1,5 @@
+#![cfg(feature = "gpu")]
+
 //! Integration tests for the WGPU (GPU) backend.
 //!
 //! Tests all ops that have dedicated GPU shaders: MatMul, element-wise,
@@ -93,14 +95,8 @@ fn test_wgpu_matmul_small() {
     let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     let b_data = f32_data(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
 
-    let result = g
-        .compile_and_execute(&[&c], WgpuBackend, &[&a_data, &b_data])
-        .unwrap();
-    let out = read_f32(&result[0]);
-    assert_eq!(out.len(), 6);
-    for &v in &out {
-        assert!(v.is_finite(), "output should be finite, got {}", v);
-    }
+    let pairs = compare_gpu_vs_cpu(&g, &[&c], &[&a_data, &b_data]);
+    assert_eq!(pairs[0].0, vec![5.0, 6.0, 7.0, 13.0, 14.0, 15.0]);
 }
 
 #[test]
@@ -114,8 +110,7 @@ fn test_wgpu_matmul_large() {
     let a_data: Vec<f32> = (0..128 * 256).map(|i| (i as f32) / 256.0).collect();
     let b_data: Vec<f32> = (0..256 * 64).map(|i| (i as f32) / 64.0).collect();
 
-    let pairs = compare_gpu_vs_cpu(&g, &[&c], &[&f32_data(&a_data), &f32_data(&b_data)]);
-    assert!(!pairs.is_empty());
+    compare_gpu_vs_cpu(&g, &[&c], &[&f32_data(&a_data), &f32_data(&b_data)]);
 }
 
 #[test]
@@ -222,7 +217,10 @@ fn test_wgpu_elementwise_neg_abs_exp_log_sqrt() {
 
     let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
 
-    compare_gpu_vs_cpu(&g, &[&n, &ab, &e, &l, &sq], &[&a_data]);
+    let pairs = compare_gpu_vs_cpu(&g, &[&n, &ab, &e, &l, &sq], &[&a_data]);
+    assert_eq!(pairs.len(), 5);
+    assert_eq!(pairs[0].0, vec![-1.0, -2.0, -3.0, -4.0]);
+    assert_eq!(pairs[1].0, vec![1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]
@@ -235,7 +233,9 @@ fn test_wgpu_elementwise_tanh_silu() {
 
     let a_data = f32_data(&[-2.0, -1.0, 0.0, 2.0]);
 
-    compare_gpu_vs_cpu(&g, &[&t, &s], &[&a_data]);
+    let pairs = compare_gpu_vs_cpu(&g, &[&t, &s], &[&a_data]);
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(pairs[0].0.len(), 4);
 }
 
 // ── Softmax ───────────────────────────────────────────────────────────
@@ -405,7 +405,8 @@ fn test_wgpu_layernorm() {
 
     let input_data = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
 
-    compare_gpu_vs_cpu(&g, &[&out], &[&input_data]);
+    let pairs = compare_gpu_vs_cpu(&g, &[&out], &[&input_data]);
+    assert_eq!(pairs[0].0.len(), 8);
 }
 
 #[test]
@@ -419,7 +420,8 @@ fn test_wgpu_rmsnorm() {
 
     let input_data = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
 
-    compare_gpu_vs_cpu(&g, &[&out], &[&input_data]);
+    let pairs = compare_gpu_vs_cpu(&g, &[&out], &[&input_data]);
+    assert_eq!(pairs[0].0.len(), 8);
 }
 
 // ── Reductions ────────────────────────────────────────────────────────
@@ -475,7 +477,8 @@ fn test_wgpu_transpose_4d() {
 
     let input_data: Vec<f32> = (0..2 * 4 * 3 * 5).map(|i| i as f32).collect();
 
-    compare_gpu_vs_cpu(&g, &[&t], &[&f32_data(&input_data)]);
+    let pairs = compare_gpu_vs_cpu(&g, &[&t], &[&f32_data(&input_data)]);
+    assert_eq!(pairs[0].0.len(), 120);
 }
 
 // ── Embedding ─────────────────────────────────────────────────────────

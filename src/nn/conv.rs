@@ -1,4 +1,4 @@
-use crate::autograd::{self, AutogradMeta, Conv2dBackward};
+use crate::autograd::{self, AutogradMeta};
 use crate::tensor::Tensor;
 use crate::{
     impl_nn_named_params, impl_nn_params, impl_training_state, impl_zero_grad,
@@ -6,92 +6,147 @@ use crate::{
 };
 use std::sync::Arc;
 
-#[derive(Clone)]
-pub struct Conv2d {
-    pub weight: Tensor,
-    pub bias: Option<Tensor>,
-    #[allow(dead_code)]
-    pub in_channels: i64,
-    #[allow(dead_code)]
-    pub out_channels: i64,
-    #[allow(dead_code)]
-    pub kernel_size: i64,
-    pub stride: i64,
-    pub padding: i64,
-    pub dilation: i64,
-    pub groups: i64,
-    pub padding_mode: String,
-    training: TrainingState,
-    // Pre-allocated scalar tensors to avoid per-forward allocation
-    #[allow(dead_code)]
-    stride_scalar: Tensor,
-    #[allow(dead_code)]
-    padding_scalar: Tensor,
-    #[allow(dead_code)]
-    dilation_scalar: Tensor,
-    #[allow(dead_code)]
-    groups_scalar: Tensor,
-    #[allow(dead_code)]
-    default_bias: Tensor,
-}
-
-impl Conv2d {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        groups: i64,
-        bias: bool,
-    ) -> Self {
-        let k = kernel_size * kernel_size * in_channels / groups;
-        let scale = (2.0 / k as f32).sqrt();
-
-        let weight_data: Vec<f32> =
-            (0..out_channels * in_channels / groups * kernel_size * kernel_size)
-                .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
-                .collect();
-        let weight = Tensor::from_vec(
-            weight_data,
-            vec![out_channels, in_channels / groups, kernel_size, kernel_size],
-        );
-        let weight = weight.requires_grad_(true);
-
-        let bias = if bias {
-            let bias_data: Vec<f32> = (0..out_channels).map(|_| 0.0).collect();
-            Some(Tensor::from_vec(bias_data, vec![out_channels]).requires_grad_(true))
-        } else {
-            None
-        };
-
-        Conv2d {
-            weight,
-            bias,
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            dilation,
-            groups,
-            padding_mode: "zeros".to_string(),
-            training: TrainingState::new(),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
-            dilation_scalar: Tensor::from_scalar(dilation as f32),
-            groups_scalar: Tensor::from_scalar(groups as f32),
-            default_bias: Tensor::from_scalar(0.0),
+/// Generates a convolution struct definition + `new()` constructor.
+///
+/// All conv types share the same struct fields and constructor signature
+/// (matching the PyTorch API). Unused fields are `#[allow(dead_code)]` —
+/// this avoids the "macros cannot expand to struct fields" limitation.
+///
+/// `$is_transpose` distinguishes ConvTranspose (different fan-in/weight-shape formulas).
+/// `$ndim` selects 1d / 2d / 3d formulas. Both are literals so the match is
+/// constant-folded — no runtime overhead.
+macro_rules! impl_conv_type {
+    ($name:ident, $is_transpose:literal, $ndim:literal) => {
+        #[derive(Clone)]
+        pub struct $name {
+            pub weight: Tensor,
+            pub bias: Option<Tensor>,
+            pub stride: i64,
+            pub padding: i64,
+            pub in_channels: i64,
+            pub out_channels: i64,
+            pub kernel_size: i64,
+            training: TrainingState,
+            #[allow(dead_code)]
+            stride_scalar: Tensor,
+            #[allow(dead_code)]
+            padding_scalar: Tensor,
+            // Always-present fields (may be unused by some conv types)
+            pub dilation: i64,
+            #[allow(dead_code)]
+            dilation_scalar: Tensor,
+            pub groups: i64,
+            #[allow(dead_code)]
+            groups_scalar: Tensor,
+            pub padding_mode: String,
+            #[allow(dead_code)]
+            default_bias: Tensor,
         }
-    }
+
+        impl $name {
+            #[allow(clippy::too_many_arguments)]
+            pub fn new(
+                in_channels: i64,
+                out_channels: i64,
+                kernel_size: i64,
+                stride: i64,
+                padding: i64,
+                dilation: i64,
+                groups: i64,
+                bias: bool,
+            ) -> Self {
+                // NOTE: These match arms use identifiers (in_channels, out_channels,
+                // kernel_size, groups) that are fn parameters in this expansion scope,
+                // so Rust macro hygiene resolves them correctly.
+                let k = match ($ndim, $is_transpose) {
+                    (1, false) => kernel_size * in_channels,
+                    (2, false) => kernel_size * kernel_size * in_channels / groups,
+                    (2, true) => kernel_size * kernel_size * in_channels,
+                    (3, false) => kernel_size * kernel_size * kernel_size * in_channels,
+                    _ => unreachable!(),
+                };
+                let scale = (2.0 / k as f32).sqrt();
+                let weight_n = match ($ndim, $is_transpose) {
+                    (1, false) => out_channels * in_channels * kernel_size,
+                    (2, false) => out_channels * (in_channels / groups) * kernel_size * kernel_size,
+                    (2, true) => in_channels * out_channels * kernel_size * kernel_size,
+                    (3, false) => {
+                        out_channels * in_channels * kernel_size * kernel_size * kernel_size
+                    }
+                    _ => unreachable!(),
+                };
+                let weight_data: Vec<f32> = (0..weight_n)
+                    .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
+                    .collect();
+                let weight_shape: Vec<i64> = match ($ndim, $is_transpose) {
+                    (1, false) => vec![out_channels, in_channels, kernel_size],
+                    (2, false) => {
+                        vec![out_channels, in_channels / groups, kernel_size, kernel_size]
+                    }
+                    (2, true) => vec![in_channels, out_channels, kernel_size, kernel_size],
+                    (3, false) => vec![
+                        out_channels,
+                        in_channels,
+                        kernel_size,
+                        kernel_size,
+                        kernel_size,
+                    ],
+                    _ => unreachable!(),
+                };
+                let weight = Tensor::from_vec(weight_data, weight_shape).requires_grad_(true);
+                let bias = if bias {
+                    Some(
+                        Tensor::zeros(
+                            vec![out_channels],
+                            crate::storage::DType::F32,
+                            crate::storage::Device::Cpu,
+                        )
+                        .requires_grad_(true),
+                    )
+                } else {
+                    None
+                };
+                $name {
+                    weight,
+                    bias,
+                    stride,
+                    padding,
+                    in_channels,
+                    out_channels,
+                    kernel_size,
+                    training: TrainingState::new(),
+                    stride_scalar: Tensor::from_scalar(stride as f32),
+                    padding_scalar: Tensor::from_scalar(padding as f32),
+                    dilation,
+                    dilation_scalar: Tensor::from_scalar(dilation as f32),
+                    groups,
+                    groups_scalar: Tensor::from_scalar(groups as f32),
+                    padding_mode: "zeros".to_string(),
+                    default_bias: Tensor::from_scalar(0.0),
+                }
+            }
+        }
+    };
 }
+
+// ── Conv2d ────────────────────────────────────────────────────────────────────
+impl_conv_type!(Conv2d, false, 2);
 
 impl Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Tensor {
+        let effective_padding = if self.padding_mode == "same" {
+            0
+        } else {
+            self.padding as usize
+        };
         let (input, _pad_scalar) = if self.padding_mode == "same" {
             let x_shape = x.shape_ref();
+            if x_shape.len() < 4 {
+                panic!(
+                    "Conv2d with padding='same' expects input with at least 4 dimensions, got {}",
+                    x_shape.len()
+                );
+            }
             let h_in = x_shape[2];
             let w_in = x_shape[3];
             let h_out = ((h_in as f64) / self.stride as f64).ceil() as i64;
@@ -132,7 +187,7 @@ impl Module for Conv2d {
                     &ins[0],
                     &ins[1],
                     self.stride as usize,
-                    self.padding as usize,
+                    effective_padding,
                     self.dilation as usize,
                     self.groups as usize,
                 )]
@@ -150,17 +205,21 @@ impl Module for Conv2d {
         };
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges
-            };
-            let inputs = vec![x.clone(), self.weight.clone()];
-            let backward = Conv2dBackward::new(edges, inputs);
+            let mut inputs = vec![
+                x.clone(),
+                self.weight.clone(),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+                Tensor::from_scalar(self.dilation as f32),
+                Tensor::from_scalar(self.groups as f32),
+            ];
+            if let Some(ref b) = self.bias {
+                inputs.push(b.clone());
+            }
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("Conv2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
             output
         } else {
             output
@@ -173,65 +232,8 @@ impl Module for Conv2d {
     impl_training_state!(self, self.training);
 }
 
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct ConvTranspose2d {
-    pub weight: Tensor,
-    pub bias: Option<Tensor>,
-    pub stride: i64,
-    pub padding: i64,
-    pub out_channels: i64,
-    pub in_channels: i64,
-    pub kernel_size: i64,
-    training: TrainingState,
-    // Pre-allocated scalars
-    stride_scalar: Tensor,
-    padding_scalar: Tensor,
-}
-
-impl ConvTranspose2d {
-    pub fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        bias: bool,
-    ) -> Self {
-        let k = kernel_size * kernel_size * in_channels;
-        let scale = (2.0 / k as f32).sqrt();
-        let weight_data: Vec<f32> = (0..in_channels * out_channels * kernel_size * kernel_size)
-            .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
-            .collect();
-        let weight = Tensor::from_vec(
-            weight_data,
-            vec![in_channels, out_channels, kernel_size, kernel_size],
-        )
-        .requires_grad_(true);
-        let bias = if bias {
-            let b = Tensor::zeros(
-                vec![out_channels],
-                crate::storage::DType::F32,
-                crate::storage::Device::Cpu,
-            );
-            Some(b.requires_grad_(true))
-        } else {
-            None
-        };
-        ConvTranspose2d {
-            weight,
-            bias,
-            stride,
-            padding,
-            out_channels,
-            in_channels,
-            kernel_size,
-            training: TrainingState::new(),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
-        }
-    }
-}
+// ── ConvTranspose2d ───────────────────────────────────────────────────────────
+impl_conv_type!(ConvTranspose2d, true, 2);
 
 impl Module for ConvTranspose2d {
     fn forward(&self, x: &Tensor) -> Tensor {
@@ -241,8 +243,12 @@ impl Module for ConvTranspose2d {
         let h_in = x_shape[2];
         let w_in = x_shape[3];
 
-        let _h_out = (h_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
-        let _w_out = (w_in - 1) * self.stride - 2 * self.padding + self.kernel_size;
+        let _h_out = (h_in - 1) * self.stride - 2 * self.padding
+            + self.dilation * (self.kernel_size - 1)
+            + 1;
+        let _w_out = (w_in - 1) * self.stride - 2 * self.padding
+            + self.dilation * (self.kernel_size - 1)
+            + 1;
 
         let mut output = Tensor::exec_aot(&[x, &self.weight], |g, ins| {
             vec![g.conv_transpose2d(
@@ -250,6 +256,7 @@ impl Module for ConvTranspose2d {
                 &ins[1],
                 self.stride as usize,
                 self.padding as usize,
+                self.dilation as usize,
             )]
         })
         .expect("ConvTranspose2d::forward: AOT failed")
@@ -269,20 +276,14 @@ impl Module for ConvTranspose2d {
 
         // Set up autograd for ConvTranspose2d
         if x.requires_grad() || self.weight.requires_grad() {
-            let mut edges = autograd::make_edge(x);
-            edges.extend(autograd::make_edge(&self.weight));
             let mut inputs = vec![x.clone(), self.weight.clone()];
             if let Some(ref b) = self.bias {
-                if b.requires_grad() {
-                    edges.extend(autograd::make_edge(b));
-                }
                 inputs.push(b.clone());
             }
-            let backward = autograd::ConvTranspose2dBackward::new(edges, inputs);
             let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("ConvTranspose2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
@@ -294,70 +295,8 @@ impl Module for ConvTranspose2d {
     impl_training_state!(self, self.training);
 }
 
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct Conv1d {
-    pub weight: Tensor,
-    pub bias: Option<Tensor>,
-    pub stride: i64,
-    pub padding: i64,
-    pub dilation: i64,
-    pub in_channels: i64,
-    pub out_channels: i64,
-    pub kernel_size: i64,
-    training: TrainingState,
-    // Pre-allocated scalars
-    stride_scalar: Tensor,
-    padding_scalar: Tensor,
-    dilation_scalar: Tensor,
-    #[allow(dead_code)]
-    default_bias: Tensor,
-}
-
-impl Conv1d {
-    pub fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        bias: bool,
-    ) -> Self {
-        let k = kernel_size * in_channels;
-        let scale = (2.0 / k as f32).sqrt();
-        let weight_data: Vec<f32> = (0..out_channels * in_channels * kernel_size)
-            .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
-            .collect();
-        let weight = Tensor::from_vec(weight_data, vec![out_channels, in_channels, kernel_size])
-            .requires_grad_(true);
-        let bias = if bias {
-            let b = Tensor::zeros(
-                vec![out_channels],
-                crate::storage::DType::F32,
-                crate::storage::Device::Cpu,
-            );
-            Some(b.requires_grad_(true))
-        } else {
-            None
-        };
-        Conv1d {
-            weight,
-            bias,
-            stride,
-            padding,
-            dilation,
-            in_channels,
-            out_channels,
-            kernel_size,
-            training: TrainingState::new(),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
-            dilation_scalar: Tensor::from_scalar(dilation as f32),
-            default_bias: Tensor::from_scalar(0.0),
-        }
-    }
-}
+// ── Conv1d ────────────────────────────────────────────────────────────────────
+impl_conv_type!(Conv1d, false, 1);
 
 impl Module for Conv1d {
     fn forward(&self, x: &Tensor) -> Tensor {
@@ -402,7 +341,7 @@ impl Module for Conv1d {
             .reshape(vec![w_shape[0], w_shape[1], 1, w_shape[2]]);
 
         // Use conv2d with padding=0 (since we pre-padded) and the user's stride/dilation
-        let output = {
+        let mut output = {
             let conv = Tensor::exec_aot(&[&x_4d, &w_4d], |g, ins| {
                 vec![g.conv2d_with_params(
                     &ins[0],
@@ -410,7 +349,7 @@ impl Module for Conv1d {
                     self.stride as usize,
                     0,
                     self.dilation as usize,
-                    1,
+                    self.groups as usize,
                 )]
             })
             .expect("Conv1d::forward: AOT failed")
@@ -425,6 +364,25 @@ impl Module for Conv1d {
             }
         };
 
+        // Attach autograd before final reshape so the backward chain is complete
+        if x.requires_grad() || self.weight.requires_grad() {
+            let mut inputs = vec![
+                x.clone(),
+                self.weight.clone(),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+                Tensor::from_scalar(self.dilation as f32),
+                Tensor::from_scalar(self.groups as f32),
+            ];
+            if let Some(ref b) = self.bias {
+                inputs.push(b.clone());
+            }
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(autograd::make_node_info("Conv1dBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
+        }
+
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
         let out_shape = output.shape_ref();
         let out_channels = out_shape[1];
@@ -438,79 +396,8 @@ impl Module for Conv1d {
     impl_training_state!(self, self.training);
 }
 
-#[derive(Clone)]
-pub struct Conv3d {
-    pub weight: Tensor,
-    pub bias: Option<Tensor>,
-    pub stride: i64,
-    pub padding: i64,
-    pub dilation: i64,
-    pub in_channels: i64,
-    pub out_channels: i64,
-    pub kernel_size: i64,
-    training: TrainingState,
-    // Pre-allocated scalars
-    #[allow(dead_code)]
-    stride_scalar: Tensor,
-    #[allow(dead_code)]
-    padding_scalar: Tensor,
-    #[allow(dead_code)]
-    dilation_scalar: Tensor,
-}
-
-impl Conv3d {
-    pub fn new(
-        in_channels: i64,
-        out_channels: i64,
-        kernel_size: i64,
-        stride: i64,
-        padding: i64,
-        dilation: i64,
-        bias: bool,
-    ) -> Self {
-        let k = kernel_size * kernel_size * kernel_size * in_channels;
-        let scale = (2.0 / k as f32).sqrt();
-        let weight_data: Vec<f32> =
-            (0..out_channels * in_channels * kernel_size * kernel_size * kernel_size)
-                .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
-                .collect();
-        let weight = Tensor::from_vec(
-            weight_data,
-            vec![
-                out_channels,
-                in_channels,
-                kernel_size,
-                kernel_size,
-                kernel_size,
-            ],
-        )
-        .requires_grad_(true);
-        let bias = if bias {
-            let b = Tensor::zeros(
-                vec![out_channels],
-                crate::storage::DType::F32,
-                crate::storage::Device::Cpu,
-            );
-            Some(b.requires_grad_(true))
-        } else {
-            None
-        };
-        Conv3d {
-            weight,
-            bias,
-            stride,
-            padding,
-            dilation,
-            in_channels,
-            out_channels,
-            kernel_size,
-            training: TrainingState::new(),
-            stride_scalar: Tensor::from_scalar(stride as f32),
-            padding_scalar: Tensor::from_scalar(padding as f32),
-            dilation_scalar: Tensor::from_scalar(dilation as f32),
-        }
-    }
-}
+// ── Conv3d ────────────────────────────────────────────────────────────────────
+impl_conv_type!(Conv3d, false, 3);
 
 impl Module for Conv3d {
     fn forward(&self, x: &Tensor) -> Tensor {
@@ -520,6 +407,7 @@ impl Module for Conv3d {
                 &ins[1],
                 self.stride as usize,
                 self.padding as usize,
+                self.dilation as usize,
             )]
         })
         .expect("Conv3d::forward: AOT failed")
@@ -532,6 +420,23 @@ impl Module for Conv3d {
             let bias_shape = vec![1, self.out_channels, 1, 1, 1];
             let bias_reshaped = bias.reshape(bias_shape);
             output = output.add(&bias_reshaped);
+        }
+
+        // Attach autograd
+        if x.requires_grad() || self.weight.requires_grad() {
+            let mut inputs = vec![
+                x.clone(),
+                self.weight.clone(),
+                Tensor::from_scalar(self.stride as f32),
+                Tensor::from_scalar(self.padding as f32),
+            ];
+            if let Some(ref b) = self.bias {
+                inputs.push(b.clone());
+            }
+            let mut meta = AutogradMeta::new_non_leaf(true);
+            meta.grad_fn = Some(autograd::make_node_info("Conv3dBackward", inputs));
+            Arc::make_mut(&mut output.inner).autograd_meta =
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output

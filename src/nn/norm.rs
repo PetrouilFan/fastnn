@@ -1,11 +1,8 @@
-use crate::autograd::{
-    self, AutogradMeta, BatchNorm1dBackward, BatchNorm2dBackward, GroupNormBackward,
-    RMSNormBackward,
-};
+use crate::autograd::{self, AutogradMeta};
 use crate::ir::node::{DimExpr, IrDType, TensorType};
 use crate::tensor::Tensor;
 use crate::{
-    impl_training_state,
+    impl_norm, impl_training_state,
     nn::{clear_grad, Module, TrainingState},
 };
 use parking_lot::RwLock;
@@ -61,42 +58,19 @@ impl Module for LayerNorm {
 
         // Set up gradient tracking for layer norm
         if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
-            let edges = {
-                let mut edges = crate::autograd::make_edge(x);
-                edges.extend(crate::autograd::make_edge(weight));
-                edges.extend(crate::autograd::make_edge(bias));
-                edges
-            };
             let inputs = vec![x.clone(), weight.clone(), bias.clone()];
-            let backward = crate::autograd::LayerNormBackward::new(edges, inputs);
             let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(std::sync::Arc::new(backward));
+            meta.grad_fn = Some(crate::autograd::make_node_info("LayerNormBackward", inputs));
             let mut output = output.clone();
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
             output
         } else {
             output
         }
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![
-            ("weight".to_string(), self.weight.clone()),
-            ("bias".to_string(), self.bias.clone()),
-        ]
-    }
-
-    fn zero_grad(&self) {
-        clear_grad(&self.weight);
-        clear_grad(&self.bias);
-    }
-
-    impl_training_state!(self, self.training);
+    impl_norm!(weight, bias, training);
 }
 
 #[derive(Clone)]
@@ -241,7 +215,7 @@ impl Module for BatchNorm1d {
         if is_training {
             let x_shape = x.shape_ref();
             let batch_size = x_shape[0];
-            let _num_features = x_shape[1];
+            let num_features = x_shape[1];
             let spatial_size: i64 = if x_shape.len() > 2 {
                 x_shape[2..].iter().product()
             } else {
@@ -251,8 +225,14 @@ impl Module for BatchNorm1d {
             let n = (batch_size * spatial_size) as f32;
             let unbiased_var = if n > 1.0 {
                 batch_var.clone().mul_scalar(n / (n - 1.0))
-            } else {
+            } else if n > 0.0 {
                 batch_var.clone()
+            } else {
+                Tensor::zeros(
+                    vec![num_features as i64],
+                    crate::storage::DType::F32,
+                    crate::storage::Device::Cpu,
+                )
             };
 
             let mom = self.momentum as f32;
@@ -263,18 +243,18 @@ impl Module for BatchNorm1d {
             let new_mean = running_mean_lock
                 .mul_scalar(inv_mom)
                 .add(&batch_mean.mul_scalar(mom));
-            *running_mean_lock = new_mean;
+            *running_mean_lock = new_mean.detach();
 
             let mut running_var_lock = self.running_var.write();
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
-            *running_var_lock = new_var;
+            *running_var_lock = new_var.detach();
         }
 
         // Attach autograd
         if grads_needed {
-            let edges = {
+            let _edges = {
                 let mut edges = autograd::make_edge(x);
                 if let Some(w) = &self.weight {
                     edges.extend(autograd::make_edge(w));
@@ -291,11 +271,10 @@ impl Module for BatchNorm1d {
             if let Some(ref b) = self.bias {
                 inputs.push(b.clone());
             }
-            let backward = BatchNorm1dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("BatchNorm1dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
@@ -371,45 +350,17 @@ impl Module for RMSNorm {
         let mut output = result.into_iter().next().unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() {
-            let edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges
-            };
             let inputs = vec![x.clone(), self.weight.clone()];
-            let backward = RMSNormBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("RMSNormBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![("weight".to_string(), self.weight.clone())]
-    }
-
-    fn zero_grad(&self) {
-        if let Some(meta) = &self.weight.inner.autograd_meta {
-            if let Ok(mut lock) = meta.lock() {
-                lock.grad = None;
-            }
-        }
-    }
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_norm!(weight);
 }
 
 #[derive(Clone)]
@@ -524,51 +475,23 @@ impl Module for GroupNorm {
         .unwrap();
 
         if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
-            let edges = {
+            let _edges = {
                 let mut edges = autograd::make_edge(x);
                 edges.extend(autograd::make_edge(&self.weight));
                 edges.extend(autograd::make_edge(&self.bias));
                 edges
             };
             let inputs = vec![x.clone(), self.weight.clone(), self.bias.clone()];
-            let backward = GroupNormBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("GroupNormBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![
-            ("weight".to_string(), self.weight.clone()),
-            ("bias".to_string(), self.bias.clone()),
-        ]
-    }
-
-    fn zero_grad(&self) {
-        for t in [&self.weight, &self.bias] {
-            if let Some(meta) = &t.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
-    fn train_mode(&self) {}
-
-    fn eval_mode(&self) {}
-
-    fn is_training(&self) -> bool {
-        false
-    }
+    impl_norm!(weight, bias);
 }
 
 pub struct BatchNorm2d {
@@ -686,7 +609,7 @@ impl Module for BatchNorm2d {
             let new_mean = running_mean_lock
                 .mul_scalar(inv_mom)
                 .add(&batch_mean.mul_scalar(mom));
-            *running_mean_lock = new_mean;
+            *running_mean_lock = new_mean.detach();
 
             let mut running_var_lock = self.running_var.write();
             let n = (batch * spatial) as f32;
@@ -698,43 +621,26 @@ impl Module for BatchNorm2d {
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
-            *running_var_lock = new_var;
+            *running_var_lock = new_var.detach();
         }
 
         // Attach autograd
         if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
-            let edges = {
+            let _edges = {
                 let mut edges = autograd::make_edge(x);
                 edges.extend(autograd::make_edge(&self.weight));
                 edges.extend(autograd::make_edge(&self.bias));
                 edges
             };
             let inputs = vec![x.clone(), self.weight.clone(), self.bias.clone()];
-            let backward = BatchNorm2dBackward::new(edges, inputs);
             let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(Arc::new(backward));
+            meta.grad_fn = Some(autograd::make_node_info("BatchNorm2dBackward", inputs));
             Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(std::sync::Mutex::new(meta)));
+                Some(Arc::new(parking_lot::Mutex::new(meta)));
         }
 
         output
     }
 
-    fn parameters(&self) -> Vec<Tensor> {
-        vec![self.weight.clone(), self.bias.clone()]
-    }
-
-    fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        vec![
-            ("weight".to_string(), self.weight.clone()),
-            ("bias".to_string(), self.bias.clone()),
-        ]
-    }
-
-    fn zero_grad(&self) {
-        clear_grad(&self.weight);
-        clear_grad(&self.bias);
-    }
-
-    impl_training_state!(self, self.training);
+    impl_norm!(weight, bias, training);
 }

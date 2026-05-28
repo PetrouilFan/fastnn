@@ -8,24 +8,19 @@ import numpy as np
 import fastnn as fnn
 
 
-def _infer_shape(lst):
-    """Infer the shape of a regular nested list.
-    
-    Raises:
-        ValueError: If the input is a ragged/irregular list (elements have different lengths).
-    """
+def _infer_shape(data):
     shape = []
-    current = lst
+    current = data
     while isinstance(current, list):
         if not current:
             shape.append(0)
             break
         shape.append(len(current))
+        if not isinstance(current[0], list):
+            break
         first_len = len(current[0])
-        for item in current:
-            if not isinstance(item, list):
-                break
-            if len(item) != first_len:
+        for item in current[1:]:
+            if not isinstance(item, list) or len(item) != first_len:
                 raise ValueError(
                     f"Irregular/ragged list detected: elements have inconsistent lengths "
                     f"at depth {len(shape)}. First element has length {first_len}, "
@@ -33,7 +28,7 @@ def _infer_shape(lst):
                     f"Only regular (rectangular) nested lists are supported."
                 )
         current = current[0]
-    return tuple(shape)
+    return shape
 
 
 def to_numpy(tensor: Any) -> np.ndarray:

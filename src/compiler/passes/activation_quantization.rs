@@ -12,7 +12,7 @@
 //! Run this pass **after** shape inference (so shapes are known) and **before**
 //! memory planning (so the planner allocates slots for the new nodes).
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 
 /// Insert `QuantizeActivations`/`DequantizeActivations` around every `MatMul`
 /// node whose first input (the activation) is not already quantized.
@@ -20,91 +20,79 @@ use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 /// The pass is idempotent — it skips MatMuls whose first input is already
 /// a `QuantizeActivations` output.
 pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
-    let order = graph.topological_sort();
-
-    // Collect rewrites first, then apply them, to avoid borrow-checker issues.
     struct Rewrite {
         matmul_id: NodeId,
-        quantize_id: NodeId,
-        dequantize_id: NodeId,
+        act_id: NodeId,
+        matmul_shape: Vec<DimExpr>,
+        act_shape: Vec<DimExpr>,
+        consumers: Vec<NodeId>,
+        is_graph_output: bool,
     }
 
     let mut rewrites: Vec<Rewrite> = Vec::new();
 
-    for &node_id in &order {
-        let node = match graph.get_node(node_id) {
-            Some(n) => n,
-            None => continue,
-        };
-
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
         if node.opcode != Opcode::MatMul {
-            continue;
+            return Ok(());
         }
 
         let &act_id = match node.inputs.first() {
             Some(id) => id,
-            None => continue,
+            None => return Ok(()),
         };
 
         let matmul_shape = node.output_type.shape.clone();
 
-        if let Some(act_node) = graph.get_node(act_id) {
+        if let Some(act_node) = graph_ref.get_node(act_id) {
             if act_node.opcode == Opcode::QuantizeActivations {
-                continue;
+                return Ok(());
             }
         }
 
-        if let Some(act_node) = graph.get_node(act_id) {
+        if let Some(act_node) = graph_ref.get_node(act_id) {
             if matches!(act_node.opcode, Opcode::Input | Opcode::Constant(_)) {
-                continue;
+                return Ok(());
             }
         }
 
         let output_id = node_id;
-        let consumers: Vec<NodeId> = graph.consumers(output_id);
-        let is_graph_output = graph.outputs.contains(&output_id);
+        let consumers: Vec<NodeId> = graph_ref.consumers(output_id);
+        let is_graph_output = graph_ref.outputs.contains(&output_id);
 
-        let act_shape = graph
+        let act_shape = graph_ref
             .get_node(act_id)
             .map(|n| n.output_type.shape.clone())
             .unwrap_or_default();
-        let quant_type = TensorType::new(act_shape, IrDType::I8);
-        let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![act_id], quant_type);
-
-        if let Some(mm_node) = graph.get_node_mut(node_id) {
-            mm_node.inputs[0] = quantize_id;
-        }
-
-        let dequant_type = TensorType::new(matmul_shape, IrDType::F32);
-        let dequantize_id =
-            graph.add_node(Opcode::DequantizeActivations, vec![output_id], dequant_type);
-
-        // Rewire consumers of the MatMul output to consume DequantizeActivations.
-        for &consumer_id in &consumers {
-            if let Some(consumer) = graph.get_node_mut(consumer_id) {
-                for inp in consumer.inputs.iter_mut() {
-                    if *inp == output_id {
-                        *inp = dequantize_id;
-                    }
-                }
-            }
-        }
-
-        // If the MatMul was a graph output, replace it with DequantizeActivations.
-        if is_graph_output {
-            if let Some(pos) = graph.outputs.iter().position(|&id| id == output_id) {
-                graph.outputs[pos] = dequantize_id;
-            }
-        }
 
         rewrites.push(Rewrite {
             matmul_id: node_id,
-            quantize_id,
-            dequantize_id,
+            act_id,
+            matmul_shape,
+            act_shape,
+            consumers,
+            is_graph_output,
         });
+
+        Ok(())
+    })?;
+
+    for rw in rewrites {
+        let quant_type = TensorType::new(rw.act_shape, IrDType::I8);
+        let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![rw.act_id], quant_type);
+
+        if let Some(mm_node) = graph.get_node_mut(rw.matmul_id) {
+            mm_node.inputs[0] = quantize_id;
+        }
+
+        // MatMul kernels consume quantized activations but still produce F32.
+        // Do not insert DequantizeActivations after MatMul: that node expects
+        // an I8 activation payload and would misread the F32 MatMul output.
+        let _ = rw.matmul_shape;
+        let _ = rw.consumers;
+        let _ = rw.is_graph_output;
     }
 
-    let _ = rewrites; // Keep for potential future diagnostics
     Ok(())
 }
 
@@ -142,8 +130,8 @@ mod tests {
         graph.set_outputs(vec![mm_id]);
 
         // Run standard compile without activation quantization
-        let executor = GraphExecutor::new(CpuBackend);
-        let (plan_no_q, mem_no_q, _) = executor
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan_no_q, mem_no_q, _) = executor
             .compile_with_plan_and_quantize(&graph, None)
             .unwrap();
 
@@ -157,7 +145,7 @@ mod tests {
         let result_no_q = executor
             .execute(
                 &graph,
-                &plan_no_q,
+                &mut plan_no_q,
                 &mem_no_q,
                 &[&input_bytes_a, &input_bytes_w],
             )
@@ -173,10 +161,15 @@ mod tests {
         let mem_q = memory_planning::plan_memory(&graph_q).unwrap();
         // Set graph outputs to include the MatMul output (which has been rewired through
         // DequantizeActivations if the pass rewired it, or still MatMul if it's a graph output)
-        let plan_q = CpuBackend.compile(&graph_q, &mem_q).unwrap();
+        let mut plan_q = CpuBackend.compile(&graph_q, &mem_q).unwrap();
 
         let result_q = executor
-            .execute(&graph_q, &plan_q, &mem_q, &[&input_bytes_a, &input_bytes_w])
+            .execute(
+                &graph_q,
+                &mut plan_q,
+                &mem_q,
+                &[&input_bytes_a, &input_bytes_w],
+            )
             .unwrap();
         let result_q_f32: Vec<f32> = bytemuck::cast_slice(&result_q[0]).to_vec();
 
@@ -349,10 +342,11 @@ mod tests {
         );
     }
 
-    /// Test that DequantizeActivations is inserted after MatMul when
-    /// there are downstream non-MatMul consumers.
+    /// Test that MatMul output stays F32 directly when activation quantization
+    /// is inserted before MatMul. Downstream F32 consumers should consume the
+    /// MatMul output directly; DequantizeActivations is only for I8 payloads.
     #[test]
-    fn test_activation_quantization_downstream_dequantize() {
+    fn test_activation_quantization_downstream_f32_consumers_use_matmul_output() {
         let mut graph = ComputeGraph::new();
         let input_id = graph.add_node(
             Opcode::Input,
@@ -387,14 +381,20 @@ mod tests {
         shape_inference::infer_shapes(&mut graph).unwrap();
         quantize_activations(&mut graph).unwrap();
 
-        // The Relu node should consume DequantizeActivations, not the MatMul directly
+        // The Relu node should consume the MatMul directly because MatMul
+        // output_type is already F32.
         let relu_node = graph.get_node(relu_id).unwrap();
-        let dq_id = relu_node.inputs[0];
-        let dq_node = graph.get_node(dq_id).unwrap();
         assert_eq!(
-            dq_node.opcode,
-            Opcode::DequantizeActivations,
-            "downstream non-MatMul consumer should get DequantizeActivations"
+            relu_node.inputs[0], mm_id,
+            "downstream F32 consumer should receive MatMul output directly"
+        );
+
+        let mm_node = graph.get_node(mm_id).unwrap();
+        let qa_node = graph.get_node(mm_node.inputs[0]).unwrap();
+        assert_eq!(
+            qa_node.opcode,
+            Opcode::QuantizeActivations,
+            "MatMul activation input should still be quantized"
         );
     }
 

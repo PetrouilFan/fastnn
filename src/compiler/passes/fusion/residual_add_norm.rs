@@ -1,6 +1,6 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, NodeId, Opcode};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct FusedResidualAddNorm;
 
@@ -23,7 +23,7 @@ fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, Strin
         .collect();
 
     let mut changed = false;
-    let mut to_remove: Vec<NodeId> = Vec::new();
+    let mut to_remove: HashSet<NodeId> = HashSet::new();
 
     for norm_id in norm_ids {
         if to_remove.contains(&norm_id) {
@@ -90,7 +90,7 @@ fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, Strin
         }
 
         if can_remove_add {
-            to_remove.push(add_id);
+            to_remove.insert(add_id);
         }
 
         changed = true;

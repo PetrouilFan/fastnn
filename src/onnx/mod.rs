@@ -20,3 +20,4 @@
 
 pub mod converter;
 pub mod export;
+pub mod opcode_map;

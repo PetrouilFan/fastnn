@@ -22,13 +22,13 @@ class Calibrator:
         self.calibration_data = calibration_data
 
     @staticmethod
-    def percentile_scale(data: np.ndarray, percentile: float = 99.9) -> float:
+    def percentile_scale(data: np.ndarray, percentile: float = 99.9, bit_width: int = 7) -> float:
         """Compute scale based on percentile instead of max-abs.
 
         Uses the given percentile of absolute values, which ignores outliers.
         """
         abs_data = np.abs(data)
-        max_val = float((1 << (7)) - 1)  # int7 max for symmetric quantization
+        max_val = float((1 << bit_width) - 1)
         p = float(np.percentile(abs_data, percentile))
         if p == 0.0:
             return 1.0
@@ -84,7 +84,7 @@ class Calibrator:
                 best_kl = kl
                 best_threshold = threshold
 
-        max_val_q = float((1 << 7) - 1)
+        max_val_q = float((1 << 7) - 1)  # int7 for KL reference distribution
         return best_threshold / max_val_q if best_threshold > 0 else 1.0
 
     def refine_scales(

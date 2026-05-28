@@ -222,24 +222,16 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
     fn zero_grad(&self) {
         for tensor in [&self.conv_weight, &self.bn_weight, &self.bn_bias] {
             if let Some(meta) = &tensor.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                let mut lock = meta.lock();
+                lock.grad = None;
             }
         }
         if let Some(b) = &self.conv_bias {
             if let Some(meta) = &b.inner.autograd_meta {
-                if let Ok(mut lock) = meta.lock() {
-                    lock.grad = None;
-                }
+                let mut lock = meta.lock();
+                lock.grad = None;
             }
         }
-    }
-
-    fn train_mode(&self) {}
-    fn eval_mode(&self) {}
-    fn is_training(&self) -> bool {
-        false
     }
 }
 

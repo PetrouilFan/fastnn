@@ -25,6 +25,14 @@ pub struct WgpuContext {
     pub staging_buffer_size: u64,
 }
 
+/// Handle returned by [`read_buffer_async`]; consumed by [`read_buffer_sync`].
+/// The staging buffer is cloned so it remains valid across lock boundaries.
+pub struct ReadbackHandle {
+    pub staging: wgpu::Buffer,
+    pub offset: u64,
+    pub size: u64,
+}
+
 impl WgpuContext {
     /// Create a WgpuContext from an existing device and queue.
     pub fn from_device(device: wgpu::Device, queue: wgpu::Queue) -> Self {
@@ -122,13 +130,17 @@ impl WgpuContext {
     }
 
     /// Create a GPU buffer from raw bytes.
+    /// Returns a 1-byte buffer if `data` is empty (WGPU requires non-zero buffer sizes).
     pub fn create_buffer(&self, data: &[u8], label: &str) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
+        let contents = if data.is_empty() { &[0u8] } else { data };
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
-                contents: data,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                contents,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
             })
     }
 
@@ -143,8 +155,20 @@ impl WgpuContext {
             })
     }
 
-    /// Read a GPU buffer back to a `Vec<u8>`.
+    /// Read a GPU buffer back to a `Vec<u8>` (convenience: async + sync).
     pub fn read_buffer(&mut self, buffer: &wgpu::Buffer, size: usize) -> Vec<u8> {
+        let handle = self.read_buffer_async(buffer, size);
+        self.read_buffer_sync(&handle)
+    }
+
+    /// Start a GPU readback: copies buffer content to a staging buffer and
+    /// submits the copy command.  Returns a [`ReadbackHandle`] – call
+    /// `read_buffer_sync` later to map and read.
+    ///
+    /// The `with_wgpu_context` lock is released between this call and
+    /// `read_buffer_sync`, allowing multiple async copies to be issued before
+    /// a single sync point.
+    pub fn read_buffer_async(&mut self, buffer: &wgpu::Buffer, size: usize) -> ReadbackHandle {
         let staging_size = size as u64;
         if self.staging_buffer_size < staging_size {
             let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -156,17 +180,29 @@ impl WgpuContext {
             self.staging_buffer = Some(buf);
             self.staging_buffer_size = staging_size;
         }
-        let staging = self.staging_buffer.as_ref().unwrap();
+        let staging = self.staging_buffer.as_ref().unwrap().clone();
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("copy_encoder"),
             });
-        encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, staging_size);
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, staging_size);
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        let buffer_slice = staging.slice(..staging_size);
+        ReadbackHandle {
+            staging,
+            offset: 0,
+            size: staging_size,
+        }
+    }
+
+    /// Complete a GPU readback: polls the device, maps the staging buffer,
+    /// and returns the data.
+    pub fn read_buffer_sync(&self, handle: &ReadbackHandle) -> Vec<u8> {
+        let buffer_slice = handle
+            .staging
+            .slice(handle.offset..handle.offset + handle.size);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -180,56 +216,81 @@ impl WgpuContext {
         let data = buffer_slice.get_mapped_range();
         let result = data.to_vec();
         drop(data);
-        staging.unmap();
+        handle.staging.unmap();
         result
     }
 
-    /// Read multiple buffers in a single sync point.
+    /// Submit an empty command buffer and poll the device to ensure all
+    /// previously submitted work has completed.  Holds the lock only briefly.
+    pub fn flush_queue(&self) {
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("flush"),
+            });
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+    }
+
+    /// Read multiple buffers in a single sync point using a single cached
+    /// staging buffer that grows as needed.
     /// Avoids per-dispatch `device.poll(Maintain::Wait)` overhead.
     pub fn read_buffers(&mut self, buffers: &[(&wgpu::Buffer, usize)]) -> Vec<Vec<u8>> {
+        let total_size: u64 = buffers.iter().map(|(_, s)| *s as u64).sum();
+        if total_size == 0 {
+            return vec![Vec::new(); buffers.len()];
+        }
+
+        // Ensure cached staging buffer is large enough
+        if self.staging_buffer_size < total_size {
+            let new_size = total_size.next_power_of_two();
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("batched_staging"),
+                size: new_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.staging_buffer = Some(buf);
+            self.staging_buffer_size = new_size;
+        }
+        let staging = self.staging_buffer.as_ref().unwrap();
+
+        // Copy all buffers into the single staging buffer at different offsets
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("batched_readback"),
             });
 
-        let mut staging_buffers = Vec::with_capacity(buffers.len());
-        let mut results = Vec::with_capacity(buffers.len());
-
+        let mut offset = 0u64;
         for &(buffer, size) in buffers {
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("staging"),
-                size: size as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size as u64);
-            staging_buffers.push(staging);
-            results.push(Vec::new());
+            encoder.copy_buffer_to_buffer(buffer, 0, staging, offset, size as u64);
+            offset += size as u64;
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Single sync point for all copies
+        // Map once, read all slices
+        let slice = staging.slice(..total_size);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
         self.device.poll(wgpu::Maintain::Wait);
+        let result = receiver
+            .recv()
+            .expect("GPU buffer mapping channel closed unexpectedly");
+        result.expect("Failed to map GPU buffer for read");
 
-        for (i, staging) in staging_buffers.iter().enumerate() {
-            let size = buffers[i].1;
-            let buffer_slice = staging.slice(..size as u64);
-            let (sender, receiver) = std::sync::mpsc::channel();
-            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
-            self.device.poll(wgpu::Maintain::Wait);
-            if let Ok(data) = receiver.recv() {
-                if data.is_ok() {
-                    let mapped = buffer_slice.get_mapped_range();
-                    results[i] = mapped.to_vec();
-                    drop(mapped);
-                    staging.unmap();
-                }
-            }
+        let mapped = slice.get_mapped_range();
+        let mut results = Vec::with_capacity(buffers.len());
+        offset = 0;
+        for &(_, size) in buffers {
+            results.push(mapped[offset as usize..offset as usize + size].to_vec());
+            offset += size as u64;
         }
+        drop(mapped);
+        staging.unmap();
 
         results
     }
@@ -303,6 +364,7 @@ pub struct GpuContext {
     shader_cache_dir: PathBuf,
     bind_group_cache: RwLock<HashMap<u64, wgpu::BindGroup>>,
     bind_group_cache_max_size: usize,
+    readback_mutex: Mutex<()>,
 }
 
 impl Clone for GpuContext {
@@ -321,6 +383,7 @@ impl Clone for GpuContext {
             shader_cache_dir: self.shader_cache_dir.clone(),
             bind_group_cache: RwLock::new(HashMap::new()),
             bind_group_cache_max_size: self.bind_group_cache_max_size,
+            readback_mutex: Mutex::new(()),
         }
     }
 }
@@ -376,6 +439,7 @@ impl GpuContext {
             shader_cache_dir,
             bind_group_cache: RwLock::new(HashMap::new()),
             bind_group_cache_max_size: 256,
+            readback_mutex: Mutex::new(()),
         })
     }
 
@@ -535,39 +599,11 @@ impl GpuContext {
         new_buffer
     }
 
-    pub fn get_or_create_gpu_buffer(&self, cpu_data: &[f32], label: &str) -> wgpu::Buffer {
+    pub fn get_or_create_gpu_buffer(&self, cpu_data: &[f32], _label: &str) -> wgpu::Buffer {
         let size = std::mem::size_of_val(cpu_data);
         let buffer = self.acquire_buffer(size);
-
-        let staging = self.ensure_staging_buffer_cpu_to_gpu(size);
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let staging_slice = staging.slice(..size as u64);
-        staging_slice.map_async(wgpu::MapMode::Write, move |result| {
-            let _ = sender.send(result);
-        });
-
-        self.device.poll(wgpu::Maintain::Wait);
-        let result = receiver
-            .recv()
-            .expect("GPU staging buffer mapping channel closed unexpectedly");
-        result.expect("Failed to map staging buffer for write");
-
-        {
-            let mut range = staging_slice.get_mapped_range_mut();
-            range.copy_from_slice(bytemuck::cast_slice(cpu_data));
-        }
-
-        staging.unmap();
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("{}_copy", label)),
-            });
-        encoder.copy_buffer_to_buffer(&staging, 0, &buffer, 0, size as u64);
-        self.queue.submit(Some(encoder.finish()));
-
+        self.queue
+            .write_buffer(&buffer, 0, bytemuck::cast_slice(cpu_data));
         buffer
     }
 
@@ -584,31 +620,10 @@ impl GpuContext {
         }
     }
 
-    pub fn create_gpu_buffer_from_bytes(&self, data: &[u8], label: &str) -> GpuBuffer {
+    pub fn create_gpu_buffer_from_bytes(&self, data: &[u8], _label: &str) -> GpuBuffer {
         let size = data.len();
         let buffer = self.acquire_buffer(size);
-
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{}_staging", label)),
-            size: size as u64,
-            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::MAP_WRITE,
-            mapped_at_creation: true,
-        });
-
-        {
-            let mut range = staging.slice(..).get_mapped_range_mut();
-            range.copy_from_slice(data);
-        }
-
-        staging.unmap();
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("{}_copy", label)),
-            });
-        encoder.copy_buffer_to_buffer(&staging, 0, &buffer, 0, size as u64);
-        self.queue.submit(Some(encoder.finish()));
+        self.queue.write_buffer(&buffer, 0, data);
 
         let id = self.buffer_id_counter.fetch_add(1, Ordering::SeqCst);
         GpuBuffer {
@@ -761,6 +776,11 @@ impl GpuContext {
     }
 
     pub fn read_buffer_from_arc(&self, buffer: &Arc<wgpu::Buffer>, size: usize) -> Vec<f32> {
+        // Serialize readback operations so that concurrent threads don't
+        // issue overlapping copy_buffer_to_buffer + map_async on the same
+        // shared staging buffer.
+        let _lock = self.readback_mutex.lock();
+
         let staging = self.ensure_staging_buffer_gpu_to_cpu(size);
 
         let mut encoder = self
@@ -777,7 +797,6 @@ impl GpuContext {
             let _ = sender.send(result);
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
         let result = receiver
             .recv()
             .expect("GPU staging buffer mapping channel closed unexpectedly");
@@ -813,11 +832,15 @@ impl GpuContext {
         format!("{}_{}_{}.spv", op_name, dtype.as_str(), hash)
     }
 
-    fn load_pipeline_from_cache(&self, _cache_key: &str) -> Option<wgpu::ComputePipeline> {
-        None
+    fn load_pipeline_data_from_cache(&self, cache_key: &str) -> Option<Vec<u8>> {
+        let cache_path = self.shader_cache_dir.join(cache_key);
+        std::fs::read(&cache_path).ok()
     }
 
-    fn save_pipeline_to_cache(&self, _cache_key: &str) {}
+    fn save_pipeline_data_to_cache(&self, cache_key: &str, data: &[u8]) {
+        let cache_path = self.shader_cache_dir.join(cache_key);
+        let _ = std::fs::write(&cache_path, data);
+    }
 
     pub fn get_or_create_shader(&self, name: &str, wgsl: &str) -> wgpu::ShaderModule {
         {
@@ -848,12 +871,16 @@ impl GpuContext {
         }
 
         let cache_key = self.get_cache_key(name, dtype, wgsl);
-        if let Some(cached_pipeline) = self.load_pipeline_from_cache(&cache_key) {
-            self.pipelines
-                .write()
-                .insert(name.to_string(), cached_pipeline.clone());
-            return cached_pipeline;
-        }
+        let existing_data = self.load_pipeline_data_from_cache(&cache_key);
+
+        let pipeline_cache = unsafe {
+            self.device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some(&cache_key),
+                    data: existing_data.as_deref(),
+                    fallback: true,
+                })
+        };
 
         let shader = self.get_or_create_shader(name, wgsl);
         let pipeline = self
@@ -863,11 +890,15 @@ impl GpuContext {
                 layout: None,
                 module: &shader,
                 entry_point: Some("main"),
-                cache: None,
+                cache: Some(&pipeline_cache),
                 compilation_options: Default::default(),
             });
 
-        self.save_pipeline_to_cache(&cache_key);
+        if let Some(new_data) = pipeline_cache.get_data() {
+            if !new_data.is_empty() {
+                self.save_pipeline_data_to_cache(&cache_key, &new_data);
+            }
+        }
 
         self.pipelines
             .write()
