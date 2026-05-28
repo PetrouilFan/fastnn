@@ -514,7 +514,10 @@ def _eval_split(node, tensors, node_attrs):
         split = tensors[1].flatten().astype(int).tolist()
     if split is not None:
         split = [int(s) for s in split]
-    return list(np.split(tensors[0], split or tensors[0].shape[axis], axis=axis))
+    else:
+        num_outputs = len(node.get("outputs", []))
+        split = num_outputs if num_outputs > 0 else tensors[0].shape[axis]
+    return list(np.split(tensors[0], split, axis=axis))
 
 
 @_register(["pad"])

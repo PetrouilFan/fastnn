@@ -10,8 +10,8 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{U4x8, U8x4};
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorValue};
+use crate::dtypes::{PackedWord, U4x8, U8x4};
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use std::cell::UnsafeCell;
@@ -22,6 +22,535 @@ pub mod flash_attn;
 pub mod im2col;
 pub mod microkernels;
 pub mod reductions_fast;
+
+// ============================================================
+// Arena slice extraction macro
+// ============================================================
+
+/// Extract input and output `f32` slices from the arena in one shot.
+///
+/// **Unary** (one input, one output):
+/// ```ignore
+/// get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [output]);
+/// // → `input: Vec<f32>` + `output: &mut [f32]`
+/// ```
+///
+/// **Binary** (two inputs, one output):
+/// ```ignore
+/// get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [output]);
+/// // → `a: Vec<f32>`, `b: Vec<f32>` + `output: &mut [f32]`
+/// ```
+macro_rules! get_in_out_slices {
+    // Unary
+    ($arena:expr, $input_slices:expr => [$input:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
+        let $input = if let Some(slice) = $input_slices.first() {
+            let d = $arena.data_mut();
+            let src = bytemuck::cast_slice::<_, f32>(&d[slice.offset..slice.offset + slice.size]);
+            let mut buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(src.len());
+            buf.copy_from_slice(src);
+            buf // ScopedVec — auto-returns to TLS pool on drop
+        } else {
+            crate::backend::cpu::microkernels::TlsVecPool::alloc(0)
+        };
+        let $output = {
+            let d = $arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
+        };
+    };
+    // Binary
+    ($arena:expr, $input_slices:expr => [$a:ident, $b:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
+        let ($a, $b) = if let [a_slice, b_slice] = &$input_slices[..] {
+            let d = $arena.data_mut();
+            let a_src =
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]);
+            let b_src =
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]);
+            let mut a_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(a_src.len());
+            a_buf.copy_from_slice(a_src);
+            let mut b_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(b_src.len());
+            b_buf.copy_from_slice(b_src);
+            (a_buf, b_buf)
+        } else {
+            (
+                crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
+                crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
+            )
+        };
+        let $output = {
+            let d = $arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
+        };
+    };
+}
+
+/// Helper: extract two f32 slices from the arena, broadcast-loop with a binary op
+/// and activation function, and write the result to the output slice.
+///
+/// Uses SIMD microkernels for fused binary+activation when available (identified
+/// by `kernel_name`), falling back to the generic closure loop.
+#[inline]
+fn fused_binary_activation_dispatch(
+    kernel_name: &str,
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    out_start: usize,
+    out_end: usize,
+    op: impl Fn(f32, f32) -> f32 + Sync,
+    act: impl Fn(f32) -> f32 + Sync,
+) {
+    if let [a_slice, b_slice] = &input_slices[..] {
+        let (a, b) = {
+            let d = arena.data_mut();
+            (
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
+                    .to_vec(),
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                    .to_vec(),
+            )
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+
+        // SIMD fast path: chain elementwise op + activation using existing
+        // SIMD microkernels. The `kernel_name` tells us which combination
+        // to dispatch. Two SIMD passes is still 4-8x faster than scalar.
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
+            // Binary op dispatch
+            let binary_dispatched = if kernel_name.starts_with("add_") {
+                add_f32(&a, &b, out_f32);
+                true
+            } else if kernel_name.starts_with("sub_") {
+                sub_f32(&a, &b, out_f32);
+                true
+            } else if kernel_name.starts_with("mul_") {
+                mul_f32(&a, &b, out_f32);
+                true
+            } else if kernel_name.starts_with("div_") {
+                div_f32(&a, &b, out_f32);
+                true
+            } else {
+                false
+            };
+
+            if binary_dispatched {
+                // Activation dispatch — chain in-place on the output buffer.
+                // We use raw pointer to avoid &[f32] + &mut [f32] aliasing.
+                let len = out_f32.len();
+                let ptr = out_f32.as_mut_ptr();
+                if kernel_name.ends_with("relu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::relu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                } else if kernel_name.ends_with("gelu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::gelu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                } else if kernel_name.ends_with("silu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::silu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                }
+                return;
+            }
+        }
+
+        let out_len = out_f32.len();
+        let a_len = a.len();
+        let b_len = b.len();
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..out_len {
+                let x = op(a[i % a_len], b[i % b_len]);
+                out_f32[i] = act(x);
+            }
+        }
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            out_f32[..out_len]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, o)| {
+                    let x = op(a[i % a_len], b[i % b_len]);
+                    *o = act(x);
+                });
+        }
+    }
+}
+
+/// Helper: build a `CallKernel` instruction for a scalar op.
+///
+/// All 6 scalar ops (gt, lt, eq, add, mul, div) share the same shape:
+/// no extra params, no secondary output, no weight metadata.
+#[inline]
+fn scalar_kernel_instruction(
+    node_id: usize,
+    kernel_name: &str,
+    input_slices: Vec<BufferSlice>,
+    output_slice: BufferSlice,
+) -> Instruction {
+    Instruction::CallKernel {
+        node_id: Some(node_id),
+        kernel_name: kernel_name.to_string(),
+        input_slices,
+        output_slice,
+        secondary_output_slice: None,
+        params: vec![],
+        param_dims: None,
+        weight_meta: None,
+    }
+}
+
+/// Helper: dispatch a scalar op (gt, lt, eq, add, mul, div) at runtime.
+///
+/// Extracts data + scalar slices from the arena, casts to f32, resolves the
+/// scalar value from the first element, and calls `op(data, scalar, output)`.
+/// Generic closure `op` is monomorphized and inlined — zero overhead vs the
+/// handwritten per-op blocks.
+#[inline]
+fn scalar_op_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    out_start: usize,
+    out_end: usize,
+    op: impl Fn(&[f32], f32, &mut [f32]),
+) {
+    if let [data_slice, scalar_slice] = &input_slices[..] {
+        let (data, scalar) = {
+            let d = arena.data_mut();
+            (
+                bytemuck::cast_slice::<_, f32>(
+                    &d[data_slice.offset..data_slice.offset + data_slice.size],
+                )
+                .to_vec(),
+                bytemuck::cast_slice::<_, f32>(
+                    &d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size],
+                )
+                .to_vec(),
+            )
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        let s = scalar.first().copied().unwrap_or(0.0);
+        op(&data, s, out_f32);
+    }
+}
+
+/// Helper: dispatch a fused matmul + bias + activation kernel at runtime.
+///
+/// Handles both fused (with bias, 3 input slices) and non-fused (without bias,
+/// 2 input slices) matmul activation variants.  Extracts A and B (and optionally
+/// bias) from the arena, resolves [M,K,N] params, calls `matmul_blas_into`, and
+/// applies `act(x + bias[i % n])`.
+///
+/// Generic closure `act` is monomorphized and inlined — zero overhead vs the
+/// handwritten per-activation blocks.
+#[inline]
+fn matmul_activation_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    out_start: usize,
+    out_end: usize,
+    kernel_name: &str,
+    act: impl Fn(f32) -> f32,
+) -> Result<(), BackendError> {
+    if let [a_slice, b_slice] = &input_slices[..2] {
+        let has_bias = input_slices.len() >= 3;
+        let (a, b, bias) = {
+            let d = arena.data_mut();
+            let a_f32 =
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
+                    .to_vec();
+            let b_f32 =
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                    .to_vec();
+            let bias_f32 = if has_bias {
+                let bias_slice = &input_slices[2];
+                bytemuck::cast_slice::<_, f32>(
+                    &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
+                )
+                .to_vec()
+            } else {
+                Vec::new()
+            };
+            (a_f32, b_f32, bias_f32)
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, _k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        matmul_blas_into(&a, &b, out_f32, m, _k, n);
+        for i in 0..out_f32.len() {
+            let x = out_f32[i]
+                + if has_bias && i % n < bias.len() {
+                    bias[i % n]
+                } else {
+                    0.0
+                };
+            out_f32[i] = act(x);
+        }
+    }
+    Ok(())
+}
+
+/// Validate quantized weight metadata and build a packed tensor.
+fn packed_tensor_from_meta<T: PackedWord>(
+    data: Vec<T>,
+    meta: crate::backend::QuantizedWeightMeta,
+    kernel_name: &str,
+) -> Result<PackedTensor<T>, BackendError> {
+    if meta.scales.is_empty() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata missing scales"
+        )));
+    }
+    if meta.zero_points.is_empty() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata missing zero_points"
+        )));
+    }
+    if meta.scales.len() != meta.zero_points.len() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata length mismatch: {} scales vs {} zero_points",
+            meta.scales.len(),
+            meta.zero_points.len()
+        )));
+    }
+
+    let rows = if meta.shape.len() >= 2 {
+        meta.shape[0]
+    } else {
+        1
+    };
+    let valid_meta_len = meta.scales.len() == 1 || meta.scales.len() == rows;
+    if !valid_meta_len {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1 or {})",
+            meta.scales.len(),
+            meta.shape,
+            rows
+        )));
+    }
+
+    let numel: usize = meta.shape.iter().product();
+    let expected_words = if meta.shape.len() >= 2 {
+        let inner: usize = meta.shape[1..].iter().product();
+        rows * inner.div_ceil(T::ITEMS)
+    } else {
+        numel.div_ceil(T::ITEMS)
+    };
+    if data.len() < expected_words {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: quantized weight payload too short: got {} packed words for shape {:?}, expected at least {}",
+            data.len(),
+            meta.shape,
+            expected_words
+        )));
+    }
+
+    Ok(PackedTensor::from_raw(
+        data,
+        meta.shape,
+        meta.scales,
+        meta.zero_points,
+    ))
+}
+
+/// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
+///
+/// Generic over `T: PackedWord` — monomorphized as `U4x8` or `U8x4`.
+/// Handles arena extraction, u32-aligned weight copy, PackedTensor
+/// construction, and `gemm_cpu_flat` dispatch.
+#[inline]
+fn quantized_matmul_dispatch<T: PackedWord>(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    out_start: usize,
+    out_end: usize,
+    bit_width: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if let [a_slice, w_slice] = &input_slices[..] {
+        let (activations, packed_bytes) = {
+            let d = arena.data_mut();
+            (
+                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
+                    .to_vec(),
+                {
+                    let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                    // Copy to u32-aligned buffer (arena may not be u32-aligned)
+                    let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                    let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                    byte_slice[..raw.len()].copy_from_slice(raw);
+                    aligned
+                },
+            )
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, &activations, out_f32, m, k, n);
+    }
+    Ok(())
+}
+
+/// Dispatch pre-quantized I8 activation × U8x4 packed-weight MatMul.
+///
+/// Reads activation from arena as raw bytes (I8 payload format:
+/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<U8x4>` from
+/// the weight bytes, and calls the scalar I8×U8x4 microkernel.
+#[inline]
+fn quantized_matmul_dispatch_i8_u8(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    out_start: usize,
+    out_end: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if let [a_slice, w_slice] = &input_slices[..] {
+        let (activation_payload, packed_bytes) = {
+            let d = arena.data_mut();
+            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
+                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                byte_slice[..raw.len()].copy_from_slice(raw);
+                aligned
+            })
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 8,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
+            &pt,
+            &activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
+        );
+    }
+    Ok(())
+}
+
+/// Dispatch pre-quantized I8 activation × U4x8 packed-weight MatMul.
+///
+/// Reads activation from arena as raw bytes (I8 payload format:
+/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<U4x8>` from
+/// the weight bytes, and calls the scalar I8×U4x8 microkernel.
+#[inline]
+fn quantized_matmul_dispatch_i8_u4(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    out_start: usize,
+    out_end: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if let [a_slice, w_slice] = &input_slices[..] {
+        let (activation_payload, packed_bytes) = {
+            let d = arena.data_mut();
+            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
+                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+                byte_slice[..raw.len()].copy_from_slice(raw);
+                aligned
+            })
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 4,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
+            &pt,
+            &activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
+        );
+    }
+    Ok(())
+}
 
 /// Minimum number of elements for a parallel dispatch loop to be beneficial.
 /// Below this threshold, sequential execution avoids rayon's task-spawning
@@ -62,6 +591,1290 @@ fn resolve_params(
     } else {
         Ok(params.to_vec())
     }
+}
+
+// ============================================================
+// Pre-copied kernel dispatch helpers
+// ============================================================
+// These are variants of the arena-based dispatch helpers that work
+// with pre-copied input buffers (&[Vec<u8>]) and a single output
+// buffer (&mut [u8]), suitable for out-of-arena execution.
+
+/// Helper: extract two f32 slices from pre-copied inputs, broadcast-loop
+/// with a binary op and activation function, and write to output.
+#[inline]
+fn fused_binary_activation_dispatch_precopied(
+    kernel_name: &str,
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    op: impl Fn(f32, f32) -> f32 + Sync,
+    act: impl Fn(f32) -> f32 + Sync,
+) {
+    if inputs.len() >= 2 {
+        let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+        let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
+            let binary_dispatched = if kernel_name.starts_with("add_") {
+                add_f32(a, b, out_f32);
+                true
+            } else if kernel_name.starts_with("sub_") {
+                sub_f32(a, b, out_f32);
+                true
+            } else if kernel_name.starts_with("mul_") {
+                mul_f32(a, b, out_f32);
+                true
+            } else if kernel_name.starts_with("div_") {
+                div_f32(a, b, out_f32);
+                true
+            } else {
+                false
+            };
+
+            if binary_dispatched {
+                let len = out_f32.len();
+                let ptr = out_f32.as_mut_ptr();
+                if kernel_name.ends_with("relu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::relu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                } else if kernel_name.ends_with("gelu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::gelu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                } else if kernel_name.ends_with("silu_f32") {
+                    unsafe {
+                        let v = std::slice::from_raw_parts(ptr, len);
+                        microkernels::silu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
+                    }
+                }
+                return;
+            }
+        }
+
+        let out_len = out_f32.len();
+        let a_len = a.len();
+        let b_len = b.len();
+        #[cfg(not(feature = "parallel"))]
+        {
+            for i in 0..out_len {
+                let x = op(a[i % a_len], b[i % b_len]);
+                out_f32[i] = act(x);
+            }
+        }
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            out_f32[..out_len]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, o)| {
+                    let x = op(a[i % a_len], b[i % b_len]);
+                    *o = act(x);
+                });
+        }
+    }
+}
+
+/// Helper: dispatch a scalar op (gt, lt, eq, add, mul, div) from pre-copied inputs.
+#[inline]
+fn scalar_op_dispatch_precopied(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    op: impl Fn(&[f32], f32, &mut [f32]),
+) {
+    if inputs.len() >= 2 {
+        let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+        let scalar_data = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        let s = scalar_data.first().copied().unwrap_or(0.0);
+        op(data, s, out_f32);
+    }
+}
+
+/// Helper: dispatch a fused matmul + bias + activation from pre-copied inputs.
+#[inline]
+fn matmul_activation_dispatch_precopied(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    kernel_name: &str,
+    act: impl Fn(f32) -> f32,
+) -> Result<(), BackendError> {
+    if inputs.len() >= 2 {
+        let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+        let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+        let bias = if inputs.len() >= 3 {
+            bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
+        } else {
+            Vec::new()
+        };
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, _k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let has_bias = !bias.is_empty();
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        matmul_blas_into(a, b, out_f32, m, _k, n);
+        for i in 0..out_f32.len() {
+            let x = out_f32[i]
+                + if has_bias && i % n < bias.len() {
+                    bias[i % n]
+                } else {
+                    0.0
+                };
+            out_f32[i] = act(x);
+        }
+    }
+    Ok(())
+}
+
+/// Helper: dispatch a quantized matmul (u4 or u8) from pre-copied inputs.
+#[inline]
+fn quantized_matmul_dispatch_precopied<T: PackedWord>(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    bit_width: usize,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if inputs.len() >= 2 {
+        let activations = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+        let raw = &inputs[1];
+        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
+        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
+        byte_slice[..raw.len()].copy_from_slice(raw);
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
+    }
+    Ok(())
+}
+
+/// Pre-copied dispatch for I8 activation × U8x4 packed-weight MatMul.
+///
+/// Reads activation as raw bytes (I8 payload format), weight as raw bytes,
+/// builds a `PackedTensor<U8x4>`, and calls the scalar I8×U8x4 microkernel.
+fn quantized_matmul_dispatch_precopied_i8_u8(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if inputs.len() >= 2 {
+        let activation_payload = &inputs[0];
+        let raw = &inputs[1];
+        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
+        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
+        byte_slice[..raw.len()].copy_from_slice(raw);
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 8,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
+            &pt,
+            activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
+        );
+    }
+    Ok(())
+}
+
+/// Pre-copied dispatch for I8 activation × U4x8 packed-weight MatMul.
+///
+/// Reads activation as raw bytes (I8 payload format), weight as raw bytes,
+/// builds a `PackedTensor<U4x8>`, and calls the scalar I8×U4x8 microkernel.
+fn quantized_matmul_dispatch_precopied_i8_u4(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    shape_env: &ShapeEnv,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    if inputs.len() >= 2 {
+        let activation_payload = &inputs[0];
+        let raw = &inputs[1];
+        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
+        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
+        byte_slice[..raw.len()].copy_from_slice(raw);
+        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+        let &[m, k, n] = &matmul_params[..] else {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: expected params [M,K,N]"
+            )));
+        };
+        let meta = weight_meta
+            .clone()
+            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+                bit_width: 4,
+                scales: vec![1.0],
+                zero_points: vec![0.0],
+                shape: vec![m, k],
+            });
+        let typed_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
+        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
+            &pt,
+            activation_payload,
+            out_f32,
+            m,
+            k,
+            n,
+        );
+    }
+    Ok(())
+}
+
+/// Execute a kernel with pre-copied input buffers and an exclusive output buffer.
+///
+/// Transformed version of the `dispatch()` match arms — replaces arena-based
+/// I/O (`CpuBuffer` + `BufferSlice`) with direct slice access.
+///
+/// # Parameters
+///
+/// * `kernel_name` — identifies the kernel to run
+/// * `inputs` — pre-copied input data (each element is an owned byte vector)
+/// * `output` — mutable output byte buffer
+// ── Helper macros for run_kernel_precopied ──────────────────────────
+/// Expands to the body of a unary match arm: cast input[0]→f32, cast output→f32, call fn
+macro_rules! precopied_unary_body {
+    ($inputs:expr, $output:expr, $fn:ident) => {{
+        if !$inputs.is_empty() {
+            let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
+            let out = bytemuck::cast_slice_mut::<_, f32>($output);
+            $fn(a, out);
+        }
+    }};
+}
+/// Expands to the body of a binary match arm: cast input[0], input[1], output, call fn
+macro_rules! precopied_binary_body {
+    ($inputs:expr, $output:expr, $fn:ident) => {{
+        let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
+        let b = bytemuck::cast_slice::<_, f32>(&$inputs[1]);
+        let out = bytemuck::cast_slice_mut::<_, f32>($output);
+        $fn(a, b, out);
+    }};
+}
+
+/// * `params` — integer kernel parameters
+/// * `param_dims` — optional symbolic dimension expressions
+/// * `weight_meta` — optional quantized weight metadata
+/// * `shape_env` — runtime shape environment for symbolic resolution
+#[allow(clippy::cognitive_complexity)]
+fn run_kernel_precopied(
+    kernel_name: &str,
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    _secondary_output: Option<&mut [u8]>,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    shape_env: &ShapeEnv,
+) -> Result<(), BackendError> {
+    match kernel_name {
+        // ── Binary elementwise ────────────────────────────────
+        "add_f32" => precopied_binary_body!(inputs, output, add_f32),
+        "sub_f32" => precopied_binary_body!(inputs, output, sub_f32),
+        "mul_f32" => precopied_binary_body!(inputs, output, mul_f32),
+        "div_f32" => precopied_binary_body!(inputs, output, div_f32),
+        // ── Unary elementwise ────────────────────────────────
+        "relu_f32" => precopied_unary_body!(inputs, output, relu_f32),
+        "gelu_f32" => precopied_unary_body!(inputs, output, gelu_f32),
+        "silu_f32" => precopied_unary_body!(inputs, output, silu_f32),
+        "exp_f32" => precopied_unary_body!(inputs, output, exp_f32),
+        "log_f32" => precopied_unary_body!(inputs, output, log_f32),
+        "sqrt_f32" => precopied_unary_body!(inputs, output, sqrt_f32),
+        "neg_f32" => precopied_unary_body!(inputs, output, neg_f32),
+        "abs_f32" => precopied_unary_body!(inputs, output, abs_f32),
+        "sigmoid_f32" => precopied_unary_body!(inputs, output, sigmoid_f32),
+        "tanh_f32" => precopied_unary_body!(inputs, output, tanh_f32),
+        "elu_f32" => precopied_unary_body!(inputs, output, elu_f32),
+        "softplus_f32" => precopied_unary_body!(inputs, output, softplus_f32),
+        "hardswish_f32" => precopied_unary_body!(inputs, output, hardswish_f32),
+        "sign_f32" => precopied_unary_body!(inputs, output, sign_f32),
+        "round_f32" => precopied_unary_body!(inputs, output, round_f32),
+        "logical_not_f32" => precopied_unary_body!(inputs, output, logical_not_f32),
+        "log_softmax_f32" => precopied_unary_body!(inputs, output, log_softmax_f32),
+        "mish_f32" => precopied_unary_body!(inputs, output, mish_f32),
+        "max_f32" => precopied_binary_body!(inputs, output, max_f32),
+        "min_f32" => precopied_binary_body!(inputs, output, min_f32),
+        // ── Unary with scalar params ───────────────────────────
+        "leaky_relu_f32" => {
+            if !inputs.is_empty() {
+                let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let out = bytemuck::cast_slice_mut::<_, f32>(output);
+                let slope = if !params.is_empty() {
+                    f32::from_bits(params[0] as u32)
+                } else {
+                    0.01
+                };
+                leaky_relu_f32(a, out, slope);
+            }
+        }
+        "clamp_f32" => {
+            if !inputs.is_empty() {
+                let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let out = bytemuck::cast_slice_mut::<_, f32>(output);
+                let min_val = if !params.is_empty() {
+                    f32::from_bits(params[0] as u32)
+                } else {
+                    0.0
+                };
+                let max_val = if params.len() > 1 {
+                    f32::from_bits(params[1] as u32)
+                } else {
+                    1.0
+                };
+                clamp_f32(a, out, min_val, max_val);
+            }
+        }
+        // ── Matmul ────────────────────────────────────────────
+        "matmul" => {
+            if inputs.len() >= 2 {
+                let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+                let &[m, _k, n] = &matmul_params[..] else {
+                    return Err(BackendError::Dispatch(
+                        "matmul: expected params [M,K,N]".into(),
+                    ));
+                };
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let a_stride = m * _k;
+                let b_stride = _k * n;
+                let out_stride = m * n;
+                let batch_count = out_f32.len() / out_stride;
+                let b_batched = b.len() > b_stride;
+                let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
+                if use_blas {
+                    for batch in 0..batch_count {
+                        let a_s = batch * a_stride;
+                        let b_s = if b_batched { batch * b_stride } else { 0 };
+                        let out_s = batch * out_stride;
+                        matmul_blas_into(
+                            &a[a_s..a_s + a_stride],
+                            &b[b_s..b_s + b_stride],
+                            &mut out_f32[out_s..out_s + out_stride],
+                            m,
+                            _k,
+                            n,
+                        );
+                    }
+                } else {
+                    let total_rows = batch_count * m;
+                    let b_batch_stride = if b_batched { b_stride } else { 0 };
+                    #[cfg(feature = "parallel")]
+                    {
+                        use rayon::prelude::*;
+                        let a_raw = a.as_ptr() as usize;
+                        let b_raw = b.as_ptr() as usize;
+                        let out_raw = out_f32.as_mut_ptr() as usize;
+                        (0..total_rows).into_par_iter().for_each(move |row| {
+                            let a_ptr = a_raw as *const f32;
+                            let b_ptr = b_raw as *const f32;
+                            let out_ptr = out_raw as *mut f32;
+                            unsafe {
+                                crate::backend::cpu::microkernels::blocked_row_matmul(
+                                    a_ptr,
+                                    b_ptr,
+                                    out_ptr,
+                                    row,
+                                    m,
+                                    n,
+                                    _k,
+                                    a_stride,
+                                    _k,
+                                    1,
+                                    b_batch_stride,
+                                    n,
+                                    1,
+                                );
+                            }
+                        });
+                    }
+                    #[cfg(not(feature = "parallel"))]
+                    for row in 0..total_rows {
+                        unsafe {
+                            crate::backend::cpu::microkernels::blocked_row_matmul(
+                                a.as_ptr(),
+                                b.as_ptr(),
+                                out_f32.as_mut_ptr(),
+                                row,
+                                m,
+                                n,
+                                _k,
+                                a_stride,
+                                _k,
+                                1,
+                                b_batch_stride,
+                                n,
+                                1,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // ── Fused matmul + activation ──────────────────────────
+        "fused_matmul_add_relu" => {
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "fused_matmul_add_relu",
+                |x| x.max(0.0),
+            )?;
+        }
+        "fused_matmul_add_gelu" => {
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "fused_matmul_add_gelu",
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            )?;
+        }
+        "fused_matmul_add_silu" => {
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "fused_matmul_add_silu",
+                |x| x / (1.0 + (-x).exp()),
+            )?;
+        }
+        "matmul_relu" => {
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "matmul_relu",
+                |x| x.max(0.0),
+            )?;
+        }
+        "matmul_gelu" => {
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "matmul_gelu",
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            )?;
+        }
+        "matmul_silu" => {
+            matmul_activation_dispatch_precopied(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                "matmul_silu",
+                |x| x / (1.0 + (-x).exp()),
+            )?;
+        }
+        "matmul_u4" => {
+            quantized_matmul_dispatch_precopied::<U4x8>(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                4,
+                "matmul_u4",
+            )?;
+        }
+        "matmul_u4_i8" => {
+            quantized_matmul_dispatch_precopied_i8_u4(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                "matmul_u4_i8",
+            )?;
+        }
+        "matmul_u8_i8" => {
+            quantized_matmul_dispatch_precopied_i8_u8(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                "matmul_u8_i8",
+            )?;
+        }
+        "matmul_u8" => {
+            quantized_matmul_dispatch_precopied::<U8x4>(
+                inputs,
+                output,
+                params,
+                param_dims,
+                shape_env,
+                weight_meta,
+                8,
+                "matmul_u8",
+            )?;
+        }
+        // ── Reduce ────────────────────────────────────────────
+        "reduce_f32" => {
+            let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+            let &[group_size, is_mean, is_max] = &params[..3] else {
+                return Err(BackendError::Dispatch(
+                    "reduce_f32: expected params [group_size, is_mean, is_max]".into(),
+                ));
+            };
+            let effective_group_size = match param_dims {
+                Some(dims) if !dims.is_empty() => dims[0]
+                    .evaluate_with_env(shape_env)
+                    .map_err(|e| BackendError::Dispatch(format!("reduce_f32: {e}")))?
+                    as usize,
+                _ => group_size,
+            };
+            reduce_f32(
+                input,
+                out_f32,
+                effective_group_size,
+                is_mean == 1,
+                is_max == 1,
+            );
+        }
+        // ── Transpose ──────────────────────────────────────────
+        "transpose_f32" => {
+            if !inputs.is_empty() {
+                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let transpose_params = resolve_params(params, param_dims, shape_env, 2)?;
+                let &[m, n] = &transpose_params[..] else {
+                    return Err(BackendError::Dispatch(
+                        "transpose_f32: expected params [M,N]".into(),
+                    ));
+                };
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
+                    unsafe {
+                        microkernels::transpose_f32_avx2(input, out_f32, m, n);
+                    }
+                } else {
+                    #[cfg(not(feature = "parallel"))]
+                    {
+                        for i in 0..m {
+                            for j in 0..n {
+                                out_f32[j * m + i] = input[i * n + j];
+                            }
+                        }
+                    }
+                    #[cfg(feature = "parallel")]
+                    {
+                        use rayon::prelude::*;
+                        out_f32.par_chunks_mut(m).enumerate().for_each(|(j, col)| {
+                            for i in 0..m {
+                                col[i] = input[i * n + j];
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        "transpose_perm_f32" => {
+            if !inputs.is_empty() {
+                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let rank = params.first().copied().unwrap_or(2);
+                let nd_params = resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
+                let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
+                let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let mut in_strides = vec![1usize; rank];
+                let mut out_strides = vec![1usize; rank];
+                for i in (0..rank - 1).rev() {
+                    in_strides[i] = in_strides[i + 1] * dims[i + 1];
+                }
+                for i in (0..rank - 1).rev() {
+                    out_strides[perm[i]] = out_strides[perm[i + 1]] * dims[perm[i + 1]];
+                }
+                let _total = out_f32.len();
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let total = _total;
+                    for out_idx in 0..total {
+                        let mut in_idx = 0usize;
+                        let mut remaining = out_idx;
+                        for k in 0..rank {
+                            let coord = remaining / out_strides[perm[k]];
+                            remaining %= out_strides[perm[k]];
+                            in_idx += coord * in_strides[perm[k]];
+                        }
+                        out_f32[out_idx] = input[in_idx];
+                    }
+                }
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    out_f32.par_iter_mut().enumerate().for_each(|(out_idx, v)| {
+                        let mut in_idx = 0usize;
+                        let mut remaining = out_idx;
+                        for k in 0..rank {
+                            let coord = remaining / out_strides[perm[k]];
+                            remaining %= out_strides[perm[k]];
+                            in_idx += coord * in_strides[perm[k]];
+                        }
+                        *v = input[in_idx];
+                    });
+                }
+            }
+        }
+        // ── Fused binary + activation ──────────────────────────
+        "add_relu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "add_relu_f32",
+                inputs,
+                output,
+                |a, b| a + b,
+                |x| x.max(0.0),
+            );
+        }
+        "sub_relu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "sub_relu_f32",
+                inputs,
+                output,
+                |a, b| a - b,
+                |x| x.max(0.0),
+            );
+        }
+        "mul_relu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "mul_relu_f32",
+                inputs,
+                output,
+                |a, b| a * b,
+                |x| x.max(0.0),
+            );
+        }
+        "div_relu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "div_relu_f32",
+                inputs,
+                output,
+                |a, b| a / b,
+                |x| x.max(0.0),
+            );
+        }
+        "add_gelu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "add_gelu_f32",
+                inputs,
+                output,
+                |a, b| a + b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
+        }
+        "sub_gelu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "sub_gelu_f32",
+                inputs,
+                output,
+                |a, b| a - b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
+        }
+        "mul_gelu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "mul_gelu_f32",
+                inputs,
+                output,
+                |a, b| a * b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
+        }
+        "div_gelu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "div_gelu_f32",
+                inputs,
+                output,
+                |a, b| a / b,
+                |x| {
+                    let x3 = x * x * x;
+                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                    let t = tanh_arg.tanh();
+                    0.5 * x * (1.0 + t)
+                },
+            );
+        }
+        "add_silu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "add_silu_f32",
+                inputs,
+                output,
+                |a, b| a + b,
+                |x| x / (1.0 + (-x).exp()),
+            );
+        }
+        "sub_silu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "sub_silu_f32",
+                inputs,
+                output,
+                |a, b| a - b,
+                |x| x / (1.0 + (-x).exp()),
+            );
+        }
+        "mul_silu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "mul_silu_f32",
+                inputs,
+                output,
+                |a, b| a * b,
+                |x| x / (1.0 + (-x).exp()),
+            );
+        }
+        "div_silu_f32" => {
+            fused_binary_activation_dispatch_precopied(
+                "div_silu_f32",
+                inputs,
+                output,
+                |a, b| a / b,
+                |x| x / (1.0 + (-x).exp()),
+            );
+        }
+        // ── Softmax ────────────────────────────────────────────
+        "softmax" => {
+            if !inputs.is_empty() {
+                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let softmax_params = resolve_params(params, param_dims, shape_env, 2)
+                    .unwrap_or_else(|_| vec![input.len(), 1]);
+                let axis_dim_size = softmax_params[0].max(1);
+                let stride = softmax_params.get(1).copied().unwrap_or(1).max(1);
+                let num_rows = input.len() / axis_dim_size.max(1);
+                softmax_f32(input, out_f32, axis_dim_size, stride, num_rows);
+            }
+        }
+        // ── BiasAdd ────────────────────────────────────────────
+        "biasadd" => {
+            if inputs.len() >= 2 {
+                let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let bias = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let &[channel_stride] = &params[..] else {
+                    return Err(BackendError::Dispatch(
+                        "biasadd: expected params [channel_stride]".into(),
+                    ));
+                };
+                biasadd_f32(data, bias, out_f32, channel_stride);
+            }
+        }
+        // ── Normalization ──────────────────────────────────────
+        "norm_f32" => {
+            let &[eps_bits, is_batch_norm] = &params[..] else {
+                return Err(BackendError::Dispatch(
+                    "norm_f32: expected params [eps_bits, is_batch_norm]".into(),
+                ));
+            };
+            let eps = f32::from_bits(eps_bits as u32);
+            if is_batch_norm == 1 {
+                if inputs.len() >= 5 {
+                    let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                    let weight = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+                    let bias = bytemuck::cast_slice::<_, f32>(&inputs[2]);
+                    let running_mean = bytemuck::cast_slice::<_, f32>(&inputs[3]);
+                    let running_var = bytemuck::cast_slice::<_, f32>(&inputs[4]);
+                    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                    {
+                        use crate::backend::cpu::microkernels::has_avx2;
+                        if has_avx2() {
+                            unsafe {
+                                crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
+                                    data,
+                                    weight,
+                                    bias,
+                                    running_mean,
+                                    running_var,
+                                    out_f32,
+                                    eps,
+                                );
+                            }
+                        } else {
+                            crate::backend::cpu::microkernels::batch_norm_inference_f32(
+                                data,
+                                weight,
+                                bias,
+                                running_mean,
+                                running_var,
+                                out_f32,
+                                eps,
+                            );
+                        }
+                    }
+                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                    {
+                        crate::backend::cpu::microkernels::batch_norm_inference_f32(
+                            data,
+                            weight,
+                            bias,
+                            running_mean,
+                            running_var,
+                            out_f32,
+                            eps,
+                        );
+                    }
+                }
+            } else {
+                if !inputs.is_empty() {
+                    let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                    let row_size = input.len() / out_f32.len().max(1);
+                    norm_layernorm_f32(input, out_f32, row_size, eps);
+                }
+            }
+        }
+        // ── Conv2d ─────────────────────────────────────────────
+        "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu" => {
+            let fused_act = match kernel_name {
+                "conv2d_relu" => Some("relu"),
+                "conv2d_gelu" => Some("gelu"),
+                "conv2d_silu" => Some("silu"),
+                _ => None,
+            };
+            if inputs.len() >= 2 {
+                let &[stride, padding, dilation, groups, c, h, w, kh, kw] = &params[..] else {
+                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
+                };
+                let c_per_group = c / groups.max(1);
+                let input_data = bytemuck::cast_slice::<_, f32>(&inputs[0]).to_vec();
+                let weight_data = bytemuck::cast_slice::<_, f32>(&inputs[1]).to_vec();
+                let bias_data = if inputs.len() >= 3 {
+                    bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
+                } else {
+                    vec![]
+                };
+                let n = input_data.len() / (c * h * w).max(1);
+                let f = weight_data.len() / (c_per_group * kh * kw).max(1);
+                let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+                let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
+                let gelu_fn: fn(f32) -> f32 =
+                    |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
+                let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
+                let identity_fn: fn(f32) -> f32 = |x| x;
+                let conv_act: Option<fn(f32) -> f32> = fused_act.map(|act| match act {
+                    "relu" => relu_fn,
+                    "gelu" => gelu_fn,
+                    "silu" => silu_fn,
+                    _ => identity_fn,
+                });
+                crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
+                    &input_data,
+                    &weight_data,
+                    &bias_data,
+                    out_f32,
+                    n,
+                    c,
+                    h,
+                    w,
+                    f,
+                    kh,
+                    kw,
+                    stride,
+                    padding,
+                    dilation,
+                    groups,
+                    conv_act,
+                );
+            }
+        }
+        // ── Concat ─────────────────────────────────────────────
+        "concat" => {
+            if !inputs.is_empty() && params.len() >= 3 {
+                let _axis = params[0];
+                let _inner_stride = params[1];
+                let outer_count = params[2];
+                let num_inputs = inputs.len();
+                let mut block_sizes: Vec<usize> = Vec::with_capacity(num_inputs);
+                for inp in inputs {
+                    let elems = inp.len() / std::mem::size_of::<f32>();
+                    block_sizes.push(elems / outer_count.max(1));
+                }
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let mut output_offset = 0;
+                for outer_pos in 0..outer_count {
+                    for (si, inp) in inputs.iter().enumerate() {
+                        let input_data = bytemuck::cast_slice::<_, f32>(inp);
+                        let block = block_sizes[si];
+                        let src_start = outer_pos * block;
+                        let src_end = (src_start + block).min(input_data.len());
+                        let dst_end = (output_offset + src_end - src_start).min(out_f32.len());
+                        out_f32[output_offset..dst_end]
+                            .copy_from_slice(&input_data[src_start..src_end]);
+                        output_offset += src_end - src_start;
+                    }
+                }
+            }
+        }
+        // ── Scalar ops ─────────────────────────────────────────
+        "gt_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
+            for i in 0..out.len() {
+                out[i] = if data[i % data.len()] > s { 1.0 } else { 0.0 };
+            }
+        }),
+        "lt_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
+            for i in 0..out.len() {
+                out[i] = if data[i % data.len()] < s { 1.0 } else { 0.0 };
+            }
+        }),
+        "eq_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
+            for i in 0..out.len() {
+                out[i] = if (data[i % data.len()] - s).abs() < 1e-6 {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
+        }),
+        "add_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
+            for i in 0..out.len() {
+                out[i] = data[i % data.len()] + s;
+            }
+        }),
+        "mul_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
+            for i in 0..out.len() {
+                out[i] = data[i % data.len()] * s;
+            }
+        }),
+        "div_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
+            for i in 0..out.len() {
+                out[i] = data[i % data.len()] / s;
+            }
+        }),
+        "where_f32" => {
+            if inputs.len() >= 3 {
+                let cond = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let a = bytemuck::cast_slice::<_, f32>(&inputs[1]);
+                let b = bytemuck::cast_slice::<_, f32>(&inputs[2]);
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                for i in 0..out_f32.len() {
+                    out_f32[i] = if cond[i % cond.len()] != 0.0 {
+                        a[i % a.len()]
+                    } else {
+                        b[i % b.len()]
+                    };
+                }
+            }
+        }
+        "cast_f32_i64" => {
+            let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+            let out_i64 = bytemuck::cast_slice_mut::<_, i64>(output);
+            for i in 0..out_i64.len() {
+                out_i64[i] = input[i % input.len()] as i64;
+            }
+        }
+        "cast_i64_f32" => {
+            let input = bytemuck::cast_slice::<_, i64>(&inputs[0]);
+            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+            for i in 0..out_f32.len() {
+                out_f32[i] = input[i % input.len()] as f32;
+            }
+        }
+        "slice_f32" => {
+            if !inputs.is_empty() {
+                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let dst_len = out_f32.len();
+                let copy_len = dst_len.min(input.len());
+                out_f32[..copy_len].copy_from_slice(&input[..copy_len]);
+            }
+        }
+        "shape_f32" | "shape_i64" => {
+            if !inputs.is_empty() {
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                for (i, inp) in inputs.iter().enumerate().take(out_f32.len()) {
+                    let f = bytemuck::cast_slice::<_, f32>(inp);
+                    out_f32[i] = f.first().copied().unwrap_or(0.0);
+                }
+            }
+        }
+        "squeeze_f32" => {
+            if !inputs.is_empty() {
+                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let copy_len = out_f32.len().min(input.len());
+                out_f32[..copy_len].copy_from_slice(&input[..copy_len]);
+            }
+        }
+        // ── Catch-all for any kernel not yet covered ───────────
+        other => {
+            return Err(BackendError::UnsupportedOp(format!(
+                "run_kernel_precopied: unsupported kernel '{}'",
+                other
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Execute a group of independent instructions, processing all inputs in
+/// parallel when the `parallel` feature is enabled.
+///
+/// All instructions in the group have the same topological level and no
+/// data dependencies between them. Inputs are pre-copied from the arena
+/// (serial phase), then each instruction is dispatched to its own kernel
+/// via [`run_kernel_precopied`] with an exclusive output slice.
+///
+/// When the `parallel` feature is disabled, instructions execute sequentially
+/// (still safe — just no overlap).
+fn execute_parallel_level(
+    group: &[usize],
+    plan: &ExecutablePlan,
+    arena: &CpuBuffer,
+    shape_env: &ShapeEnv,
+) -> Result<(), BackendError> {
+    // ── Phase 1: Pre-copy all inputs from the arena (serial) ──────
+    struct ParallelTask {
+        kernel_name: String,
+        inputs: Vec<Vec<u8>>,
+        output_offset: usize,
+        output_size: usize,
+        secondary_output_offset: Option<usize>,
+        secondary_output_size: Option<usize>,
+        params: Vec<usize>,
+        param_dims: Option<Vec<DimExpr>>,
+        weight_meta: Option<crate::backend::QuantizedWeightMeta>,
+    }
+
+    let mut ptasks: Vec<ParallelTask> = Vec::with_capacity(group.len());
+    for &instr_idx in group {
+        let instr = &plan.instructions[instr_idx];
+        match instr {
+            Instruction::CallKernel {
+                kernel_name,
+                input_slices,
+                output_slice,
+                secondary_output_slice,
+                params,
+                param_dims,
+                weight_meta,
+                ..
+            } => {
+                let d = arena.data_mut();
+                let inputs: Vec<Vec<u8>> = input_slices
+                    .iter()
+                    .map(|slice| {
+                        let start = slice.offset;
+                        let end = start + slice.size;
+                        d[start..end].to_vec()
+                    })
+                    .collect();
+                ptasks.push(ParallelTask {
+                    kernel_name: kernel_name.clone(),
+                    inputs,
+                    output_offset: output_slice.offset,
+                    output_size: output_slice.size,
+                    secondary_output_offset: secondary_output_slice.as_ref().map(|s| s.offset),
+                    secondary_output_size: secondary_output_slice.as_ref().map(|s| s.size),
+                    params: params.clone(),
+                    param_dims: param_dims.clone(),
+                    weight_meta: weight_meta.clone(),
+                });
+            }
+            // MemCopy / Fill / WriteConst are fast — execute inline (serial)
+            Instruction::MemCopy { dst, src } => {
+                let data = arena.data_mut();
+                let len = dst.size.min(src.size);
+                data.copy_within(src.offset..src.offset + len, dst.offset);
+            }
+            Instruction::Fill { dst, value } => {
+                let data = arena.data_mut();
+                let bytes = &mut data[dst.offset..dst.offset + dst.size];
+                let f32_slice = bytemuck::cast_slice_mut::<_, f32>(bytes);
+                f32_slice.fill(*value);
+            }
+            Instruction::WriteConst { dst, data } => {
+                let arena_data = arena.data_mut();
+                let end = (dst.offset + data.len()).min(arena_data.len());
+                arena_data[dst.offset..end].copy_from_slice(&data[..end - dst.offset]);
+            }
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    {
+        // ── Phase 2: Execute kernel tasks in parallel ────────────────
+        use rayon::prelude::*;
+        let arena_base = arena.data_mut().as_mut_ptr() as usize;
+        // SAFETY: ShapeEnv is read-only during dispatch; no concurrent writes occur.
+        // We pass it as a raw pointer (isize) to satisfy Send requirements.
+        let shape_env_ptr = shape_env as *const ShapeEnv as usize;
+
+        let errors: Vec<_> = ptasks
+            .into_par_iter()
+            .map(|task| {
+                // SAFETY: each task writes to a non-overlapping region of the arena
+                // (guaranteed by the memory planner — same-level instructions have
+                // distinct output regions).
+                let output = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (arena_base + task.output_offset) as *mut u8,
+                        task.output_size,
+                    )
+                };
+                let secondary = task.secondary_output_offset.map(|off| unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (arena_base + off) as *mut u8,
+                        task.secondary_output_size.unwrap_or(0),
+                    )
+                });
+                // SAFETY: ShapeEnv is read-only and lives for the duration of dispatch().
+                let se = unsafe { &*(shape_env_ptr as *const ShapeEnv) };
+                run_kernel_precopied(
+                    &task.kernel_name,
+                    &task.inputs,
+                    output,
+                    secondary,
+                    &task.params,
+                    &task.param_dims,
+                    &task.weight_meta,
+                    se,
+                )
+            })
+            .collect();
+
+        // Check for errors from parallel tasks
+        for result in errors {
+            result?;
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        // Fallback: execute sequentially using pre-copied inputs (same code path,
+        // just without the parallelism).
+        for task in &ptasks {
+            let output = {
+                let d = arena.data_mut();
+                &mut d[task.output_offset..task.output_offset + task.output_size]
+            };
+            let secondary = task.secondary_output_offset.map(|off| {
+                let d = arena.data_mut();
+                let sz = task.secondary_output_size.unwrap_or(0);
+                &mut d[off..off + sz]
+            });
+            run_kernel_precopied(
+                &task.kernel_name,
+                &task.inputs,
+                output,
+                secondary,
+                &task.params,
+                &task.param_dims,
+                &task.weight_meta,
+                shape_env,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Build level groups from the plan's topological levels.
+///
+/// Returns a `Vec<Vec<usize>>` where `groups[lvl]` contains the instruction
+/// indices at that level. Groups are in ascending level order. Levels with
+/// no instructions produce empty vectors.
+fn build_level_groups(levels: &[usize]) -> Vec<Vec<usize>> {
+    if levels.is_empty() {
+        return vec![];
+    }
+    let max_level = *levels.iter().max().unwrap_or(&0);
+    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+    for (idx, &lvl) in levels.iter().enumerate() {
+        groups[lvl].push(idx);
+    }
+    groups
 }
 
 /// CPU memory arena with interior mutability for zero-allocation dispatch.
@@ -115,7 +1928,12 @@ impl Backend for CpuBackend {
     }
 
     fn allocate_arena(&self, total_bytes: usize) -> CpuBuffer {
-        CpuBuffer::new(vec![0u8; total_bytes])
+        // No need to zero-fill — every output slot is written before read
+        let mut buf = Vec::with_capacity(total_bytes);
+        unsafe {
+            buf.set_len(total_bytes);
+        }
+        CpuBuffer::new(buf)
     }
 
     fn compile(
@@ -126,10 +1944,30 @@ impl Backend for CpuBackend {
         let mut instructions = Vec::new();
         let order = graph.topological_sort();
 
+        // ── Pre‑compute topological levels for parallel dispatch ──────
+        // level[node] = max(level[input]) + 1   (with input level = 0 for graph inputs)
+        let mut node_level: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        for &node_id in &order {
+            let node = graph
+                .get_node(node_id)
+                .expect("node in topological order must exist");
+            let level = node
+                .inputs
+                .iter()
+                .filter_map(|id| node_level.get(id))
+                .max()
+                .map(|l| l + 1)
+                .unwrap_or(0);
+            node_level.insert(node_id, level);
+        }
+        let mut instruction_levels: Vec<usize> = Vec::with_capacity(order.len());
+
         for &node_id in &order {
             let node = graph
                 .get_node(node_id)
                 .ok_or_else(|| BackendError::Compilation(format!("Node {} not found", node_id)))?;
+            let level = node_level[&node_id];
 
             let input_slices: Vec<BufferSlice> = node
                 .inputs
@@ -222,6 +2060,21 @@ impl Backend for CpuBackend {
                         (Some("OpRelu"), false) => "matmul_relu",
                         (Some("OpGelu"), false) => "matmul_gelu",
                         (Some("OpSilu"), false) => "matmul_silu",
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
+                        {
+                            "matmul_u4_i8"
+                        }
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
+                                && !input_dtypes
+                                    .iter()
+                                    .any(|d| matches!(d, IrDType::U4 { .. })) =>
+                        {
+                            "matmul_u8_i8"
+                        }
                         (_, true)
                             if input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
@@ -379,6 +2232,7 @@ impl Backend for CpuBackend {
                 | Opcode::Hardswish
                 | Opcode::Clamp
                 | Opcode::Sign
+                | Opcode::Round
                 | Opcode::LogicalNot
                 | Opcode::LogSoftmax
                 | Opcode::Mish => {
@@ -399,6 +2253,7 @@ impl Backend for CpuBackend {
                         Opcode::Hardswish => "hardswish_f32",
                         Opcode::Clamp => "clamp_f32",
                         Opcode::Sign => "sign_f32",
+                        Opcode::Round => "round_f32",
                         Opcode::LogicalNot => "logical_not_f32",
                         Opcode::LogSoftmax => "log_softmax_f32",
                         Opcode::Mish => "mish_f32",
@@ -519,7 +2374,14 @@ impl Backend for CpuBackend {
                         });
                         (kernel.to_string(), meta)
                     } else {
-                        ("conv2d".to_string(), None)
+                        let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
+                        let base_name = match fused_type {
+                            Some("OpRelu") => "conv2d_relu",
+                            Some("OpGelu") => "conv2d_gelu",
+                            Some("OpSilu") => "conv2d_silu",
+                            _ => "conv2d",
+                        };
+                        (base_name.to_string(), None)
                     };
                     // Extract spatial dims from input shapes to avoid
                     // ambiguous dim inference at dispatch time.
@@ -655,20 +2517,40 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
-                    let input_ids_str = node
+                    // Compute inner_stride (product of dims after axis) and
+                    // outer_count (product of dims before axis) from output shape.
+                    let output_shape: Vec<u64> = node
+                        .output_type
+                        .shape
+                        .iter()
+                        .map(|d| d.evaluate().unwrap_or(symbol_max))
+                        .collect();
+                    let rank = output_shape.len();
+                    let inner_stride: u64 = if axis + 1 < rank {
+                        output_shape[axis + 1..].iter().product()
+                    } else {
+                        1
+                    };
+                    let outer_count: u64 = if axis > 0 {
+                        output_shape[..axis].iter().product()
+                    } else {
+                        1
+                    };
+                    let _input_ids_str = node
                         .inputs
                         .iter()
                         .map(|id| id.to_string())
                         .collect::<Vec<_>>()
                         .join(",");
+                    #[cfg(feature = "debug_canary")]
                     eprintln!(
-                        "[FNN_DBG_CONCAT_COMPILE] nid={} op=Concat inputs=[{}] input_slices={:?}",
+                        "[FNN_DBG_CONCAT_COMPILE] nid={} op=Concat inputs=[{}] axis={} inner_stride={} outer_count={} output_shape={:?}",
                         node_id,
-                        input_ids_str,
-                        input_slices
-                            .iter()
-                            .map(|s| (s.offset, s.size))
-                            .collect::<Vec<_>>()
+                        _input_ids_str,
+                        axis,
+                        inner_stride,
+                        outer_count,
+                        output_shape,
                     );
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -676,7 +2558,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![axis],
+                        params: vec![axis, inner_stride as usize, outer_count as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -818,13 +2700,21 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::ScatterNd => {
+                    let data_shape: Vec<u64> = input_shapes.first().cloned().unwrap_or_default();
+                    let indices_shape: Vec<u64> = input_shapes.get(1).cloned().unwrap_or_default();
+                    let index_depth = match indices_shape.len() {
+                        0 | 1 => 1,
+                        _ => indices_shape[indices_shape.len() - 1] as usize,
+                    };
+                    let mut params: Vec<usize> = vec![index_depth];
+                    params.extend(data_shape.iter().map(|&d| d as usize));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "scatter_nd".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
+                        params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -834,32 +2724,39 @@ impl Backend for CpuBackend {
                     // For a single-axis reduce this is just input_shape[axis],
                     // which is typically Known (e.g. reduce over dim 1 of [N,4]
                     // has group_size=Known(4)).
-                    let axis: usize = node
+                    let axis_i64: i64 = node
                         .attrs
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
+                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let axis = if axis_i64 < 0 {
+                        (rank + axis_i64).max(0)
+                    } else {
+                        axis_i64.min((rank - 1).max(0))
+                    } as usize;
                     let group_size_dim = input_shape_dims
                         .first()
                         .and_then(|s| s.get(axis).cloned())
                         .unwrap_or(DimExpr::Known(1));
-                    let is_mean = if matches!(node.opcode, Opcode::ReduceMean) {
-                        1
-                    } else {
-                        0
+                    let (is_mean, is_max) = match node.opcode {
+                        Opcode::ReduceMean => (1, 0),
+                        Opcode::ReduceMax => (0, 1),
+                        _ => (0, 0), // ReduceSum
                     };
                     let group_size = group_size_dim.evaluate().unwrap_or_else(|| {
                         // Symbolic dim — use SYMBOL_DIM_MAX as compile-time
                         // estimate; runtime resolves via param_dims.
                         crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
                     }) as usize;
+
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "reduce_f32".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![group_size, is_mean],
+                        params: vec![group_size, is_mean, is_max],
                         // Pass the group_size as a symbolic DimExpr so dispatch
                         // can re-evaluate it when shape_env is available (e.g.
                         // reduce over symbolic batch dim N).
@@ -868,33 +2765,61 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Transpose => {
-                    // Extract M, N from the input shape (assume 2D)
-                    let m = input_shapes
+                    let input_shape: Vec<usize> = input_shapes
                         .first()
-                        .and_then(|s| s.first().copied())
-                        .unwrap_or(1) as usize;
-                    let n = input_shapes
-                        .first()
-                        .and_then(|s| s.get(1).copied())
-                        .unwrap_or(1) as usize;
-                    let m_dim = input_shape_dims
-                        .first()
-                        .and_then(|s| s.first().cloned())
-                        .unwrap_or(DimExpr::Known(m as u64));
-                    let n_dim = input_shape_dims
-                        .first()
-                        .and_then(|s| s.get(1).cloned())
-                        .unwrap_or(DimExpr::Known(n as u64));
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "transpose_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: vec![m, n],
-                        param_dims: Some(vec![m_dim, n_dim]),
-                        weight_meta: None,
-                    });
+                        .map(|s| s.iter().map(|&d| d as usize).collect())
+                        .unwrap_or_default();
+                    let rank = input_shape.len();
+
+                    // Read perm from node attrs (e.g. "0,3,1,2")
+                    let perm_str: String = node.attrs.get("perm").cloned().unwrap_or_default();
+                    let perm: Vec<usize> = if perm_str.is_empty() {
+                        (0..rank).rev().collect()
+                    } else {
+                        perm_str.split(',').filter_map(|s| s.parse().ok()).collect()
+                    };
+
+                    // Simple 2D transpose [1,0] on a rank-2 tensor → use fast kernel
+                    if rank == 2 && perm.len() >= 2 && perm[0] == 1 && perm[1] == 0 {
+                        let m = input_shape[0];
+                        let n = input_shape[1];
+                        let m_dim = input_shape_dims
+                            .first()
+                            .and_then(|s| s.first().cloned())
+                            .unwrap_or(DimExpr::Known(m as u64));
+                        let n_dim = input_shape_dims
+                            .first()
+                            .and_then(|s| s.get(1).cloned())
+                            .unwrap_or(DimExpr::Known(n as u64));
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "transpose_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![m, n],
+                            param_dims: Some(vec![m_dim, n_dim]),
+                            weight_meta: None,
+                        });
+                    } else {
+                        // N-D permute transpose: params = [rank, d0..dN, p0..pN]
+                        let mut nd_params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
+                        nd_params.push(rank);
+                        nd_params.extend_from_slice(&input_shape);
+                        for i in 0..rank {
+                            nd_params.push(perm.get(i).copied().unwrap_or(i));
+                        }
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "transpose_perm_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: nd_params,
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
                 }
                 Opcode::Conv1d => {
                     let stride: usize = node
@@ -941,6 +2866,11 @@ impl Backend for CpuBackend {
                         .get("padding")
                         .and_then(|p| p.parse().ok())
                         .unwrap_or(0);
+                    let dilation: usize = node
+                        .attrs
+                        .get("dilation")
+                        .and_then(|d| d.parse().ok())
+                        .unwrap_or(1);
                     let input_c = input_shapes
                         .first()
                         .and_then(|s| s.get(1).copied())
@@ -976,8 +2906,8 @@ impl Backend for CpuBackend {
                         output_slice,
                         secondary_output_slice: None,
                         params: vec![
-                            stride, padding, input_c, input_d, input_h, input_w, kernel_d,
-                            kernel_h, kernel_w,
+                            stride, padding, dilation, input_c, input_d, input_h, input_w,
+                            kernel_d, kernel_h, kernel_w,
                         ],
                         param_dims: None,
                         weight_meta: None,
@@ -1081,76 +3011,52 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::GtScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "gt_scalar_f32".to_string(),
+                    instructions.push(scalar_kernel_instruction(
+                        node_id,
+                        "gt_scalar_f32",
                         input_slices,
                         output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    ));
                 }
                 Opcode::LtScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "lt_scalar_f32".to_string(),
+                    instructions.push(scalar_kernel_instruction(
+                        node_id,
+                        "lt_scalar_f32",
                         input_slices,
                         output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    ));
                 }
                 Opcode::EqScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "eq_scalar_f32".to_string(),
+                    instructions.push(scalar_kernel_instruction(
+                        node_id,
+                        "eq_scalar_f32",
                         input_slices,
                         output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    ));
                 }
                 Opcode::AddScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "add_scalar_f32".to_string(),
+                    instructions.push(scalar_kernel_instruction(
+                        node_id,
+                        "add_scalar_f32",
                         input_slices,
                         output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    ));
                 }
                 Opcode::MulScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "mul_scalar_f32".to_string(),
+                    instructions.push(scalar_kernel_instruction(
+                        node_id,
+                        "mul_scalar_f32",
                         input_slices,
                         output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    ));
                 }
                 Opcode::DivScalar => {
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "div_scalar_f32".to_string(),
+                    instructions.push(scalar_kernel_instruction(
+                        node_id,
+                        "div_scalar_f32",
                         input_slices,
                         output_slice,
-                        secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
-                        weight_meta: None,
-                    });
+                    ));
                 }
                 // Input nodes have no producer instruction — data is written
                 // by the executor before dispatch.
@@ -1163,13 +3069,33 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(-1);
+                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let normalized = if axis < 0 {
+                        (rank + axis).max(0)
+                    } else {
+                        axis.min((rank - 1).max(0))
+                    };
+                    let (dim_size, inner) = input_shapes
+                        .first()
+                        .and_then(|s| {
+                            let idx = normalized as usize;
+                            if idx < s.len() {
+                                let ds = s[idx] as usize;
+                                let inn: usize =
+                                    s[idx + 1..].iter().copied().map(|x| x as usize).product();
+                                Some((ds, inn))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or((0, 1));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "argmax".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![axis as usize],
+                        params: vec![normalized as usize, dim_size, inner],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1332,13 +3258,19 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(-1);
+                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let normalized = if axis < 0 {
+                        (rank + axis).max(0)
+                    } else {
+                        axis.min((rank - 1).max(0))
+                    };
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "topk_fused".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice,
-                        params: vec![k, axis as usize],
+                        params: vec![k, normalized as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1350,13 +3282,18 @@ impl Backend for CpuBackend {
                         .get("lr")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.01);
+                    let wd: f32 = node
+                        .attrs
+                        .get("weight_decay")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "sgd_update_f32".to_string(),
                         input_slices, // [weight, grad] — weight must be same slot as output
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![lr.to_bits() as usize],
+                        params: vec![lr.to_bits() as usize, wd.to_bits() as usize],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1440,11 +3377,6 @@ impl Backend for CpuBackend {
                         .get("eps")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1e-8);
-                    let t: u64 = node
-                        .attrs
-                        .get("t")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
                     let wd: f32 = node
                         .attrs
                         .get("weight_decay")
@@ -1464,20 +3396,33 @@ impl Backend for CpuBackend {
                     } else {
                         "adamw_update_f32"
                     };
+                    let t_attr: u64 = node
+                        .attrs
+                        .get("t")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    let has_t_input = node.inputs.len() >= 5;
+                    let mut adamw_params = vec![
+                        lr.to_bits() as usize,
+                        beta1.to_bits() as usize,
+                        beta2.to_bits() as usize,
+                        eps.to_bits() as usize,
+                    ];
+                    if has_t_input {
+                        // New path: t is a runtime tensor (5th input slice)
+                        adamw_params.push(wd.to_bits() as usize);
+                    } else {
+                        // Old path: t is stored in params
+                        adamw_params.push(t_attr as usize);
+                        adamw_params.push(wd.to_bits() as usize);
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
-                        input_slices, // [weight, grad, m, v]
+                        input_slices, // [weight, grad, m, v, t] (t only for training pass path)
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![
-                            lr.to_bits() as usize,
-                            beta1.to_bits() as usize,
-                            beta2.to_bits() as usize,
-                            eps.to_bits() as usize,
-                            t as usize,
-                            wd.to_bits() as usize,
-                        ],
+                        params: adamw_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -1529,6 +3474,11 @@ impl Backend for CpuBackend {
                         .get("beta2")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0.999);
+                    let wd: f32 = node
+                        .attrs
+                        .get("weight_decay")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "lion_update_f32".to_string(),
@@ -1539,6 +3489,7 @@ impl Backend for CpuBackend {
                             lr.to_bits() as usize,
                             beta1.to_bits() as usize,
                             beta2.to_bits() as usize,
+                            wd.to_bits() as usize,
                         ],
                         param_dims: None,
                         weight_meta: None,
@@ -1576,15 +3527,18 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Shape => {
-                    // Write the shape of the input tensor as I64 values.
+                    // Write the shape of the input tensor as F32 values.
+                    // The arena stores all data as f32 (4 bytes/element), so we
+                    // write f32-le bytes.  Downstream ops (Gather, Concat, etc.)
+                    // read from the arena as f32 slices and get correct values.
                     // Resolve input shape at compile time (known dims directly,
                     // symbolic dims use SYMBOL_DIM_MAX — they'll be resolved
                     // at dispatch by param_dims).
                     use std::io::Write;
                     let in_shape = input_shapes.first().cloned().unwrap_or_default();
-                    let mut shape_bytes = Vec::with_capacity(in_shape.len() * 8);
+                    let mut shape_bytes = Vec::with_capacity(in_shape.len() * 4);
                     for &d in &in_shape {
-                        shape_bytes.write_all(&(d as i64).to_le_bytes()).unwrap();
+                        shape_bytes.write_all(&(d as f32).to_le_bytes()).unwrap();
                     }
                     instructions.push(Instruction::WriteConst {
                         dst: output_slice,
@@ -1911,15 +3865,19 @@ impl Backend for CpuBackend {
                                 dst: output_slice,
                                 src: BufferSlice::new(in_slot.offset, in_slot.size),
                             });
+                        } else {
+                            // no input slot — user‑error / unexpected
                         }
                     }
                 }
             }
+            instruction_levels.push(level);
         }
 
         Ok(ExecutablePlan {
             instructions,
             arena_size: memory_plan.total_size,
+            levels: instruction_levels,
         })
     }
 
@@ -1930,6 +3888,9 @@ impl Backend for CpuBackend {
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
         // ── Debug: collect MaxPool primary output ranges ──────────────
+        //     (only active with `debug_canary` feature — expensive)
+        // ANCHOR: debug-canary-start
+        #[cfg(feature = "debug_canary")]
         let maxpool_ranges: Vec<(usize, usize)> = {
             let mut v = Vec::new();
             for instr in &plan.instructions {
@@ -1949,10 +3910,13 @@ impl Backend for CpuBackend {
         };
         // Track: after each MaxPool kernel, snapshot its first f32 value;
         // after every other instruction, check if any snapshot changed.
+        #[cfg(feature = "debug_canary")]
         let mut maxpool_snapshot: Vec<Option<f32>> = vec![None; maxpool_ranges.len()];
+        #[cfg(feature = "debug_canary")]
         let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
+        // ANCHOR: debug-canary-end
 
-        for (instr_idx, instr) in plan.instructions.iter().enumerate() {
+        for (_instr_idx, instr) in plan.instructions.iter().enumerate() {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
@@ -1969,883 +3933,123 @@ impl Backend for CpuBackend {
 
                     match kernel_name.as_str() {
                         "add_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] + b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] + b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            add_f32(&a, &b, out_f32);
                         }
                         "sub_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] - b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] - b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            sub_f32(&a, &b, out_f32);
                         }
                         "mul_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] * b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] * b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            mul_f32(&a, &b, out_f32);
                         }
                         "div_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = a[i % a_len] / b[i % b_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i % a_len] / b[i % b_len]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            div_f32(&a, &b, out_f32);
                         }
                         "relu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].max(0.0));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            relu_f32(&input, out_f32);
                         }
                         "gelu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let x = input[i];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let x = input[i];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            gelu_f32(&input, out_f32);
                         }
                         "silu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let x = input[i];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let x = input[i];
-                                            *o = x / (1.0 + (-x).exp());
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            silu_f32(&input, out_f32);
                         }
                         "exp_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].exp();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].exp());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            exp_f32(&input, out_f32);
                         }
                         "log_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].ln();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].ln());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            log_f32(&input, out_f32);
                         }
                         "sqrt_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].sqrt();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].sqrt());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            sqrt_f32(&input, out_f32);
                         }
                         "neg_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = -input[i];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = -input[i]);
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            neg_f32(&input, out_f32);
                         }
                         "abs_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].abs();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].abs());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            abs_f32(&input, out_f32);
                         }
                         "sigmoid_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = 1.0 / (1.0 + (-input[i]).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = 1.0 / (1.0 + (-input[i]).exp()));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            sigmoid_f32(&input, out_f32);
                         }
                         "tanh_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].tanh();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].tanh());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            tanh_f32(&input, out_f32);
                         }
                         "leaky_relu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let slope = if !params.is_empty() {
-                                    f32::from_bits(params[0] as u32)
-                                } else {
-                                    0.01
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if input[i] > 0.0 {
-                                            input[i]
-                                        } else {
-                                            input[i] * slope
-                                        };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if input[i] > 0.0 {
-                                                input[i]
-                                            } else {
-                                                input[i] * slope
-                                            }
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            let slope = if !params.is_empty() {
+                                f32::from_bits(params[0] as u32)
+                            } else {
+                                0.01
+                            };
+                            leaky_relu_f32(&input, out_f32, slope);
                         }
                         "elu_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if input[i] > 0.0 {
-                                            input[i]
-                                        } else {
-                                            input[i].exp() - 1.0
-                                        };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if input[i] > 0.0 {
-                                                input[i]
-                                            } else {
-                                                input[i].exp() - 1.0
-                                            }
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            elu_f32(&input, out_f32);
                         }
                         "softplus_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = (1.0 + input[i].exp()).ln();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = (1.0 + input[i].exp()).ln());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            softplus_f32(&input, out_f32);
                         }
                         "hardswish_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let v = input[i];
-                                        out_f32[i] = v * (v + 3.0).clamp(0.0, 6.0) / 6.0;
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let v = input[i];
-                                            *o = v * (v + 3.0).clamp(0.0, 6.0) / 6.0;
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            hardswish_f32(&input, out_f32);
                         }
                         "clamp_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let min_val = if !params.is_empty() {
-                                    f32::from_bits(params[0] as u32)
-                                } else {
-                                    0.0
-                                };
-                                let max_val = if params.len() > 1 {
-                                    f32::from_bits(params[1] as u32)
-                                } else {
-                                    1.0
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].max(min_val).min(max_val);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].max(min_val).min(max_val));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            let min_val = if !params.is_empty() {
+                                f32::from_bits(params[0] as u32)
+                            } else {
+                                0.0
+                            };
+                            let max_val = if params.len() > 1 {
+                                f32::from_bits(params[1] as u32)
+                            } else {
+                                1.0
+                            };
+                            clamp_f32(&input, out_f32, min_val, max_val);
                         }
                         "sign_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = input[i].signum();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = input[i].signum());
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            sign_f32(&input, out_f32);
+                        }
+                        "round_f32" => {
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            round_f32(&input, out_f32);
                         }
                         "logical_not_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if input[i] == 0.0 { 1.0 } else { 0.0 };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if input[i] == 0.0 { 1.0 } else { 0.0 }
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            logical_not_f32(&input, out_f32);
                         }
                         "log_softmax_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                if !input.is_empty() {
-                                    let max_val =
-                                        input.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                                    let mut sum = 0.0f32;
-                                    for i in 0..input.len() {
-                                        sum += (input[i] - max_val).exp();
-                                    }
-                                    let log_sum = sum.ln();
-                                    let len = out_f32.len().min(input.len());
-                                    #[cfg(not(feature = "parallel"))]
-                                    {
-                                        for i in 0..len {
-                                            out_f32[i] = (input[i] - max_val) - log_sum;
-                                        }
-                                    }
-                                    #[cfg(feature = "parallel")]
-                                    {
-                                        use rayon::prelude::*;
-                                        out_f32[..len]
-                                            .par_iter_mut()
-                                            .enumerate()
-                                            .for_each(|(i, o)| *o = (input[i] - max_val) - log_sum);
-                                    }
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            log_softmax_f32(&input, out_f32);
                         }
                         "mish_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(input.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        let x = input[i];
-                                        let sp = (1.0 + x.exp()).ln();
-                                        out_f32[i] = x * sp.tanh();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            let x = input[i];
-                                            let sp = (1.0 + x.exp()).ln();
-                                            *o = x * sp.tanh();
-                                        });
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            mish_f32(&input, out_f32);
                         }
                         "max_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(a.len()).min(b.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = a[i].max(b[i]);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i].max(b[i]));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            max_f32(&a, &b, out_f32);
                         }
                         "min_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(a.len()).min(b.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = a[i].min(b[i]);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = a[i].min(b[i]));
-                                }
-                            }
+                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
+                            min_f32(&a, &b, out_f32);
                         }
                         "matmul" => {
                             if let [a_slice, b_slice] = &input_slices[..] {
@@ -2872,411 +4076,248 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Use matrixmultiply::sgemm for all sizes — it handles small matrices
-                                // efficiently via its own tiling and is heavily optimized.
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
+                                // *** BATCHED MATMUL ***
+                                // Compute batch count from output buffer size. Each batch element is
+                                // M*K elements in A, K*N in B, and M*N in the output (all contiguous).
+                                let a_stride = m * _k;
+                                let b_stride = _k * n;
+                                let out_stride = m * n;
+                                let batch_count = out_f32.len() / out_stride;
+                                // B may be batched (same batch dims as A, e.g. Q*K^T in attention)
+                                // or shared across all batches (2D weight matrix). Detect by comparing
+                                // total B elements against a single batch's K*N slice.
+                                let b_batched = b.len() > b_stride;
+                                // Skip BLAS for tiny matrices — dispatch overhead dominates.
+                                let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
+                                if use_blas {
+                                    for batch in 0..batch_count {
+                                        let a_s = batch * a_stride;
+                                        let b_s = if b_batched { batch * b_stride } else { 0 };
+                                        let out_s = batch * out_stride;
+                                        matmul_blas_into(
+                                            &a[a_s..a_s + a_stride],
+                                            &b[b_s..b_s + b_stride],
+                                            &mut out_f32[out_s..out_s + out_stride],
+                                            m,
+                                            _k,
+                                            n,
+                                        );
+                                    }
+                                } else {
+                                    // Use SIMD+tiled blocked_row_matmul for small-to-medium matmuls
+                                    let total_rows = batch_count * m;
+                                    let b_batch_stride = if b_batched { b_stride } else { 0 };
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        // Wrap raw pointers in usize for Send+Sync safety.
+                                        // Each parallel task writes to a different row of output.
+                                        let a_raw = a.as_ptr() as usize;
+                                        let b_raw = b.as_ptr() as usize;
+                                        let out_raw = out_f32.as_mut_ptr() as usize;
+                                        (0..total_rows).into_par_iter().for_each(move |row| {
+                                            let a_ptr = a_raw as *const f32;
+                                            let b_ptr = b_raw as *const f32;
+                                            let out_ptr = out_raw as *mut f32;
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::blocked_row_matmul(
+                                                    a_ptr, b_ptr, out_ptr, row,
+                                                    m, n, _k,
+                                                    a_stride, _k, 1,
+                                                    b_batch_stride,
+                                                    n, 1,
+                                                );
+                                            }
+                                        });
+                                    }
+                                    #[cfg(not(feature = "parallel"))]
+                                    for row in 0..total_rows {
+                                        unsafe {
+                                            crate::backend::cpu::microkernels::blocked_row_matmul(
+                                                a.as_ptr(),
+                                                b.as_ptr(),
+                                                out_f32.as_mut_ptr(),
+                                                row,
+                                                m,
+                                                n,
+                                                _k,
+                                                a_stride,
+                                                _k,
+                                                1,
+                                                b_batch_stride,
+                                                n,
+                                                1,
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                         "fused_matmul_add_relu" => {
-                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "fused_matmul_add_relu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use matrixmultiply::sgemm for the matmul, then add bias + relu
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for i in 0..out_f32.len() {
-                                    out_f32[i] = (out_f32[i]
-                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 })
-                                    .max(0.0);
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "fused_matmul_add_relu",
+                                |x| x.max(0.0),
+                            )?;
                         }
                         "fused_matmul_add_gelu" => {
-                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "fused_matmul_add_gelu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for i in 0..out_f32.len() {
-                                    let x = out_f32[i]
-                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 };
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "fused_matmul_add_gelu",
+                                |x| {
                                     let x3 = x * x * x;
                                     let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                     let t = tanh_arg.tanh();
-                                    out_f32[i] = 0.5 * x * (1.0 + t);
-                                }
-                            }
+                                    0.5 * x * (1.0 + t)
+                                },
+                            )?;
                         }
                         "fused_matmul_add_silu" => {
-                            if let [a_slice, b_slice, bias_slice] = &input_slices[..] {
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                                    )
-                                    .to_vec();
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "fused_matmul_add_silu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for i in 0..out_f32.len() {
-                                    let x = out_f32[i]
-                                        + if i % n < bias.len() { bias[i % n] } else { 0.0 };
-                                    out_f32[i] = x / (1.0 + (-x).exp());
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "fused_matmul_add_silu",
+                                |x| x / (1.0 + (-x).exp()),
+                            )?;
                         }
                         "matmul_relu" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_relu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use matrixmultiply::sgemm for the matmul, then apply relu
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for v in out_f32.iter_mut() {
-                                    *v = v.max(0.0);
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "matmul_relu",
+                                |x| x.max(0.0),
+                            )?;
                         }
                         "matmul_gelu" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_gelu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for v in out_f32.iter_mut() {
-                                    let x = *v;
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "matmul_gelu",
+                                |x| {
                                     let x3 = x * x * x;
                                     let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
                                     let t = tanh_arg.tanh();
-                                    *v = 0.5 * x * (1.0 + t);
-                                }
-                            }
+                                    0.5 * x * (1.0 + t)
+                                },
+                            )?;
                         }
                         "matmul_silu" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_silu: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                matmul_blas_into(&a, &b, out_f32, m, _k, n);
-                                for v in out_f32.iter_mut() {
-                                    *v = *v / (1.0 + (-*v).exp());
-                                }
-                            }
+                            matmul_activation_dispatch(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                out_start,
+                                out_end,
+                                "matmul_silu",
+                                |x| x / (1.0 + (-x).exp()),
+                            )?;
                         }
                         "matmul_u4" => {
-                            // input_slices: [activation (f32), weight (packed U4)]
-                            if let [a_slice, w_slice] = &input_slices[..] {
-                                let (activations, packed_bytes) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        {
-                                            let raw =
-                                                &d[w_slice.offset..w_slice.offset + w_slice.size];
-                                            // Copy to u32-aligned buffer (arena may not be u32-aligned)
-                                            let mut aligned: Vec<u32> =
-                                                vec![0u32; raw.len().div_ceil(4)];
-                                            let byte_slice =
-                                                bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                                            byte_slice[..raw.len()].copy_from_slice(raw);
-                                            aligned
-                                        },
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_u4: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let meta = weight_meta.clone().unwrap_or_else(|| {
-                                    crate::backend::QuantizedWeightMeta {
-                                        bit_width: 4,
-                                        scales: vec![1.0],
-                                        zero_points: vec![0.0],
-                                        shape: vec![m, k],
-                                    }
-                                });
-                                // Construct PackedTensor from arena data and call SIMD gemm
-                                let u4x8_data: Vec<U4x8> =
-                                    bytemuck::cast_slice(&packed_bytes).to_vec();
-                                let pt = PackedTensor::from_raw(
-                                    u4x8_data,
-                                    meta.shape.clone(),
-                                    meta.scales,
-                                    meta.zero_points,
-                                );
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
-                                crate::backend::cpu::microkernels::gemm_cpu_flat::<U4x8>(
-                                    &pt,
-                                    &activations,
-                                    out_f32,
-                                    m, // num_pixels
-                                    k, // col_w
-                                    n, // oc
-                                );
-                            }
+                            quantized_matmul_dispatch::<U4x8>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                4,
+                                "matmul_u4",
+                            )?;
+                        }
+                        "matmul_u4_i8" => {
+                            quantized_matmul_dispatch_i8_u4(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                "matmul_u4_i8",
+                            )?;
+                        }
+                        "matmul_u8_i8" => {
+                            quantized_matmul_dispatch_i8_u8(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                "matmul_u8_i8",
+                            )?;
                         }
                         "matmul_u8" => {
-                            // input_slices: [activation (f32), weight (packed U8)]
-                            if let [a_slice, w_slice] = &input_slices[..] {
-                                let (activations, packed_bytes) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        {
-                                            let raw =
-                                                &d[w_slice.offset..w_slice.offset + w_slice.size];
-                                            // Copy to u32-aligned buffer (arena may not be u32-aligned)
-                                            let mut aligned: Vec<u32> =
-                                                vec![0u32; raw.len().div_ceil(4)];
-                                            let byte_slice =
-                                                bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                                            byte_slice[..raw.len()].copy_from_slice(raw);
-                                            aligned
-                                        },
-                                    )
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul_u8: expected params [M,K,N]".into(),
-                                    ));
-                                };
-                                let meta = weight_meta.clone().unwrap_or_else(|| {
-                                    crate::backend::QuantizedWeightMeta {
-                                        bit_width: 8,
-                                        scales: vec![1.0],
-                                        zero_points: vec![0.0],
-                                        shape: vec![m, k],
-                                    }
-                                });
-                                // Construct PackedTensor from arena data and call SIMD gemm
-                                let u8x4_data: Vec<U8x4> =
-                                    bytemuck::cast_slice(&packed_bytes).to_vec();
-                                let pt = PackedTensor::from_raw(
-                                    u8x4_data,
-                                    meta.shape.clone(),
-                                    meta.scales,
-                                    meta.zero_points,
-                                );
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
-                                crate::backend::cpu::microkernels::gemm_cpu_flat::<U8x4>(
-                                    &pt,
-                                    &activations,
-                                    out_f32,
-                                    m, // num_pixels = batch rows
-                                    k, // col_w = input features per row
-                                    n, // oc = output features per row
-                                );
-                            }
+                            quantized_matmul_dispatch::<U8x4>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_u8",
+                            )?;
                         }
                         "reduce_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let &[group_size, is_mean] = &params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "reduce_f32: expected params [group_size, is_mean]".into(),
-                                    ));
-                                };
-                                let effective_group_size = match param_dims {
-                                    Some(dims) if !dims.is_empty() => {
-                                        dims[0].evaluate_with_env(shape_env).map_err(|e| {
-                                            BackendError::Dispatch(format!("reduce_f32: {e}"))
-                                        })? as usize
-                                    }
-                                    _ => group_size,
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let _num_groups = out_f32.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for g in 0.._num_groups {
-                                        let mut sum = 0.0f32;
-                                        let start = g * effective_group_size;
-                                        let end = (start + effective_group_size).min(input.len());
-                                        for i in start..end {
-                                            sum += input[i];
-                                        }
-                                        if is_mean == 1 {
-                                            sum /= effective_group_size as f32;
-                                        }
-                                        out_f32[g] = sum;
-                                    }
+                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
+                            let &[group_size, is_mean, is_max] = &params[..3] else {
+                                return Err(BackendError::Dispatch(
+                                    "reduce_f32: expected params [group_size, is_mean, is_max]"
+                                        .into(),
+                                ));
+                            };
+                            let effective_group_size = match param_dims {
+                                Some(dims) if !dims.is_empty() => {
+                                    dims[0].evaluate_with_env(shape_env).map_err(|e| {
+                                        BackendError::Dispatch(format!("reduce_f32: {e}"))
+                                    })? as usize
                                 }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32.par_iter_mut().enumerate().for_each(|(g, out)| {
-                                        let mut sum = 0.0f32;
-                                        let start = g * effective_group_size;
-                                        let end = (start + effective_group_size).min(input.len());
-                                        for i in start..end {
-                                            sum += input[i];
-                                        }
-                                        if is_mean == 1 {
-                                            sum /= effective_group_size as f32;
-                                        }
-                                        *out = sum;
-                                    });
-                                }
-                            }
+                                _ => group_size,
+                            };
+                            reduce_f32(
+                                &input,
+                                out_f32,
+                                effective_group_size,
+                                is_mean == 1,
+                                is_max == 1,
+                            );
                         }
                         "transpose_f32" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -3299,135 +4340,127 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
+                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
+                                    unsafe {
+                                        microkernels::transpose_f32_avx2(&input, out_f32, m, n);
+                                    }
+                                } else {
+                                    #[cfg(not(feature = "parallel"))]
+                                    {
+                                        for i in 0..m {
+                                            for j in 0..n {
+                                                out_f32[j * m + i] = input[i * n + j];
+                                            }
+                                        }
+                                    }
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        out_f32.par_chunks_mut(m).enumerate().for_each(
+                                            |(j, col)| {
+                                                for i in 0..m {
+                                                    col[i] = input[i * n + j];
+                                                }
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        "transpose_perm_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let input = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
+                                    )
+                                    .to_vec()
+                                };
+                                // params: [rank, d0..dN, p0..pN]
+                                let rank = params.first().copied().unwrap_or(2);
+                                let nd_params =
+                                    resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
+                                let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
+                                let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+                                // Pre-compute input and output strides
+                                let mut in_strides = vec![1usize; rank];
+                                let mut out_strides = vec![1usize; rank];
+                                for i in (0..rank - 1).rev() {
+                                    in_strides[i] = in_strides[i + 1] * dims[i + 1];
+                                }
+                                for i in (0..rank - 1).rev() {
+                                    out_strides[perm[i]] =
+                                        out_strides[perm[i + 1]] * dims[perm[i + 1]];
+                                }
+                                let _total = out_f32.len();
                                 #[cfg(not(feature = "parallel"))]
                                 {
-                                    for i in 0..m {
-                                        for j in 0..n {
-                                            out_f32[j * m + i] = input[i * n + j];
+                                    let total = _total;
+                                    for out_idx in 0..total {
+                                        let mut in_idx = 0usize;
+                                        let mut remaining = out_idx;
+                                        for k in 0..rank {
+                                            let coord = remaining / out_strides[perm[k]];
+                                            remaining %= out_strides[perm[k]];
+                                            in_idx += coord * in_strides[perm[k]];
                                         }
+                                        out_f32[out_idx] = input[in_idx];
                                     }
                                 }
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32.par_chunks_mut(m).enumerate().for_each(|(j, col)| {
-                                        for i in 0..m {
-                                            col[i] = input[i * n + j];
+                                    out_f32.par_iter_mut().enumerate().for_each(|(out_idx, v)| {
+                                        let mut in_idx = 0usize;
+                                        let mut remaining = out_idx;
+                                        for k in 0..rank {
+                                            let coord = remaining / out_strides[perm[k]];
+                                            remaining %= out_strides[perm[k]];
+                                            in_idx += coord * in_strides[perm[k]];
                                         }
+                                        *v = input[in_idx];
                                     });
                                 }
                             }
                         }
                         "add_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] + b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] + b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "add_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| x.max(0.0),
+                            );
                         }
                         "sub_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] - b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] - b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "sub_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| x.max(0.0),
+                            );
                         }
                         "mul_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] * b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] * b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "mul_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| x.max(0.0),
+                            );
                         }
                         "softmax" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -3443,84 +4476,13 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Resolve the axis-dimension size from params
-                                // (compile-time) or param_dims (runtime symbolic).
                                 let softmax_params =
                                     resolve_params(params, param_dims, shape_env, 2)
                                         .unwrap_or_else(|_| vec![input.len(), 1]);
                                 let axis_dim_size = softmax_params[0].max(1);
                                 let stride = softmax_params.get(1).copied().unwrap_or(1).max(1);
                                 let num_rows = input.len() / axis_dim_size.max(1);
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for r in 0..num_rows {
-                                        let outer = r / stride;
-                                        let inner = r % stride;
-                                        let base = (outer * axis_dim_size * stride) + inner;
-                                        let mut max_val = f32::NEG_INFINITY;
-                                        for i in 0..axis_dim_size {
-                                            let idx = base + i * stride;
-                                            if input[idx] > max_val {
-                                                max_val = input[idx];
-                                            }
-                                        }
-                                        let mut sum = 0.0f32;
-                                        for i in 0..axis_dim_size {
-                                            let idx = base + i * stride;
-                                            let e = (input[idx] - max_val).exp();
-                                            out_f32[idx] = e;
-                                            sum += e;
-                                        }
-                                        if sum > 0.0 {
-                                            for i in 0..axis_dim_size {
-                                                let idx = base + i * stride;
-                                                out_f32[idx] /= sum;
-                                            }
-                                        }
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    let stride = stride;
-                                    let axis_dim_size = axis_dim_size;
-                                    // SAFETY: each row writes to a disjoint set of output indices
-                                    // (different `idx` values per row), so writing through a raw
-                                    // pointer from multiple threads is safe.  Cast through `usize`
-                                    // to satisfy `Send` required by rayon's `for_each`.
-                                    let out_addr = out_f32.as_mut_ptr() as usize;
-                                    (0..num_rows).into_par_iter().for_each(|r| {
-                                        let out_ptr = out_addr as *mut f32;
-                                        let outer = r / stride;
-                                        let inner = r % stride;
-                                        let base = (outer * axis_dim_size * stride) + inner;
-                                        let mut max_val = f32::NEG_INFINITY;
-                                        for i in 0..axis_dim_size {
-                                            let idx = base + i * stride;
-                                            let v = input[idx];
-                                            if v > max_val {
-                                                max_val = v;
-                                            }
-                                        }
-                                        let mut sum = 0.0f32;
-                                        for i in 0..axis_dim_size {
-                                            let idx = base + i * stride;
-                                            let e = (input[idx] - max_val).exp();
-                                            unsafe {
-                                                *out_ptr.add(idx) = e;
-                                            }
-                                            sum += e;
-                                        }
-                                        if sum > 0.0 {
-                                            for i in 0..axis_dim_size {
-                                                let idx = base + i * stride;
-                                                unsafe {
-                                                    *out_ptr.add(idx) /= sum;
-                                                }
-                                            }
-                                        }
-                                    });
-                                }
+                                softmax_f32(&input, out_f32, axis_dim_size, stride, num_rows);
                             }
                         }
                         "biasadd" => {
@@ -3549,26 +4511,7 @@ impl Backend for CpuBackend {
                                         "biasadd: expected params [channel_stride]".into(),
                                     ));
                                 };
-                                let bias_len = bias.len().max(1);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] =
-                                            data[i] + bias[(i / channel_stride) % bias_len];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    let bias = &bias;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = data[i] + bias[(i / channel_stride) % bias_len]
-                                        });
-                                }
+                                biasadd_f32(&data, &bias, out_f32, channel_stride);
                             }
                         }
                         "norm_f32" => {
@@ -3619,29 +4562,34 @@ impl Backend for CpuBackend {
                                             &mut d[out_start..out_end],
                                         )
                                     };
-                                    let c = weight.len();
-                                    let len = out_f32.len().min(data.len());
-                                    #[cfg(not(feature = "parallel"))]
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                     {
-                                        for i in 0..len {
-                                            let ch = i % c;
-                                            out_f32[i] = (data[i] - running_mean[ch])
-                                                / (running_var[ch] + eps).sqrt()
-                                                * weight[ch]
-                                                + bias[ch];
+                                        use crate::backend::cpu::microkernels::has_avx2;
+                                        if has_avx2() {
+                                            // SAFETY: AVX2 feature checked by has_avx2()
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
+                                                    &data, &weight, &bias, &running_mean, &running_var,
+                                                    out_f32, eps,
+                                                );
+                                            }
+                                        } else {
+                                            crate::backend::cpu::microkernels::batch_norm_inference_f32(
+                                                &data, &weight, &bias, &running_mean, &running_var,
+                                                out_f32, eps,
+                                            );
                                         }
                                     }
-                                    #[cfg(feature = "parallel")]
+                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                     {
-                                        use rayon::prelude::*;
-                                        out_f32[..len].par_iter_mut().enumerate().for_each(
-                                            |(i, o)| {
-                                                let ch = i % c;
-                                                *o = (data[i] - running_mean[ch])
-                                                    / (running_var[ch] + eps).sqrt()
-                                                    * weight[ch]
-                                                    + bias[ch];
-                                            },
+                                        crate::backend::cpu::microkernels::batch_norm_inference_f32(
+                                            &data,
+                                            &weight,
+                                            &bias,
+                                            &running_mean,
+                                            &running_var,
+                                            out_f32,
+                                            eps,
                                         );
                                     }
                                 }
@@ -3661,449 +4609,151 @@ impl Backend for CpuBackend {
                                             &mut d[out_start..out_end],
                                         )
                                     };
-                                    // Layer norm over the last dimension
                                     let row_size = input.len() / out_f32.len().max(1);
-                                    let num_rows = input.len().checked_div(row_size).unwrap_or(1);
-                                    #[cfg(not(feature = "parallel"))]
-                                    {
-                                        for r in 0..num_rows {
-                                            let start = r * row_size;
-                                            let end = (start + row_size).min(input.len());
-                                            let n = (end - start) as f32;
-                                            let mean: f32 =
-                                                input[start..end].iter().sum::<f32>() / n;
-                                            let var: f32 = input[start..end]
-                                                .iter()
-                                                .map(|&x| (x - mean).powi(2))
-                                                .sum::<f32>()
-                                                / n;
-                                            let inv_std = 1.0 / (var + eps).sqrt();
-                                            for i in start..end {
-                                                out_f32[i] = (input[i] - mean) * inv_std;
-                                            }
-                                        }
-                                    }
-                                    #[cfg(feature = "parallel")]
-                                    {
-                                        use rayon::prelude::*;
-                                        let row_size = row_size;
-                                        let out_addr = out_f32.as_mut_ptr() as usize;
-                                        (0..num_rows).into_par_iter().for_each(|r| {
-                                            let start = r * row_size;
-                                            let end = start + row_size;
-                                            let n = row_size as f32;
-                                            let mean: f32 =
-                                                input[start..end].iter().sum::<f32>() / n;
-                                            let var: f32 = input[start..end]
-                                                .iter()
-                                                .map(|&x| (x - mean).powi(2))
-                                                .sum::<f32>()
-                                                / n;
-                                            let inv_std = 1.0 / (var + eps).sqrt();
-                                            let out_ptr = out_addr as *mut f32;
-                                            for i in start..end {
-                                                unsafe {
-                                                    *out_ptr.add(i) = (input[i] - mean) * inv_std;
-                                                }
-                                            }
-                                        });
-                                    }
+                                    norm_layernorm_f32(&input, out_f32, row_size, eps);
                                 }
                             }
                         }
                         "div_relu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        out_f32[i] = (a[i % a_len] / b[i % b_len]).max(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| *o = (a[i % a_len] / b[i % b_len]).max(0.0),
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "div_relu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| x.max(0.0),
+                            );
                         }
                         // ── Fused elementwise + GELU ─────────────────────
                         "add_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] + b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] + b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "add_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         "sub_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] - b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] - b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "sub_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         "mul_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] * b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] * b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "mul_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         "div_gelu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] / b[i % b_len];
-                                        let x3 = x * x * x;
-                                        let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                        let t = tanh_arg.tanh();
-                                        out_f32[i] = 0.5 * x * (1.0 + t);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] / b[i % b_len];
-                                            let x3 = x * x * x;
-                                            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                                            let t = tanh_arg.tanh();
-                                            *o = 0.5 * x * (1.0 + t);
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "div_gelu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| {
+                                    let x3 = x * x * x;
+                                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+                                    let t = tanh_arg.tanh();
+                                    0.5 * x * (1.0 + t)
+                                },
+                            );
                         }
                         // ── Fused elementwise + SiLU ─────────────────────
                         "add_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] + b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] + b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "add_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "sub_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] - b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] - b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "sub_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "mul_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] * b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] * b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "mul_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
                         "div_silu_f32" => {
-                            if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let out_len = out_f32.len();
-                                let a_len = a.len();
-                                let b_len = b.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..out_len {
-                                        let x = a[i % a_len] / b[i % b_len];
-                                        out_f32[i] = x / (1.0 + (-x).exp());
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..out_len].par_iter_mut().enumerate().for_each(
-                                        |(i, o)| {
-                                            let x = a[i % a_len] / b[i % b_len];
-                                            *o = x / (1.0 + (-x).exp());
-                                        },
-                                    );
-                                }
-                            }
+                            fused_binary_activation_dispatch(
+                                "div_silu_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| x / (1.0 + (-x).exp()),
+                            );
                         }
-                        "conv2d" => {
-                            if let [input_slice, weight_slice] = &input_slices[..] {
+                        "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu" => {
+                            let fused_act = match kernel_name.as_str() {
+                                "conv2d_relu" => Some("relu"),
+                                "conv2d_gelu" => Some("gelu"),
+                                "conv2d_silu" => Some("silu"),
+                                _ => None,
+                            };
+                            if let [input_slice, weight_slice] = &input_slices[..2] {
+                                let &[stride, padding, dilation, groups, c, h, w, kh, kw] =
+                                    &params[..]
+                                else {
+                                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
+                                };
+                                let c_per_group = c / groups.max(1);
+
+                                // Copy input and weight from arena (arena regions may overlap with
+                                // output — the memory planner reuses space for dead tensors — so
+                                // we cannot safely pass arena slices directly as &[f32] and &mut [f32]
+                                // to the same microkernel).
                                 let (input_data, weight_data) = {
                                     let d = arena.data_mut();
                                     (
@@ -4129,13 +4779,6 @@ impl Backend for CpuBackend {
                                 } else {
                                     vec![]
                                 };
-                                // params: [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]
-                                let &[stride, padding, dilation, groups, c, h, w, kh, kw] =
-                                    &params[..]
-                                else {
-                                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
-                                };
-                                let c_per_group = c / groups.max(1);
                                 let n = input_data.len() / (c * h * w).max(1);
                                 let f = weight_data.len() / (c_per_group * kh * kw).max(1);
                                 let _h_out = (h + 2 * padding)
@@ -4151,8 +4794,28 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Delegate to the tiled SIMD-friendly microkernel
-                                crate::backend::cpu::microkernels::conv2d_f32_tiled(
+                                // Build optional activation closure for fused conv+activation.
+                                // The activation is applied inside the scatter loop, avoiding a
+                                // separate memory round-trip over the output tensor.
+                                // Note: this is scalar activation per-element (inside the scatter loop
+                                // which processes one output channel at a time) rather than the SIMD
+                                // vectorized activation used in the separate pass. But it saves the
+                                // entire extra memory round-trip over the output tensor.
+                                let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
+                                let gelu_fn: fn(f32) -> f32 =
+                                    |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
+                                let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
+                                let identity_fn: fn(f32) -> f32 = |x| x;
+                                let conv_act: Option<fn(f32) -> f32> =
+                                    fused_act.map(|act| match act {
+                                        "relu" => relu_fn,
+                                        "gelu" => gelu_fn,
+                                        "silu" => silu_fn,
+                                        _ => identity_fn,
+                                    });
+
+                                // Delegate to the im2col + GEMM microkernel (falls back to tiled for small tensors)
+                                crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
                                     &input_data,
                                     &weight_data,
                                     &bias_data,
@@ -4168,6 +4831,7 @@ impl Backend for CpuBackend {
                                     padding,
                                     dilation,
                                     groups,
+                                    conv_act,
                                 );
                             }
                         }
@@ -4208,7 +4872,7 @@ impl Backend for CpuBackend {
                                 } else {
                                     vec![]
                                 };
-                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, _kernel_w] =
+                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
                                 else {
                                     return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
@@ -4235,22 +4899,22 @@ impl Backend for CpuBackend {
                                 let c = input_c;
                                 let h = input_h;
                                 let w = input_w;
-                                let kernel_size = kernel_h;
                                 if groups == 0 {
                                     return Err(BackendError::Dispatch(
                                         "conv2d_u4/u8: groups=0".into(),
                                     ));
                                 }
                                 let c_per_g = c / groups;
-                                let dk = (kernel_size - 1) * dilation + 1;
+                                let dk_h = (kernel_h - 1) * dilation + 1;
+                                let dk_w = (kernel_w - 1) * dilation + 1;
                                 let n = input_data.len() / (c * h * w).max(1);
-                                let h_out = if h + 2 * padding >= dk {
-                                    (h + 2 * padding - dk) / stride + 1
+                                let h_out = if h + 2 * padding >= dk_h {
+                                    (h + 2 * padding - dk_h) / stride + 1
                                 } else {
                                     0
                                 };
-                                let w_out = if w + 2 * padding >= dk {
-                                    (w + 2 * padding - dk) / stride + 1
+                                let w_out = if w + 2 * padding >= dk_w {
+                                    (w + 2 * padding - dk_w) / stride + 1
                                 } else {
                                     0
                                 };
@@ -4266,54 +4930,23 @@ impl Backend for CpuBackend {
                                             meta.scales,
                                             meta.zero_points,
                                         );
-                                        let col_w = c_per_g * kernel_size * kernel_size;
+                                        let col_w = c_per_g * kernel_h * kernel_w;
                                         for nn in 0..n {
                                             let num_pixels = h_out * w_out;
                                             let mut col_matrix = vec![0.0f32; num_pixels * col_w];
-                                            for hh in 0..h_out {
-                                                for ww in 0..w_out {
-                                                    let row = hh * w_out + ww;
-                                                    for g in 0..groups {
-                                                        for cc in 0..c_per_g {
-                                                            for kkh in 0..kernel_size {
-                                                                for kkw in 0..kernel_size {
-                                                                    let h_in = (hh * stride
-                                                                        + kkh * dilation)
-                                                                        as i64
-                                                                        - padding as i64;
-                                                                    let w_in = (ww * stride
-                                                                        + kkw * dilation)
-                                                                        as i64
-                                                                        - padding as i64;
-                                                                    if h_in >= 0
-                                                                        && h_in < h as i64
-                                                                        && w_in >= 0
-                                                                        && w_in < w as i64
-                                                                    {
-                                                                        let src = nn * (c * h * w)
-                                                                            + (g * c_per_g + cc)
-                                                                                * (h * w)
-                                                                            + h_in as usize * w
-                                                                            + w_in as usize;
-                                                                        let dst = row * col_w
-                                                                            + (g * c_per_g + cc)
-                                                                                * (kernel_size
-                                                                                    * kernel_size)
-                                                                            + kkh * kernel_size
-                                                                            + kkw;
-                                                                        if src < input_data.len()
-                                                                            && dst
-                                                                                < col_matrix.len()
-                                                                        {
-                                                                            col_matrix[dst] =
-                                                                                input_data[src];
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                            unsafe {
+                                                crate::backend::cpu::im2col::im2col_kernel_rect(
+                                                    &input_data[nn * (c * h * w)..],
+                                                    c_per_g,
+                                                    h,
+                                                    w,
+                                                    kernel_h,
+                                                    kernel_w,
+                                                    stride,
+                                                    padding,
+                                                    dilation,
+                                                    &mut col_matrix,
+                                                );
                                             }
                                             // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
                                             let mut temp_out = vec![0.0f32; num_pixels * oc];
@@ -4351,9 +4984,69 @@ impl Backend for CpuBackend {
                             }
                         }
                         "concat" => {
-                            if !input_slices.is_empty() {
+                            if !input_slices.is_empty() && params.len() >= 3 {
+                                let _axis = params[0];
+                                let _inner_stride = params[1];
+                                let outer_count = params[2];
+                                // For each input, compute block_size = elements per outer position.
+                                let num_inputs = input_slices.len();
+                                let mut block_sizes: Vec<usize> = Vec::with_capacity(num_inputs);
+                                for slice in input_slices {
+                                    let elems = slice.size / std::mem::size_of::<f32>();
+                                    block_sizes.push(elems / outer_count.max(1));
+                                }
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
                                 let mut output_offset = 0;
-                                for (si, slice) in input_slices.iter().enumerate() {
+                                for outer_pos in 0..outer_count {
+                                    for (si, slice) in input_slices.iter().enumerate() {
+                                        let input_data = {
+                                            let d = arena.data_mut();
+                                            bytemuck::cast_slice::<_, f32>(
+                                                &d[slice.offset..slice.offset + slice.size],
+                                            )
+                                        };
+                                        let bs = block_sizes[si];
+                                        let src_start = outer_pos * bs;
+                                        let src_end = (src_start + bs).min(input_data.len());
+                                        let copy_len = src_end - src_start;
+                                        let dst_end = (output_offset + copy_len).min(out_f32.len());
+                                        let actual_copy = dst_end - output_offset;
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() {
+                                            unsafe {
+                                                microkernels::concat_f32_avx2(
+                                                    &input_data[src_start..src_start + actual_copy],
+                                                    out_f32,
+                                                    output_offset,
+                                                );
+                                            }
+                                        } else {
+                                            out_f32[output_offset..dst_end].copy_from_slice(
+                                                &input_data[src_start..src_start + actual_copy],
+                                            );
+                                        }
+                                        #[cfg(not(all(
+                                            feature = "simd",
+                                            target_arch = "x86_64"
+                                        )))]
+                                        out_f32[output_offset..dst_end].copy_from_slice(
+                                            &input_data[src_start..src_start + actual_copy],
+                                        );
+                                        #[cfg(feature = "debug_canary")]
+                                        eprintln!(
+                                            "[FNN_DBG_CONCAT] out=[{},{}) outer={} input[{}]: off={} sz={} block={} copy={}",
+                                            out_start, out_end, outer_pos, si, slice.offset, slice.size, bs, copy_len
+                                        );
+                                        output_offset += copy_len;
+                                    }
+                                }
+                            } else if !input_slices.is_empty() {
+                                // Fallback: flat concat (legacy, no axis info)
+                                let mut output_offset = 0;
+                                for (_si, slice) in input_slices.iter().enumerate() {
                                     let input_data = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice::<_, f32>(
@@ -4361,8 +5054,6 @@ impl Backend for CpuBackend {
                                         )
                                         .to_vec()
                                     };
-                                    let input_first = input_data.first().copied().unwrap_or(0.0);
-                                    let input_numel = input_data.len();
                                     let out_f32 = {
                                         let d = arena.data_mut();
                                         bytemuck::cast_slice_mut::<_, f32>(
@@ -4370,11 +5061,27 @@ impl Backend for CpuBackend {
                                         )
                                     };
                                     let end = (output_offset + input_data.len()).min(out_f32.len());
+                                    let actual_copy = end - output_offset;
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    if microkernels::simd_avx2_available() {
+                                        unsafe {
+                                            microkernels::concat_f32_avx2(
+                                                &input_data[..actual_copy],
+                                                out_f32,
+                                                output_offset,
+                                            );
+                                        }
+                                    } else {
+                                        out_f32[output_offset..end]
+                                            .copy_from_slice(&input_data[..actual_copy]);
+                                    }
+                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                     out_f32[output_offset..end]
-                                        .copy_from_slice(&input_data[..end - output_offset]);
+                                        .copy_from_slice(&input_data[..actual_copy]);
+                                    #[cfg(feature = "debug_canary")]
                                     eprintln!(
-                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} first_f32={}",
-                                        out_start, out_end, si, slice.offset, slice.size, input_numel, input_first
+                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} (flat fallback)",
+                                        out_start, out_end, si, slice.offset, slice.size, input_data.len()
                                     );
                                     output_offset += input_data.len();
                                 }
@@ -4405,83 +5112,288 @@ impl Backend for CpuBackend {
                                     (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let w_out =
                                     (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
-                                let mut indices_out: Option<&mut [i64]> = if is_max == 1 {
-                                    secondary_output_slice.as_ref().map(|sec_slice| {
-                                        let d = arena.data_mut();
-                                        bytemuck::cast_slice_mut::<_, i64>(
-                                            &mut d[sec_slice.offset
-                                                ..sec_slice.offset + sec_slice.size],
-                                        )
-                                    })
-                                } else {
-                                    None
-                                };
-                                for nn in 0..n {
-                                    for cc in 0..c {
-                                        for hh in 0..h_out {
-                                            for ww in 0..w_out {
-                                                let mut val = if is_max == 1 {
-                                                    f32::NEG_INFINITY
-                                                } else {
-                                                    0.0f32
-                                                };
-                                                let mut best_kh = 0usize;
-                                                let mut best_kw = 0usize;
-                                                let mut count = 0usize;
-                                                for kh in 0..kernel {
-                                                    for kw in 0..kernel {
-                                                        let h_in = hh * stride_val + kh;
-                                                        let w_in = ww * stride_val + kw;
-                                                        if h_in >= padding_val
-                                                            && w_in >= padding_val
-                                                        {
-                                                            let h_in_s = h_in - padding_val;
-                                                            let w_in_s = w_in - padding_val;
-                                                            if h_in_s < h && w_in_s < w {
-                                                                let idx = nn * (c * h * w)
-                                                                    + cc * (h * w)
-                                                                    + h_in_s * w
-                                                                    + w_in_s;
-                                                                if idx < input.len() {
-                                                                    if is_max == 1 {
-                                                                        if input[idx] > val {
-                                                                            val = input[idx];
-                                                                            best_kh = kh;
-                                                                            best_kw = kw;
-                                                                        }
-                                                                    } else {
-                                                                        val += input[idx];
-                                                                    }
-                                                                    count += 1;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                if is_max == 0 && count > 0 {
-                                                    val /= count as f32;
-                                                }
-                                                let out_idx = nn * (c * h_out * w_out)
-                                                    + cc * (h_out * w_out)
-                                                    + hh * w_out
-                                                    + ww;
-                                                if out_idx < out_f32.len() {
-                                                    out_f32[out_idx] = val;
-                                                }
-                                                // Debug: log first MaxPool write value
-                                                if nn == 0 && cc == 0 && hh == 0 && ww == 0 {
-                                                    eprintln!("[FNN_DBG_POOL] MaxPool out_start={} wrote={}",
-                                                        out_start, val);
-                                                }
-                                                // Write argmax index if this is max pooling
-                                                if let Some(ref mut idx_out) = indices_out {
-                                                    if out_idx < idx_out.len() {
-                                                        idx_out[out_idx] =
-                                                            (best_kh * kernel + best_kw) as i64;
-                                                    }
-                                                }
+                                let hw_out = h_out * w_out;
+                                // ── Sequential path ──────────────────────
+                                #[cfg(not(feature = "parallel"))]
+                                {
+                                    if is_max == 1 {
+                                        let indices_out: Option<&mut [i64]> =
+                                            secondary_output_slice.as_ref().map(|sec_slice| {
+                                                let d = arena.data_mut();
+                                                bytemuck::cast_slice_mut::<_, i64>(
+                                                    &mut d[sec_slice.offset
+                                                        ..sec_slice.offset + sec_slice.size],
+                                                )
+                                            });
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() {
+                                            unsafe {
+                                                microkernels::pool_max_f32_avx2(
+                                                    &input,
+                                                    out_f32,
+                                                    n,
+                                                    c,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
+                                                    indices_out,
+                                                );
                                             }
+                                        } else {
+                                            microkernels::pool_max_f32_scalar(
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
+                                                indices_out,
+                                            );
                                         }
+                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                        {
+                                            microkernels::pool_max_f32_scalar(
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
+                                                indices_out,
+                                            );
+                                        }
+                                    } else {
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() {
+                                            unsafe {
+                                                microkernels::pool_avg_f32_avx2(
+                                                    &input,
+                                                    out_f32,
+                                                    n,
+                                                    c,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
+                                                );
+                                            }
+                                        } else {
+                                            microkernels::pool_avg_f32_scalar(
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
+                                            );
+                                        }
+                                        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                        {
+                                            microkernels::pool_avg_f32_scalar(
+                                                &input,
+                                                out_f32,
+                                                n,
+                                                c,
+                                                h,
+                                                w,
+                                                kernel,
+                                                stride_val,
+                                                padding_val,
+                                                h_out,
+                                                w_out,
+                                            );
+                                        }
+                                    }
+                                }
+                                // ── Parallel path (rayon) ────────────────
+                                #[cfg(feature = "parallel")]
+                                {
+                                    use rayon::prelude::*;
+                                    let nc = n * c;
+                                    let input_ptr_val = input.as_ptr() as usize;
+                                    let out_ptr_val = out_f32.as_mut_ptr() as usize;
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    let use_simd = microkernels::simd_avx2_available();
+                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                    let use_simd = false;
+                                    if is_max == 1 {
+                                        let (idx_ptr_val, has_indices) =
+                                            if let Some(sec_slice) = secondary_output_slice {
+                                                let d = arena.data_mut();
+                                                let idx_end = sec_slice.offset + sec_slice.size;
+                                                let idx_slice = bytemuck::cast_slice_mut::<_, i64>(
+                                                    &mut d[sec_slice.offset..idx_end],
+                                                );
+                                                (idx_slice.as_mut_ptr() as usize, true)
+                                            } else {
+                                                (0usize, false)
+                                            };
+                                        (0..nc).into_par_iter().for_each(|nc_idx| {
+                                            let nn = nc_idx / c;
+                                            let cc = nc_idx % c;
+                                            let inp = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    (input_ptr_val
+                                                        + (nn * (c * h * w) + cc * (h * w))
+                                                            * std::mem::size_of::<f32>())
+                                                        as *const f32,
+                                                    h * w,
+                                                )
+                                            };
+                                            let out = unsafe {
+                                                std::slice::from_raw_parts_mut(
+                                                    (out_ptr_val
+                                                        + (nn * (c * hw_out) + cc * hw_out)
+                                                            * std::mem::size_of::<f32>())
+                                                        as *mut f32,
+                                                    hw_out,
+                                                )
+                                            };
+                                            let idx: Option<&mut [i64]> = if has_indices {
+                                                Some(unsafe {
+                                                    std::slice::from_raw_parts_mut(
+                                                        (idx_ptr_val
+                                                            + (nn * (c * hw_out) + cc * hw_out)
+                                                                * core::mem::size_of::<i64>())
+                                                            as *mut i64,
+                                                        hw_out,
+                                                    )
+                                                })
+                                            } else {
+                                                None
+                                            };
+                                            if use_simd {
+                                                #[cfg(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                ))]
+                                                unsafe {
+                                                    microkernels::pool_max_f32_avx2(
+                                                        inp,
+                                                        out,
+                                                        1,
+                                                        1,
+                                                        h,
+                                                        w,
+                                                        kernel,
+                                                        stride_val,
+                                                        padding_val,
+                                                        h_out,
+                                                        w_out,
+                                                        idx,
+                                                    );
+                                                }
+                                                #[cfg(not(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                )))]
+                                                {
+                                                    unreachable!();
+                                                }
+                                            } else {
+                                                microkernels::pool_max_f32_scalar(
+                                                    inp,
+                                                    out,
+                                                    1,
+                                                    1,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
+                                                    idx,
+                                                );
+                                            }
+                                        });
+                                    } else {
+                                        (0..nc).into_par_iter().for_each(|nc_idx| {
+                                            let nn = nc_idx / c;
+                                            let cc = nc_idx % c;
+                                            let inp = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    (input_ptr_val
+                                                        + (nn * (c * h * w) + cc * (h * w))
+                                                            * std::mem::size_of::<f32>())
+                                                        as *const f32,
+                                                    h * w,
+                                                )
+                                            };
+                                            let out = unsafe {
+                                                std::slice::from_raw_parts_mut(
+                                                    (out_ptr_val
+                                                        + (nn * (c * hw_out) + cc * hw_out)
+                                                            * std::mem::size_of::<f32>())
+                                                        as *mut f32,
+                                                    hw_out,
+                                                )
+                                            };
+                                            if use_simd {
+                                                #[cfg(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                ))]
+                                                unsafe {
+                                                    microkernels::pool_avg_f32_avx2(
+                                                        inp,
+                                                        out,
+                                                        1,
+                                                        1,
+                                                        h,
+                                                        w,
+                                                        kernel,
+                                                        stride_val,
+                                                        padding_val,
+                                                        h_out,
+                                                        w_out,
+                                                    );
+                                                }
+                                                #[cfg(not(all(
+                                                    feature = "simd",
+                                                    target_arch = "x86_64"
+                                                )))]
+                                                {
+                                                    unreachable!();
+                                                }
+                                            } else {
+                                                microkernels::pool_avg_f32_scalar(
+                                                    inp,
+                                                    out,
+                                                    1,
+                                                    1,
+                                                    h,
+                                                    w,
+                                                    kernel,
+                                                    stride_val,
+                                                    padding_val,
+                                                    h_out,
+                                                    w_out,
+                                                );
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -4592,13 +5504,18 @@ impl Backend for CpuBackend {
                             }
                         }
                         "scatter_nd" => {
-                            if let [data_slice, _indices_slice, updates_slice] = &input_slices[..] {
-                                let (data, updates) = {
+                            if let [data_slice, indices_slice, updates_slice] = &input_slices[..] {
+                                let (data, indices_f32, updates) = {
                                     let d = arena.data_mut();
                                     (
                                         bytemuck::cast_slice::<_, f32>(
                                             &d[data_slice.offset
                                                 ..data_slice.offset + data_slice.size],
+                                        )
+                                        .to_vec(),
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[indices_slice.offset
+                                                ..indices_slice.offset + indices_slice.size],
                                         )
                                         .to_vec(),
                                         bytemuck::cast_slice::<_, f32>(
@@ -4613,8 +5530,38 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 out_f32.copy_from_slice(&data);
-                                let copy_len = out_f32.len().min(updates.len());
-                                out_f32[..copy_len].copy_from_slice(&updates[..copy_len]);
+                                if let Some((&index_depth, data_dims)) = params.split_first() {
+                                    let data_rank = data_dims.len();
+                                    if index_depth > 0
+                                        && index_depth <= data_rank
+                                        && indices_f32.len() >= index_depth
+                                    {
+                                        let num_indices = indices_f32.len() / index_depth;
+                                        let inner_size: usize =
+                                            data_dims[index_depth..].iter().product();
+                                        for i in 0..num_indices {
+                                            let mut linear_offset = 0usize;
+                                            for j in 0..index_depth {
+                                                let idx = indices_f32[i * index_depth + j] as usize;
+                                                let mut stride = 1usize;
+                                                for k in (j + 1)..data_rank {
+                                                    stride *= data_dims[k];
+                                                }
+                                                linear_offset += idx * stride;
+                                            }
+                                            let update_start = i * inner_size;
+                                            let update_end = update_start + inner_size;
+                                            if linear_offset + inner_size <= out_f32.len()
+                                                && update_end <= updates.len()
+                                            {
+                                                out_f32[linear_offset..linear_offset + inner_size]
+                                                    .copy_from_slice(
+                                                        &updates[update_start..update_end],
+                                                    );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         "conv1d" => {
@@ -4687,16 +5634,27 @@ impl Backend for CpuBackend {
                                         .to_vec(),
                                     )
                                 };
-                                let &[stride, padding, c, d, h, w, kd, kh, kw] = &params[..] else {
+                                let &[stride, padding, dilation, c, d, h, w, kd, kh, kw] =
+                                    &params[..]
+                                else {
                                     return Err(BackendError::Dispatch(
-                                        "conv3d: expected params [stride, padding, input_c, input_d, input_h, input_w, kernel_d, kernel_h, kernel_w]".into(),
+                                        "conv3d: expected params [stride, padding, dilation, input_c, input_d, input_h, input_w, kernel_d, kernel_h, kernel_w]".into(),
                                     ));
                                 };
                                 let n = input.len() / (c * d * h * w).max(1);
                                 let f = weight.len() / (c * kd * kh * kw).max(1);
-                                let d_out = (d + 2 * padding).saturating_sub(kd) / stride + 1;
-                                let h_out = (h + 2 * padding).saturating_sub(kh) / stride + 1;
-                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
+                                let d_out = (d + 2 * padding)
+                                    .saturating_sub(dilation * (kd - 1) + 1)
+                                    / stride
+                                    + 1;
+                                let h_out = (h + 2 * padding)
+                                    .saturating_sub(dilation * (kh - 1) + 1)
+                                    / stride
+                                    + 1;
+                                let w_out = (w + 2 * padding)
+                                    .saturating_sub(dilation * (kw - 1) + 1)
+                                    / stride
+                                    + 1;
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -4711,9 +5669,12 @@ impl Backend for CpuBackend {
                                                         for kkd in 0..kd {
                                                             for kkh in 0..kh {
                                                                 for kkw in 0..kw {
-                                                                    let d_in = dd * stride + kkd;
-                                                                    let h_in = hh * stride + kkh;
-                                                                    let w_in = ww * stride + kkw;
+                                                                    let d_in = dd * stride
+                                                                        + kkd * dilation;
+                                                                    let h_in = hh * stride
+                                                                        + kkh * dilation;
+                                                                    let w_in = ww * stride
+                                                                        + kkw * dilation;
                                                                     if d_in >= padding
                                                                         && h_in >= padding
                                                                         && w_in >= padding
@@ -4788,8 +5749,8 @@ impl Backend for CpuBackend {
                                 };
                                 let n = input.len() / (c * hin * win).max(1);
                                 let f = weight.len() / (c * kh * kw).max(1);
-                                let h_out = (hin - 1) * stride + kh - 2 * padding;
-                                let w_out = (win - 1) * stride + kw - 2 * padding;
+                                let h_out = ((hin - 1) * stride + kh).saturating_sub(2 * padding);
+                                let w_out = ((win - 1) * stride + kw).saturating_sub(2 * padding);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
@@ -4920,24 +5881,7 @@ impl Backend for CpuBackend {
                                 } else {
                                     input.len()
                                 };
-                                let num_rows = input.len().checked_div(row_size).unwrap_or(1);
-                                for r in 0..num_rows {
-                                    let start = r * row_size;
-                                    let end = (start + row_size).min(input.len());
-                                    let mut sq_sum = 0.0f32;
-                                    for i in start..end {
-                                        sq_sum += input[i] * input[i];
-                                    }
-                                    let rms = (sq_sum / (end - start) as f32 + eps).sqrt();
-                                    for i in start..end {
-                                        let w = if i - start < weight.len() {
-                                            weight[i - start]
-                                        } else {
-                                            1.0
-                                        };
-                                        out_f32[i] = input[i] / rms * w;
-                                    }
-                                }
+                                rms_norm_f32(&input, &weight, out_f32, row_size, eps);
                             }
                         }
                         "fused_residual_add_layer_norm" => {
@@ -4984,90 +5928,25 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 let len = out_f32.len().min(main.len()).min(residual.len());
-                                let row_size = len;
+                                let row_size = if !weight.is_empty() {
+                                    weight.len()
+                                } else if !bias.is_empty() {
+                                    bias.len()
+                                } else {
+                                    len
+                                };
                                 for i in 0..len {
                                     out_f32[i] = main[i] + residual[i % residual.len()];
                                 }
-                                let num_rows = if row_size > 0 { len / row_size } else { 1 };
-                                let out_addr = out_f32.as_mut_ptr() as usize;
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for r in 0..num_rows {
-                                        let start = r * row_size;
-                                        let end = (start + row_size).min(len);
-                                        let n = (end - start) as f32;
-                                        let out_ptr = out_addr as *mut f32;
-                                        let mut sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                sum += *out_ptr.add(i);
-                                            }
-                                        }
-                                        let mean = sum / n;
-                                        let mut var_sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                let x = *out_ptr.add(i);
-                                                var_sum += (x - mean).powi(2);
-                                            }
-                                        }
-                                        let var = var_sum / n;
-                                        let inv_std = 1.0 / (var + eps).sqrt();
-                                        for i in start..end {
-                                            unsafe {
-                                                let idx = i - start;
-                                                let w = if idx < weight.len() {
-                                                    weight[idx]
-                                                } else {
-                                                    1.0
-                                                };
-                                                let b =
-                                                    if idx < bias.len() { bias[idx] } else { 0.0 };
-                                                *out_ptr.add(i) =
-                                                    (*out_ptr.add(i) - mean) * inv_std * w + b;
-                                            }
-                                        }
+                                if row_size > 0 {
+                                    let norm_input = out_f32.to_vec();
+                                    norm_layernorm_f32(&norm_input, &mut *out_f32, row_size, eps);
+                                    for i in 0..len {
+                                        let idx = i % row_size;
+                                        let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+                                        let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+                                        out_f32[i] = out_f32[i] * w + b;
                                     }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    (0..num_rows).into_par_iter().for_each(|r| {
-                                        let start = r * row_size;
-                                        let end = start + row_size;
-                                        let n = row_size as f32;
-                                        let out_ptr = out_addr as *mut f32;
-                                        let mut sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                sum += *out_ptr.add(i);
-                                            }
-                                        }
-                                        let mean = sum / n;
-                                        let mut var_sum = 0.0f32;
-                                        for i in start..end {
-                                            unsafe {
-                                                let x = *out_ptr.add(i);
-                                                var_sum += (x - mean).powi(2);
-                                            }
-                                        }
-                                        let var = var_sum / n;
-                                        let inv_std = 1.0 / (var + eps).sqrt();
-                                        for i in start..end {
-                                            unsafe {
-                                                let idx = i - start;
-                                                let w = if idx < weight.len() {
-                                                    weight[idx]
-                                                } else {
-                                                    1.0
-                                                };
-                                                let b =
-                                                    if idx < bias.len() { bias[idx] } else { 0.0 };
-                                                *out_ptr.add(i) =
-                                                    (*out_ptr.add(i) - mean) * inv_std * w + b;
-                                            }
-                                        }
-                                    });
                                 }
                             }
                         }
@@ -5109,20 +5988,15 @@ impl Backend for CpuBackend {
                                     out_f32[i] = main[i] + residual[i % residual.len()];
                                 }
                                 let row_size = len;
-                                let num_rows = if row_size > 0 { len / row_size } else { 1 };
-                                for r in 0..num_rows {
-                                    let start = r * row_size;
-                                    let end = (start + row_size).min(len);
-                                    let mut sq_sum = 0.0f32;
-                                    for i in start..end {
-                                        sq_sum += out_f32[i] * out_f32[i];
-                                    }
-                                    let rms = (sq_sum / (end - start) as f32 + eps).sqrt();
-                                    for i in start..end {
-                                        let idx = i - start;
-                                        let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-                                        out_f32[i] = out_f32[i] / rms * w;
-                                    }
+                                if row_size > 0 {
+                                    let norm_input = out_f32.to_vec();
+                                    rms_norm_f32(
+                                        &norm_input,
+                                        &weight,
+                                        &mut *out_f32,
+                                        row_size,
+                                        eps,
+                                    );
                                 }
                             }
                         }
@@ -5217,245 +6091,58 @@ impl Backend for CpuBackend {
                             }
                         }
                         "gt_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if data[i] > s { 1.0 } else { 0.0 };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if data[i] > s { 1.0 } else { 0.0 }
-                                        });
-                                }
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| gt_scalar_f32(data, s, out),
+                            );
                         }
                         "lt_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = if data[i] < s { 1.0 } else { 0.0 };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if data[i] < s { 1.0 } else { 0.0 }
-                                        });
-                                }
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| lt_scalar_f32(data, s, out),
+                            );
                         }
                         "eq_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] =
-                                            if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
-                                            *o = if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 }
-                                        });
-                                }
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| eq_scalar_f32(data, s, out),
+                            );
                         }
                         "add_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = data[i] + s;
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = data[i] + s);
-                                }
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| add_scalar_f32(data, s, out),
+                            );
                         }
                         "mul_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = data[i] * s;
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = data[i] * s);
-                                }
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| mul_scalar_f32(data, s, out),
+                            );
                         }
                         "div_scalar_f32" => {
-                            if let [data_slice, scalar_slice] = &input_slices[..] {
-                                let (data, scalar) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[scalar_slice.offset
-                                                ..scalar_slice.offset + scalar_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let s = scalar.first().copied().unwrap_or(0.0);
-                                let len = out_f32.len().min(data.len());
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = data[i] / s;
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = data[i] / s);
-                                }
-                            }
+                            scalar_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |data, s, out| div_scalar_f32(data, s, out),
+                            );
                         }
                         "argmax" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -5468,11 +6155,13 @@ impl Backend for CpuBackend {
                                     .to_vec()
                                 };
                                 let axis = params.first().copied().unwrap_or(usize::MAX);
+                                let dim_size = params.get(1).copied().unwrap_or(0);
+                                let _inner = params.get(2).copied().unwrap_or(1);
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, u64>(&mut d[out_start..out_end])
                                 };
-                                if axis == usize::MAX {
+                                if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
                                     let max_idx = input
                                         .iter()
                                         .enumerate()
@@ -5485,37 +6174,24 @@ impl Backend for CpuBackend {
                                         *v = max_idx;
                                     }
                                 } else {
-                                    let dim_size = axis;
-                                    if dim_size > 0 && input.len() % dim_size == 0 {
-                                        let num_rows = input.len() / dim_size;
-                                        for row in 0..num_rows {
-                                            let start = row * dim_size;
-                                            let end = start + dim_size;
-                                            let max_idx = input[start..end]
-                                                .iter()
-                                                .enumerate()
-                                                .max_by(|(_, a), (_, b)| {
-                                                    a.partial_cmp(b)
-                                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                                })
-                                                .map(|(i, _)| (row * dim_size + i) as u64)
-                                                .unwrap_or(0);
-                                            if row < out_f32.len() {
-                                                out_f32[row] = max_idx;
+                                    let outer = input.len() / (dim_size * _inner);
+                                    for o in 0..outer {
+                                        for i in 0.._inner {
+                                            let base = o * dim_size * _inner + i;
+                                            let mut best_flat = base as u64;
+                                            let mut best_val = input[base];
+                                            for k in 1..dim_size {
+                                                let flat_idx = base + k * _inner;
+                                                let val = input[flat_idx];
+                                                if val > best_val {
+                                                    best_val = val;
+                                                    best_flat = flat_idx as u64;
+                                                }
                                             }
-                                        }
-                                    } else {
-                                        let max_idx = input
-                                            .iter()
-                                            .enumerate()
-                                            .max_by(|(_, a), (_, b)| {
-                                                a.partial_cmp(b)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            })
-                                            .map(|(i, _)| i as u64)
-                                            .unwrap_or(0);
-                                        for v in out_f32.iter_mut() {
-                                            *v = max_idx;
+                                            let out_idx = o * _inner + i;
+                                            if out_idx < out_f32.len() {
+                                                out_f32[out_idx] = best_flat;
+                                            }
                                         }
                                     }
                                 }
@@ -5640,34 +6316,29 @@ impl Backend for CpuBackend {
                                 let h_in = params.get(2).copied().unwrap_or(1);
                                 let w_in = params.get(3).copied().unwrap_or(1);
                                 let hw = h_in * w_in;
-                                let out_len = out_f32.len();
                                 let in_len = input.len();
                                 if scale_h > 0
                                     && scale_w > 0
                                     && hw > 0
-                                    && out_len == in_len * scale_h * scale_w
                                     && in_len > 0
                                     && in_len % hw == 0
                                 {
                                     let nc = in_len / hw;
-                                    for nci in 0..nc {
-                                        for hi in 0..h_in {
-                                            for wi in 0..w_in {
-                                                let val = input[nci * hw + hi * w_in + wi];
-                                                for sh in 0..scale_h {
-                                                    for sw in 0..scale_w {
-                                                        let out_idx = nci * hw * scale_h * scale_w
-                                                            + (hi * scale_h + sh)
-                                                                * (w_in * scale_w)
-                                                            + (wi * scale_w + sw);
-                                                        if out_idx < out_len {
-                                                            out_f32[out_idx] = val;
-                                                        }
-                                                    }
-                                                }
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    {
+                                        use crate::backend::cpu::microkernels::has_avx2;
+                                        if has_avx2() {
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
+                                                    &input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                                );
                                             }
+                                            continue; // skip scalar fallback
                                         }
                                     }
+                                    crate::backend::cpu::microkernels::upsample_nearest2d_f32(
+                                        &input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                    );
                                 }
                             }
                         }
@@ -5764,34 +6435,9 @@ impl Backend for CpuBackend {
                                         }
                                         let w = hw / h;
                                         if h >= out_h && w >= out_w && h > 0 && w > 0 {
-                                            for nci in 0..nc {
-                                                for ohi in 0..out_h {
-                                                    for owi in 0..out_w {
-                                                        let h_start = ohi * h / out_h;
-                                                        let h_end = (ohi + 1) * h / out_h;
-                                                        let w_start = owi * w / out_w;
-                                                        let w_end = (owi + 1) * w / out_w;
-                                                        let mut sum = 0.0f32;
-                                                        let mut count = 0;
-                                                        for hi in h_start..h_end {
-                                                            for wi in w_start..w_end {
-                                                                sum +=
-                                                                    input[nci * hw + hi * w + wi];
-                                                                count += 1;
-                                                            }
-                                                        }
-                                                        let out_idx =
-                                                            nci * out_h * out_w + ohi * out_w + owi;
-                                                        if out_idx < out_len {
-                                                            out_f32[out_idx] = if count > 0 {
-                                                                sum / count as f32
-                                                            } else {
-                                                                0.0
-                                                            };
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                            microkernels::adaptive_avg_pool2d_f32_scalar(
+                                                &input, out_f32, nc, h, w, out_h, out_w,
+                                            );
                                         }
                                     }
                                 }
@@ -5997,29 +6643,12 @@ impl Backend for CpuBackend {
                                         ..input_slices[1].offset + input_slices[1].size],
                                 );
                                 let lr = f32::from_bits(params[0] as u32);
-                                let mut w_new = w_init.to_vec();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..w_new.len() {
-                                        w_new[i] -= lr
-                                            * g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    w_new.par_iter_mut().enumerate().for_each(|(i, w)| {
-                                        *w -= lr
-                                            * g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                    });
-                                }
-                                w_new
+                                let wd = if params.len() > 1 {
+                                    f32::from_bits(params[1] as u32)
+                                } else {
+                                    0.0
+                                };
+                                sgd_update_f32(w_init, g_slice, lr, wd)
                             };
                             let d = arena.data_mut();
                             let w_off = input_slices[0].offset;
@@ -6089,43 +6718,10 @@ impl Backend for CpuBackend {
                                 let t = params[4] as f32;
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                                let _len = w_init.len();
-                                let mut w_new = w_init.to_vec();
-                                let mut m_new = m_init.to_vec();
-                                let mut v_new = v_init.to_vec();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0.._len {
-                                        let g =
-                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
-                                        m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                        let m_hat = m_new[i] / bias_corr1;
-                                        let v_hat = v_new[i] / bias_corr2;
-                                        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    w_new
-                                        .par_iter_mut()
-                                        .zip(m_new.par_iter_mut())
-                                        .zip(v_new.par_iter_mut())
-                                        .enumerate()
-                                        .for_each(|(i, ((w, m), v))| {
-                                            let g = g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                            *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                            let m_hat = *m / bias_corr1;
-                                            let v_hat = *v / bias_corr2;
-                                            *w -= lr * m_hat / (v_hat.sqrt() + eps);
-                                        });
-                                }
-                                (w_new, m_new, v_new)
+                                adam_update_f32(
+                                    w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps,
+                                    bias_corr1, bias_corr2,
+                                )
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6147,9 +6743,6 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&v_new);
                         }
                         "adamw_update_f32" => {
-                            // input_slices: [0]=weight, [1]=grad, [2]=momentum(m),
-                            //   [3]=velocity(v); output slot aliases weight.
-                            // Phase 1: read initial values from arena into local Vecs
                             let (w_new, m_new, v_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
@@ -6173,49 +6766,34 @@ impl Backend for CpuBackend {
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
-                                let t = params[4] as f32;
-                                let wd = f32::from_bits(params[5] as u32);
+                                let (t, wd) = if input_slices.len() >= 5 {
+                                    // New path: t is a runtime tensor (5th input slice)
+                                    let t = u64::from_le_bytes(
+                                        d_ref[input_slices[4].offset..input_slices[4].offset + 8]
+                                            .try_into()
+                                            .unwrap(),
+                                    ) as f32;
+                                    let wd = f32::from_bits(params[4] as u32);
+                                    (t, wd)
+                                } else {
+                                    // Old path: t is in params[4], wd in params[5]
+                                    let t = params[4] as f32;
+                                    let wd = f32::from_bits(params[5] as u32);
+                                    (t, wd)
+                                };
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                                let mut w_new = w_init.to_vec();
-                                let mut m_new = m_init.to_vec();
-                                let mut v_new = v_init.to_vec();
-                                // Phase 2: compute (uses local vecs, no arena access)
-                                #[cfg(not(feature = "parallel"))]
-                                for i in 0..w_new.len() {
-                                    w_new[i] -= lr * wd * w_init[i];
-                                    let g = g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
-                                    m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                    v_new[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                    let m_hat = m_new[i] / bias_corr1;
-                                    let v_hat = v_new[i] / bias_corr2;
-                                    w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    w_new
-                                        .par_iter_mut()
-                                        .zip(m_new.par_iter_mut())
-                                        .zip(v_new.par_iter_mut())
-                                        .enumerate()
-                                        .for_each(|(i, ((w, m), v))| {
-                                            *w -= lr * wd * w_init[i];
-                                            let g = g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                            *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                            let m_hat = *m / bias_corr1;
-                                            let v_hat = *v / bias_corr2;
-                                            *w -= lr * m_hat / (v_hat.sqrt() + eps);
-                                        });
-                                }
-                                (w_new, m_new, v_new)
+                                adamw_update_f32(
+                                    w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps,
+                                    bias_corr1, bias_corr2, wd,
+                                )
                             };
-                            // Phase 3: write back into arena (arena borrow dropped after Phase 1)
                             let d = arena.data_mut();
+                            bytemuck::cast_slice_mut::<_, f32>(
+                                &mut d[input_slices[0].offset
+                                    ..input_slices[0].offset + input_slices[0].size],
+                            )
+                            .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6246,34 +6824,9 @@ impl Backend for CpuBackend {
                                         ..input_slices[2].offset + input_slices[2].size],
                                 );
                                 let lr = f32::from_bits(params[0] as u32);
-                                let beta1 = f32::from_bits(params[1] as u32);
+                                let beta = f32::from_bits(params[1] as u32);
                                 let wd = f32::from_bits(params[2] as u32);
-                                let mut w_new = w_init.to_vec();
-                                let mut m_new = m_init.to_vec();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..w_init.len() {
-                                        let g =
-                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
-                                        m_new[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        w_new[i] = w_init[i] - lr * (m_new[i] + wd * w_init[i]);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
-                                        .enumerate()
-                                        .for_each(|(i, (w, m))| {
-                                            let g = g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                            *w = w_init[i] - lr * (*m + wd * w_init[i]);
-                                        });
-                                }
-                                (w_new, m_new)
+                                muon_update_f32(w_init, g_slice, m_init, lr, beta, wd)
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6308,34 +6861,12 @@ impl Backend for CpuBackend {
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
-                                let mut w_new = w_init.to_vec();
-                                let mut m_new = m_init.to_vec();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..w_init.len() {
-                                        let g =
-                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
-                                        m_new[i] = beta2 * m_init[i] + (1.0 - beta2) * g;
-                                        let update = beta1 * m_new[i] + (1.0 - beta1) * g;
-                                        w_new[i] -= lr * update.signum();
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    (w_new.par_iter_mut().zip(m_new.par_iter_mut()))
-                                        .enumerate()
-                                        .for_each(|(i, (w, m))| {
-                                            let g = g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            *m = beta2 * m_init[i] + (1.0 - beta2) * g;
-                                            let update = beta1 * *m + (1.0 - beta1) * g;
-                                            *w -= lr * update.signum();
-                                        });
-                                }
-                                (w_new, m_new)
+                                let wd = if params.len() > 3 {
+                                    f32::from_bits(params[3] as u32)
+                                } else {
+                                    0.0
+                                };
+                                lion_update_f32(w_init, g_slice, m_init, lr, beta1, beta2, wd)
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6370,32 +6901,7 @@ impl Backend for CpuBackend {
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta = f32::from_bits(params[1] as u32);
                                 let eps = f32::from_bits(params[2] as u32);
-                                let mut w_new = w_init.to_vec();
-                                let mut v_new = v_init.to_vec();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..w_init.len() {
-                                        let g =
-                                            g_slice.get(i % g_slice.len()).copied().unwrap_or(0.0);
-                                        v_new[i] = beta * v_init[i] + (1.0 - beta) * g * g;
-                                        w_new[i] -= lr * g / (v_new[i].sqrt() + eps);
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    (w_new.par_iter_mut().zip(v_new.par_iter_mut()))
-                                        .enumerate()
-                                        .for_each(|(i, (w, v))| {
-                                            let g = g_slice
-                                                .get(i % g_slice.len())
-                                                .copied()
-                                                .unwrap_or(0.0);
-                                            *v = beta * v_init[i] + (1.0 - beta) * g * g;
-                                            *w -= lr * g / (v.sqrt() + eps);
-                                        });
-                                }
-                                (w_new, v_new)
+                                rmsprop_update_f32(w_init, g_slice, v_init, lr, beta, eps)
                             };
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6548,8 +7054,21 @@ impl Backend for CpuBackend {
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
-                                let t = params[4] as f32;
-                                let wd = f32::from_bits(params[5] as u32);
+                                let (t, wd) = if input_slices.len() >= 5 {
+                                    // New path: t is a runtime tensor (5th input slice)
+                                    let t = u64::from_le_bytes(
+                                        d_ref[input_slices[4].offset..input_slices[4].offset + 8]
+                                            .try_into()
+                                            .unwrap(),
+                                    ) as f32;
+                                    let wd = f32::from_bits(params[4] as u32);
+                                    (t, wd)
+                                } else {
+                                    // Old path: t is in params[4], wd in params[5]
+                                    let t = params[4] as f32;
+                                    let wd = f32::from_bits(params[5] as u32);
+                                    (t, wd)
+                                };
                                 (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd)
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
@@ -6667,19 +7186,20 @@ impl Backend for CpuBackend {
                                 params[1 + max_rank..1 + max_rank * 2].to_vec();
 
                             let data_slice = &input_slices[0];
-                            let shape_slice = &input_slices[1];
+                            let _shape_slice = &input_slices[1];
                             let data_numel = data_slice.size / 4; // f32 = 4 bytes
                             let out_numel = output_slice.size / 4;
 
                             let d = arena.data_mut();
 
-                            // Read target shape tensor (I64 values giving output dims)
-                            // This is the runtime version of the shape; we use compile-time
-                            // dims from params as the source of truth.
-                            let _shape_data: Vec<i64> = bytemuck::cast_slice::<_, i64>(
-                                &d[shape_slice.offset..shape_slice.offset + shape_slice.size],
-                            )
-                            .to_vec();
+                            // NOTE: We do NOT read the runtime shape tensor here.
+                            // The compile-time broadcast dims from the instruction params
+                            // (in_dims, out_dims) are the source of truth.  The shape
+                            // tensor (input[1]) is stored as F32 (4 bytes/elem) by the
+                            // Shape/Gather/Concat pipeline, but the old code attempted to
+                            // read it as i64 (8 bytes/elem) — a latent bytemuck panic for
+                            // tensors with odd element counts (e.g. 3 dims → 12 bytes,
+                            // not a multiple of 8).
 
                             // Read input data
                             let in_f32: Vec<f32> = bytemuck::cast_slice::<_, f32>(
@@ -6711,7 +7231,7 @@ impl Backend for CpuBackend {
                                         } else if in_dim == 1 {
                                             0
                                         } else {
-                                            0
+                                            panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
                                         };
                                         in_linear += in_coord * in_stride;
                                         in_stride *= in_dim;
@@ -6743,7 +7263,7 @@ impl Backend for CpuBackend {
                                         } else if in_dim == 1 {
                                             0
                                         } else {
-                                            0
+                                            panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
                                         };
                                         in_linear += in_coord * in_stride;
                                         in_stride *= in_dim;
@@ -6781,7 +7301,13 @@ impl Backend for CpuBackend {
                             } else {
                                 1.0
                             };
-                            let n = ((limit_val - start_val) / step_val).ceil().max(0.0) as usize;
+                            let n = if step_val > 0.0 {
+                                ((limit_val - start_val) / step_val).ceil().max(0.0) as usize
+                            } else if step_val < 0.0 {
+                                ((start_val - limit_val) / (-step_val)).ceil().max(0.0) as usize
+                            } else {
+                                0
+                            };
                             let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
                                 &mut d[out_start..out_start + output_slice.size],
                             );
@@ -7179,6 +7705,8 @@ impl Backend for CpuBackend {
             // ── Debug: per-instruction MaxPool canary check ──────────
             // After the current instruction has executed, check whether
             // any MaxPool primary slot has been overwritten.
+            // Only active with `debug_canary` feature (expensive).
+            #[cfg(feature = "debug_canary")]
             {
                 let d = arena.data_mut();
                 // Determine if this instruction IS a MaxPool kernel, and
@@ -7271,7 +7799,7 @@ impl Backend for CpuBackend {
                                     };
                                     eprintln!(
                                         "[FNN_DBG_CORRUPT] MaxPool mp_off={} expected={} actual={} AFTER instr_idx={} {}",
-                                        mp_off, expected, actual, instr_idx, desc
+                                        mp_off, expected, actual, _instr_idx, desc
                                     );
                                 }
                             }
@@ -7295,4 +7823,511 @@ impl Backend for CpuBackend {
         let end = (offset + size).min(buf.len());
         buf[offset..end].to_vec()
     }
+}
+
+macro_rules! impl_simd_unary_wrapper {
+    ($name:ident, $avx2:path, $scalar:path) => {
+        #[inline]
+        fn $name(input: &[f32], output: &mut [f32]) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if microkernels::simd_avx2_available() {
+                return unsafe { $avx2(input, output) };
+            }
+            let len = output.len().min(input.len());
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                    *o = $scalar(input[i]);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            for i in 0..len {
+                output[i] = $scalar(input[i]);
+            }
+        }
+    };
+}
+
+macro_rules! impl_simd_binary_wrapper {
+    ($name:ident, $avx2:path, $scalar:path, $op:expr) => {
+        #[inline]
+        fn $name(a: &[f32], b: &[f32], output: &mut [f32]) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if (a.len() == output.len() || b.len() == output.len())
+                && microkernels::simd_avx2_available()
+            {
+                return unsafe { $avx2(a, b, output) };
+            }
+            let len = output.len().min(a.len().max(b.len()));
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                let a_len = a.len();
+                let b_len = b.len();
+                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                    *o = $op(a[i % a_len], b[i % b_len]);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            $scalar(a, b, output);
+        }
+    };
+}
+
+macro_rules! impl_simd_scalar_wrapper {
+    ($name:ident, $avx2:path, $scalar:path, $op:expr) => {
+        #[inline]
+        fn $name(data: &[f32], s: f32, output: &mut [f32]) {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if microkernels::simd_avx2_available() {
+                return unsafe { $avx2(data, s, output) };
+            }
+            let len = output.len().min(data.len());
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
+                    *o = $op(data[i], s);
+                });
+            }
+            #[cfg(not(feature = "parallel"))]
+            $scalar(data, s, output);
+        }
+    };
+}
+
+// ============================================================
+// SIMD-aware elementwise dispatch wrappers
+// ============================================================
+// Each wrapper checks `simd_avx2_available()` at runtime and
+// delegates to the AVX2 microkernel when possible, falling back
+// to a scalar loop.  The scalar fallback is the same code that
+// was previously inlined in the big `dispatch()` match arms —
+// flattened to reduce duplication.
+
+impl_simd_unary_wrapper!(
+    relu_f32,
+    microkernels::relu_f32_avx2,
+    microkernels::relu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    gelu_f32,
+    microkernels::gelu_f32_avx2,
+    microkernels::gelu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    silu_f32,
+    microkernels::silu_f32_avx2,
+    microkernels::silu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    sigmoid_f32,
+    microkernels::sigmoid_f32_avx2,
+    microkernels::sigmoid_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    tanh_f32,
+    microkernels::tanh_f32_avx2,
+    microkernels::tanh_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    exp_f32,
+    microkernels::exp_f32_avx2,
+    microkernels::exp_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    log_f32,
+    microkernels::log_f32_avx2,
+    microkernels::log_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    sqrt_f32,
+    microkernels::sqrt_f32_avx2,
+    microkernels::sqrt_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    neg_f32,
+    microkernels::neg_f32_avx2,
+    microkernels::neg_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    abs_f32,
+    microkernels::abs_f32_avx2,
+    microkernels::abs_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    elu_f32,
+    microkernels::elu_f32_avx2,
+    microkernels::elu_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    softplus_f32,
+    microkernels::softplus_f32_avx2,
+    microkernels::softplus_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    hardswish_f32,
+    microkernels::hardswish_f32_avx2,
+    microkernels::hardswish_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    sign_f32,
+    microkernels::sign_f32_avx2,
+    microkernels::sign_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    round_f32,
+    microkernels::round_f32_avx2,
+    microkernels::round_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    logical_not_f32,
+    microkernels::logical_not_f32_avx2,
+    microkernels::logical_not_f32_scalar
+);
+impl_simd_unary_wrapper!(
+    mish_f32,
+    microkernels::mish_f32_avx2,
+    microkernels::mish_f32_scalar
+);
+
+#[inline]
+fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) };
+    }
+    let len = output.len().min(input.len());
+    for i in 0..len {
+        output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope);
+    }
+}
+
+#[inline]
+fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) };
+    }
+    let len = output.len().min(input.len());
+    for i in 0..len {
+        output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val);
+    }
+}
+
+#[inline]
+fn log_softmax_f32(input: &[f32], output: &mut [f32]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::log_softmax_f32_avx2(input, output) };
+    }
+    microkernels::log_softmax_f32_scalar_all(input, output);
+}
+
+// ── Binary ops ──────────────────────────────────────────────
+
+impl_simd_binary_wrapper!(
+    add_f32,
+    microkernels::add_f32_avx2_broadcast,
+    microkernels::add_f32_scalar_broadcast,
+    |a, b| a + b
+);
+impl_simd_binary_wrapper!(
+    sub_f32,
+    microkernels::sub_f32_avx2_broadcast,
+    microkernels::sub_f32_scalar_broadcast,
+    |a, b| a - b
+);
+impl_simd_binary_wrapper!(
+    mul_f32,
+    microkernels::mul_f32_avx2_broadcast,
+    microkernels::mul_f32_scalar_broadcast,
+    |a, b| a * b
+);
+impl_simd_binary_wrapper!(
+    div_f32,
+    microkernels::div_f32_avx2_broadcast,
+    microkernels::div_f32_scalar_broadcast,
+    |a, b| a / b
+);
+impl_simd_binary_wrapper!(
+    max_f32,
+    microkernels::max_f32_avx2_broadcast,
+    microkernels::max_f32_scalar_broadcast,
+    |a: f32, b: f32| a.max(b)
+);
+impl_simd_binary_wrapper!(
+    min_f32,
+    microkernels::min_f32_avx2_broadcast,
+    microkernels::min_f32_scalar_broadcast,
+    |a: f32, b: f32| a.min(b)
+);
+
+// ============================================================
+// New dispatch wrappers — Reductions
+// ============================================================
+
+#[inline]
+fn reduce_f32(input: &[f32], output: &mut [f32], group_size: usize, is_mean: bool, is_max: bool) {
+    if is_max {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if microkernels::simd_avx2_available() {
+            return unsafe { microkernels::reduce_max_f32_avx2(input, output, group_size) };
+        }
+        microkernels::reduce_max_f32_scalar(input, output, group_size);
+    } else {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if microkernels::simd_avx2_available() {
+            return unsafe {
+                microkernels::reduce_sum_f32_avx2(input, output, group_size, is_mean)
+            };
+        }
+        microkernels::reduce_sum_f32_scalar(input, output, group_size, is_mean);
+    }
+}
+
+// ============================================================
+// New dispatch wrappers — Scalar arithmetic
+// ============================================================
+
+impl_simd_scalar_wrapper!(
+    add_scalar_f32,
+    microkernels::add_scalar_f32_avx2,
+    microkernels::add_scalar_f32_scalar,
+    |a, s| a + s
+);
+impl_simd_scalar_wrapper!(
+    mul_scalar_f32,
+    microkernels::mul_scalar_f32_avx2,
+    microkernels::mul_scalar_f32_scalar,
+    |a, s| a * s
+);
+impl_simd_scalar_wrapper!(
+    div_scalar_f32,
+    microkernels::div_scalar_f32_avx2,
+    microkernels::div_scalar_f32_scalar,
+    |a, s| a / s
+);
+
+// ============================================================
+// New dispatch wrappers — Scalar comparison
+// ============================================================
+
+impl_simd_scalar_wrapper!(
+    gt_scalar_f32,
+    microkernels::gt_scalar_f32_avx2,
+    microkernels::gt_scalar_f32_scalar,
+    |a, s| if a > s { 1.0 } else { 0.0 }
+);
+impl_simd_scalar_wrapper!(
+    lt_scalar_f32,
+    microkernels::lt_scalar_f32_avx2,
+    microkernels::lt_scalar_f32_scalar,
+    |a, s| if a < s { 1.0 } else { 0.0 }
+);
+impl_simd_scalar_wrapper!(
+    eq_scalar_f32,
+    microkernels::eq_scalar_f32_avx2,
+    microkernels::eq_scalar_f32_scalar,
+    |a, s| if a == s { 1.0 } else { 0.0 }
+);
+
+// ============================================================
+// New dispatch wrappers — BiasAdd, Norm, RMS Norm, Softmax
+// ============================================================
+
+#[inline]
+fn biasadd_f32(data: &[f32], bias: &[f32], output: &mut [f32], channel_stride: usize) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::biasadd_f32_avx2(data, bias, output, channel_stride) };
+    }
+    microkernels::biasadd_f32_scalar(data, bias, output, channel_stride);
+}
+
+#[inline]
+fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::norm_layernorm_f32_avx2(input, output, row_size, eps) };
+    }
+    microkernels::norm_layernorm_f32_scalar(input, output, row_size, eps);
+}
+
+#[inline]
+fn rms_norm_f32(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::rms_norm_f32_avx2(input, weight, output, row_size, eps) };
+    }
+    microkernels::rms_norm_f32_scalar(input, weight, output, row_size, eps);
+}
+
+#[inline]
+fn softmax_f32(
+    input: &[f32],
+    output: &mut [f32],
+    axis_dim_size: usize,
+    stride: usize,
+    num_rows: usize,
+) {
+    #[cfg(feature = "parallel")]
+    if num_rows > 1 && stride == 1 {
+        use rayon::prelude::*;
+        let has_avx2 = {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                microkernels::simd_avx2_available()
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                false
+            }
+        };
+        // Build non-overlapping row slices before the parallel section
+        // to satisfy the borrow checker and rayon's Send requirements.
+        let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
+        for row in 0..num_rows {
+            let offset = row * axis_dim_size;
+            let inp = &input[offset..offset + axis_dim_size];
+            // SAFETY: Each row writes to a unique non-overlapping region of output.
+            let out = unsafe {
+                std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size)
+            };
+            row_slices.push((inp, out));
+        }
+        row_slices.par_iter_mut().for_each(|(inp, out)| {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if has_avx2 {
+                unsafe {
+                    microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1);
+                }
+                return;
+            }
+            microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
+        });
+        return;
+    }
+    // Single-threaded fallback
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe {
+            microkernels::softmax_f32_avx2_strided(input, output, axis_dim_size, stride, num_rows)
+        };
+    }
+    microkernels::softmax_f32_scalar_strided(input, output, axis_dim_size, stride, num_rows);
+}
+
+// ============================================================
+// Optimizer update wrappers
+// ============================================================
+
+#[inline]
+fn sgd_update_f32(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::sgd_update_f32_avx2(w, g, lr, wd) };
+    }
+    microkernels::sgd_update_f32_scalar(w, g, lr, wd)
+}
+
+#[inline]
+fn adam_update_f32(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe {
+            microkernels::adam_update_f32_avx2(
+                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2,
+            )
+        };
+    }
+    microkernels::adam_update_f32_scalar(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2)
+}
+
+#[inline]
+fn adamw_update_f32(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe {
+            microkernels::adamw_update_f32_avx2(
+                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd,
+            )
+        };
+    }
+    microkernels::adamw_update_f32_scalar(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd,
+    )
+}
+
+#[inline]
+fn lion_update_f32(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::lion_update_f32_avx2(w, g, m, lr, beta1, beta2, wd) };
+    }
+    microkernels::lion_update_f32_scalar(w, g, m, lr, beta1, beta2, wd)
+}
+
+#[inline]
+fn rmsprop_update_f32(
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::rmsprop_update_f32_avx2(w, g, v, lr, beta, eps) };
+    }
+    microkernels::rmsprop_update_f32_scalar(w, g, v, lr, beta, eps)
+}
+
+#[inline]
+fn muon_update_f32(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta: f32,
+    wd: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::simd_avx2_available() {
+        return unsafe { microkernels::muon_update_f32_avx2(w, g, m, lr, beta, wd) };
+    }
+    microkernels::muon_update_f32_scalar(w, g, m, lr, beta, wd)
 }

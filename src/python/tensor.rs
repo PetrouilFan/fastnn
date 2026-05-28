@@ -39,13 +39,19 @@ impl PyTensor {
     #[pyo3(signature = (buf, device = None))]
     fn from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>, device: Option<String>) -> PyResult<Self> {
         use pyo3::buffer::PyBuffer;
-        let buffer = PyBuffer::<f32>::get(buf)?;
+        let buffer = PyBuffer::<f32>::get(buf).map_err(|e| {
+            pyo3::exceptions::PyBufferError::new_err(format!("PyBuffer::get failed: {e}"))
+        })?;
+        // For 0-d (scalar) arrays, buffer.shape() returns an empty slice.
+        // Treat this as a scalar tensor with shape [].
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
-        let data_len: usize = shape.iter().product::<i64>() as usize;
+        let data_len: usize = if shape.is_empty() { 1 } else { shape.iter().product::<i64>() as usize };
         let nbytes = data_len * 4;
         let mut storage_bytes = vec![0u8; nbytes];
         let f32_slice = bytemuck::cast_slice_mut(&mut storage_bytes);
-        buffer.copy_to_slice(py, f32_slice)?;
+        buffer.copy_to_slice(py, f32_slice).map_err(|e| {
+            pyo3::exceptions::PyBufferError::new_err(format!("copy_to_slice failed: {e}"))
+        })?;
         let device = device
             .as_ref()
             .and_then(|s| crate::storage::Device::from_str_label(s))
@@ -90,11 +96,11 @@ impl PyTensor {
     }
 
     fn item(&self) -> f32 {
+        #[cfg(feature = "gpu")]
         if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            self.inner.to_cpu().item()
-        } else {
-            self.inner.item()
+            return self.inner.to_cpu().item();
         }
+        self.inner.item()
     }
 
     fn numpy(&self) -> Vec<f32> {
@@ -106,12 +112,14 @@ impl PyTensor {
     fn __dlpack__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use crate::io::dlpack::to_dlpack;
         use pyo3::exceptions::PyValueError;
-        let ptr = to_dlpack(&self.inner);
-        if ptr.is_null() {
-            return Err(PyValueError::new_err(
-                "DLPack conversion failed: unsupported dtype or device"
-            ));
-        }
+        let ptr = match to_dlpack(&self.inner) {
+            Some(p) => p,
+            None => {
+                return Err(PyValueError::new_err(
+                    "DLPack conversion failed: unsupported dtype or device"
+                ));
+            }
+        };
         // Create PyCapsule with the DLPack tensor
         // The capsule name must be "dltensor" per DLPack spec
         // SAFETY: The GIL is held (we have `py: Python<'_>`). `ptr` points to
@@ -141,8 +149,8 @@ impl PyTensor {
     fn __dlpack_device__(&self) -> (i32, i32) {
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
+            #[cfg(feature = "gpu")]
             crate::storage::Device::Wgpu(device_id) => (2, device_id as i32),
-
         }
     }
 
@@ -213,10 +221,27 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (grad=None))]
-    fn backward(&self, py: Python<'_>, grad: Option<PyTensor>) {
+    fn backward(&self, py: Python<'_>, grad: Option<PyTensor>) -> PyResult<()> {
         let inner = self.inner.clone();
         let grad_tensor = grad.map(|g| g.inner);
-        py.detach(move || crate::autograd::backward(&inner, grad_tensor));
+        let result = py.detach(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                crate::autograd::backward(&inner, grad_tensor);
+            }))
+        });
+        match result {
+            Ok(()) => Ok(()),
+            Err(panic_err) => {
+                let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic during backward".to_string()
+                };
+                Err(pyo3::exceptions::PyRuntimeError::new_err(msg))
+            }
+        }
     }
 
     #[pyo3(signature = (grad))]
@@ -231,14 +256,18 @@ impl PyTensor {
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let dim = dim.unwrap_or(0);
-        PyTensor::from_tensor(self.inner.sum(dim, keepdim))
+        match dim {
+            Some(d) => PyTensor::from_tensor(self.inner.sum(d, keepdim)),
+            None => PyTensor::from_tensor(reduce_sum_all(&self.inner)),
+        }
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
     fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        let dim = dim.unwrap_or(0);
-        PyTensor::from_tensor(self.inner.mean(dim, keepdim))
+        match dim {
+            Some(d) => PyTensor::from_tensor(self.inner.mean(d, keepdim)),
+            None => PyTensor::from_tensor(reduce_mean_all(&self.inner)),
+        }
     }
 
     fn view(&self, shape: Vec<i64>) -> PyTensor {
@@ -363,10 +392,97 @@ impl PyTensor {
         }
     }
 
+    /// Basic index assignment: supports t[idx] = value for integer indices
+    /// along dimension 0. The value can be a scalar (f32) or a tensor.
+    /// GPU tensors are automatically copied to CPU before modification.
+    fn __setitem__(&self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        use pyo3::types::PySlice;
+
+        // Ensure the tensor is on CPU
+        let mut inner = {
+            #[cfg(feature = "gpu")]
+            if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "__setitem__ does not support GPU tensors; call .cpu() first"
+                ));
+            }
+            self.inner.clone()
+        };
+
+        let shape = inner.shape();
+        if shape.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Cannot index into a scalar tensor",
+            ));
+        }
+
+        // Compute row size (number of elements per index)
+        let row_size: usize = shape.iter().skip(1).map(|&d| d as usize).product::<usize>().max(1);
+        let dim0 = shape[0] as isize;
+
+        let (start, stop, step) = if let Ok(slice) = idx.cast::<PySlice>() {
+            let indices = slice.indices(dim0)?;
+            (indices.start as isize, indices.stop as isize, indices.step as isize)
+        } else {
+            let idx_val: isize = idx.extract()?;
+            let idx_val = if idx_val < 0 { dim0 + idx_val } else { idx_val };
+            if idx_val < 0 || idx_val >= dim0 {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "index {idx_val} is out of bounds for dimension 0 of size {dim0}"
+                )));
+            }
+            (idx_val, idx_val + 1, 1)
+        };
+
+        // Convert value to f32 data
+        let val_data: Vec<f32> = if let Ok(scalar) = value.extract::<f32>() {
+            vec![scalar]
+        } else if let Ok(t) = value.extract::<PyTensor>() {
+            let tv = t.inner.to_cpu();
+            tv.to_numpy()
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "Unsupported value type; expected float or Tensor",
+            ));
+        };
+
+        // Get mutable access to the tensor's data
+        let total_elems: usize = shape.iter().map(|&d| d as usize).product();
+        let data_slice = unsafe {
+            let ptr = inner.data_ptr_f32_mut();
+            std::slice::from_raw_parts_mut(ptr, total_elems)
+        };
+
+        let mut i = start;
+        while (step > 0 && i < stop) || (step < 0 && i > stop) {
+            let offset = (i as usize) * row_size;
+            if val_data.len() == 1 {
+                // Scalar: fill the entire row
+                for j in offset..offset + row_size {
+                    data_slice[j] = val_data[0];
+                }
+            } else {
+                // Tensor value: must match row size
+                let end = offset + row_size;
+                if val_data.len() == row_size {
+                    data_slice[offset..end].copy_from_slice(&val_data);
+                } else {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Value size {} does not match slice size {}", val_data.len(), row_size
+                    )));
+                }
+            }
+            i += step;
+        }
+
+        Ok(())
+    }
+
     fn cpu(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_cpu())
     }
 
+    #[cfg(feature = "gpu")]
     fn to_gpu(&self, device_id: usize) -> PyTensor {
         PyTensor::from_tensor(self.inner.to_gpu(device_id))
     }

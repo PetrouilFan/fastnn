@@ -1,7 +1,11 @@
-use crate::backend::wgpu::context::with_wgpu_context;
+use super::PendingRead;
+use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
 
 pub(super) fn dispatch_embed_gpu(
+    ctx: &mut WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<PendingRead>,
     arena: &super::WgpuBuffer,
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
@@ -34,95 +38,86 @@ pub(super) fn dispatch_embed_gpu(
     let indices_raw = read_raw(0);
     let weight_raw = read_raw(1);
 
-    with_wgpu_context(|ctx| -> Result<(), BackendError> {
-        let shader = build_embed_shader();
-        super::pipeline::ensure_compute_pipeline(ctx, "embed", &shader)
-            .map_err(BackendError::Dispatch)?;
+    let shader = build_embed_shader();
+    super::pipeline::ensure_compute_pipeline(ctx, "embed", &shader)
+        .map_err(BackendError::Dispatch)?;
 
-        let buf_indices = ctx.create_buffer(&indices_raw, "embed_indices");
-        let buf_weight = ctx.create_buffer(&weight_raw, "embed_weight");
+    let buf_indices = ctx.create_buffer(&indices_raw, "embed_indices");
+    let buf_weight = ctx.create_buffer(&weight_raw, "embed_weight");
 
-        let output_size = output_slice.size as u64;
-        let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("embed_output"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+    let output_size = output_slice.size as u64;
+    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("embed_output"),
+        size: output_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct EmbedParams {
+        num_indices: u32,
+        embedding_dim: u32,
+        vocab_size: u32,
+    }
+    let vocab_size = weight_raw.len() / (embedding_dim * 4);
+    let params = EmbedParams {
+        num_indices: num_indices as u32,
+        embedding_dim: embedding_dim as u32,
+        vocab_size: vocab_size as u32,
+    };
+    let buf_params = ctx.create_uniform_buffer(&params, "embed_params");
+
+    let pipeline_key = "wgpu_backend_embed";
+    let pipeline = &ctx.pipelines[pipeline_key];
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("embed_bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_indices.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_weight.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_out.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buf_params.as_entire_binding(),
+            },
+        ],
+    });
+
+    let wgc_x = (num_indices as u32).div_ceil(256);
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("embed_pass"),
+            timestamp_writes: None,
         });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(wgc_x.max(1), 1, 1);
+    }
 
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct EmbedParams {
-            num_indices: u32,
-            embedding_dim: u32,
-            vocab_size: u32,
-        }
-        let vocab_size = weight_raw.len() / (embedding_dim * 4);
-        let params = EmbedParams {
-            num_indices: num_indices as u32,
-            embedding_dim: embedding_dim as u32,
-            vocab_size: vocab_size as u32,
-        };
-        let buf_params = ctx.create_uniform_buffer(&params, "embed_params");
-
-        let pipeline_key = "wgpu_backend_embed";
-        let pipeline = &ctx.pipelines[pipeline_key];
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("embed_bg"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_indices.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_weight.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_params.as_entire_binding(),
-                },
-            ],
-        });
-
-        let wgc_x = (num_indices as u32).div_ceil(256);
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("embed_encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("embed_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(wgc_x.max(1), 1, 1);
-        }
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        let raw = ctx.read_buffer(&buf_out, output_size as usize);
-        let result: &[f32] = bytemuck::cast_slice(&raw);
-
-        let out = arena.data_mut();
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-            &mut out[output_slice.offset..output_slice.offset + output_slice.size],
-        );
-        let len = out_f32.len().min(result.len());
-        out_f32[..len].copy_from_slice(&result[..len]);
-
-        Ok(())
-    })
+    pending_reads.push(PendingRead {
+        buffer: buf_out,
+        cpu_offset: output_slice.offset,
+        size: output_size as usize,
+    });
+    Ok(())
 }
 
 fn build_embed_shader() -> String {
-    r#"
+    // Note: `enable i64;` is required by WGSL when using i64 types.
+    // The vocab_size is compared as u64 to avoid truncation when
+    // vocab_size > i32::MAX (which would silently bypass the bounds check).
+    r#"enable i64;
+
 @group(0) @binding(0) var<storage, read>     indices: array<i64>;
 @group(0) @binding(1) var<storage, read>     weight:  array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
@@ -139,8 +134,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= params.num_indices) { return; }
     let idx = indices[i];
-    let src_base = u32(idx) * params.embedding_dim;
     let dst_base = i * params.embedding_dim;
+    // Compare using u64 so vocab_size > i32::MAX is handled correctly.
+    if (idx < 0 || u64(idx) >= u64(params.vocab_size)) {
+        for (var j = 0u; j < params.embedding_dim; j = j + 1u) {
+            output[dst_base + j] = 0.0;
+        }
+        return;
+    }
+    // idx is guaranteed non-negative and < vocab_size ≤ u32::MAX, so u32 cast is safe.
+    let src_base = u32(idx) * params.embedding_dim;
     for (var j = 0u; j < params.embedding_dim; j = j + 1u) {
         output[dst_base + j] = weight[src_base + j];
     }

@@ -338,39 +338,32 @@ fused_relu = fnn.FusedConvBnRelu(conv, bn)
 fused_gelu = fnn.FusedConvBnGelu(conv, bn)
 ```
 
-## Quantized Layers (AOT Compiler Pass)
+## Quantized Inference (AOT Compiler Pass)
 
-Quantization is handled by the AOT compiler's `QuantizationPass`. To compile a model with quantized weights:
+Quantization is handled by the AOT compiler as a compile-time pass. When compiling a model for execution, pass the desired bit width:
 
 ```python
-# Compile with 4-bit or 8-bit quantization
-plan = model.compile_with_quantize(bit_width=4, backend=CpuBackend)
-plan = model.compile_with_quantize(bit_width=8, backend=CpuBackend)
+from fastnn.io import AotExecutor
+
+# Compile with 4-bit or 8-bit weight quantization
+executor = AotExecutor(nodes, params, input_names, output_names, quantize=4)
+# or quantize=8 for 8-bit
 ```
 
-The compiler pass replaces eligible `MatMul` and `Conv2d` nodes with quantized variants carrying per-channel `QuantizedWeightMeta`. The v1 packed layer classes (`PackedLinear`, `PackedConv2d`, etc.) have been removed.
+The compiler pass replaces eligible `MatMul` and `Conv2d` weight nodes with packed U4/U8 variants carrying per-channel scale and zero-point metadata. Dequantization is fused into the GEMM/conv kernels — no separate dequant step.
 
-## Multi-Head Attention
-
-```python
-# Standard attention
-mha = fnn.MultiHeadAttention(d_model=512, n_heads=8)
-output = mha(query, key, value)
-```
-
-## Transformer
+## Transformer Encoder
 
 ```python
-# Standard transformer block
-block = fnn.TransformerBlock(d_model=512, n_heads=8, ff_dim=2048, dropout=0.1)
-
-# Full transformer encoder
-encoder = fnn.TransformerEncoder(
+# Full transformer encoder (positional encoding + multi-head attention + FFN)
+encoder = fnn.nn.PyTransformerEncoder(
     vocab_size=10000, max_seq_len=512,
-    d_model=512, n_heads=8, n_layers=6,
+    d_model=512, n_head=8, n_layers=6,
     ff_dim=2048, n_classes=10, dropout=0.1
 )
 ```
+
+> Note: `MultiHeadAttention` and `TransformerBlock` are available as Rust internal types but do not have standalone Python bindings. Use `TransformerEncoder` for end-to-end transformer classification, or build custom attention via `fnn.flash_attention()`.
 
 ## Sequential
 
