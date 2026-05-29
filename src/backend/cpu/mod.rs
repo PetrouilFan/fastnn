@@ -22,6 +22,7 @@ pub mod flash_attn;
 pub mod im2col;
 pub mod microkernels;
 pub mod reductions_fast;
+pub mod telemetry;
 
 // ============================================================
 // Arena slice extraction macro
@@ -48,6 +49,7 @@ macro_rules! get_in_out_slices {
             let src = bytemuck::cast_slice::<_, f32>(&d[slice.offset..slice.offset + slice.size]);
             let mut buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(src.len());
             buf.copy_from_slice(src);
+            crate::backend::cpu::telemetry::record_arena_temp_copy(slice.size);
             buf // ScopedVec — auto-returns to TLS pool on drop
         } else {
             crate::backend::cpu::microkernels::TlsVecPool::alloc(0)
@@ -67,8 +69,10 @@ macro_rules! get_in_out_slices {
                 bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]);
             let mut a_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(a_src.len());
             a_buf.copy_from_slice(a_src);
+            crate::backend::cpu::telemetry::record_arena_temp_copy(a_slice.size);
             let mut b_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(b_src.len());
             b_buf.copy_from_slice(b_src);
+            crate::backend::cpu::telemetry::record_arena_temp_copy(b_slice.size);
             (a_buf, b_buf)
         } else {
             (
@@ -101,6 +105,8 @@ fn fused_binary_activation_dispatch(
     if let [a_slice, b_slice] = &input_slices[..] {
         let (a, b) = {
             let d = arena.data_mut();
+            telemetry::record_arena_temp_copy(a_slice.size);
+            telemetry::record_arena_temp_copy(b_slice.size);
             (
                 bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
                     .to_vec(),
@@ -224,6 +230,8 @@ fn scalar_op_dispatch(
     if let [data_slice, scalar_slice] = &input_slices[..] {
         let (data, scalar) = {
             let d = arena.data_mut();
+            telemetry::record_arena_temp_copy(data_slice.size);
+            telemetry::record_arena_temp_copy(scalar_slice.size);
             (
                 bytemuck::cast_slice::<_, f32>(
                     &d[data_slice.offset..data_slice.offset + data_slice.size],

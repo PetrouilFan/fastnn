@@ -120,9 +120,14 @@ pub struct TlsVecPool;
 
 impl TlsVecPool {
     pub fn alloc(min_capacity: usize) -> ScopedVec {
-        let mut v = TLS_VEC_POOL
-            .with(|pool| pool.borrow_mut().pop())
-            .unwrap_or_default();
+        let pooled = TLS_VEC_POOL.with(|pool| pool.borrow_mut().pop());
+        let mut v = if let Some(v) = pooled {
+            crate::backend::cpu::telemetry::record_tls_vec_reuse();
+            v
+        } else {
+            crate::backend::cpu::telemetry::record_tls_vec_alloc();
+            Vec::new()
+        };
         if v.capacity() < min_capacity {
             v.reserve(min_capacity - v.len());
         }
