@@ -229,27 +229,72 @@ fn scalar_op_dispatch(
     op: impl Fn(&[f32], f32, &mut [f32]),
 ) {
     if let [data_slice, scalar_slice] = &input_slices[..] {
-        let (data, scalar) = {
-            let d = arena.data_mut();
-            telemetry::record_arena_temp_copy(data_slice.size);
-            telemetry::record_arena_temp_copy(scalar_slice.size);
-            (
-                bytemuck::cast_slice::<_, f32>(
-                    &d[data_slice.offset..data_slice.offset + data_slice.size],
-                )
-                .to_vec(),
-                bytemuck::cast_slice::<_, f32>(
-                    &d[scalar_slice.offset..scalar_slice.offset + scalar_slice.size],
-                )
-                .to_vec(),
-            )
-        };
-        let out_f32 = {
-            let d = arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-        };
-        let s = scalar.first().copied().unwrap_or(0.0);
-        op(&data, s, out_f32);
+        let scalar = arena::read_scalar_f32(arena, *scalar_slice);
+        let output_slice = BufferSlice::new(out_start, out_end - out_start);
+        arena::with_unary_f32_slices(arena, *data_slice, output_slice, |data, out| {
+            op(data, scalar, out);
+        });
+    }
+}
+
+#[cfg(test)]
+mod scalar_dispatch_tests {
+    use super::*;
+
+    fn arena_from_f32(values: &[f32]) -> CpuBuffer {
+        CpuBuffer::new(bytemuck::cast_slice(values).to_vec())
+    }
+
+    fn read_f32s(arena: &CpuBuffer, slice: BufferSlice) -> Vec<f32> {
+        let end = slice.offset + slice.size;
+        let data = arena.data_mut();
+        bytemuck::cast_slice::<_, f32>(&data[slice.offset..end]).to_vec()
+    }
+
+    #[test]
+    fn scalar_op_dispatch_disjoint_avoids_temp_copy() {
+        telemetry::reset_cpu_telemetry();
+        let arena = arena_from_f32(&[1.0, 2.0, 3.0, 10.0, 0.0, 0.0, 0.0]);
+        let data = BufferSlice::new(0, 3 * std::mem::size_of::<f32>());
+        let scalar = BufferSlice::new(3 * std::mem::size_of::<f32>(), std::mem::size_of::<f32>());
+        let output = BufferSlice::new(
+            4 * std::mem::size_of::<f32>(),
+            3 * std::mem::size_of::<f32>(),
+        );
+
+        scalar_op_dispatch(
+            &[data, scalar],
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            add_scalar_f32,
+        );
+
+        assert_eq!(read_f32s(&arena, output), vec![11.0, 12.0, 13.0]);
+        assert_eq!(telemetry::cpu_telemetry_snapshot().arena_temp_copies, 0);
+    }
+
+    #[test]
+    fn scalar_op_dispatch_overlapping_input_falls_back_to_copy() {
+        telemetry::reset_cpu_telemetry();
+        let arena = arena_from_f32(&[1.0, 2.0, 3.0, 4.0, 10.0, 0.0]);
+        let data = BufferSlice::new(0, 4 * std::mem::size_of::<f32>());
+        let scalar = BufferSlice::new(4 * std::mem::size_of::<f32>(), std::mem::size_of::<f32>());
+        let output = BufferSlice::new(
+            2 * std::mem::size_of::<f32>(),
+            4 * std::mem::size_of::<f32>(),
+        );
+
+        scalar_op_dispatch(
+            &[data, scalar],
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            add_scalar_f32,
+        );
+
+        assert_eq!(read_f32s(&arena, output), vec![11.0, 12.0, 13.0, 14.0]);
+        assert!(telemetry::cpu_telemetry_snapshot().arena_temp_copies >= 1);
     }
 }
 
