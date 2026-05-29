@@ -18,6 +18,34 @@ struct GemmCase {
     batch: usize,
 }
 
+#[derive(Clone, Copy)]
+struct VecCase {
+    name: &'static str,
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BroadcastCase {
+    name: &'static str,
+    batch: usize,
+    hidden: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RowwiseCase {
+    name: &'static str,
+    batch: usize,
+    hidden: usize,
+}
+
+#[derive(Clone, Copy)]
+struct FusionCase {
+    name: &'static str,
+    m: usize,
+    k: usize,
+    n: usize,
+}
+
 fn weight_data(rows: usize, cols: usize) -> Vec<f32> {
     (0..rows * cols)
         .map(|i| (((i % 97) as f32) - 48.0) * 0.03125)
@@ -27,6 +55,12 @@ fn weight_data(rows: usize, cols: usize) -> Vec<f32> {
 fn activation_data(cols: usize) -> Vec<f32> {
     (0..cols)
         .map(|i| (((i % 29) as f32) - 14.0) * 0.0625)
+        .collect()
+}
+
+fn vector_data(len: usize, salt: usize) -> Vec<f32> {
+    (0..len)
+        .map(|i| ((((i * 17 + salt) % 101) as f32) - 50.0) * 0.03125)
         .collect()
 }
 
@@ -68,6 +102,133 @@ fn naive_gemm(
             }
             output[row] = acc;
         }
+    }
+}
+
+fn elementwise_binary(a: &[f32], b: &[f32], out: &mut [f32], op: fn(f32, f32) -> f32) {
+    for i in 0..out.len() {
+        out[i] = op(a[i], b[i]);
+    }
+}
+
+fn elementwise_scalar(a: &[f32], scalar: f32, out: &mut [f32], op: fn(f32, f32) -> f32) {
+    for i in 0..out.len() {
+        out[i] = op(a[i], scalar);
+    }
+}
+
+fn broadcast_add(input: &[f32], bias: &[f32], out: &mut [f32], batch: usize, hidden: usize) {
+    for row in 0..batch {
+        let base = row * hidden;
+        for col in 0..hidden {
+            out[base + col] = input[base + col] + bias[col];
+        }
+    }
+}
+
+fn reduce_sum(input: &[f32]) -> f32 {
+    input.iter().copied().sum()
+}
+
+fn reduce_mean(input: &[f32]) -> f32 {
+    reduce_sum(input) / input.len() as f32
+}
+
+fn reduce_max(input: &[f32]) -> f32 {
+    input.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+}
+
+fn rowwise_sum(input: &[f32], out: &mut [f32], batch: usize, hidden: usize) {
+    for row in 0..batch {
+        let start = row * hidden;
+        out[row] = input[start..start + hidden].iter().copied().sum();
+    }
+}
+
+fn rowwise_mean(input: &[f32], out: &mut [f32], batch: usize, hidden: usize) {
+    rowwise_sum(input, out, batch, hidden);
+    for value in out.iter_mut().take(batch) {
+        *value /= hidden as f32;
+    }
+}
+
+fn relu(x: f32) -> f32 {
+    x.max(0.0)
+}
+
+fn gelu(x: f32) -> f32 {
+    0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044715 * x * x * x)).tanh())
+}
+
+fn matmul_bias_activation(
+    a: &[f32],
+    b: &[f32],
+    bias: &[f32],
+    out: &mut [f32],
+    case: FusionCase,
+    activation: fn(f32) -> f32,
+) {
+    for row in 0..case.m {
+        for col in 0..case.n {
+            let mut acc = bias[col];
+            for kk in 0..case.k {
+                acc += a[row * case.k + kk] * b[kk * case.n + col];
+            }
+            out[row * case.n + col] = activation(acc);
+        }
+    }
+}
+
+fn residual_add_norm(
+    x: &[f32],
+    residual: &[f32],
+    bias: &[f32],
+    out: &mut [f32],
+    batch: usize,
+    hidden: usize,
+) {
+    for row in 0..batch {
+        let start = row * hidden;
+        let row_out = &mut out[start..start + hidden];
+        for col in 0..hidden {
+            row_out[col] = x[start + col] + residual[start + col] + bias[col];
+        }
+        let mean = row_out.iter().copied().sum::<f32>() / hidden as f32;
+        let var = row_out
+            .iter()
+            .map(|v| {
+                let d = *v - mean;
+                d * d
+            })
+            .sum::<f32>()
+            / hidden as f32;
+        let inv_std = 1.0 / (var + 1e-5).sqrt();
+        for v in row_out {
+            *v = (*v - mean) * inv_std;
+        }
+    }
+}
+
+fn sgd_update(param: &mut [f32], grad: &[f32], lr: f32, weight_decay: f32) {
+    for i in 0..param.len() {
+        param[i] -= lr * (grad[i] + weight_decay * param[i]);
+    }
+}
+
+fn adamw_update(param: &mut [f32], grad: &[f32], m: &mut [f32], v: &mut [f32], t: f32) {
+    let lr: f32 = 1e-3;
+    let beta1: f32 = 0.9;
+    let beta2: f32 = 0.999;
+    let eps: f32 = 1e-8;
+    let weight_decay: f32 = 0.01;
+    let bias_correction1 = 1.0 - beta1.powf(t);
+    let bias_correction2 = 1.0 - beta2.powf(t);
+    for i in 0..param.len() {
+        m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
+        v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
+        let m_hat = m[i] / bias_correction1;
+        let v_hat = v[i] / bias_correction2;
+        param[i] -= lr * (m_hat / (v_hat.sqrt() + eps) + weight_decay * param[i]);
     }
 }
 
@@ -228,5 +389,357 @@ fn bench_gemm(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(cpu_benchmarks, bench_gemv, bench_gemm);
+fn bench_elementwise(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cpu_elementwise");
+    group.warm_up_time(std::time::Duration::from_millis(300));
+    group.measurement_time(std::time::Duration::from_secs(1));
+    group.sample_size(10);
+
+    let cases = [
+        VecCase {
+            name: "1k",
+            len: 1_024,
+        },
+        VecCase {
+            name: "64k",
+            len: 65_536,
+        },
+        VecCase {
+            name: "1m",
+            len: 1_048_576,
+        },
+    ];
+    let binary_ops: [(&str, fn(f32, f32) -> f32); 3] = [
+        ("add", |x, y| x + y),
+        ("mul", |x, y| x * y),
+        ("div", |x, y| x / (y.abs() + 1.0)),
+    ];
+
+    for case in cases {
+        group.throughput(Throughput::Elements(case.len as u64));
+        let a = vector_data(case.len, 3);
+        let b = vector_data(case.len, 11);
+        let mut out = vec![0.0f32; case.len];
+        for (op_name, op) in binary_ops {
+            group.bench_with_input(
+                BenchmarkId::new(format!("same_shape_{op_name}"), case.name),
+                &case,
+                |bench, _| {
+                    bench.iter(|| {
+                        elementwise_binary(black_box(&a), black_box(&b), black_box(&mut out), op);
+                        black_box(&out);
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("scalar_{op_name}"), case.name),
+                &case,
+                |bench, _| {
+                    bench.iter(|| {
+                        elementwise_scalar(
+                            black_box(&a),
+                            black_box(0.125),
+                            black_box(&mut out),
+                            op,
+                        );
+                        black_box(&out);
+                    });
+                },
+            );
+        }
+    }
+
+    let broadcast_cases = [
+        BroadcastCase {
+            name: "batch16_hidden768",
+            batch: 16,
+            hidden: 768,
+        },
+        BroadcastCase {
+            name: "batch8_hidden4096",
+            batch: 8,
+            hidden: 4096,
+        },
+    ];
+    for case in broadcast_cases {
+        let len = case.batch * case.hidden;
+        group.throughput(Throughput::Elements(len as u64));
+        let input = vector_data(len, 7);
+        let bias = vector_data(case.hidden, 19);
+        let mut out = vec![0.0f32; len];
+        group.bench_with_input(
+            BenchmarkId::new("broadcast_add", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    broadcast_add(
+                        black_box(&input),
+                        black_box(&bias),
+                        black_box(&mut out),
+                        case.batch,
+                        case.hidden,
+                    );
+                    black_box(&out);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_reductions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cpu_reductions");
+    group.warm_up_time(std::time::Duration::from_millis(300));
+    group.measurement_time(std::time::Duration::from_secs(1));
+    group.sample_size(10);
+
+    let cases = [
+        VecCase {
+            name: "1k",
+            len: 1_024,
+        },
+        VecCase {
+            name: "64k",
+            len: 65_536,
+        },
+        VecCase {
+            name: "1m",
+            len: 1_048_576,
+        },
+    ];
+    for case in cases {
+        group.throughput(Throughput::Elements(case.len as u64));
+        let input = vector_data(case.len, 23);
+        group.bench_with_input(BenchmarkId::new("sum_1d", case.name), &case, |bench, _| {
+            bench.iter(|| black_box(reduce_sum(black_box(&input))));
+        });
+        group.bench_with_input(BenchmarkId::new("mean_1d", case.name), &case, |bench, _| {
+            bench.iter(|| black_box(reduce_mean(black_box(&input))));
+        });
+        group.bench_with_input(BenchmarkId::new("max_1d", case.name), &case, |bench, _| {
+            bench.iter(|| black_box(reduce_max(black_box(&input))));
+        });
+    }
+
+    let rowwise_cases = [
+        RowwiseCase {
+            name: "batch32_hidden768",
+            batch: 32,
+            hidden: 768,
+        },
+        RowwiseCase {
+            name: "batch32_hidden1024",
+            batch: 32,
+            hidden: 1024,
+        },
+        RowwiseCase {
+            name: "batch16_hidden4096",
+            batch: 16,
+            hidden: 4096,
+        },
+    ];
+    for case in rowwise_cases {
+        let len = case.batch * case.hidden;
+        group.throughput(Throughput::Elements(len as u64));
+        let input = vector_data(len, 29);
+        let mut out = vec![0.0f32; case.batch];
+        group.bench_with_input(
+            BenchmarkId::new("rowwise_sum", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    rowwise_sum(
+                        black_box(&input),
+                        black_box(&mut out),
+                        case.batch,
+                        case.hidden,
+                    );
+                    black_box(&out);
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("rowwise_mean", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    rowwise_mean(
+                        black_box(&input),
+                        black_box(&mut out),
+                        case.batch,
+                        case.hidden,
+                    );
+                    black_box(&out);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_fusions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cpu_fusions");
+    group.warm_up_time(std::time::Duration::from_millis(300));
+    group.measurement_time(std::time::Duration::from_secs(1));
+    group.sample_size(10);
+
+    let cases = [
+        FusionCase {
+            name: "m16_k256_n256",
+            m: 16,
+            k: 256,
+            n: 256,
+        },
+        FusionCase {
+            name: "m8_k768_n768",
+            m: 8,
+            k: 768,
+            n: 768,
+        },
+    ];
+    for case in cases {
+        group.throughput(Throughput::Elements((case.m * case.k * case.n) as u64));
+        let a = vector_data(case.m * case.k, 31);
+        let b = vector_data(case.k * case.n, 37);
+        let bias = vector_data(case.n, 41);
+        let mut out = vec![0.0f32; case.m * case.n];
+        group.bench_with_input(
+            BenchmarkId::new("matmul_bias_relu", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    matmul_bias_activation(
+                        black_box(&a),
+                        black_box(&b),
+                        black_box(&bias),
+                        black_box(&mut out),
+                        case,
+                        relu,
+                    );
+                    black_box(&out);
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("matmul_bias_gelu", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    matmul_bias_activation(
+                        black_box(&a),
+                        black_box(&b),
+                        black_box(&bias),
+                        black_box(&mut out),
+                        case,
+                        gelu,
+                    );
+                    black_box(&out);
+                });
+            },
+        );
+    }
+
+    let norm_cases = [
+        RowwiseCase {
+            name: "batch16_hidden768",
+            batch: 16,
+            hidden: 768,
+        },
+        RowwiseCase {
+            name: "batch8_hidden4096",
+            batch: 8,
+            hidden: 4096,
+        },
+    ];
+    for case in norm_cases {
+        let len = case.batch * case.hidden;
+        group.throughput(Throughput::Elements(len as u64));
+        let x = vector_data(len, 43);
+        let residual = vector_data(len, 47);
+        let bias = vector_data(case.hidden, 53);
+        let mut out = vec![0.0f32; len];
+        group.bench_with_input(
+            BenchmarkId::new("residual_add_norm", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    residual_add_norm(
+                        black_box(&x),
+                        black_box(&residual),
+                        black_box(&bias),
+                        black_box(&mut out),
+                        case.batch,
+                        case.hidden,
+                    );
+                    black_box(&out);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_training_updates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cpu_training_updates");
+    group.warm_up_time(std::time::Duration::from_millis(300));
+    group.measurement_time(std::time::Duration::from_secs(1));
+    group.sample_size(10);
+
+    let cases = [
+        VecCase {
+            name: "64k",
+            len: 65_536,
+        },
+        VecCase {
+            name: "1m",
+            len: 1_048_576,
+        },
+    ];
+    for case in cases {
+        group.throughput(Throughput::Elements(case.len as u64));
+        let grad = vector_data(case.len, 61);
+        group.bench_with_input(BenchmarkId::new("sgd", case.name), &case, |bench, _| {
+            let mut param = vector_data(case.len, 59);
+            bench.iter(|| {
+                sgd_update(
+                    black_box(&mut param),
+                    black_box(&grad),
+                    black_box(1e-3),
+                    black_box(0.01),
+                );
+                black_box(&param);
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("adamw", case.name), &case, |bench, _| {
+            let mut param = vector_data(case.len, 67);
+            let mut m = vec![0.0f32; case.len];
+            let mut v = vec![0.0f32; case.len];
+            bench.iter(|| {
+                adamw_update(
+                    black_box(&mut param),
+                    black_box(&grad),
+                    black_box(&mut m),
+                    black_box(&mut v),
+                    black_box(1.0),
+                );
+                black_box((&param, &m, &v));
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    cpu_benchmarks,
+    bench_gemv,
+    bench_gemm,
+    bench_elementwise,
+    bench_reductions,
+    bench_fusions,
+    bench_training_updates
+);
 criterion_main!(cpu_benchmarks);
