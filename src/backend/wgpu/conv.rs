@@ -46,16 +46,11 @@ pub(super) fn dispatch_conv_gpu(
     super::pipeline::ensure_compute_pipeline(ctx, "conv2d", shader)
         .map_err(BackendError::Dispatch)?;
 
-    let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "conv_input");
-    let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "conv_weight");
+    let buf_input = ctx.create_pooled_buffer(bytemuck::cast_slice(&input_data), "conv_input");
+    let buf_weight = ctx.create_pooled_buffer(bytemuck::cast_slice(&weight_data), "conv_weight");
 
     let output_size = (n * oc * h_out * w_out * 4) as u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("conv_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
