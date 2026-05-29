@@ -48,16 +48,11 @@ pub(super) fn dispatch_matmul_gpu(
     super::pipeline::ensure_compute_pipeline(ctx, "matmul", shader)
         .map_err(BackendError::Dispatch)?;
 
-    let buf_a = ctx.create_buffer(bytemuck::cast_slice(&a_data), "mm_a");
-    let buf_b = ctx.create_buffer(bytemuck::cast_slice(&b_data), "mm_b");
+    let buf_a = ctx.create_pooled_buffer(bytemuck::cast_slice(&a_data), "mm_a");
+    let buf_b = ctx.create_pooled_buffer(bytemuck::cast_slice(&b_data), "mm_b");
 
     let output_size = (m * n * 4) as u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("mm_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -175,16 +170,11 @@ pub(super) fn dispatch_matmul_activation_gpu(
     super::pipeline::ensure_matmul_activation_pipeline(ctx, "matmul_activation", shader)
         .map_err(BackendError::Dispatch)?;
 
-    let buf_a = ctx.create_buffer(bytemuck::cast_slice(&a_data), "mm_a");
-    let buf_b = ctx.create_buffer(bytemuck::cast_slice(&b_data), "mm_b");
+    let buf_a = ctx.create_pooled_buffer(bytemuck::cast_slice(&a_data), "mm_a");
+    let buf_b = ctx.create_pooled_buffer(bytemuck::cast_slice(&b_data), "mm_b");
 
     let output_size = (m * n * 4) as u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("mm_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -205,7 +195,7 @@ pub(super) fn dispatch_matmul_activation_gpu(
     };
     let buf_params = ctx.create_uniform_buffer(&params, "mm_activation_params");
 
-    let buf_bias = ctx.create_buffer(bytemuck::cast_slice(&bias_data), "mm_bias");
+    let buf_bias = ctx.create_pooled_buffer(bytemuck::cast_slice(&bias_data), "mm_bias");
 
     let pipeline_key = "wgpu_backend_matmul_activation";
     let pipeline = &ctx.pipelines[pipeline_key];

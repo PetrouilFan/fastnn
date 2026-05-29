@@ -43,16 +43,11 @@ pub(super) fn dispatch_embed_gpu(
     super::pipeline::ensure_compute_pipeline(ctx, "embed", shader)
         .map_err(BackendError::Dispatch)?;
 
-    let buf_indices = ctx.create_buffer(&indices_raw, "embed_indices");
-    let buf_weight = ctx.create_buffer(&weight_raw, "embed_weight");
+    let buf_indices = ctx.create_pooled_buffer(&indices_raw, "embed_indices");
+    let buf_weight = ctx.create_pooled_buffer(&weight_raw, "embed_weight");
 
     let output_size = output_slice.size as u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("embed_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
