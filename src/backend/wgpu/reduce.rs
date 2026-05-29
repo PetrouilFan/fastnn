@@ -1,7 +1,5 @@
-use super::PendingRead;
-use crate::backend::wgpu::context::WgpuContext;
-use crate::backend::BackendError;
 use crate::dispatch_gpu_compute;
+use std::sync::OnceLock;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -12,9 +10,23 @@ struct RdParams {
     _pad: u32,
 }
 
+/// Cached reduce shader source — built once, reused for every dispatch.
+pub(crate) fn cached_reduce_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_reduce_shader_inner()
+        })
+    }
+}
+
 dispatch_gpu_compute!(
     dispatch_reduce_gpu,
-    build_reduce_shader(),
+    cached_reduce_shader(),
     "reduce",
     input,
     arg1,
@@ -38,7 +50,7 @@ dispatch_gpu_compute!(
     },
 );
 
-fn build_reduce_shader() -> String {
+fn build_reduce_shader_inner() -> String {
     r#"
 @group(0) @binding(0) var<storage, read>     input:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
