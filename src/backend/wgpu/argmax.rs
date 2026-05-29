@@ -114,24 +114,14 @@ pub(super) fn dispatch_argmax_gpu(
     let shader_l2 = build_argmax_level2_shader();
     ensure_argmax_pipeline(ctx, "argmax_l2", &shader_l2).map_err(BackendError::Dispatch)?;
 
-    let buf_in = ctx.create_buffer(bytemuck::cast_slice(&input), "am_input");
+    let buf_in = ctx.create_pooled_buffer(bytemuck::cast_slice(&input), "am_input");
 
     // Intermediate buffer: level 1 results, packed as vec2<f32> (x=value, y=index as f32)
     let intermediate_size = (num_level1_wgs * 8) as u64;
-    let buf_intermediate = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("am_intermediate"),
-        size: intermediate_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_intermediate = ctx.acquire_buffer_for_size(intermediate_size as usize);
 
     let output_size = 8u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("am_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     // ── Level 1 dispatch ──
     {

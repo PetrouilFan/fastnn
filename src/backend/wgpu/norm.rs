@@ -67,17 +67,12 @@ pub(super) fn dispatch_norm_gpu(
     let pipeline_key = format!("wgpu_backend_{}", kernel_name);
     ensure_norm_pipeline(ctx, &pipeline_key, &shader).map_err(BackendError::Dispatch)?;
 
-    let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "norm_input");
-    let buf_weight = ctx.create_buffer(bytemuck::cast_slice(&weight_data), "norm_weight");
-    let buf_bias = ctx.create_buffer(bytemuck::cast_slice(&bias_data), "norm_bias");
+    let buf_input = ctx.create_pooled_buffer(bytemuck::cast_slice(&input_data), "norm_input");
+    let buf_weight = ctx.create_pooled_buffer(bytemuck::cast_slice(&weight_data), "norm_weight");
+    let buf_bias = ctx.create_pooled_buffer(bytemuck::cast_slice(&bias_data), "norm_bias");
 
     let output_size = (output_slice.size) as u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("norm_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

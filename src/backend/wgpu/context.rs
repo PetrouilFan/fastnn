@@ -23,6 +23,10 @@ pub struct WgpuContext {
     pub staging_buffer: Option<wgpu::Buffer>,
     /// Size of the cached staging buffer in bytes
     pub staging_buffer_size: u64,
+    /// Power-of-two bucketed buffer pool for reusable STORAGE buffers.
+    /// Key: bucket index (trailing zeros of aligned size).
+    /// Reduces allocation churn for transient input/output/scratch buffers.
+    buffer_pool: HashMap<u32, Vec<wgpu::Buffer>>,
 }
 
 /// Handle returned by [`read_buffer_async`]; consumed by [`read_buffer_sync`].
@@ -89,6 +93,7 @@ impl WgpuContext {
             bind_group_layout,
             staging_buffer: None,
             staging_buffer_size: 0,
+            buffer_pool: HashMap::new(),
         }
     }
 
@@ -293,6 +298,77 @@ impl WgpuContext {
         staging.unmap();
 
         results
+    }
+
+    // ── Buffer pool ────────────────────────────────────────────────────────
+
+    /// Compute the power-of-two bucket index for a given size.
+    /// Minimum alignment is 256 bytes to avoid tiny allocations.
+    fn get_bucket_index(size: usize) -> u32 {
+        const MIN_ALIGNMENT: usize = 256;
+        let aligned_size = size.max(MIN_ALIGNMENT).next_power_of_two();
+        aligned_size.trailing_zeros()
+    }
+
+    /// Acquire a reusable STORAGE buffer from the pool, or allocate a fresh one.
+    /// The returned buffer has usage `STORAGE | COPY_SRC | COPY_DST` and is
+    /// aligned to the next power of two >= `size`.
+    pub fn acquire_buffer_for_size(&mut self, size: usize) -> wgpu::Buffer {
+        let bucket = Self::get_bucket_index(size);
+        let aligned_size = 1 << bucket;
+
+        if let Some(buffers) = self.buffer_pool.get_mut(&bucket) {
+            if let Some(buffer) = buffers.pop() {
+                return buffer;
+            }
+        }
+
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pooled_buffer"),
+            size: aligned_size as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Return a buffer to the pool for future reuse.
+    /// Only buffers with matching aligned size and STORAGE usage are pooled;
+    /// others are silently dropped.
+    pub fn release_buffer_to_pool(&mut self, buffer: wgpu::Buffer, size: usize) {
+        let bucket = Self::get_bucket_index(size);
+        let aligned_size = 1 << bucket;
+        if buffer.size() != aligned_size as u64 {
+            return;
+        }
+        let buffers = self.buffer_pool.entry(bucket).or_default();
+        const MAX_BUFFERS_PER_BUCKET: usize = 16;
+        if buffers.len() < MAX_BUFFERS_PER_BUCKET {
+            buffers.push(buffer);
+        }
+    }
+
+    /// Create a pooled STORAGE buffer and write `data` into it.
+    /// Avoids `create_buffer_init` by reusing an existing allocation.
+    pub fn create_pooled_buffer(&mut self, data: &[u8], _label: &str) -> wgpu::Buffer {
+        let size = data.len().max(1); // WGPU requires non-zero buffer sizes
+        let buffer = self.acquire_buffer_for_size(size);
+        self.queue.write_buffer(&buffer, 0, data);
+        buffer
+    }
+
+    /// Drop all pooled buffers, freeing their GPU memory.
+    pub fn clear_buffer_pool(&mut self) {
+        self.buffer_pool.clear();
+    }
+
+    /// Return (total_pooled_buffers, total_buckets) for diagnostics.
+    #[allow(dead_code)]
+    pub fn buffer_pool_stats(&self) -> (usize, usize) {
+        let total_buffers: usize = self.buffer_pool.values().map(|v| v.len()).sum();
+        let total_buckets = self.buffer_pool.len();
+        (total_buffers, total_buckets)
     }
 }
 
