@@ -1,6 +1,6 @@
 # Performance Roadmap
 
-This roadmap tracks backend work that should be implemented alongside the modular reorganization.
+This roadmap tracks backend performance work. The current v2.3 focus is CPU performance, CPU benchmark coverage, and CPU backend maintainability.
 
 ## P0
 
@@ -15,36 +15,45 @@ This roadmap tracks backend work that should be implemented alongside the modula
 - ~~Implement real GPU reductions for N-D tensors.~~ ✅ Done (v1.2.0). Dynamic shader generation handles any dimensionality for sum/mean/max/min.
 - ~~Integrate packed precision into full model execution paths.~~ ✅ Done (v1.3.0). Quantized dispatch for MatMul, ConvTranspose, Embedding; Q/DQ folding; batch GEMM for packed MatMul; ARM NEON SIMD kernels; WGPU packed conv shader.
 
-## P1
+## P1 — CPU-first v2.3 work
 
-- Remove scalar host synchronization inside optimizer loops, especially Muon normalization and Newton-Schulz steps.
-- Add WGPU-side pooling for transient output, staging, scratch, and parameter/state buffers.
-- Cache specialized matmul and reduction bind groups and shader variants by operation, dtype, shape class, and layout class.
+- Expand `cpu_baselines` beyond GEMV/GEMM:
+  - elementwise same-shape/scalar/broadcast workloads
+  - 1D and row-wise reductions
+  - matmul+bias+activation and residual+add+norm fusions
+  - optimizer update-loop workloads
+- Add CPU copy/allocation telemetry:
+  - arena temporary copies
+  - copied bytes
+  - TLS vector-pool allocation/reuse
+- Reduce avoidable arena copies in scalar and elementwise CPU dispatch.
+- Benchmark and optimize CPU matmul epilogues where internal kernels are used.
+- Benchmark and optimize CPU reductions and normalization paths.
 
 ## P2
 
-- ~~Add a GPU embedding/gather kernel so embedding-heavy models do not bounce through CPU execution.~~ ✅ Done (v1.2.0). WGSL shader + dispatch + ops.rs registration.
-- ~~FlashAttention SIMD optimization — tiled online-softmax with AVX-512/AVX2 tile matmul~~ ✅ Done (v2.2). 2-4× speedup over baseline.
-- ~~Raspberry Pi benchmark suite — ARM NEON validation on physical hardware~~ ✅ Done (v2.2). CI cross-compilation, NEON kernel tests, cross-architecture consistency tests.
-- ~~Full fused GPU optimizer kernels — all optimizers have GPU-native step functions~~ ✅ Done (v2.2). Compiled training with SGD, Adam, AdamW, Muon, Lion, RMSprop.
-- ~~`residual + add + norm` fusion — single-pass skip connection + add + layer norm~~ ✅ Done (v2.2).
+- Split `src/backend/cpu/mod.rs` into focused CPU modules after performance-sensitive changes stabilize.
 - Explore packed activation storage and optimizer state for numerically tolerant paths.
-- ONNX training export support — enable autograd through the DAG and export .fnn graphs that preserve gradient flow.
+- ONNX/fastnn-native training graph export metadata.
 
 ## Beyond (future)
 
-- Multi-GPU training — distribute tensor-parallel across wgpu devices
-- Process-based multiprocessing for DataLoader — bypass GIL for true parallel data loading
-- 2-bit quantization and sparse computation
+- WGPU-resident arena execution.
+- Maintained WGPU benchmark baseline.
+- Multi-GPU training — distribute tensor-parallel across wgpu devices.
+- Process-based multiprocessing for DataLoader — bypass GIL for true parallel data loading.
+- 2-bit quantization and sparse computation.
 
 ## Current Status
 
 - CPU storage pooling exists.
-- GPU context code includes buffer and bind-group caches.
+- CPU arena allocation is zero-initialized for deterministic correctness across Linux and macOS aarch64.
+- CPU benchmark suite `cpu_baselines` is the maintained performance baseline and is being expanded for v2.3.
+- WGPU context code includes buffer and bind-group caches.
 - WGPU unary, binary, scalar, matmul, and N-D reduction launch paths no longer poll immediately after submit (since v1.1.0).
 - N-D GPU reductions (sum, mean, max, min) for any dimensionality (since v1.2.0+).
 - GPU embedding/gather kernel with WGSL shader (since v1.2.0+).
-- Explicit readback paths still synchronize when mapping staging buffers.
+- Explicit GPU readback paths still synchronize when mapping staging buffers.
 - Fused CPU kernels: Conv+BN+SiLU (14-25× speedup), Conv+BN+ReLU, Conv+BN+GELU, LayerNorm+GELU, RMSNorm+GELU (since v1.2.0).
 - Fused linear+activation: `fused_linear_relu`, `fused_linear_gelu` (since v1.2.0).
 - AdamW/Adam fused update step eliminates redundant loops (since v1.2.0).
