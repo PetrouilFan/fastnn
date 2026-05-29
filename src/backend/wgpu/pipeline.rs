@@ -28,11 +28,27 @@ pub(crate) enum OpKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ShapeClass {
     Scalar,
-    Vector { len_bucket: u32 },
-    Matrix { rows_bucket: u32, cols_bucket: u32 },
-    Tensor3D { d0_bucket: u32, d1_bucket: u32, d2_bucket: u32 },
-    Tensor4D { d0_bucket: u32, d1_bucket: u32, d2_bucket: u32, d3_bucket: u32 },
-    Generic { rank: u8 },
+    Vector {
+        len_bucket: u32,
+    },
+    Matrix {
+        rows_bucket: u32,
+        cols_bucket: u32,
+    },
+    Tensor3D {
+        d0_bucket: u32,
+        d1_bucket: u32,
+        d2_bucket: u32,
+    },
+    Tensor4D {
+        d0_bucket: u32,
+        d1_bucket: u32,
+        d2_bucket: u32,
+        d3_bucket: u32,
+    },
+    Generic {
+        rank: u8,
+    },
 }
 
 impl ShapeClass {
@@ -384,21 +400,36 @@ mod tests {
 
     #[test]
     fn test_shader_source_caching() {
+        let before = shader_cache_stats();
+
         // First call should build the shader string (miss recorded inside OnceLock)
         let s1 = crate::backend::wgpu::reduce::cached_reduce_shader();
-        // Second call should return the same static reference (no rebuild)
+        // Second call should return the same static reference (hit recorded, no rebuild)
         let s2 = crate::backend::wgpu::reduce::cached_reduce_shader();
-        assert!(std::ptr::eq(s1, s2), "cached_reduce_shader should return the same &str reference on repeated calls");
+        assert!(
+            std::ptr::eq(s1, s2),
+            "cached_reduce_shader should return the same &str reference on repeated calls"
+        );
 
         // Same pattern for matmul
         let m1 = crate::backend::wgpu::matmul::cached_matmul_shader();
         let m2 = crate::backend::wgpu::matmul::cached_matmul_shader();
-        assert!(std::ptr::eq(m1, m2), "cached_matmul_shader should return the same &str reference");
+        assert!(
+            std::ptr::eq(m1, m2),
+            "cached_matmul_shader should return the same &str reference"
+        );
 
         // And activation variant
         let a1 = crate::backend::wgpu::matmul::cached_matmul_activation_shader();
         let a2 = crate::backend::wgpu::matmul::cached_matmul_activation_shader();
-        assert!(std::ptr::eq(a1, a2), "cached_matmul_activation_shader should return the same &str reference");
+        assert!(
+            std::ptr::eq(a1, a2),
+            "cached_matmul_activation_shader should return the same &str reference"
+        );
+
+        let after = shader_cache_stats();
+        assert_eq!(after.shader_misses - before.shader_misses, 3);
+        assert_eq!(after.shader_hits - before.shader_hits, 3);
 
         // All shaders should be non-empty
         assert!(!s1.is_empty());
