@@ -62,6 +62,9 @@ MANIFEST
 MANIFEST.in
 build/
 
+# Compiled test binaries (accidental build artifacts)
+test_macro_positions
+
 # Benchmark tests
 benchmark_tests/
 nul
