@@ -6,7 +6,7 @@
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
 [![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 
-> **Version:** 2.2.0 — AOT compiler, compiled training (6 optimizers), FlashAttention SIMD, WGPU quantized inference, residual+add+norm fusion
+> **Version:** 2.2.4 — AOT compiler, compiled training (6 optimizers), FlashAttention SIMD, WGPU quantized inference, residual+add+norm fusion
 
 ---
 
@@ -237,6 +237,7 @@ output = executor.forward({"input": input_tensor})
 Performance numbers are hardware-dependent and must be backed by a runnable benchmark command.
 
 - Run the maintained CPU suite with `cargo +stable bench --bench cpu_baselines`
+- Run WGPU benchmark entrypoints manually on machines with a compatible GPU before making GPU speed claims
 - Save a regression baseline with `cargo +stable bench --bench cpu_baselines -- --save-baseline <name>`
 - Export a normalized JSON summary with `python scripts/criterion_to_json.py --criterion-dir target/criterion --output benchmark-results/<name>.json`
 
@@ -347,7 +348,7 @@ uv run pytest tests/ -v
 - [x] **v2.0** — AOT compiler pipeline, IR-based execution, native U4/U8 quantization
 - [x] **v2.1** — Modular fusion (forward + backward), CLI binary, error handling (`try_*` API)
 - [x] **v2.2** — Compiled training (6 optimizers), FlashAttention SIMD, WGPU quantized inference, residual+add+norm fusion, ARM NEON validation suite
-- [ ] **v2.3** (planned) — Multi-GPU training, 2-bit quantization, sparse computation
+- [ ] **v2.3** (planned) — Maintained WGPU benchmarks, WGPU-resident arena execution, optimizer sync audit, training graph export metadata
 
 ---
 
