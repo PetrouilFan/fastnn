@@ -39,7 +39,6 @@ pub(super) fn dispatch_embed_gpu(
     let indices_raw = read_raw(0);
     let weight_raw = read_raw(1);
 
-    super::pipeline::record_shader_hit();
     let shader = cached_embed_shader();
     super::pipeline::ensure_compute_pipeline(ctx, "embed", shader)
         .map_err(BackendError::Dispatch)?;
@@ -117,10 +116,15 @@ pub(super) fn dispatch_embed_gpu(
 /// Cached embedding shader source — built once, reused for every dispatch.
 pub(crate) fn cached_embed_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_embed_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_embed_shader_inner()
+        })
+    }
 }
 
 fn build_embed_shader_inner() -> String {

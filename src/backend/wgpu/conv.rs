@@ -42,7 +42,6 @@ pub(super) fn dispatch_conv_gpu(
     let h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
     let w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
 
-    super::pipeline::record_shader_hit();
     let shader = cached_conv_shader();
     super::pipeline::ensure_compute_pipeline(ctx, "conv2d", shader)
         .map_err(BackendError::Dispatch)?;
@@ -142,10 +141,15 @@ pub(super) fn dispatch_conv_gpu(
 /// Cached conv2d shader source — built once, reused for every dispatch.
 pub(crate) fn cached_conv_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_conv_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_conv_shader_inner()
+        })
+    }
 }
 
 fn infer_conv_dims(
