@@ -17,11 +17,11 @@ fn build_inference_graph() -> ComputeGraph {
     let gb = GraphBuilder::new();
     let x = gb.input(&[1, 4], IrDType::F32);
     let w = gb.constant(
-        &vec![0.0f32; 16].into_iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
-        TensorType::new(
-            vec![DimExpr::Known(4), DimExpr::Known(4)],
-            IrDType::F32,
-        ),
+        &vec![0.0f32; 16]
+            .into_iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect::<Vec<u8>>(),
+        TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
     );
     let mm = gb.matmul(&x, &w);
     let _ = gb.relu(&mm);
@@ -75,7 +75,11 @@ fn build_training_graph_gradient_scale() -> ComputeGraph {
 fn test_inference_graph_exports_successfully() {
     let graph = build_inference_graph();
     let result = export_to_onnx_json(&graph);
-    assert!(result.is_ok(), "Inference graph should export: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Inference graph should export: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -84,7 +88,9 @@ fn test_inference_export_metadata() {
     let json = export_to_onnx_json(&graph).expect("export should succeed");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
 
-    let metadata = parsed["metadata"].as_object().expect("metadata should be object");
+    let metadata = parsed["metadata"]
+        .as_object()
+        .expect("metadata should be object");
     assert_eq!(metadata["export_mode"].as_str(), Some("inference"));
     assert_eq!(metadata["training_ops_dropped"].as_bool(), Some(false));
     assert_eq!(metadata["training_ops_count"].as_u64(), Some(0));
@@ -96,7 +102,10 @@ fn test_inference_export_metadata() {
 fn test_training_graph_sgd_fails_export() {
     let graph = build_training_graph_sgd();
     let result = export_to_onnx_json(&graph);
-    assert!(result.is_err(), "SGD training graph should fail export by default");
+    assert!(
+        result.is_err(),
+        "SGD training graph should fail export by default"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("training-only opcode") || err.contains("SgdUpdate"),
@@ -114,7 +123,10 @@ fn test_training_graph_sgd_fails_export() {
 fn test_training_graph_adam_fails_export() {
     let graph = build_training_graph_adam();
     let result = export_to_onnx_json(&graph);
-    assert!(result.is_err(), "Adam training graph should fail export by default");
+    assert!(
+        result.is_err(),
+        "Adam training graph should fail export by default"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("AdamUpdate"),
@@ -127,7 +139,10 @@ fn test_training_graph_adam_fails_export() {
 fn test_gradient_scale_fails_export() {
     let graph = build_training_graph_gradient_scale();
     let result = export_to_onnx_json(&graph);
-    assert!(result.is_err(), "GradientScale graph should fail export by default");
+    assert!(
+        result.is_err(),
+        "GradientScale graph should fail export by default"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("GradientScale"),
@@ -142,7 +157,10 @@ fn test_gradient_scale_fails_export() {
 fn test_detect_training_ops_inference_clean() {
     let graph = build_inference_graph();
     let ops = detect_training_ops(&graph);
-    assert!(ops.is_empty(), "Inference graph should have no training ops");
+    assert!(
+        ops.is_empty(),
+        "Inference graph should have no training ops"
+    );
 }
 
 #[test]
@@ -173,7 +191,10 @@ fn test_detect_training_ops_adam() {
 fn test_detect_training_ops_gradient_scale() {
     let graph = build_training_graph_gradient_scale();
     let ops = detect_training_ops(&graph);
-    assert!(!ops.is_empty(), "GradientScale graph should detect training ops");
+    assert!(
+        !ops.is_empty(),
+        "GradientScale graph should detect training ops"
+    );
     assert!(
         ops.iter().any(|(_, name)| name.contains("GradientScale")),
         "Should detect GradientScale, got: {:?}",
@@ -194,7 +215,9 @@ fn test_training_graph_sgd_optout_drops_ops() {
     let json = result.expect("export with opt-out should succeed");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
 
-    let metadata = parsed["metadata"].as_object().expect("metadata should be object");
+    let metadata = parsed["metadata"]
+        .as_object()
+        .expect("metadata should be object");
     assert_eq!(metadata["training_ops_dropped"].as_bool(), Some(true));
     let count = metadata["training_ops_count"].as_u64().unwrap_or(0);
     assert!(count > 0, "Should report dropped training ops count > 0");
@@ -251,9 +274,7 @@ fn test_quantized_matmul_export_still_works() {
 
     let json = result.unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should parse");
-    let nodes = parsed["nodes"]
-        .as_array()
-        .expect("nodes should be array");
+    let nodes = parsed["nodes"].as_array().expect("nodes should be array");
 
     let has_qlinear = nodes
         .iter()
