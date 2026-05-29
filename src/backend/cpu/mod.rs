@@ -1928,11 +1928,14 @@ impl Backend for CpuBackend {
     }
 
     fn allocate_arena(&self, total_bytes: usize) -> CpuBuffer {
-        // No need to zero-fill — every output slot is written before read
-        let mut buf = Vec::with_capacity(total_bytes);
-        unsafe {
-            buf.set_len(total_bytes);
-        }
+        // Zero-fill the arena to guarantee deterministic behavior across
+        // platform allocators.  On Linux, mmap-backed pages are typically
+        // zero-filled by the kernel, but macOS and Windows allocators may
+        // return reused memory with non-zero contents.  Zero-initialization
+        // ensures that any kernel that fails to write its output slot
+        // (e.g. due to a missed dispatch path) produces zeros instead of
+        // platform-dependent garbage.
+        let buf = vec![0u8; total_bytes];
         CpuBuffer::new(buf)
     }
 
