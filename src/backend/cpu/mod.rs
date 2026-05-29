@@ -17,6 +17,7 @@ use bytemuck;
 use std::cell::UnsafeCell;
 use std::sync::atomic::Ordering;
 
+mod arena;
 pub mod blas;
 pub mod flash_attn;
 pub mod im2col;
