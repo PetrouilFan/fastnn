@@ -11,10 +11,15 @@ struct TpParams {
 /// Cached transpose shader source — built once, reused for every dispatch.
 pub(crate) fn cached_transpose_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_transpose_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_transpose_shader_inner()
+        })
+    }
 }
 
 dispatch_gpu_compute!(
