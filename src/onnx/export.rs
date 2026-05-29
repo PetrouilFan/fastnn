@@ -23,8 +23,10 @@ pub struct ExportConfig {
     /// When `true`, export will fail with an explicit error if the graph
     /// contains training-only opcodes (optimizer updates, gradient scaling).
     ///
-    /// When `false` (default for backward compat), training opcodes are
-    /// silently dropped from the export — **this can produce a wrong graph**.
+    /// When `false`, training opcodes are intentionally dropped from the export
+    /// and the output metadata records that omission. This preserves an opt-in
+    /// inference-only export path, but **can produce a wrong graph** if used on
+    /// a graph where the training outputs matter.
     ///
     /// # Recommendation
     ///
@@ -44,8 +46,8 @@ impl Default for ExportConfig {
 /// Returns the list of opcodes that are **only meaningful in a training graph**
 /// and have no standard ONNX representation.
 ///
-/// If any of these appear in a `ComputeGraph`, the exported ONNX JSON would
-/// silently drop them, producing a graph that may execute but produces wrong
+/// If any of these appear in a `ComputeGraph`, default export fails rather than
+/// dropping them and producing a graph that may execute but produces wrong
 /// results (missing optimizer steps, missing gradient scaling, etc.).
 const TRAINING_ONLY_OPCODES: &[fn(&Opcode) -> bool] = &[
     |op| matches!(op, Opcode::SgdUpdate),
