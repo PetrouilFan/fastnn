@@ -573,6 +573,9 @@ pub fn tighten_slices(
 ) -> Result<(), BackendError> {
     // Build an offset → tightened_size map for non-CallKernel instructions
     // (Fill, MemCopy, WriteConst) that don't carry a node_id.
+    // Note: in-place reuse candidates share the same offset as their
+    // input node, but since both have identical sizes, the HashMap
+    // collision is harmless (min(sz, current) = sz for both).
     let mut offset_size: HashMap<usize, usize> = HashMap::new();
     for (_node_id, slot) in &tightened_memory_plan.slots {
         offset_size.insert(slot.offset, slot.size);
