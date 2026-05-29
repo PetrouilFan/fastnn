@@ -1,7 +1,5 @@
-use super::PendingRead;
-use crate::backend::wgpu::context::WgpuContext;
-use crate::backend::BackendError;
 use crate::dispatch_gpu_compute;
+use std::sync::OnceLock;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -10,9 +8,18 @@ struct SfParams {
     row_size: u32,
 }
 
+/// Cached softmax shader source — built once, reused for every dispatch.
+pub(crate) fn cached_softmax_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| {
+        super::pipeline::record_shader_miss();
+        build_softmax_shader_inner()
+    })
+}
+
 dispatch_gpu_compute!(
     dispatch_softmax_gpu,
-    build_softmax_shader(),
+    cached_softmax_shader(),
     "softmax",
     input,
     arg1,
@@ -28,7 +35,7 @@ dispatch_gpu_compute!(
     ((arg1 as u32) / (if arg2 > 0 { arg2 as u32 } else { 1u32 })).div_ceil(256),
 );
 
-fn build_softmax_shader() -> String {
+fn build_softmax_shader_inner() -> String {
     r#"
 @group(0) @binding(0) var<storage, read>     input:  array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
