@@ -254,19 +254,29 @@ pub(super) fn dispatch_quantized_conv_gpu(
 /// Cached quantized matmul shader for u4 (items=8).
 pub(crate) fn cached_quantized_u4_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_quantized_matmul_shader_inner(8)
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_quantized_matmul_shader_inner(8)
+        })
+    }
 }
 
 /// Cached quantized matmul shader for u8 (items=4).
 pub(crate) fn cached_quantized_u8_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_quantized_matmul_shader_inner(4)
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_quantized_matmul_shader_inner(4)
+        })
+    }
 }
 
 /// Return the cached shader for the given bit width (4 or 8).
@@ -322,7 +332,6 @@ fn dispatch_quantized_gemm_gpu(
         zd
     };
 
-    super::pipeline::record_shader_hit();
     let shader_src = cached_quantized_shader(bit_width);
     let short_key = format!("quantized_matmul_u{}", bit_width);
     super::pipeline::ensure_quantized_compute_pipeline(ctx, &short_key, shader_src)

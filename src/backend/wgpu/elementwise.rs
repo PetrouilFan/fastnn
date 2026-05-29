@@ -58,10 +58,15 @@ pub(super) fn elementwise_opcode(kernel_name: &str) -> Option<u32> {
 /// Cached elementwise shader source — built once, reused for every dispatch.
 pub(crate) fn cached_elementwise_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_elementwise_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_elementwise_shader_inner()
+        })
+    }
 }
 
 pub(super) fn dispatch_elementwise_gpu(
@@ -76,7 +81,6 @@ pub(super) fn dispatch_elementwise_gpu(
     extra1: u32,
     cpu_offset: usize,
 ) -> Result<(), BackendError> {
-    super::pipeline::record_shader_hit();
     let shader_src = cached_elementwise_shader();
     super::pipeline::ensure_compute_pipeline(ctx, "element_wise", shader_src)
         .map_err(BackendError::Dispatch)?;
