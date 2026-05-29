@@ -18,6 +18,74 @@
 use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
 use std::collections::{HashMap, HashSet};
 
+/// Configuration for ONNX export behavior.
+pub struct ExportConfig {
+    /// When `true`, export will fail with an explicit error if the graph
+    /// contains training-only opcodes (optimizer updates, gradient scaling).
+    ///
+    /// When `false`, training opcodes are intentionally dropped from the export
+    /// and the output metadata records that omission. This preserves an opt-in
+    /// inference-only export path, but **can produce a wrong graph** if used on
+    /// a graph where the training outputs matter.
+    ///
+    /// # Recommendation
+    ///
+    /// Always set `fail_on_training_ops: true` unless you have verified that
+    /// the training opcodes in the graph are intentionally irrelevant.
+    pub fail_on_training_ops: bool,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            fail_on_training_ops: true,
+        }
+    }
+}
+
+/// Returns the list of opcodes that are **only meaningful in a training graph**
+/// and have no standard ONNX representation.
+///
+/// If any of these appear in a `ComputeGraph`, default export fails rather than
+/// dropping them and producing a graph that may execute but produces wrong
+/// results (missing optimizer steps, missing gradient scaling, etc.).
+const TRAINING_ONLY_OPCODES: &[fn(&Opcode) -> bool] = &[
+    |op| matches!(op, Opcode::SgdUpdate),
+    |op| matches!(op, Opcode::AdamUpdate),
+    |op| matches!(op, Opcode::AdamWUpdate),
+    |op| matches!(op, Opcode::MuonUpdate),
+    |op| matches!(op, Opcode::LionUpdate),
+    |op| matches!(op, Opcode::RmspropUpdate),
+    |op| matches!(op, Opcode::GradientScale),
+];
+
+/// Detect training-only opcodes present in the graph.
+///
+/// Returns a list of `(node_id, opcode_name)` pairs for every node whose
+/// opcode has no standard ONNX representation and is only meaningful during
+/// training (optimizer updates, gradient scaling).
+///
+/// An empty return value means the graph is safe for ONNX inference export.
+pub fn detect_training_ops(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
+    let order = graph.topological_sort();
+    let mut found = Vec::new();
+
+    for &node_id in &order {
+        if let Some(node) = graph.get_node(node_id) {
+            for check in TRAINING_ONLY_OPCODES {
+                if check(&node.opcode) {
+                    let name = format!("{:?}", node.opcode);
+                    let onnx_name = name.strip_prefix("Opcode::").unwrap_or(&name);
+                    found.push((node_id, onnx_name.to_string()));
+                    break;
+                }
+            }
+        }
+    }
+
+    found
+}
+
 /// ONNX node representation for export JSON.
 #[derive(Debug, Clone, serde::Serialize)]
 struct OnnxExportNode {
@@ -241,7 +309,50 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
 /// Export a ComputeGraph to ONNX JSON format.
 ///
 /// Returns a JSON string that can be re-imported via [`OnnxConverter`].
+///
+/// # Training Safety
+///
+/// By default, this function returns an error if the graph contains
+/// training-only opcodes (optimizer updates, gradient scaling). Pass
+/// `ExportConfig { fail_on_training_ops: false }` to silently drop them,
+/// but be aware this **can produce a wrong graph**.
 pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
+    export_to_onnx_json_with_config(graph, &ExportConfig::default())
+}
+
+/// Export a ComputeGraph to ONNX JSON format with explicit configuration.
+///
+/// This is the primary export entry point. It validates the graph against
+/// the provided configuration and returns a JSON string suitable for
+/// re-import via [`OnnxConverter`].
+pub fn export_to_onnx_json_with_config(
+    graph: &ComputeGraph,
+    config: &ExportConfig,
+) -> Result<String, String> {
+    // ── Phase 0: Training safety check ──────────────────────────────
+    let training_ops = detect_training_ops(graph);
+    if config.fail_on_training_ops && !training_ops.is_empty() {
+        let opcodes: Vec<String> = training_ops
+            .iter()
+            .map(|(id, name)| format!("node {} ({})", id, name))
+            .collect();
+        return Err(format!(
+            "ONNX export failed: graph contains {} training-only opcode(s) \
+             that have no standard ONNX representation and would be silently \
+             dropped, producing a wrong graph: {}.\n\n\
+             Training opcodes in fastnn (SgdUpdate, AdamUpdate, AdamWUpdate, \
+             MuonUpdate, LionUpdate, RmspropUpdate, GradientScale) are executed \
+             by the fastnn compiled training pipeline and cannot be faithfully \
+             represented in the ONNX inference format.\n\n\
+             To export this graph for inference only, remove training nodes \
+             (optimizer steps, gradient scaling) before export, or set \
+             `ExportConfig {{ fail_on_training_ops: false }}` to explicitly \
+             acknowledge that training nodes will be dropped.",
+            training_ops.len(),
+            opcodes.join(", ")
+        ));
+    }
+
     let order = graph.topological_sort();
 
     // Phase 1: detect quantized patterns
@@ -588,6 +699,11 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
         "params": params,
         "input_names": input_names,
         "output_names": output_names,
+        "metadata": {
+            "export_mode": "inference",
+            "training_ops_dropped": !training_ops.is_empty(),
+            "training_ops_count": training_ops.len(),
+        },
     });
 
     serde_json::to_string_pretty(&export_obj)
@@ -597,5 +713,15 @@ pub fn export_to_onnx_json(graph: &ComputeGraph) -> Result<String, String> {
 /// Export a ComputeGraph to an ONNX JSON file.
 pub fn export_to_onnx_file(graph: &ComputeGraph, path: &str) -> Result<(), String> {
     let json = export_to_onnx_json(graph)?;
+    std::fs::write(path, &json).map_err(|e| format!("ONNX export file write: {}", e))
+}
+
+/// Export a ComputeGraph to an ONNX JSON file with explicit configuration.
+pub fn export_to_onnx_file_with_config(
+    graph: &ComputeGraph,
+    path: &str,
+    config: &ExportConfig,
+) -> Result<(), String> {
+    let json = export_to_onnx_json_with_config(graph, config)?;
     std::fs::write(path, &json).map_err(|e| format!("ONNX export file write: {}", e))
 }

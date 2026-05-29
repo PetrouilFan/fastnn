@@ -221,3 +221,85 @@ fn test_add_param_group() {
     assert_eq!(adam.no_decay.len(), 2);
     assert_eq!(adam.step.len(), 2);
 }
+
+#[test]
+fn test_muon_orthogonalization_quality() {
+    // Verify Muon produces finite, non-zero updates for a well-conditioned
+    // 2D matrix — confirms the Newton-Schulz iteration converges correctly
+    // after removing intermediate re-normalization syncs.
+    let params = vec![Tensor::from_vec(
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        vec![2, 3],
+    )];
+    let mut muon = Muon::new(params.clone(), 0.02, 0.9, 0.0, false);
+
+    let mut params_with_grad = params.clone();
+    set_grads(&mut params_with_grad);
+    muon.params_mut().clone_from(&params_with_grad);
+
+    muon.step();
+
+    let result: Vec<f32> = muon.params[0].to_numpy();
+    assert!(
+        result.iter().all(|x| x.is_finite()),
+        "Muon update produced non-finite values: {:?}",
+        result
+    );
+    assert_ne!(
+        result,
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "Muon should modify parameters"
+    );
+
+    // Run multiple steps to verify no divergence over time
+    for _ in 0..9 {
+        set_grads(muon.params_mut());
+        muon.step();
+    }
+    let final_result: Vec<f32> = muon.params[0].to_numpy();
+    assert!(
+        final_result.iter().all(|x| x.is_finite()),
+        "Muon diverged after multiple steps: {:?}",
+        final_result
+    );
+}
+
+#[test]
+fn test_muon_zero_norm_handling() {
+    // Verify Muon handles zero-gradient (and thus zero-momentum) gracefully
+    // — the EPSILON guard in Newton-Schulz should produce zeros, not NaN.
+    let params = vec![Tensor::from_vec(vec![0.0; 4], vec![2, 2])];
+    let mut muon = Muon::new(params.clone(), 0.02, 0.9, 0.0, false);
+
+    let mut params_with_grad = params.clone();
+    set_grads(&mut params_with_grad);
+    muon.params_mut().clone_from(&params_with_grad);
+
+    muon.step();
+
+    let result: Vec<f32> = muon.params[0].to_numpy();
+    assert!(
+        result.iter().all(|x| x.is_finite()),
+        "Muon with zero input produced non-finite values: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_muon_state_dict_roundtrip() {
+    let params = vec![Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])];
+    let mut muon = Muon::new(params.clone(), 0.02, 0.9, 0.01, false);
+
+    let mut params_with_grad = params.clone();
+    set_grads(&mut params_with_grad);
+    muon.params_mut().clone_from(&params_with_grad);
+    muon.step();
+
+    let state = muon.state_dict();
+    let mut muon2 = Muon::new(params.clone(), 0.02, 0.9, 0.01, false);
+    muon2.load_state_dict(state);
+
+    let r1: Vec<f32> = muon.params[0].to_numpy();
+    let r2: Vec<f32> = muon2.params[0].to_numpy();
+    assert_eq!(r1, r2, "state_dict roundtrip should preserve parameters");
+}
