@@ -35,7 +35,15 @@ impl Muon {
         }
     }
 
-    /// Newton-Schulz iteration for orthogonalization in-place
+    /// Newton-Schulz iteration for orthogonalization in-place.
+    ///
+    /// Performs `num_iterations` steps of `X = 1.5*X - 0.5*X*X^T*X` after an
+    /// initial Frobenius-norm normalization.  Intermediate re-normalizations
+    /// have been removed: the cubic convergence of the iteration keeps the
+    /// iterates bounded, and a single initial normalization is sufficient for
+    /// well-conditioned momentum buffers.  This eliminates 5 per-parameter
+    /// GPU→CPU scalar extraction sync points that previously occurred inside
+    /// the loop (one `.item()` call per iteration).
     fn newton_schulz_iteration_inplace(a: &Tensor, num_iterations: usize, out: &mut Tensor) {
         // Compute Frobenius norm: sqrt(sum(x * x))
         let norm_squared = a.mul(a).sum(-1, false).sum(-1, false);
@@ -50,7 +58,6 @@ impl Muon {
         }
 
         // Normalize by Frobenius norm to ensure numerical stability
-        // Add epsilon to prevent division by zero
         let norm_safe = Tensor::from_scalar(norm_val + EPSILON);
         *out = a.clone();
         out.div_(&norm_safe);
@@ -65,17 +72,6 @@ impl Muon {
             x_x_t_x.mul_scalar_(0.5);
             out.mul_scalar_(1.5);
             out.sub_(&x_x_t_x);
-
-            // Re-normalize after each iteration for stability
-            let x_norm_squared = out.mul(out).sum(-1, false).sum(-1, false);
-            let x_norm = x_norm_squared.sqrt();
-            let x_norm_val = x_norm.item();
-            if x_norm_val < EPSILON {
-                *out = Tensor::zeros(out.shape(), out.dtype(), out.device());
-                return;
-            }
-            let x_norm_safe = Tensor::from_scalar(x_norm_val + EPSILON);
-            out.div_(&x_norm_safe);
         }
     }
 }
