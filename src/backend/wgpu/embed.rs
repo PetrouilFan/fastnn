@@ -1,6 +1,7 @@
 use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use std::sync::OnceLock;
 
 pub(super) fn dispatch_embed_gpu(
     ctx: &mut WgpuContext,
@@ -38,8 +39,9 @@ pub(super) fn dispatch_embed_gpu(
     let indices_raw = read_raw(0);
     let weight_raw = read_raw(1);
 
-    let shader = build_embed_shader();
-    super::pipeline::ensure_compute_pipeline(ctx, "embed", &shader)
+    super::pipeline::record_shader_hit();
+    let shader = cached_embed_shader();
+    super::pipeline::ensure_compute_pipeline(ctx, "embed", shader)
         .map_err(BackendError::Dispatch)?;
 
     let buf_indices = ctx.create_buffer(&indices_raw, "embed_indices");
@@ -112,7 +114,16 @@ pub(super) fn dispatch_embed_gpu(
     Ok(())
 }
 
-fn build_embed_shader() -> String {
+/// Cached embedding shader source — built once, reused for every dispatch.
+pub(crate) fn cached_embed_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| {
+        super::pipeline::record_shader_miss();
+        build_embed_shader_inner()
+    })
+}
+
+fn build_embed_shader_inner() -> String {
     // Note: `enable i64;` is required by WGSL when using i64 types.
     // The vocab_size is compared as u64 to avoid truncation when
     // vocab_size > i32::MAX (which would silently bypass the bounds check).
