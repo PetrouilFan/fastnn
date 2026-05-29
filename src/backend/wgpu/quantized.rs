@@ -14,6 +14,7 @@
 use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
+use std::sync::OnceLock;
 
 // ─============================================================================
 // Quantized matmul dispatch (GPU)
@@ -247,6 +248,36 @@ pub(super) fn dispatch_quantized_conv_gpu(
 }
 
 // ─============================================================================
+// Cached quantized shader sources (items=8 → u4, items=4 → u8)
+// ─============================================================================
+
+/// Cached quantized matmul shader for u4 (items=8).
+pub(crate) fn cached_quantized_u4_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| {
+        super::pipeline::record_shader_miss();
+        build_quantized_matmul_shader_inner(8)
+    })
+}
+
+/// Cached quantized matmul shader for u8 (items=4).
+pub(crate) fn cached_quantized_u8_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    S.get_or_init(|| {
+        super::pipeline::record_shader_miss();
+        build_quantized_matmul_shader_inner(4)
+    })
+}
+
+/// Return the cached shader for the given bit width (4 or 8).
+fn cached_quantized_shader(bit_width: usize) -> &'static str {
+    match bit_width {
+        4 => cached_quantized_u4_shader(),
+        _ => cached_quantized_u8_shader(),
+    }
+}
+
+// ─============================================================================
 // Shared GPU quantized GEMM dispatch
 // ─============================================================================
 
@@ -291,9 +322,10 @@ fn dispatch_quantized_gemm_gpu(
         zd
     };
 
-    let shader_src = build_quantized_matmul_shader(items);
+    super::pipeline::record_shader_hit();
+    let shader_src = cached_quantized_shader(bit_width);
     let short_key = format!("quantized_matmul_u{}", bit_width);
-    super::pipeline::ensure_quantized_compute_pipeline(ctx, &short_key, &shader_src)
+    super::pipeline::ensure_quantized_compute_pipeline(ctx, &short_key, shader_src)
         .map_err(BackendError::Dispatch)?;
     let pipeline_key = format!("wgpu_backend_quantized_{}", short_key);
     let pipeline = &ctx.pipelines[&pipeline_key];
@@ -394,7 +426,7 @@ fn dispatch_quantized_gemm_gpu(
 ///   3: zero_points   (array<f32>)
 ///   4: output        (array<f32>)
 ///   5: params        (uniform QuantParams)
-fn build_quantized_matmul_shader(items: usize) -> String {
+fn build_quantized_matmul_shader_inner(items: usize) -> String {
     let unpack_fn = if items == 8 {
         r#"
 fn unpack_word(word: u32, lane: u32) -> f32 {
