@@ -237,6 +237,10 @@ impl Backend for WgpuBackend {
                     let end = (pr.cpu_offset + result.len()).min(data.len());
                     data[pr.cpu_offset..end].copy_from_slice(&result[..end - pr.cpu_offset]);
                 }
+                // Release output buffers back to pool for reuse.
+                for pr in pending_reads.drain(..) {
+                    ctx.release_buffer_to_pool(pr.buffer, pr.size);
+                }
             }
 
             Ok(())

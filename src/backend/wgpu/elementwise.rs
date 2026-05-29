@@ -85,16 +85,11 @@ pub(super) fn dispatch_elementwise_gpu(
     super::pipeline::ensure_compute_pipeline(ctx, "element_wise", shader_src)
         .map_err(BackendError::Dispatch)?;
 
-    let buf0 = ctx.create_buffer(bytemuck::cast_slice(input0), "ew_input0");
-    let buf1 = ctx.create_buffer(bytemuck::cast_slice(input1), "ew_input1");
+    let buf0 = ctx.create_pooled_buffer(bytemuck::cast_slice(input0), "ew_input0");
+    let buf1 = ctx.create_pooled_buffer(bytemuck::cast_slice(input1), "ew_input1");
 
     let output_size = (numel * 4) as u64;
-    let output_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("ew_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output_buf = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
