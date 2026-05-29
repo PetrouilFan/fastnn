@@ -114,7 +114,10 @@ pub(super) fn with_binary_f32_slices<R>(
 
 #[inline]
 pub(super) fn read_scalar_f32(arena: &CpuBuffer, scalar: BufferSlice) -> f32 {
-    assert_eq!(scalar.size, std::mem::size_of::<f32>());
+    assert!(
+        scalar.size >= std::mem::size_of::<f32>(),
+        "scalar BufferSlice must contain at least one f32"
+    );
     let scalar_end = checked_end(scalar);
     let arena_bytes = arena.data_mut();
     assert_slice_in_bounds(arena_bytes.len(), scalar, scalar_end);
