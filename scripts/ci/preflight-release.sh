@@ -51,10 +51,15 @@ else
   warn "Branch '$BRANCH' is not a typical release branch (main/dev/agent/*). Intentional?"
 fi
 
-if [ "$(git log --oneline -1 --format='%H' HEAD)" = "$(git log --oneline -1 --format='%H' v2.2.4 2>/dev/null)" ]; then
-  pass "HEAD matches v2.2.4 tag"
+LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+if [ -n "$LATEST_TAG" ]; then
+  if [ "$(git rev-parse HEAD)" = "$(git rev-parse "$LATEST_TAG" 2>/dev/null)" ]; then
+    pass "HEAD matches latest tag ($LATEST_TAG)"
+  else
+    warn "HEAD does not match latest tag ($LATEST_TAG) — a new tag will be created on a different commit"
+  fi
 else
-  warn "HEAD does not match v2.2.4 — a new tag will be created on a different commit"
+  warn "No existing release tag found"
 fi
 
 # ── 3. Version consistency ───────────────────────────────────────────────────
