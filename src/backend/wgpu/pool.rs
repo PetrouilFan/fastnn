@@ -48,7 +48,7 @@ pub(super) fn dispatch_pool_gpu(
     super::pipeline::ensure_compute_pipeline(ctx, "pool", &shader)
         .map_err(BackendError::Dispatch)?;
 
-    let buf_input = ctx.create_buffer(bytemuck::cast_slice(&input_data), "pool_input");
+    let buf_input = ctx.create_pooled_buffer(bytemuck::cast_slice(&input_data), "pool_input");
     let buf_dummy = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pool_dummy"),
         size: 4,
@@ -57,12 +57,7 @@ pub(super) fn dispatch_pool_gpu(
     });
 
     let output_size = (output_len * 4) as u64;
-    let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("pool_output"),
-        size: output_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
     #[repr(C)]
     #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
