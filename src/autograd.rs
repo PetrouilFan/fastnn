@@ -1174,6 +1174,46 @@ mod tests {
         assert!(a.grad().is_none(), "a should not have grad");
         assert!(b.grad().is_none(), "b should not have grad");
     }
+
+    /// Regression test: verify arena zero-initialization produces correct
+    /// gradients on all platforms (macOS aarch64, Linux x86_64, Windows).
+    ///
+    /// Previously, `allocate_arena` used `Vec::with_capacity` + `set_len`
+    /// (uninitialized memory).  On macOS, the allocator does not guarantee
+    /// zero-filled pages, which caused all-zero outputs in compiled
+    /// execution tests.
+    #[test]
+    fn test_training_step_nonzero_gradients() {
+        let a = seq_tensor(4).requires_grad_(true);
+        let b = seq_tensor(4).requires_grad_(true);
+        let c = a.mul(&b);
+        let loss = c.mean(0, false);
+
+        backward(&loss, None);
+
+        let grad_a = a.grad().expect("a should have grad");
+        let grad_b = b.grad().expect("b should have grad");
+
+        let grad_a_sum: f32 = unsafe {
+            let ptr = grad_a.data_ptr_f32() as *const f32;
+            (0..4).map(|i| *ptr.add(i)).sum()
+        };
+        let grad_b_sum: f32 = unsafe {
+            let ptr = grad_b.data_ptr_f32() as *const f32;
+            (0..4).map(|i| *ptr.add(i)).sum()
+        };
+
+        assert!(
+            grad_a_sum.abs() > 0.0,
+            "mul backward grad_a should be non-zero, got {}",
+            grad_a_sum
+        );
+        assert!(
+            grad_b_sum.abs() > 0.0,
+            "mul backward grad_b should be non-zero, got {}",
+            grad_b_sum
+        );
+    }
 }
 
 pub fn make_edges(tensor_a: &Tensor, tensor_b: &Tensor) -> Vec<Edge> {
