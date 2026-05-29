@@ -189,6 +189,7 @@ impl Backend for WgpuBackend {
                             let single_plan = ExecutablePlan {
                                 instructions: vec![instr.clone()],
                                 arena_size: plan.arena_size,
+                                levels: vec![0],
                             };
                             cpu.dispatch(&single_plan, &cpu_buf, shape_env)?;
 
