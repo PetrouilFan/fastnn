@@ -6,10 +6,15 @@ use std::sync::OnceLock;
 /// Cached matmul shader source — built once, reused for every dispatch.
 pub(crate) fn cached_matmul_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_matmul_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_matmul_shader_inner()
+        })
+    }
 }
 
 pub(super) fn dispatch_matmul_gpu(
@@ -39,7 +44,6 @@ pub(super) fn dispatch_matmul_gpu(
     let a_data = read_slice(0);
     let b_data = read_slice(1);
 
-    super::pipeline::record_shader_hit();
     let shader = cached_matmul_shader();
     super::pipeline::ensure_compute_pipeline(ctx, "matmul", shader)
         .map_err(BackendError::Dispatch)?;
@@ -118,10 +122,15 @@ pub(super) fn dispatch_matmul_gpu(
 /// Cached matmul+activation shader source — built once, reused for every dispatch.
 pub(crate) fn cached_matmul_activation_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_matmul_activation_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_matmul_activation_shader_inner()
+        })
+    }
 }
 
 pub(super) fn dispatch_matmul_activation_gpu(
@@ -162,7 +171,6 @@ pub(super) fn dispatch_matmul_activation_gpu(
     let bias_data: Vec<f32> = if has_bias { read_slice(2) } else { vec![0.0] };
     let bias_len: u32 = if has_bias { n as u32 } else { 0 };
 
-    super::pipeline::record_shader_hit();
     let shader = cached_matmul_activation_shader();
     super::pipeline::ensure_matmul_activation_pipeline(ctx, "matmul_activation", shader)
         .map_err(BackendError::Dispatch)?;

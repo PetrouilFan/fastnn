@@ -13,10 +13,15 @@ struct RdParams {
 /// Cached reduce shader source — built once, reused for every dispatch.
 pub(crate) fn cached_reduce_shader() -> &'static str {
     static S: OnceLock<String> = OnceLock::new();
-    S.get_or_init(|| {
-        super::pipeline::record_shader_miss();
-        build_reduce_shader_inner()
-    })
+    if let Some(shader) = S.get() {
+        super::pipeline::record_shader_hit();
+        shader
+    } else {
+        S.get_or_init(|| {
+            super::pipeline::record_shader_miss();
+            build_reduce_shader_inner()
+        })
+    }
 }
 
 dispatch_gpu_compute!(
