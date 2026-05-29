@@ -86,15 +86,10 @@ macro_rules! dispatch_gpu_compute {
             )
             .map_err($crate::backend::BackendError::Dispatch)?;
 
-            let buf_in =
-                ctx.create_buffer(bytemuck::cast_slice($input), concat!($shader_key, "_input"));
+            let buf_in = ctx
+                .create_pooled_buffer(bytemuck::cast_slice($input), concat!($shader_key, "_input"));
             let output_size: u64 = $output_size.max(1); // WGPU requires non-zero buffer size
-            let buf_out = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(concat!($shader_key, "_output")),
-                size: output_size,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
+            let buf_out = ctx.acquire_buffer_for_size(output_size as usize);
 
             let params = $params;
             let buf_params = ctx.create_uniform_buffer(&params, concat!($shader_key, "_params"));
