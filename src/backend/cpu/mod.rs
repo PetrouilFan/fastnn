@@ -3489,20 +3489,48 @@ impl Backend for CpuBackend {
 
                     match kernel_name.as_str() {
                         "add_f32" => {
-                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
-                            add_f32(&a, &b, out_f32);
+                            fused_binary_activation_dispatch(
+                                "add_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a + b,
+                                |x| x,
+                            );
                         }
                         "sub_f32" => {
-                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
-                            sub_f32(&a, &b, out_f32);
+                            fused_binary_activation_dispatch(
+                                "sub_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a - b,
+                                |x| x,
+                            );
                         }
                         "mul_f32" => {
-                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
-                            mul_f32(&a, &b, out_f32);
+                            fused_binary_activation_dispatch(
+                                "mul_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a * b,
+                                |x| x,
+                            );
                         }
                         "div_f32" => {
-                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
-                            div_f32(&a, &b, out_f32);
+                            fused_binary_activation_dispatch(
+                                "div_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a, b| a / b,
+                                |x| x,
+                            );
                         }
                         "relu_f32" => {
                             unary_op_dispatch(input_slices, arena, out_start, out_end, relu_f32);
