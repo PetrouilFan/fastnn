@@ -101,7 +101,7 @@ fn scalar_add_compiled_disjoint_graph_has_zero_arena_temp_copies() {
 }
 
 #[test]
-fn plain_binary_add_compiled_graph_reports_current_same_shape_copy_fallback() {
+fn plain_binary_add_compiled_disjoint_graph_has_zero_arena_temp_copies() {
     let _guard = TELEMETRY_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -127,13 +127,10 @@ fn plain_binary_add_compiled_graph_reports_current_same_shape_copy_fallback() {
         .collect();
     assert_close(&actual, &expected);
     assert_eq!(
-        snapshot.arena_temp_copies, 2,
-        "same-shape plain add currently copies both inputs before dispatch; snapshot={snapshot:?}"
+        snapshot.arena_temp_copies, 0,
+        "same-shape plain add should borrow disjoint arena input/output directly; snapshot={snapshot:?}"
     );
-    assert_eq!(
-        snapshot.arena_temp_copy_bytes,
-        (lhs_bytes.len() + rhs_bytes.len()) as u64
-    );
+    assert_eq!(snapshot.arena_temp_copy_bytes, 0);
 }
 
 #[test]
