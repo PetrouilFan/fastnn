@@ -1,6 +1,6 @@
 use crate::backend::BufferSlice;
 
-use super::{add_f32, arena, div_f32, microkernels, mul_f32, sub_f32, telemetry, CpuBuffer};
+use super::{add_f32, arena, div_f32, microkernels, mul_f32, sub_f32, CpuBuffer};
 
 /// Compute a fused binary op + activation over already-extracted f32 slices.
 ///
@@ -90,10 +90,9 @@ fn fused_binary_activation_dispatch_slices(
 /// Helper: extract two f32 slices from the arena, broadcast-loop with a binary op
 /// and activation function, and write the result to the output slice.
 ///
-/// Same-shape binary elementwise dispatch uses the arena helper so disjoint
-/// input/output ranges can be borrowed directly without temporary copies. For
-/// broadcast or mismatched-length inputs, fall back to the prior copy path to
-/// preserve modulo/broadcast semantics exactly.
+/// Disjoint input/output ranges are borrowed directly for both same-shape and
+/// modulo-broadcast fallback semantics. If the output overlaps either input,
+/// fall back to copied inputs so in-place/overlapping execution remains safe.
 #[inline]
 pub(super) fn fused_binary_activation_dispatch(
     kernel_name: &str,
@@ -106,37 +105,9 @@ pub(super) fn fused_binary_activation_dispatch(
 ) {
     if let [a_slice, b_slice] = &input_slices[..] {
         let output_slice = BufferSlice::new(out_start, out_end - out_start);
-
-        if a_slice.size == output_slice.size && b_slice.size == output_slice.size {
-            arena::with_binary_f32_slices(
-                arena,
-                *a_slice,
-                *b_slice,
-                output_slice,
-                |a, b, out_f32| {
-                    fused_binary_activation_dispatch_slices(kernel_name, a, b, out_f32, &op, &act);
-                },
-            );
-            return;
-        }
-
-        let (a, b) = {
-            let d = arena.data_mut();
-            telemetry::record_arena_temp_copy(a_slice.size);
-            telemetry::record_arena_temp_copy(b_slice.size);
-            (
-                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
-                    .to_vec(),
-                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
-                    .to_vec(),
-            )
-        };
-        let out_f32 = {
-            let d = arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-        };
-
-        fused_binary_activation_dispatch_slices(kernel_name, &a, &b, out_f32, &op, &act);
+        arena::with_binary_f32_slices(arena, *a_slice, *b_slice, output_slice, |a, b, out_f32| {
+            fused_binary_activation_dispatch_slices(kernel_name, a, b, out_f32, &op, &act);
+        });
     }
 }
 
