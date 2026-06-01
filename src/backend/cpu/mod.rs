@@ -272,6 +272,53 @@ fn scalar_op_dispatch(
     }
 }
 
+/// Helper: dispatch a unary f32 op at runtime.
+///
+/// Same-shape unary dispatch uses the arena helper so disjoint input/output
+/// ranges can be borrowed directly without a temporary copy. If the output
+/// aliases the input, the arena helper preserves correctness by copying the
+/// input first. Mismatched lengths keep the previous pre-copy behavior.
+#[inline]
+fn unary_op_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    out_start: usize,
+    out_end: usize,
+    op: impl FnOnce(&[f32], &mut [f32]),
+) {
+    let output_slice = BufferSlice::new(out_start, out_end - out_start);
+
+    if let Some(input_slice) = input_slices.first() {
+        if input_slice.size == output_slice.size {
+            arena::with_unary_f32_slices(arena, *input_slice, output_slice, op);
+            return;
+        }
+
+        let input = {
+            let d = arena.data_mut();
+            let src = bytemuck::cast_slice::<_, f32>(
+                &d[input_slice.offset..input_slice.offset + input_slice.size],
+            );
+            let mut buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(src.len());
+            buf.copy_from_slice(src);
+            telemetry::record_arena_temp_copy(input_slice.size);
+            buf
+        };
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        op(&input, out_f32);
+    } else {
+        let input = crate::backend::cpu::microkernels::TlsVecPool::alloc(0);
+        let out_f32 = {
+            let d = arena.data_mut();
+            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+        };
+        op(&input, out_f32);
+    }
+}
+
 #[cfg(test)]
 mod scalar_dispatch_tests {
     use super::*;
@@ -329,6 +376,65 @@ mod scalar_dispatch_tests {
         );
 
         assert_eq!(read_f32s(&arena, output), vec![11.0, 12.0, 13.0, 14.0]);
+        assert!(telemetry::cpu_telemetry_snapshot().arena_temp_copies >= 1);
+    }
+}
+
+#[cfg(test)]
+mod unary_dispatch_tests {
+    use super::*;
+
+    fn arena_from_f32(values: &[f32]) -> CpuBuffer {
+        CpuBuffer::new(bytemuck::cast_slice(values).to_vec())
+    }
+
+    fn read_f32s(arena: &CpuBuffer, slice: BufferSlice) -> Vec<f32> {
+        let end = slice.offset + slice.size;
+        let data = arena.data_mut();
+        bytemuck::cast_slice::<_, f32>(&data[slice.offset..end]).to_vec()
+    }
+
+    #[test]
+    fn unary_op_dispatch_disjoint_same_shape_avoids_temp_copy() {
+        telemetry::reset_cpu_telemetry();
+        let arena = arena_from_f32(&[-1.0, 2.0, -3.0, 0.0, 0.0, 0.0]);
+        let input = BufferSlice::new(0, 3 * std::mem::size_of::<f32>());
+        let output = BufferSlice::new(
+            3 * std::mem::size_of::<f32>(),
+            3 * std::mem::size_of::<f32>(),
+        );
+
+        unary_op_dispatch(
+            &[input],
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            relu_f32,
+        );
+
+        assert_eq!(read_f32s(&arena, output), vec![0.0, 2.0, 0.0]);
+        assert_eq!(telemetry::cpu_telemetry_snapshot().arena_temp_copies, 0);
+    }
+
+    #[test]
+    fn unary_op_dispatch_overlapping_input_falls_back_to_copy() {
+        telemetry::reset_cpu_telemetry();
+        let arena = arena_from_f32(&[-1.0, 2.0, -3.0, 4.0, 0.0, 0.0]);
+        let input = BufferSlice::new(0, 4 * std::mem::size_of::<f32>());
+        let output = BufferSlice::new(
+            2 * std::mem::size_of::<f32>(),
+            4 * std::mem::size_of::<f32>(),
+        );
+
+        unary_op_dispatch(
+            &[input],
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            relu_f32,
+        );
+
+        assert_eq!(read_f32s(&arena, output), vec![0.0, 2.0, 0.0, 4.0]);
         assert!(telemetry::cpu_telemetry_snapshot().arena_temp_copies >= 1);
     }
 }
@@ -4041,68 +4147,73 @@ impl Backend for CpuBackend {
                             div_f32(&a, &b, out_f32);
                         }
                         "relu_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            relu_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, relu_f32);
                         }
                         "gelu_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            gelu_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, gelu_f32);
                         }
                         "silu_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            silu_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, silu_f32);
                         }
                         "exp_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            exp_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, exp_f32);
                         }
                         "log_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            log_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, log_f32);
                         }
                         "sqrt_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            sqrt_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, sqrt_f32);
                         }
                         "neg_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            neg_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, neg_f32);
                         }
                         "abs_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            abs_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, abs_f32);
                         }
                         "sigmoid_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            sigmoid_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, sigmoid_f32);
                         }
                         "tanh_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            tanh_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, tanh_f32);
                         }
                         "leaky_relu_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
                             let slope = if !params.is_empty() {
                                 f32::from_bits(params[0] as u32)
                             } else {
                                 0.01
                             };
-                            leaky_relu_f32(&input, out_f32, slope);
+                            unary_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |input, out_f32| {
+                                    leaky_relu_f32(input, out_f32, slope);
+                                },
+                            );
                         }
                         "elu_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            elu_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, elu_f32);
                         }
                         "softplus_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            softplus_f32(&input, out_f32);
+                            unary_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                softplus_f32,
+                            );
                         }
                         "hardswish_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            hardswish_f32(&input, out_f32);
+                            unary_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                hardswish_f32,
+                            );
                         }
                         "clamp_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
                             let min_val = if !params.is_empty() {
                                 f32::from_bits(params[0] as u32)
                             } else {
@@ -4113,27 +4224,42 @@ impl Backend for CpuBackend {
                             } else {
                                 1.0
                             };
-                            clamp_f32(&input, out_f32, min_val, max_val);
+                            unary_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |input, out_f32| {
+                                    clamp_f32(input, out_f32, min_val, max_val);
+                                },
+                            );
                         }
                         "sign_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            sign_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, sign_f32);
                         }
                         "round_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            round_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, round_f32);
                         }
                         "logical_not_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            logical_not_f32(&input, out_f32);
+                            unary_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                logical_not_f32,
+                            );
                         }
                         "log_softmax_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            log_softmax_f32(&input, out_f32);
+                            unary_op_dispatch(
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                log_softmax_f32,
+                            );
                         }
                         "mish_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            mish_f32(&input, out_f32);
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, mish_f32);
                         }
                         "max_f32" => {
                             get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
