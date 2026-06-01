@@ -139,3 +139,101 @@ pub(super) fn fused_binary_activation_dispatch(
         fused_binary_activation_dispatch_slices(kernel_name, &a, &b, out_f32, &op, &act);
     }
 }
+
+#[cfg(test)]
+mod elementwise_copy_reduction_tests {
+    use super::*;
+
+    fn arena_from_f32(values: &[f32]) -> CpuBuffer {
+        CpuBuffer::new(bytemuck::cast_slice(values).to_vec())
+    }
+
+    fn read_f32s(arena: &CpuBuffer, start_elem: usize, len: usize) -> Vec<f32> {
+        let start = start_elem * std::mem::size_of::<f32>();
+        let end = start + len * std::mem::size_of::<f32>();
+        let data = arena.data_mut();
+        bytemuck::cast_slice::<_, f32>(&data[start..end]).to_vec()
+    }
+
+    fn f32_slice(start_elem: usize, len: usize) -> BufferSlice {
+        BufferSlice::new(
+            start_elem * std::mem::size_of::<f32>(),
+            len * std::mem::size_of::<f32>(),
+        )
+    }
+
+    #[test]
+    fn elementwise_same_shape_fused_add_relu_correct() {
+        let arena = arena_from_f32(&[
+            -3.0, 1.0, 4.0, 6.0, // a
+            1.0, -5.0, 2.0, -10.0, // b
+            0.0, 0.0, 0.0, 0.0, // output
+        ]);
+        let inputs = vec![f32_slice(0, 4), f32_slice(4, 4)];
+        let output = f32_slice(8, 4);
+
+        fused_binary_activation_dispatch(
+            "add_relu_f32",
+            &inputs,
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            |a, b| a + b,
+            |x| x.max(0.0),
+        );
+
+        assert_eq!(read_f32s(&arena, 8, 4), vec![0.0, 0.0, 6.0, 0.0]);
+    }
+
+    #[test]
+    fn elementwise_broadcast_fused_mul_silu_correct() {
+        let arena = arena_from_f32(&[
+            1.0, -2.0, 3.0, -4.0, // a
+            0.5,  // b broadcasts by modulo
+            0.0, 0.0, 0.0, 0.0, // output
+        ]);
+        let inputs = vec![f32_slice(0, 4), f32_slice(4, 1)];
+        let output = f32_slice(5, 4);
+
+        fused_binary_activation_dispatch(
+            "mul_silu_f32",
+            &inputs,
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            |a, b| a * b,
+            |x| x / (1.0 + (-x).exp()),
+        );
+
+        let got = read_f32s(&arena, 5, 4);
+        let expected: Vec<f32> = [0.5_f32, -1.0, 1.5, -2.0]
+            .iter()
+            .map(|&x| x / (1.0 + (-x).exp()))
+            .collect();
+        for (actual, expected) in got.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn elementwise_same_shape_overlapping_output_uses_safe_result() {
+        let arena = arena_from_f32(&[
+            1.0, 2.0, 3.0, 4.0, // a also overlaps output below
+            10.0, 20.0, 30.0, 40.0, // b
+        ]);
+        let inputs = vec![f32_slice(0, 4), f32_slice(4, 4)];
+        let output = f32_slice(2, 4);
+
+        fused_binary_activation_dispatch(
+            "div_relu_f32",
+            &inputs,
+            &arena,
+            output.offset,
+            output.offset + output.size,
+            |a, b| a / b,
+            |x| x.max(0.0),
+        );
+
+        assert_eq!(read_f32s(&arena, 2, 4), vec![0.1, 0.1, 0.1, 0.1]);
+    }
+}
