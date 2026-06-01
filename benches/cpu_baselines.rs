@@ -30,6 +30,13 @@ struct VecCase {
 }
 
 #[derive(Clone, Copy)]
+struct ArenaBroadcastCase {
+    name: &'static str,
+    batch: usize,
+    hidden: usize,
+}
+
+#[derive(Clone, Copy)]
 struct BroadcastCase {
     name: &'static str,
     batch: usize,
@@ -845,7 +852,6 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
         let rhs = vector_data(case.len, 83);
         let lhs_bytes = bytemuck::cast_slice(&lhs).to_vec();
         let rhs_bytes = bytemuck::cast_slice(&rhs).to_vec();
-        let expected_copy_bytes = (lhs_bytes.len() + rhs_bytes.len()) as u64;
         let builder = GraphBuilder::new();
         let lhs_node = builder.input_with_dims(&[DimExpr::Known(case.len as u64)], IrDType::F32);
         let rhs_node = builder.input_with_dims(&[DimExpr::Known(case.len as u64)], IrDType::F32);
@@ -856,7 +862,7 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
             .compile_with_plan_and_quantize(&graph, None)
             .expect("plain add graph should compile");
         group.bench_with_input(
-            BenchmarkId::new("add_plain_copy_fallback", case.name),
+            BenchmarkId::new("add_plain_zero_copy", case.name),
             &case,
             |bench, _| {
                 bench.iter(|| {
@@ -871,10 +877,72 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
                         .expect("plain add graph should execute");
                     let snapshot = cpu_telemetry_snapshot();
                     assert_eq!(
-                        snapshot.arena_temp_copies, 2,
+                        snapshot.arena_temp_copies, 0,
                         "plain add snapshot={snapshot:?}"
                     );
-                    assert_eq!(snapshot.arena_temp_copy_bytes, expected_copy_bytes);
+                    assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+                    black_box(outputs);
+                });
+            },
+        );
+    }
+
+    let broadcast_cases = [
+        ArenaBroadcastCase {
+            name: "batch16_hidden768",
+            batch: 16,
+            hidden: 768,
+        },
+        ArenaBroadcastCase {
+            name: "batch8_hidden4096",
+            batch: 8,
+            hidden: 4096,
+        },
+    ];
+
+    for case in broadcast_cases {
+        let len = case.batch * case.hidden;
+        group.throughput(Throughput::Elements(len as u64));
+
+        let lhs = vector_data(len, 89);
+        let rhs = vector_data(case.hidden, 97);
+        let lhs_bytes = bytemuck::cast_slice(&lhs).to_vec();
+        let rhs_bytes = bytemuck::cast_slice(&rhs).to_vec();
+        let builder = GraphBuilder::new();
+        let lhs_node = builder.input_with_dims(
+            &[
+                DimExpr::Known(case.batch as u64),
+                DimExpr::Known(case.hidden as u64),
+            ],
+            IrDType::F32,
+        );
+        let rhs_node = builder.input_with_dims(&[DimExpr::Known(case.hidden as u64)], IrDType::F32);
+        let out = builder.add(&lhs_node, &rhs_node);
+        let graph = graph_from(&builder, &out);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = executor
+            .compile_with_plan_and_quantize(&graph, None)
+            .expect("broadcast add graph should compile");
+        group.bench_with_input(
+            BenchmarkId::new("add_broadcast_zero_copy", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    reset_cpu_telemetry();
+                    let outputs = executor
+                        .execute(
+                            &compiled_graph,
+                            &mut plan,
+                            &memory_plan,
+                            &[black_box(&lhs_bytes), black_box(&rhs_bytes)],
+                        )
+                        .expect("broadcast add graph should execute");
+                    let snapshot = cpu_telemetry_snapshot();
+                    assert_eq!(
+                        snapshot.arena_temp_copies, 0,
+                        "broadcast add snapshot={snapshot:?}"
+                    );
+                    assert_eq!(snapshot.arena_temp_copy_bytes, 0);
                     black_box(outputs);
                 });
             },
