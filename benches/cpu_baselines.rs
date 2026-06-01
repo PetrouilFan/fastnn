@@ -1,6 +1,11 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fastnn::backend::cpu::microkernels::{gemm_cpu, gemv_cpu};
+use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::executor::GraphExecutor;
 use fastnn::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use fastnn::ir::builder::{GraphBuilder, GraphTensor};
+use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
 
 #[derive(Clone, Copy)]
@@ -62,6 +67,13 @@ fn vector_data(len: usize, salt: usize) -> Vec<f32> {
     (0..len)
         .map(|i| ((((i * 17 + salt) % 101) as f32) - 50.0) * 0.03125)
         .collect()
+}
+
+fn graph_from(builder: &GraphBuilder, output: &GraphTensor) -> ComputeGraph {
+    let mut graph = builder.to_graph();
+    graph.inputs = builder.recorded_input_ids();
+    graph.outputs = vec![output.node_id()];
+    graph
 }
 
 fn batch_inputs(batch: usize, cols: usize) -> Vec<Vec<f32>> {
@@ -733,6 +745,145 @@ fn bench_training_updates(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cpu_arena_telemetry(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cpu_arena_telemetry");
+    group.warm_up_time(std::time::Duration::from_millis(200));
+    group.measurement_time(std::time::Duration::from_secs(1));
+    group.sample_size(10);
+
+    let cases = [
+        VecCase {
+            name: "1k",
+            len: 1_024,
+        },
+        VecCase {
+            name: "64k",
+            len: 65_536,
+        },
+        VecCase {
+            name: "1m",
+            len: 1_048_576,
+        },
+    ];
+
+    for case in cases {
+        group.throughput(Throughput::Elements(case.len as u64));
+
+        let input = vector_data(case.len, 71);
+        let input_bytes = bytemuck::cast_slice(&input).to_vec();
+        let builder = GraphBuilder::new();
+        let x = builder.input_with_dims(&[DimExpr::Known(case.len as u64)], IrDType::F32);
+        let out = builder.relu(&x);
+        let graph = graph_from(&builder, &out);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = executor
+            .compile_with_plan_and_quantize(&graph, None)
+            .expect("relu graph should compile");
+        group.bench_with_input(
+            BenchmarkId::new("relu_zero_copy", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    reset_cpu_telemetry();
+                    let outputs = executor
+                        .execute(
+                            &compiled_graph,
+                            &mut plan,
+                            &memory_plan,
+                            &[black_box(&input_bytes)],
+                        )
+                        .expect("relu graph should execute");
+                    let snapshot = cpu_telemetry_snapshot();
+                    assert_eq!(snapshot.arena_temp_copies, 0, "relu snapshot={snapshot:?}");
+                    assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+                    black_box(outputs);
+                });
+            },
+        );
+
+        let input = vector_data(case.len, 73);
+        let input_bytes = bytemuck::cast_slice(&input).to_vec();
+        let scalar = 1.25f32;
+        let builder = GraphBuilder::new();
+        let x = builder.input_with_dims(&[DimExpr::Known(case.len as u64)], IrDType::F32);
+        let scalar_node = builder.constant(
+            bytemuck::cast_slice(&[scalar]),
+            TensorType::new(vec![], IrDType::F32),
+        );
+        let out = builder.add_scalar(&x, &scalar_node);
+        let graph = graph_from(&builder, &out);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = executor
+            .compile_with_plan_and_quantize(&graph, None)
+            .expect("add_scalar graph should compile");
+        group.bench_with_input(
+            BenchmarkId::new("add_scalar_zero_copy", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    reset_cpu_telemetry();
+                    let outputs = executor
+                        .execute(
+                            &compiled_graph,
+                            &mut plan,
+                            &memory_plan,
+                            &[black_box(&input_bytes)],
+                        )
+                        .expect("add_scalar graph should execute");
+                    let snapshot = cpu_telemetry_snapshot();
+                    assert_eq!(
+                        snapshot.arena_temp_copies, 0,
+                        "add_scalar snapshot={snapshot:?}"
+                    );
+                    assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+                    black_box(outputs);
+                });
+            },
+        );
+
+        let lhs = vector_data(case.len, 79);
+        let rhs = vector_data(case.len, 83);
+        let lhs_bytes = bytemuck::cast_slice(&lhs).to_vec();
+        let rhs_bytes = bytemuck::cast_slice(&rhs).to_vec();
+        let expected_copy_bytes = (lhs_bytes.len() + rhs_bytes.len()) as u64;
+        let builder = GraphBuilder::new();
+        let lhs_node = builder.input_with_dims(&[DimExpr::Known(case.len as u64)], IrDType::F32);
+        let rhs_node = builder.input_with_dims(&[DimExpr::Known(case.len as u64)], IrDType::F32);
+        let out = builder.add(&lhs_node, &rhs_node);
+        let graph = graph_from(&builder, &out);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let (mut plan, memory_plan, compiled_graph) = executor
+            .compile_with_plan_and_quantize(&graph, None)
+            .expect("plain add graph should compile");
+        group.bench_with_input(
+            BenchmarkId::new("add_plain_copy_fallback", case.name),
+            &case,
+            |bench, _| {
+                bench.iter(|| {
+                    reset_cpu_telemetry();
+                    let outputs = executor
+                        .execute(
+                            &compiled_graph,
+                            &mut plan,
+                            &memory_plan,
+                            &[black_box(&lhs_bytes), black_box(&rhs_bytes)],
+                        )
+                        .expect("plain add graph should execute");
+                    let snapshot = cpu_telemetry_snapshot();
+                    assert_eq!(
+                        snapshot.arena_temp_copies, 2,
+                        "plain add snapshot={snapshot:?}"
+                    );
+                    assert_eq!(snapshot.arena_temp_copy_bytes, expected_copy_bytes);
+                    black_box(outputs);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     cpu_benchmarks,
     bench_gemv,
@@ -740,6 +891,7 @@ criterion_group!(
     bench_elementwise,
     bench_reductions,
     bench_fusions,
-    bench_training_updates
+    bench_training_updates,
+    bench_cpu_arena_telemetry
 );
 criterion_main!(cpu_benchmarks);
