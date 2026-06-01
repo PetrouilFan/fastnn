@@ -1,6 +1,7 @@
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
+use fastnn::backend::Instruction;
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
 use std::sync::Mutex;
@@ -22,14 +23,29 @@ fn graph_from(builder: &GraphBuilder, output: &GraphTensor) -> ComputeGraph {
 }
 
 fn execute_single_output_f32(graph: &ComputeGraph, inputs: &[&[u8]]) -> Vec<f32> {
+    execute_single_output_f32_with_kernels(graph, inputs).0
+}
+
+fn execute_single_output_f32_with_kernels(
+    graph: &ComputeGraph,
+    inputs: &[&[u8]],
+) -> (Vec<f32>, Vec<String>) {
     let mut executor = GraphExecutor::new(CpuBackend);
     let (mut plan, memory_plan, compiled_graph) = executor
         .compile_with_plan_and_quantize(graph, None)
         .expect("graph should compile");
+    let kernels = plan
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::CallKernel { kernel_name, .. } => Some(kernel_name.clone()),
+            _ => None,
+        })
+        .collect();
     let outputs = executor
         .execute(&compiled_graph, &mut plan, &memory_plan, inputs)
         .expect("graph should execute");
-    bytemuck::cast_slice(&outputs[0]).to_vec()
+    (bytemuck::cast_slice(&outputs[0]).to_vec(), kernels)
 }
 
 fn assert_close(actual: &[f32], expected: &[f32]) {
@@ -207,6 +223,50 @@ fn plain_binary_broadcast_add_compiled_disjoint_graph_has_zero_arena_temp_copies
     assert_eq!(
         snapshot.arena_temp_copies, 0,
         "broadcast plain add should borrow disjoint arena input/output directly; snapshot={snapshot:?}"
+    );
+    assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+}
+
+#[test]
+fn fused_binary_activation_broadcast_add_relu_has_zero_arena_temp_copies() {
+    let _guard = TELEMETRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let width = 17usize;
+    let len = LEN * width;
+    let builder = GraphBuilder::new();
+    let lhs = builder.input_with_dims(
+        &[DimExpr::Known(LEN as u64), DimExpr::Known(width as u64)],
+        IrDType::F32,
+    );
+    let rhs = builder.input_with_dims(&[DimExpr::Known(width as u64)], IrDType::F32);
+    let add = builder.add(&lhs, &rhs);
+    let output = builder.relu(&add);
+    let graph = graph_from(&builder, &output);
+
+    let lhs_values = vector_data(len, 43);
+    let rhs_values = vector_data(width, 47);
+    let lhs_bytes = bytemuck::cast_slice(&lhs_values).to_vec();
+    let rhs_bytes = bytemuck::cast_slice(&rhs_values).to_vec();
+
+    reset_cpu_telemetry();
+    let (actual, kernels) =
+        execute_single_output_f32_with_kernels(&graph, &[&lhs_bytes, &rhs_bytes]);
+    let snapshot = cpu_telemetry_snapshot();
+
+    assert!(
+        kernels.iter().any(|kernel| kernel == "add_relu_f32"),
+        "expected add+relu fusion, kernels={kernels:?}"
+    );
+    let expected: Vec<f32> = lhs_values
+        .iter()
+        .enumerate()
+        .map(|(idx, &x)| (x + rhs_values[idx % width]).max(0.0))
+        .collect();
+    assert_close(&actual, &expected);
+    assert_eq!(
+        snapshot.arena_temp_copies, 0,
+        "broadcast fused add+relu should borrow disjoint arena input/output directly; snapshot={snapshot:?}, kernels={kernels:?}"
     );
     assert_eq!(snapshot.arena_temp_copy_bytes, 0);
 }
