@@ -77,6 +77,9 @@ fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, Strin
         let mut attrs = HashMap::new();
         attrs.insert("eps".to_string(), eps.to_string());
         attrs.insert("norm_type".to_string(), norm_type.to_string());
+        if let Some(normalized_ndims) = norm_node.attrs.get("normalized_ndims") {
+            attrs.insert("normalized_ndims".to_string(), normalized_ndims.clone());
+        }
 
         // Preserve weight (and bias for LayerNorm) inputs from the original norm node
         let weight_bias_inputs: Vec<NodeId> = norm_node.inputs[1..].to_vec();

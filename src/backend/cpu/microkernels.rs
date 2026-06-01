@@ -4178,6 +4178,46 @@ pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: us
     }
 }
 
+#[inline]
+pub fn fused_residual_add_layer_norm_f32_scalar(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
+    let len = output.len().min(main.len()).min(residual.len());
+    let num_rows = len / row_size;
+    for r in 0..num_rows {
+        let start = r * row_size;
+        let end = start + row_size;
+        let n = row_size as f32;
+
+        let mut sum = 0.0f32;
+        for i in start..end {
+            sum += main[i] + residual[i];
+        }
+        let mean = if n > 0.0 { sum / n } else { 0.0 };
+
+        let mut var = 0.0f32;
+        for i in start..end {
+            let d = main[i] + residual[i] - mean;
+            var += d * d;
+        }
+        var /= n;
+        let inv_std = 1.0 / (var + eps).sqrt();
+
+        for i in start..end {
+            let idx = i - start;
+            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+            output[i] = (main[i] + residual[i] - mean) * inv_std * w + b;
+        }
+    }
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn norm_layernorm_f32_avx2(
@@ -4269,6 +4309,41 @@ pub fn rms_norm_f32_scalar(
                 1.0
             };
             output[i] = input[i] / rms * w;
+        }
+    }
+}
+
+#[inline]
+pub fn fused_residual_add_rms_norm_f32_scalar(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
+    let len = output.len().min(main.len()).min(residual.len());
+    let num_rows = len / row_size;
+    for r in 0..num_rows {
+        let start = r * row_size;
+        let end = start + row_size;
+
+        let mut sq_sum = 0.0f32;
+        for i in start..end {
+            let x = main[i] + residual[i];
+            sq_sum += x * x;
+        }
+        let n = row_size as f32;
+        let rms = if n > 0.0 {
+            (sq_sum / n + eps).sqrt()
+        } else {
+            1.0
+        };
+
+        for i in start..end {
+            let idx = i - start;
+            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+            output[i] = (main[i] + residual[i]) / rms * w;
         }
     }
 }

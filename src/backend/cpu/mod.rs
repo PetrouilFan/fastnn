@@ -3266,14 +3266,54 @@ impl Backend for CpuBackend {
                         .map(|s| s.as_str())
                         .unwrap_or("layer_norm");
                     let kernel_name = format!("fused_residual_add_{}", norm_type);
+
+                    let output_numel = input_shapes
+                        .first()
+                        .map(|s| s.iter().product::<u64>() as usize)
+                        .unwrap_or(1);
+                    let row_size = node
+                        .attrs
+                        .get("normalized_ndims")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .and_then(|ndims| {
+                            input_shapes.first().map(|shape| {
+                                let start = shape.len().saturating_sub(ndims);
+                                shape[start..]
+                                    .iter()
+                                    .copied()
+                                    .map(|d| d as usize)
+                                    .product::<usize>()
+                                    .max(1)
+                            })
+                        })
+                        .or_else(|| {
+                            input_shapes
+                                .get(2)
+                                .map(|s| s.iter().product::<u64>() as usize)
+                        })
+                        .unwrap_or(output_numel.max(1));
+                    let row_size_dim = node
+                        .attrs
+                        .get("normalized_ndims")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .and_then(|ndims| {
+                            input_shape_dims.first().map(|shape| {
+                                let start = shape.len().saturating_sub(ndims);
+                                shape[start..]
+                                    .iter()
+                                    .cloned()
+                                    .fold(DimExpr::Known(1), |acc, dim| acc.mul(&dim))
+                            })
+                        })
+                        .unwrap_or(DimExpr::Known(row_size as u64));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name,
                         input_slices, // [residual, main_output, weight, optional_bias]
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![eps.to_bits() as usize],
-                        param_dims: None,
+                        params: vec![eps.to_bits() as usize, row_size],
+                        param_dims: Some(vec![row_size_dim]),
                         weight_meta: None,
                     });
                 }
@@ -5416,117 +5456,111 @@ impl Backend for CpuBackend {
                             }
                         }
                         "fused_residual_add_layer_norm" => {
-                            let weight = if input_slices.len() >= 3 {
-                                let w_slice = &input_slices[2];
-                                let d = arena.data_mut();
-                                bytemuck::cast_slice::<_, f32>(
-                                    &d[w_slice.offset..w_slice.offset + w_slice.size],
-                                )
-                                .to_vec()
-                            } else {
-                                vec![]
-                            };
-                            let bias = if input_slices.len() >= 4 {
-                                let b_slice = &input_slices[3];
-                                let d = arena.data_mut();
-                                bytemuck::cast_slice::<_, f32>(
-                                    &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                )
-                                .to_vec()
-                            } else {
-                                vec![]
-                            };
-                            if let [residual_slice, main_slice] = &input_slices[..2] {
-                                let (residual, main) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[residual_slice.offset
-                                                ..residual_slice.offset + residual_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[main_slice.offset
-                                                ..main_slice.offset + main_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
+                            if let [residual_slice, main_slice, rest @ ..] = &input_slices[..] {
                                 let eps =
                                     f32::from_bits(params.first().copied().unwrap_or(0) as u32);
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(main.len()).min(residual.len());
-                                let row_size = if !weight.is_empty() {
-                                    weight.len()
-                                } else if !bias.is_empty() {
-                                    bias.len()
-                                } else {
-                                    len
-                                };
-                                for i in 0..len {
-                                    out_f32[i] = main[i] + residual[i % residual.len()];
-                                }
-                                if row_size > 0 {
-                                    let norm_input = out_f32.to_vec();
-                                    norm_layernorm_f32(&norm_input, &mut *out_f32, row_size, eps);
-                                    for i in 0..len {
-                                        let idx = i % row_size;
-                                        let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-                                        let b = if idx < bias.len() { bias[idx] } else { 0.0 };
-                                        out_f32[i] = out_f32[i] * w + b;
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                let weight_slice = rest.first().copied();
+                                let bias_slice = rest.get(1).copied();
+                                let fallback_row_size = weight_slice
+                                    .or(bias_slice)
+                                    .map(|slice| slice.size / std::mem::size_of::<f32>())
+                                    .unwrap_or(output_slice.size / std::mem::size_of::<f32>());
+                                let row_size = params
+                                    .get(1)
+                                    .copied()
+                                    .filter(|&value| value > 0)
+                                    .unwrap_or(fallback_row_size);
+
+                                if residual_slice.size == main_slice.size
+                                    && main_slice.size == output_slice.size
+                                    && row_size > 0
+                                    && output_slice.size / std::mem::size_of::<f32>() % row_size
+                                        == 0
+                                    && weight_slice.map_or(true, |w| {
+                                        w.size / std::mem::size_of::<f32>() == row_size
+                                    })
+                                    && bias_slice.map_or(true, |b| {
+                                        b.size / std::mem::size_of::<f32>() == row_size
+                                    })
+                                {
+                                    let mut inputs = vec![*residual_slice, *main_slice];
+                                    if let Some(w) = weight_slice {
+                                        inputs.push(w);
                                     }
+                                    if let Some(b) = bias_slice {
+                                        inputs.push(b);
+                                    }
+                                    arena::with_nary_f32_slices(
+                                        arena,
+                                        &inputs,
+                                        output_slice,
+                                        |inputs, out_f32| {
+                                            let weight = if weight_slice.is_some() {
+                                                inputs[2]
+                                            } else {
+                                                &[]
+                                            };
+                                            let bias = match (
+                                                weight_slice.is_some(),
+                                                bias_slice.is_some(),
+                                            ) {
+                                                (true, true) => inputs[3],
+                                                (false, true) => inputs[2],
+                                                _ => &[],
+                                            };
+                                            microkernels::fused_residual_add_layer_norm_f32_scalar(
+                                                inputs[0], inputs[1], weight, bias, out_f32,
+                                                row_size, eps,
+                                            );
+                                        },
+                                    );
                                 }
                             }
                         }
                         "fused_residual_add_rms_norm" => {
-                            let weight = if input_slices.len() >= 3 {
-                                let w_slice = &input_slices[2];
-                                let d = arena.data_mut();
-                                bytemuck::cast_slice::<_, f32>(
-                                    &d[w_slice.offset..w_slice.offset + w_slice.size],
-                                )
-                                .to_vec()
-                            } else {
-                                vec![]
-                            };
-                            if let [residual_slice, main_slice] = &input_slices[..2] {
-                                let (residual, main) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[residual_slice.offset
-                                                ..residual_slice.offset + residual_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[main_slice.offset
-                                                ..main_slice.offset + main_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
+                            if let [residual_slice, main_slice, rest @ ..] = &input_slices[..] {
                                 let eps =
                                     f32::from_bits(params.first().copied().unwrap_or(0) as u32);
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len().min(main.len()).min(residual.len());
-                                for i in 0..len {
-                                    out_f32[i] = main[i] + residual[i % residual.len()];
-                                }
-                                let row_size = len;
-                                if row_size > 0 {
-                                    let norm_input = out_f32.to_vec();
-                                    rms_norm_f32(
-                                        &norm_input,
-                                        &weight,
-                                        &mut *out_f32,
-                                        row_size,
-                                        eps,
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                let weight_slice = rest.first().copied();
+                                let fallback_row_size = weight_slice
+                                    .map(|slice| slice.size / std::mem::size_of::<f32>())
+                                    .unwrap_or(output_slice.size / std::mem::size_of::<f32>());
+                                let row_size = params
+                                    .get(1)
+                                    .copied()
+                                    .filter(|&value| value > 0)
+                                    .unwrap_or(fallback_row_size);
+
+                                if residual_slice.size == main_slice.size
+                                    && main_slice.size == output_slice.size
+                                    && row_size > 0
+                                    && output_slice.size / std::mem::size_of::<f32>() % row_size
+                                        == 0
+                                    && weight_slice.map_or(true, |w| {
+                                        w.size / std::mem::size_of::<f32>() == row_size
+                                    })
+                                {
+                                    let mut inputs = vec![*residual_slice, *main_slice];
+                                    if let Some(w) = weight_slice {
+                                        inputs.push(w);
+                                    }
+                                    arena::with_nary_f32_slices(
+                                        arena,
+                                        &inputs,
+                                        output_slice,
+                                        |inputs, out_f32| {
+                                            let weight = if weight_slice.is_some() {
+                                                inputs[2]
+                                            } else {
+                                                &[]
+                                            };
+                                            microkernels::fused_residual_add_rms_norm_f32_scalar(
+                                                inputs[0], inputs[1], weight, out_f32, row_size,
+                                                eps,
+                                            );
+                                        },
                                     );
                                 }
                             }
