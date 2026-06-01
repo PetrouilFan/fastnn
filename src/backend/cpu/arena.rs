@@ -113,6 +113,71 @@ pub(super) fn with_binary_f32_slices<R>(
 }
 
 #[inline]
+pub(super) fn with_nary_f32_slices<R>(
+    arena: &CpuBuffer,
+    inputs: &[BufferSlice],
+    output: BufferSlice,
+    f: impl FnOnce(&[&[f32]], &mut [f32]) -> R,
+) -> R {
+    let input_ends: Vec<usize> = inputs.iter().copied().map(checked_end).collect();
+    let output_end = checked_end(output);
+    let output_overlaps_input =
+        inputs
+            .iter()
+            .copied()
+            .zip(input_ends.iter().copied())
+            .any(|(input, input_end)| {
+                ranges_overlap(input.offset, input_end, output.offset, output_end)
+            });
+
+    if !output_overlaps_input {
+        let arena_bytes = arena.data_mut();
+        for (&input, &input_end) in inputs.iter().zip(&input_ends) {
+            assert_slice_in_bounds(arena_bytes.len(), input, input_end);
+        }
+        assert_slice_in_bounds(arena_bytes.len(), output, output_end);
+
+        // SAFETY: every input byte range was bounds-checked and proven disjoint
+        // from the mutable output byte range. Input ranges may overlap each
+        // other, which is fine for shared f32 slices.
+        unsafe {
+            let input_f32: Vec<&[f32]> = inputs
+                .iter()
+                .map(|input| bytes_as_f32_slice(arena_bytes.as_ptr().add(input.offset), input.size))
+                .collect();
+            let output_f32 =
+                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+            f(&input_f32, output_f32)
+        }
+    } else {
+        let input_copies = {
+            let arena_bytes = arena.data_mut();
+            inputs
+                .iter()
+                .copied()
+                .zip(input_ends.iter().copied())
+                .map(|(input, input_end)| {
+                    assert_slice_in_bounds(arena_bytes.len(), input, input_end);
+                    let input_f32 =
+                        bytemuck::cast_slice::<_, f32>(&arena_bytes[input.offset..input_end]);
+                    let mut copy = TlsVecPool::alloc(input_f32.len());
+                    copy.copy_from_slice(input_f32);
+                    record_arena_temp_copy(input.size);
+                    copy
+                })
+                .collect::<Vec<_>>()
+        };
+        let output_f32 = {
+            let arena_bytes = arena.data_mut();
+            assert_slice_in_bounds(arena_bytes.len(), output, output_end);
+            bytemuck::cast_slice_mut::<_, f32>(&mut arena_bytes[output.offset..output_end])
+        };
+        let input_refs: Vec<&[f32]> = input_copies.iter().map(|copy| &copy[..]).collect();
+        f(&input_refs, output_f32)
+    }
+}
+
+#[inline]
 pub(super) fn read_scalar_f32(arena: &CpuBuffer, scalar: BufferSlice) -> f32 {
     assert!(
         scalar.size >= std::mem::size_of::<f32>(),
@@ -248,5 +313,44 @@ mod tests {
         let scalar = BufferSlice::new(std::mem::size_of::<f32>(), std::mem::size_of::<f32>());
 
         assert_eq!(read_scalar_f32(&arena, scalar), 2.5);
+    }
+
+    #[test]
+    fn disjoint_nary_input_output_direct_helper_result() {
+        let arena = arena_from_f32(&[1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 0.0, 0.0, 0.0]);
+        let inputs = [
+            BufferSlice::new(0, 3 * std::mem::size_of::<f32>()),
+            BufferSlice::new(
+                3 * std::mem::size_of::<f32>(),
+                3 * std::mem::size_of::<f32>(),
+            ),
+        ];
+        let output = BufferSlice::new(
+            6 * std::mem::size_of::<f32>(),
+            3 * std::mem::size_of::<f32>(),
+        );
+
+        with_nary_f32_slices(&arena, &inputs, output, |inputs, output| {
+            for i in 0..output.len() {
+                output[i] = inputs[0][i] + inputs[1][i];
+            }
+        });
+
+        assert_eq!(read_f32s(&arena, output), vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn overlapping_nary_fallback_result() {
+        let arena = arena_from_f32(&[1.0, 2.0, 3.0, 4.0, 0.0]);
+        let inputs = [BufferSlice::new(0, 4 * std::mem::size_of::<f32>())];
+        let output = BufferSlice::new(std::mem::size_of::<f32>(), 4 * std::mem::size_of::<f32>());
+
+        with_nary_f32_slices(&arena, &inputs, output, |inputs, output| {
+            for (dst, src) in output.iter_mut().zip(inputs[0]) {
+                *dst = *src * 2.0;
+            }
+        });
+
+        assert_eq!(read_f32s(&arena, output), vec![2.0, 4.0, 6.0, 8.0]);
     }
 }
