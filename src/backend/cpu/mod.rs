@@ -7806,11 +7806,19 @@ fn argmax_f32(input: &[f32], output: &mut [u64], axis: usize, dim_size: usize, i
 
 #[inline]
 fn sgd_update_f32(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
+    let mut out = vec![0.0; w.len()];
+    sgd_update_f32_into(w, g, lr, wd, &mut out);
+    out
+}
+
+#[inline]
+fn sgd_update_f32_into(w: &[f32], g: &[f32], lr: f32, wd: f32, out: &mut [f32]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::sgd_update_f32_avx2(w, g, lr, wd) };
+        unsafe { microkernels::sgd_update_f32_avx2_into(w, g, lr, wd, out) };
+        return;
     }
-    microkernels::sgd_update_f32_scalar(w, g, lr, wd)
+    microkernels::sgd_update_f32_scalar_into(w, g, lr, wd, out);
 }
 
 #[inline]
@@ -7851,17 +7859,46 @@ fn adamw_update_f32(
     bias_corr2: f32,
     wd: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut w_out = vec![0.0; w.len()];
+    let mut m_out = vec![0.0; m.len()];
+    let mut v_out = vec![0.0; v.len()];
+    adamw_update_f32_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, &mut w_out, &mut m_out,
+        &mut v_out,
+    );
+    (w_out, m_out, v_out)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn adamw_update_f32_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe {
-            microkernels::adamw_update_f32_avx2(
-                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd,
+        unsafe {
+            microkernels::adamw_update_f32_avx2_into(
+                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, w_out, m_out, v_out,
             )
         };
+        return;
     }
-    microkernels::adamw_update_f32_scalar(
-        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd,
-    )
+    microkernels::adamw_update_f32_scalar_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, w_out, m_out, v_out,
+    );
 }
 
 #[inline]
@@ -7874,11 +7911,33 @@ fn lion_update_f32(
     beta2: f32,
     wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
+    let mut w_out = vec![0.0; w.len()];
+    let mut m_out = vec![0.0; m.len()];
+    lion_update_f32_into(w, g, m, lr, beta1, beta2, wd, &mut w_out, &mut m_out);
+    (w_out, m_out)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn lion_update_f32_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::lion_update_f32_avx2(w, g, m, lr, beta1, beta2, wd) };
+        unsafe {
+            microkernels::lion_update_f32_avx2_into(w, g, m, lr, beta1, beta2, wd, w_out, m_out)
+        };
+        return;
     }
-    microkernels::lion_update_f32_scalar(w, g, m, lr, beta1, beta2, wd)
+    microkernels::lion_update_f32_scalar_into(w, g, m, lr, beta1, beta2, wd, w_out, m_out);
 }
 
 #[inline]
@@ -7890,11 +7949,30 @@ fn rmsprop_update_f32(
     beta: f32,
     eps: f32,
 ) -> (Vec<f32>, Vec<f32>) {
+    let mut w_out = vec![0.0; w.len()];
+    let mut v_out = vec![0.0; v.len()];
+    rmsprop_update_f32_into(w, g, v, lr, beta, eps, &mut w_out, &mut v_out);
+    (w_out, v_out)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn rmsprop_update_f32_into(
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
+    w_out: &mut [f32],
+    v_out: &mut [f32],
+) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::rmsprop_update_f32_avx2(w, g, v, lr, beta, eps) };
+        unsafe { microkernels::rmsprop_update_f32_avx2_into(w, g, v, lr, beta, eps, w_out, v_out) };
+        return;
     }
-    microkernels::rmsprop_update_f32_scalar(w, g, v, lr, beta, eps)
+    microkernels::rmsprop_update_f32_scalar_into(w, g, v, lr, beta, eps, w_out, v_out);
 }
 
 #[inline]
