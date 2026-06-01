@@ -1,6 +1,5 @@
 use fastnn::compiler::passes::memory_planning;
 use fastnn::compiler::passes::shape_inference;
-use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 
 #[test]
@@ -164,6 +163,154 @@ fn test_memory_plan_output_lifetime_extended() {
     assert!(
         plan.slots.contains_key(&relu_id),
         "output node should have a memory slot"
+    );
+}
+
+#[test]
+fn test_memory_plan_binary_reuses_dead_non_input_operand() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let lhs_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let rhs_id = graph.add_node(
+        Opcode::Sigmoid,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let add_id = graph.add_node(
+        Opcode::Add,
+        vec![lhs_id, rhs_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Relu,
+        vec![add_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    let lhs_slot = plan.slots.get(&lhs_id).unwrap();
+    let rhs_slot = plan.slots.get(&rhs_id).unwrap();
+    let add_slot = plan.slots.get(&add_id).unwrap();
+
+    assert_eq!(
+        add_slot.offset, lhs_slot.offset,
+        "binary output should reuse first dead non-input operand buffer"
+    );
+    assert_ne!(
+        add_slot.offset, rhs_slot.offset,
+        "planner should pick a single operand buffer for reuse"
+    );
+    assert_eq!(
+        plan.total_size,
+        4 * 64,
+        "without binary in-place reuse, the add output requires a fifth 64-byte slot"
+    );
+}
+
+#[test]
+fn test_memory_plan_binary_does_not_reuse_input_operand() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let rhs_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let add_id = graph.add_node(
+        Opcode::Add,
+        vec![input_id, rhs_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let later_id = graph.add_node(
+        Opcode::Mul,
+        vec![rhs_id, add_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Relu,
+        vec![later_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    assert_ne!(
+        plan.slots.get(&add_id).unwrap().offset,
+        plan.slots.get(&input_id).unwrap().offset,
+        "binary output must not reuse graph input storage"
+    );
+    assert_ne!(
+        plan.slots.get(&add_id).unwrap().offset,
+        plan.slots.get(&rhs_id).unwrap().offset,
+        "test setup keeps the non-input operand live so only the input would be reusable"
+    );
+}
+
+#[test]
+fn test_memory_plan_binary_does_not_reuse_operand_with_later_consumer() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let lhs_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let rhs_id = graph.add_node(
+        Opcode::Sigmoid,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let add_id = graph.add_node(
+        Opcode::Add,
+        vec![lhs_id, rhs_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let later_id = graph.add_node(
+        Opcode::Mul,
+        vec![lhs_id, add_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Relu,
+        vec![later_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    assert_ne!(
+        plan.slots.get(&add_id).unwrap().offset,
+        plan.slots.get(&lhs_id).unwrap().offset,
+        "binary output must not reuse an operand that has a later consumer"
     );
 }
 
