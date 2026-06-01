@@ -84,6 +84,54 @@ pub(super) fn with_binary_f32_slices<R>(
                 bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
             f(a_f32, b_f32, output_f32)
         }
+    } else if output_overlaps_a && !output_overlaps_b {
+        let a_copy = {
+            let arena_bytes = arena.data_mut();
+            assert_slice_in_bounds(arena_bytes.len(), a, a_end);
+            let a_f32 = bytemuck::cast_slice::<_, f32>(&arena_bytes[a.offset..a_end]);
+            let mut copy = TlsVecPool::alloc(a_f32.len());
+            copy.copy_from_slice(a_f32);
+            record_arena_temp_copy(a.size);
+            copy
+        };
+
+        let arena_bytes = arena.data_mut();
+        assert_slice_in_bounds(arena_bytes.len(), b, b_end);
+        assert_slice_in_bounds(arena_bytes.len(), output, output_end);
+
+        // SAFETY: a was copied before taking the mutable output slice, and b's
+        // byte range was bounds-checked and proven disjoint from output above.
+        // Therefore the borrowed b slice cannot alias the mutable output slice.
+        unsafe {
+            let b_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(b.offset), b.size);
+            let output_f32 =
+                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+            f(&a_copy, b_f32, output_f32)
+        }
+    } else if output_overlaps_b && !output_overlaps_a {
+        let b_copy = {
+            let arena_bytes = arena.data_mut();
+            assert_slice_in_bounds(arena_bytes.len(), b, b_end);
+            let b_f32 = bytemuck::cast_slice::<_, f32>(&arena_bytes[b.offset..b_end]);
+            let mut copy = TlsVecPool::alloc(b_f32.len());
+            copy.copy_from_slice(b_f32);
+            record_arena_temp_copy(b.size);
+            copy
+        };
+
+        let arena_bytes = arena.data_mut();
+        assert_slice_in_bounds(arena_bytes.len(), a, a_end);
+        assert_slice_in_bounds(arena_bytes.len(), output, output_end);
+
+        // SAFETY: b was copied before taking the mutable output slice, and a's
+        // byte range was bounds-checked and proven disjoint from output above.
+        // Therefore the borrowed a slice cannot alias the mutable output slice.
+        unsafe {
+            let a_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(a.offset), a.size);
+            let output_f32 =
+                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+            f(a_f32, &b_copy, output_f32)
+        }
     } else {
         let (a_copy, b_copy) = {
             let arena_bytes = arena.data_mut();
@@ -226,6 +274,7 @@ unsafe fn bytes_as_f32_slice_mut<'a>(ptr: *mut u8, len_bytes: usize) -> &'a mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 
     fn arena_from_f32(values: &[f32]) -> CpuBuffer {
         CpuBuffer::new(bytemuck::cast_slice(values).to_vec())
@@ -305,6 +354,39 @@ mod tests {
         });
 
         assert_eq!(read_f32s(&arena, output), vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn binary_single_output_overlap_copies_only_overlapping_operand() {
+        reset_cpu_telemetry();
+
+        let arena = arena_from_f32(&[
+            1.0, 2.0, 3.0, 4.0, // a
+            0.0, 0.0, // output tail before execution
+            10.0, 20.0, 30.0, 40.0, // b
+        ]);
+        let a = BufferSlice::new(0, 4 * std::mem::size_of::<f32>());
+        let output = BufferSlice::new(
+            2 * std::mem::size_of::<f32>(),
+            4 * std::mem::size_of::<f32>(),
+        );
+        let b = BufferSlice::new(
+            6 * std::mem::size_of::<f32>(),
+            4 * std::mem::size_of::<f32>(),
+        );
+
+        with_binary_f32_slices(&arena, a, b, output, |a, b, output| {
+            for i in 0..output.len() {
+                output[i] = a[i] + b[i];
+            }
+        });
+
+        assert_eq!(read_f32s(&arena, output), vec![11.0, 22.0, 33.0, 44.0]);
+        let snapshot = cpu_telemetry_snapshot();
+        assert_eq!(snapshot.arena_temp_copies, 1);
+        assert_eq!(snapshot.arena_temp_copy_bytes, a.size as u64);
+
+        reset_cpu_telemetry();
     }
 
     #[test]
