@@ -3,9 +3,12 @@
 //! Tests that the fusion pass correctly detects and fuses
 //! Add(residual, main) → LayerNorm/RMSNorm patterns.
 
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::executor::GraphExecutor;
+use fastnn::backend::Instruction;
 use fastnn::compiler::passes::operator_fusion::fuse_operators;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{ComputeGraph, IrDType, Opcode};
+use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 
 /// Check if a graph contains a node with the given opcode.
 fn has_opcode(graph: &ComputeGraph, op: Opcode) -> bool {
@@ -15,6 +18,98 @@ fn has_opcode(graph: &ComputeGraph, op: Opcode) -> bool {
 /// Count nodes with a given opcode.
 fn count_opcode(graph: &ComputeGraph, op: Opcode) -> usize {
     graph.nodes.iter().filter(|n| n.opcode == op).count()
+}
+
+fn graph_from(builder: &GraphBuilder, output: &fastnn::ir::builder::GraphTensor) -> ComputeGraph {
+    let mut graph = builder.to_graph();
+    graph.inputs = builder.recorded_input_ids();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+}
+
+fn run_single_output_f32(graph: &ComputeGraph, inputs: &[&[u8]]) -> (Vec<f32>, Vec<String>) {
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let (mut plan, memory_plan, compiled_graph) = executor
+        .compile_with_plan(graph)
+        .expect("graph should compile");
+    let kernels = plan
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::CallKernel { kernel_name, .. } => Some(kernel_name.clone()),
+            _ => None,
+        })
+        .collect();
+    let outputs = executor
+        .execute(&compiled_graph, &mut plan, &memory_plan, inputs)
+        .expect("graph should execute");
+    (bytemuck::cast_slice(&outputs[0]).to_vec(), kernels)
+}
+
+fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (a - e).abs() <= tol,
+            "mismatch at {i}: actual={a} expected={e} diff={}",
+            (a - e).abs()
+        );
+    }
+}
+
+fn reference_rms_residual_add(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    row_size: usize,
+    eps: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0; main.len()];
+    for row in 0..(main.len() / row_size) {
+        let start = row * row_size;
+        let end = start + row_size;
+        let mut sq_sum = 0.0f32;
+        for i in start..end {
+            let x = main[i] + residual[i];
+            sq_sum += x * x;
+        }
+        let rms = (sq_sum / row_size as f32 + eps).sqrt();
+        for i in start..end {
+            out[i] = (main[i] + residual[i]) / rms * weight[i - start];
+        }
+    }
+    out
+}
+
+fn reference_layer_residual_add(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    row_size: usize,
+    eps: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0; main.len()];
+    for row in 0..(main.len() / row_size) {
+        let start = row * row_size;
+        let end = start + row_size;
+        let mut sum = 0.0f32;
+        for i in start..end {
+            sum += main[i] + residual[i];
+        }
+        let mean = sum / row_size as f32;
+        let mut var = 0.0f32;
+        for i in start..end {
+            let d = main[i] + residual[i] - mean;
+            var += d * d;
+        }
+        let inv_std = 1.0 / (var / row_size as f32 + eps).sqrt();
+        for i in start..end {
+            let idx = i - start;
+            out[i] = (main[i] + residual[i] - mean) * inv_std * weight[idx] + bias[idx];
+        }
+    }
+    out
 }
 
 // ── Structural tests ─────────────────────────────────────────────────
@@ -227,4 +322,69 @@ fn test_fusion_preserves_outputs() {
         vec![output_id],
         "output node id should be preserved (the fused norm)"
     );
+}
+
+#[test]
+fn test_cpu_fused_rmsnorm_batched_uses_hidden_row_size() {
+    let builder = GraphBuilder::new();
+    let main_t = builder.input_with_dims(&[DimExpr::Known(2), DimExpr::Known(4)], IrDType::F32);
+    let residual_t = builder.input_with_dims(&[DimExpr::Known(2), DimExpr::Known(4)], IrDType::F32);
+    let weight = vec![0.75, -1.25, 1.5, 0.5];
+    let weight_t = builder.constant(
+        bytemuck::cast_slice(&weight),
+        TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+    );
+    let add = builder.add(&main_t, &residual_t);
+    let norm = builder.rms_norm(&add, &weight_t, 1e-5);
+    let graph = graph_from(&builder, &norm);
+
+    let main = vec![1.0, -2.0, 3.5, -4.5, 2.25, -1.0, 0.5, 3.0];
+    let residual = vec![-0.25, 0.5, -1.5, 2.0, 1.25, -0.75, 2.5, -3.5];
+    let main_bytes = bytemuck::cast_slice(&main).to_vec();
+    let residual_bytes = bytemuck::cast_slice(&residual).to_vec();
+    let (actual, kernels) = run_single_output_f32(&graph, &[&main_bytes, &residual_bytes]);
+    let expected = reference_rms_residual_add(&residual, &main, &weight, 4, 1e-5);
+
+    assert!(
+        kernels
+            .iter()
+            .any(|name| name == "fused_residual_add_rms_norm"),
+        "expected fused RMS kernel, got {kernels:?}"
+    );
+    assert_close(&actual, &expected, 1e-5);
+}
+
+#[test]
+fn test_cpu_fused_layernorm_matches_reference() {
+    let builder = GraphBuilder::new();
+    let main_t = builder.input_with_dims(&[DimExpr::Known(2), DimExpr::Known(4)], IrDType::F32);
+    let residual_t = builder.input_with_dims(&[DimExpr::Known(2), DimExpr::Known(4)], IrDType::F32);
+    let weight = vec![1.25, 0.75, -0.5, 1.5];
+    let bias = vec![0.1, -0.2, 0.3, -0.4];
+    let weight_t = builder.constant(
+        bytemuck::cast_slice(&weight),
+        TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+    );
+    let bias_t = builder.constant(
+        bytemuck::cast_slice(&bias),
+        TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+    );
+    let add = builder.add(&main_t, &residual_t);
+    let norm = builder.layer_norm(&add, &weight_t, &bias_t, 1e-5);
+    let graph = graph_from(&builder, &norm);
+
+    let main = vec![0.5, -1.0, 2.0, -3.0, 1.5, 2.5, -0.75, -1.25];
+    let residual = vec![1.0, 0.25, -0.5, 1.75, -2.0, 0.5, 1.25, -0.25];
+    let main_bytes = bytemuck::cast_slice(&main).to_vec();
+    let residual_bytes = bytemuck::cast_slice(&residual).to_vec();
+    let (actual, kernels) = run_single_output_f32(&graph, &[&main_bytes, &residual_bytes]);
+    let expected = reference_layer_residual_add(&residual, &main, &weight, &bias, 4, 1e-5);
+
+    assert!(
+        kernels
+            .iter()
+            .any(|name| name == "fused_residual_add_layer_norm"),
+        "expected fused LayerNorm kernel, got {kernels:?}"
+    );
+    assert_close(&actual, &expected, 1e-5);
 }
