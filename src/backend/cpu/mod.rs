@@ -4514,28 +4514,37 @@ impl Backend for CpuBackend {
                             )?;
                         }
                         "reduce_f32" => {
-                            get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [out_f32]);
-                            let &[group_size, is_mean, is_max] = &params[..3] else {
-                                return Err(BackendError::Dispatch(
-                                    "reduce_f32: expected params [group_size, is_mean, is_max]"
-                                        .into(),
-                                ));
-                            };
-                            let effective_group_size = match param_dims {
-                                Some(dims) if !dims.is_empty() => {
-                                    dims[0].evaluate_with_env(shape_env).map_err(|e| {
-                                        BackendError::Dispatch(format!("reduce_f32: {e}"))
-                                    })? as usize
-                                }
-                                _ => group_size,
-                            };
-                            reduce_f32(
-                                &input,
-                                out_f32,
-                                effective_group_size,
-                                is_mean == 1,
-                                is_max == 1,
-                            );
+                            if let Some(input_slice) = input_slices.first() {
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                let &[group_size, is_mean, is_max] = &params[..3] else {
+                                    return Err(BackendError::Dispatch(
+                                        "reduce_f32: expected params [group_size, is_mean, is_max]"
+                                            .into(),
+                                    ));
+                                };
+                                let effective_group_size = match param_dims {
+                                    Some(dims) if !dims.is_empty() => {
+                                        dims[0].evaluate_with_env(shape_env).map_err(|e| {
+                                            BackendError::Dispatch(format!("reduce_f32: {e}"))
+                                        })? as usize
+                                    }
+                                    _ => group_size,
+                                };
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        reduce_f32(
+                                            input,
+                                            out_f32,
+                                            effective_group_size,
+                                            is_mean == 1,
+                                            is_max == 1,
+                                        );
+                                    },
+                                );
+                            }
                         }
                         "transpose_f32" => {
                             if let Some(input_slice) = input_slices.first() {
@@ -4682,25 +4691,28 @@ impl Backend for CpuBackend {
                         }
                         "softmax" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let softmax_params =
-                                    resolve_params(params, param_dims, shape_env, 2)
-                                        .unwrap_or_else(|_| vec![input.len(), 1]);
-                                let axis_dim_size = softmax_params[0].max(1);
-                                let stride = softmax_params.get(1).copied().unwrap_or(1).max(1);
-                                let num_rows = input.len() / axis_dim_size.max(1);
-                                softmax_f32(&input, out_f32, axis_dim_size, stride, num_rows);
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let softmax_params =
+                                            resolve_params(params, param_dims, shape_env, 2)
+                                                .unwrap_or_else(|_| vec![input.len(), 1]);
+                                        let axis_dim_size = softmax_params[0].max(1);
+                                        let stride =
+                                            softmax_params.get(1).copied().unwrap_or(1).max(1);
+                                        let num_rows = input.len() / axis_dim_size.max(1);
+                                        softmax_f32(
+                                            input,
+                                            out_f32,
+                                            axis_dim_size,
+                                            stride,
+                                            num_rows,
+                                        );
+                                    },
+                                );
                             }
                         }
                         "biasadd" => {
@@ -4811,25 +4823,17 @@ impl Backend for CpuBackend {
                                         );
                                     }
                                 }
-                            } else {
-                                if let Some(input_slice) = input_slices.first() {
-                                    let input = {
-                                        let d = arena.data_mut();
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[input_slice.offset
-                                                ..input_slice.offset + input_slice.size],
-                                        )
-                                        .to_vec()
-                                    };
-                                    let out_f32 = {
-                                        let d = arena.data_mut();
-                                        bytemuck::cast_slice_mut::<_, f32>(
-                                            &mut d[out_start..out_end],
-                                        )
-                                    };
-                                    let row_size = input.len() / out_f32.len().max(1);
-                                    norm_layernorm_f32(&input, out_f32, row_size, eps);
-                                }
+                            } else if let Some(input_slice) = input_slices.first() {
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let row_size = input.len() / out_f32.len().max(1);
+                                        norm_layernorm_f32(input, out_f32, row_size, eps);
+                                    },
+                                );
                             }
                         }
                         "div_relu_f32" => {
@@ -6073,33 +6077,24 @@ impl Backend for CpuBackend {
                         }
                         "rms_norm" => {
                             if let [data_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
                                 let eps =
                                     f32::from_bits(params.first().copied().unwrap_or(0) as u32);
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let row_size = if !weight.is_empty() {
-                                    input.len() / weight.len()
-                                } else {
-                                    input.len()
-                                };
-                                rms_norm_f32(&input, &weight, out_f32, row_size, eps);
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                arena::with_nary_f32_slices(
+                                    arena,
+                                    &[*data_slice, *weight_slice],
+                                    output_slice,
+                                    |inputs, out_f32| {
+                                        let input = inputs[0];
+                                        let weight = inputs[1];
+                                        let row_size = if !weight.is_empty() {
+                                            input.len() / weight.len()
+                                        } else {
+                                            input.len()
+                                        };
+                                        rms_norm_f32(input, weight, out_f32, row_size, eps);
+                                    },
+                                );
                             }
                         }
                         "fused_residual_add_layer_norm" => {
@@ -6364,54 +6359,56 @@ impl Backend for CpuBackend {
                         }
                         "argmax" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
                                 let axis = params.first().copied().unwrap_or(usize::MAX);
                                 let dim_size = params.get(1).copied().unwrap_or(0);
-                                let _inner = params.get(2).copied().unwrap_or(1);
-                                let out_f32 = {
+                                let inner = params.get(2).copied().unwrap_or(1);
+                                let input_end = input_slice.offset + input_slice.size;
+                                let output_bytes = BufferSlice::new(out_start, out_end - out_start);
+
+                                if !arena::ranges_overlap(
+                                    input_slice.offset,
+                                    input_end,
+                                    output_bytes.offset,
+                                    output_bytes.offset + output_bytes.size,
+                                ) {
                                     let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, u64>(&mut d[out_start..out_end])
-                                };
-                                if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
-                                    let max_idx = input
-                                        .iter()
-                                        .enumerate()
-                                        .max_by(|(_, a), (_, b)| {
-                                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                                        })
-                                        .map(|(i, _)| i as u64)
-                                        .unwrap_or(0);
-                                    for v in out_f32.iter_mut() {
-                                        *v = max_idx;
+                                    assert!(input_end <= d.len());
+                                    assert!(out_end <= d.len());
+                                    // SAFETY: bounds were checked above and the input/output byte
+                                    // ranges are disjoint, so a shared f32 input slice cannot alias
+                                    // the mutable u64 output slice.
+                                    unsafe {
+                                        let input = std::slice::from_raw_parts(
+                                            d.as_ptr().add(input_slice.offset).cast::<f32>(),
+                                            input_slice.size / std::mem::size_of::<f32>(),
+                                        );
+                                        let out_u64 = std::slice::from_raw_parts_mut(
+                                            d.as_mut_ptr().add(out_start).cast::<u64>(),
+                                            (out_end - out_start) / std::mem::size_of::<u64>(),
+                                        );
+                                        argmax_f32(input, out_u64, axis, dim_size, inner);
                                     }
                                 } else {
-                                    let outer = input.len() / (dim_size * _inner);
-                                    for o in 0..outer {
-                                        for i in 0.._inner {
-                                            let base = o * dim_size * _inner + i;
-                                            let mut best_flat = base as u64;
-                                            let mut best_val = input[base];
-                                            for k in 1..dim_size {
-                                                let flat_idx = base + k * _inner;
-                                                let val = input[flat_idx];
-                                                if val > best_val {
-                                                    best_val = val;
-                                                    best_flat = flat_idx as u64;
-                                                }
-                                            }
-                                            let out_idx = o * _inner + i;
-                                            if out_idx < out_f32.len() {
-                                                out_f32[out_idx] = best_flat;
-                                            }
-                                        }
-                                    }
+                                    let input = {
+                                        let d = arena.data_mut();
+                                        let src = bytemuck::cast_slice::<_, f32>(
+                                            &d[input_slice.offset..input_end],
+                                        );
+                                        let mut copy =
+                                            crate::backend::cpu::microkernels::TlsVecPool::alloc(
+                                                src.len(),
+                                            );
+                                        copy.copy_from_slice(src);
+                                        crate::backend::cpu::telemetry::record_arena_temp_copy(
+                                            input_slice.size,
+                                        );
+                                        copy
+                                    };
+                                    let d = arena.data_mut();
+                                    let out_u64 = bytemuck::cast_slice_mut::<_, u64>(
+                                        &mut d[out_start..out_end],
+                                    );
+                                    argmax_f32(&input, out_u64, axis, dim_size, inner);
                                 }
                             }
                         }
@@ -8435,6 +8432,41 @@ fn softmax_f32(
         };
     }
     microkernels::softmax_f32_scalar_strided(input, output, axis_dim_size, stride, num_rows);
+}
+
+fn argmax_f32(input: &[f32], output: &mut [u64], axis: usize, dim_size: usize, inner: usize) {
+    if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
+        let max_idx = input
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i as u64)
+            .unwrap_or(0);
+        for v in output.iter_mut() {
+            *v = max_idx;
+        }
+    } else {
+        let outer = input.len() / (dim_size * inner);
+        for o in 0..outer {
+            for i in 0..inner {
+                let base = o * dim_size * inner + i;
+                let mut best_flat = base as u64;
+                let mut best_val = input[base];
+                for k in 1..dim_size {
+                    let flat_idx = base + k * inner;
+                    let val = input[flat_idx];
+                    if val > best_val {
+                        best_val = val;
+                        best_flat = flat_idx as u64;
+                    }
+                }
+                let out_idx = o * inner + i;
+                if out_idx < output.len() {
+                    output[out_idx] = best_flat;
+                }
+            }
+        }
+    }
 }
 
 // ============================================================
