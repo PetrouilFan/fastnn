@@ -4696,21 +4696,33 @@ pub unsafe fn softmax_f32_avx2_strided(
 
 #[inline]
 pub fn sgd_update_f32_scalar(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
-    let len = w.len();
-    let mut result = w.to_vec();
+    let mut result = vec![0.0; w.len()];
+    sgd_update_f32_scalar_into(w, g, lr, wd, &mut result);
+    result
+}
+
+#[inline]
+pub fn sgd_update_f32_scalar_into(w: &[f32], g: &[f32], lr: f32, wd: f32, out: &mut [f32]) {
+    let len = w.len().min(out.len());
     for i in 0..len {
         // w - lr * (g + wd * w)  =  w - lr*g - lr*wd*w
-        result[i] -= lr * g.get(i % g.len()).copied().unwrap_or(0.0);
-        result[i] -= lr * wd * w[i];
+        out[i] = w[i] - lr * g.get(i % g.len()).copied().unwrap_or(0.0);
+        out[i] -= lr * wd * w[i];
     }
-    result
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn sgd_update_f32_avx2(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
-    let len = w.len();
-    let mut result = w.to_vec();
+    let mut result = vec![0.0; w.len()];
+    sgd_update_f32_avx2_into(w, g, lr, wd, &mut result);
+    result
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn sgd_update_f32_avx2_into(w: &[f32], g: &[f32], lr: f32, wd: f32, out: &mut [f32]) {
+    let len = w.len().min(out.len());
     let mut i = 0;
     let vlr = _mm256_set1_ps(lr);
     let vwd = _mm256_set1_ps(wd);
@@ -4722,15 +4734,14 @@ pub unsafe fn sgd_update_f32_avx2(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec
             // = w - lr*g - lr*wd*w
             // = vw - vlr * (vg + vwd * vw)
             let vg_wd = _mm256_fmadd_ps(vwd, vw, vg); // vwd * vw + vg
-            _mm256_storeu_ps(result.as_mut_ptr().add(i), _mm256_fnmadd_ps(vg_wd, vlr, vw));
+            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_fnmadd_ps(vg_wd, vlr, vw));
             i += 8;
         }
     }
     for j in i..len {
-        result[j] -= lr * g.get(j % g.len()).copied().unwrap_or(0.0);
-        result[j] -= lr * wd * w[j];
+        out[j] = w[j] - lr * g.get(j % g.len()).copied().unwrap_or(0.0);
+        out[j] -= lr * wd * w[j];
     }
-    result
 }
 
 // ── Optimizer: adam_update_f32 ──────────────────────────────
@@ -4840,20 +4851,44 @@ pub fn adamw_update_f32_scalar(
     bias_corr2: f32,
     wd: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let len = w.len();
-    let mut w_new = w.to_vec();
-    let mut m_new = m.to_vec();
-    let mut v_new = v.to_vec();
-    for i in 0..len {
-        w_new[i] -= lr * wd * w[i];
-        let gi = g.get(i % g.len()).copied().unwrap_or(0.0);
-        m_new[i] = beta1 * m[i] + (1.0 - beta1) * gi;
-        v_new[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi;
-        let m_hat = m_new[i] / bias_corr1;
-        let v_hat = v_new[i] / bias_corr2;
-        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
-    }
+    let mut w_new = vec![0.0; w.len()];
+    let mut m_new = vec![0.0; m.len()];
+    let mut v_new = vec![0.0; v.len()];
+    adamw_update_f32_scalar_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
     (w_new, m_new, v_new)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn adamw_update_f32_scalar_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len()).min(v_out.len());
+    for i in 0..len {
+        w_out[i] = w[i] - lr * wd * w[i];
+        let gi = g.get(i % g.len()).copied().unwrap_or(0.0);
+        m_out[i] = beta1 * m[i] + (1.0 - beta1) * gi;
+        v_out[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi;
+        let m_hat = m_out[i] / bias_corr1;
+        let v_hat = v_out[i] / bias_corr2;
+        w_out[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -4871,10 +4906,36 @@ pub unsafe fn adamw_update_f32_avx2(
     bias_corr2: f32,
     wd: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let len = w.len();
-    let mut w_new = w.to_vec();
-    let mut m_new = m.to_vec();
-    let mut v_new = v.to_vec();
+    let mut w_new = vec![0.0; w.len()];
+    let mut m_new = vec![0.0; m.len()];
+    let mut v_new = vec![0.0; v.len()];
+    adamw_update_f32_avx2_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
+    (w_new, m_new, v_new)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn adamw_update_f32_avx2_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    wd: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len()).min(v_out.len());
     let vlr = _mm256_set1_ps(lr);
     let vwd = _mm256_set1_ps(wd);
     let vb1 = _mm256_set1_ps(beta1);
@@ -4891,37 +4952,31 @@ pub unsafe fn adamw_update_f32_avx2(
             let vg = _mm256_loadu_ps(g.as_ptr().add(i));
             let vm = _mm256_loadu_ps(m.as_ptr().add(i));
             let vv = _mm256_loadu_ps(v.as_ptr().add(i));
-            // w -= lr * wd * w  (weight decay)
             let vw_decayed = _mm256_fnmadd_ps(_mm256_mul_ps(vlr, vwd), vw, vw);
-            // m_new = beta1 * m + (1-beta1) * g
             let vm_new = _mm256_fmadd_ps(vb1c, vg, _mm256_mul_ps(vb1, vm));
-            // v_new = beta2 * v + (1-beta2) * g * g
             let vv_new = _mm256_fmadd_ps(vb2c, _mm256_mul_ps(vg, vg), _mm256_mul_ps(vb2, vv));
-            // m_hat = m_new / bias_corr1; v_hat = v_new / bias_corr2
             let vm_hat = _mm256_div_ps(vm_new, vbc1);
             let vv_hat = _mm256_div_ps(vv_new, vbc2);
-            // w -= lr * m_hat / (sqrt(v_hat) + eps)
             let vdenom = _mm256_add_ps(_mm256_sqrt_ps(vv_hat), veps);
             let vupdate = _mm256_div_ps(_mm256_mul_ps(vlr, vm_hat), vdenom);
             _mm256_storeu_ps(
-                w_new.as_mut_ptr().add(i),
+                w_out.as_mut_ptr().add(i),
                 _mm256_sub_ps(vw_decayed, vupdate),
             );
-            _mm256_storeu_ps(m_new.as_mut_ptr().add(i), vm_new);
-            _mm256_storeu_ps(v_new.as_mut_ptr().add(i), vv_new);
+            _mm256_storeu_ps(m_out.as_mut_ptr().add(i), vm_new);
+            _mm256_storeu_ps(v_out.as_mut_ptr().add(i), vv_new);
             i += 8;
         }
     }
     for j in i..len {
-        w_new[j] -= lr * wd * w[j];
+        w_out[j] = w[j] - lr * wd * w[j];
         let gi = g.get(j % g.len()).copied().unwrap_or(0.0);
-        m_new[j] = beta1 * m[j] + (1.0 - beta1) * gi;
-        v_new[j] = beta2 * v[j] + (1.0 - beta2) * gi * gi;
-        let m_hat = m_new[j] / bias_corr1;
-        let v_hat = v_new[j] / bias_corr2;
-        w_new[j] -= lr * m_hat / (v_hat.sqrt() + eps);
+        m_out[j] = beta1 * m[j] + (1.0 - beta1) * gi;
+        v_out[j] = beta2 * v[j] + (1.0 - beta2) * gi * gi;
+        let m_hat = m_out[j] / bias_corr1;
+        let v_hat = v_out[j] / bias_corr2;
+        w_out[j] -= lr * m_hat / (v_hat.sqrt() + eps);
     }
-    (w_new, m_new, v_new)
 }
 
 // ── Optimizer: lion_update_f32 ──────────────────────────────
@@ -4936,17 +4991,33 @@ pub fn lion_update_f32_scalar(
     beta2: f32,
     wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    let len = w.len();
-    let mut w_new = w.to_vec();
-    let mut m_new = m.to_vec();
+    let mut w_new = vec![0.0; w.len()];
+    let mut m_new = vec![0.0; m.len()];
+    lion_update_f32_scalar_into(w, g, m, lr, beta1, beta2, wd, &mut w_new, &mut m_new);
+    (w_new, m_new)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn lion_update_f32_scalar_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len());
     for i in 0..len {
         let gi = g.get(i % g.len()).copied().unwrap_or(0.0);
-        m_new[i] = beta2 * m[i] + (1.0 - beta2) * gi;
-        let update = beta1 * m_new[i] + (1.0 - beta1) * gi;
+        m_out[i] = beta2 * m[i] + (1.0 - beta2) * gi;
+        let update = beta1 * m_out[i] + (1.0 - beta1) * gi;
         // Lion with decoupled weight decay: w -= lr * (sign(update) + wd * w)
-        w_new[i] -= lr * (update.signum() + wd * w[i]);
+        w_out[i] = w[i] - lr * (update.signum() + wd * w[i]);
     }
-    (w_new, m_new)
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -4960,9 +5031,27 @@ pub unsafe fn lion_update_f32_avx2(
     beta2: f32,
     wd: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    let len = w.len();
-    let mut w_new = w.to_vec();
-    let mut m_new = m.to_vec();
+    let mut w_new = vec![0.0; w.len()];
+    let mut m_new = vec![0.0; m.len()];
+    lion_update_f32_avx2_into(w, g, m, lr, beta1, beta2, wd, &mut w_new, &mut m_new);
+    (w_new, m_new)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn lion_update_f32_avx2_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    wd: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len());
     let vlr = _mm256_set1_ps(lr);
     let vwd = _mm256_set1_ps(wd);
     let vb1 = _mm256_set1_ps(beta1);
@@ -4978,34 +5067,29 @@ pub unsafe fn lion_update_f32_avx2(
             let vw = _mm256_loadu_ps(w.as_ptr().add(i));
             let vg = _mm256_loadu_ps(g.as_ptr().add(i));
             let vm = _mm256_loadu_ps(m.as_ptr().add(i));
-            // m_new = beta2 * m + (1-beta2) * g
             let vm_new = _mm256_fmadd_ps(vb2c, vg, _mm256_mul_ps(vb2, vm));
-            // update = beta1 * m_new + (1-beta1) * g
             let vupdate = _mm256_fmadd_ps(vb1c, vg, _mm256_mul_ps(vb1, vm_new));
-            // signum(update) with blendv
             let vpos_mask = _mm256_cmp_ps::<{ _CMP_GT_OQ }>(vupdate, vzero);
             let vneg_mask = _mm256_cmp_ps::<{ _CMP_LT_OQ }>(vupdate, vzero);
             let vsign = _mm256_or_ps(
                 _mm256_and_ps(vpos_mask, vone),
                 _mm256_and_ps(vneg_mask, vneg_one),
             );
-            // w -= lr * (sign + wd * w)  =  vw - vlr * (vsign + vwd * vw)
-            let vsign_wd = _mm256_fmadd_ps(vwd, vw, vsign); // vwd * vw + vsign
+            let vsign_wd = _mm256_fmadd_ps(vwd, vw, vsign);
             _mm256_storeu_ps(
-                w_new.as_mut_ptr().add(i),
+                w_out.as_mut_ptr().add(i),
                 _mm256_fnmadd_ps(vlr, vsign_wd, vw),
             );
-            _mm256_storeu_ps(m_new.as_mut_ptr().add(i), vm_new);
+            _mm256_storeu_ps(m_out.as_mut_ptr().add(i), vm_new);
             i += 8;
         }
     }
     for j in i..len {
         let gi = g.get(j % g.len()).copied().unwrap_or(0.0);
-        m_new[j] = beta2 * m[j] + (1.0 - beta2) * gi;
-        let update = beta1 * m_new[j] + (1.0 - beta1) * gi;
-        w_new[j] -= lr * (update.signum() + wd * w[j]);
+        m_out[j] = beta2 * m[j] + (1.0 - beta2) * gi;
+        let update = beta1 * m_out[j] + (1.0 - beta1) * gi;
+        w_out[j] = w[j] - lr * (update.signum() + wd * w[j]);
     }
-    (w_new, m_new)
 }
 
 // ── Optimizer: rmsprop_update_f32 ───────────────────────────
@@ -5019,15 +5103,29 @@ pub fn rmsprop_update_f32_scalar(
     beta: f32,
     eps: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    let len = w.len();
-    let mut w_new = w.to_vec();
-    let mut v_new = v.to_vec();
+    let mut w_new = vec![0.0; w.len()];
+    let mut v_new = vec![0.0; v.len()];
+    rmsprop_update_f32_scalar_into(w, g, v, lr, beta, eps, &mut w_new, &mut v_new);
+    (w_new, v_new)
+}
+
+#[inline]
+pub fn rmsprop_update_f32_scalar_into(
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
+    w_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(v_out.len());
     for i in 0..len {
         let gi = g.get(i % g.len()).copied().unwrap_or(0.0);
-        v_new[i] = beta * v[i] + (1.0 - beta) * gi * gi;
-        w_new[i] -= lr * gi / (v_new[i].sqrt() + eps);
+        v_out[i] = beta * v[i] + (1.0 - beta) * gi * gi;
+        w_out[i] = w[i] - lr * gi / (v_out[i].sqrt() + eps);
     }
-    (w_new, v_new)
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -5040,9 +5138,25 @@ pub unsafe fn rmsprop_update_f32_avx2(
     beta: f32,
     eps: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    let len = w.len();
-    let mut w_new = w.to_vec();
-    let mut v_new = v.to_vec();
+    let mut w_new = vec![0.0; w.len()];
+    let mut v_new = vec![0.0; v.len()];
+    rmsprop_update_f32_avx2_into(w, g, v, lr, beta, eps, &mut w_new, &mut v_new);
+    (w_new, v_new)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn rmsprop_update_f32_avx2_into(
+    w: &[f32],
+    g: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta: f32,
+    eps: f32,
+    w_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(v_out.len());
     let vlr = _mm256_set1_ps(lr);
     let vb = _mm256_set1_ps(beta);
     let vbc = _mm256_set1_ps(1.0 - beta);
@@ -5053,22 +5167,19 @@ pub unsafe fn rmsprop_update_f32_avx2(
             let vw = _mm256_loadu_ps(w.as_ptr().add(i));
             let vg = _mm256_loadu_ps(g.as_ptr().add(i));
             let vv = _mm256_loadu_ps(v.as_ptr().add(i));
-            // v_new = beta * v + (1-beta) * g * g
             let vv_new = _mm256_fmadd_ps(vbc, _mm256_mul_ps(vg, vg), _mm256_mul_ps(vb, vv));
-            // w -= lr * g / (sqrt(v_new) + eps)
             let vdenom = _mm256_add_ps(_mm256_sqrt_ps(vv_new), veps);
             let vupdate = _mm256_div_ps(_mm256_mul_ps(vlr, vg), vdenom);
-            _mm256_storeu_ps(w_new.as_mut_ptr().add(i), _mm256_sub_ps(vw, vupdate));
-            _mm256_storeu_ps(v_new.as_mut_ptr().add(i), vv_new);
+            _mm256_storeu_ps(w_out.as_mut_ptr().add(i), _mm256_sub_ps(vw, vupdate));
+            _mm256_storeu_ps(v_out.as_mut_ptr().add(i), vv_new);
             i += 8;
         }
     }
     for j in i..len {
         let gi = g.get(j % g.len()).copied().unwrap_or(0.0);
-        v_new[j] = beta * v[j] + (1.0 - beta) * gi * gi;
-        w_new[j] -= lr * gi / (v_new[j].sqrt() + eps);
+        v_out[j] = beta * v[j] + (1.0 - beta) * gi * gi;
+        w_out[j] = w[j] - lr * gi / (v_out[j].sqrt() + eps);
     }
-    (w_new, v_new)
 }
 
 // ── Optimizer: muon_update_f32 ──────────────────────────────
