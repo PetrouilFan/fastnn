@@ -37,69 +37,6 @@ use matmul::{
     quantized_matmul_dispatch_i8_u4, quantized_matmul_dispatch_i8_u8,
 };
 
-// ============================================================
-// Arena slice extraction macro
-// ============================================================
-
-/// Extract input and output `f32` slices from the arena in one shot.
-///
-/// **Unary** (one input, one output):
-/// ```ignore
-/// get_in_out_slices!(arena, input_slices => [input]; out_start, out_end => [output]);
-/// // → `input: Vec<f32>` + `output: &mut [f32]`
-/// ```
-///
-/// **Binary** (two inputs, one output):
-/// ```ignore
-/// get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [output]);
-/// // → `a: Vec<f32>`, `b: Vec<f32>` + `output: &mut [f32]`
-/// ```
-macro_rules! get_in_out_slices {
-    // Unary
-    ($arena:expr, $input_slices:expr => [$input:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
-        let $input = if let Some(slice) = $input_slices.first() {
-            let d = $arena.data_mut();
-            let src = bytemuck::cast_slice::<_, f32>(&d[slice.offset..slice.offset + slice.size]);
-            let mut buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(src.len());
-            buf.copy_from_slice(src);
-            crate::backend::cpu::telemetry::record_arena_temp_copy(slice.size);
-            buf // ScopedVec — auto-returns to TLS pool on drop
-        } else {
-            crate::backend::cpu::microkernels::TlsVecPool::alloc(0)
-        };
-        let $output = {
-            let d = $arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
-        };
-    };
-    // Binary
-    ($arena:expr, $input_slices:expr => [$a:ident, $b:ident]; $out_start:expr, $out_end:expr => [$output:ident]) => {
-        let ($a, $b) = if let [a_slice, b_slice] = &$input_slices[..] {
-            let d = $arena.data_mut();
-            let a_src =
-                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]);
-            let b_src =
-                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size]);
-            let mut a_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(a_src.len());
-            a_buf.copy_from_slice(a_src);
-            crate::backend::cpu::telemetry::record_arena_temp_copy(a_slice.size);
-            let mut b_buf = crate::backend::cpu::microkernels::TlsVecPool::alloc(b_src.len());
-            b_buf.copy_from_slice(b_src);
-            crate::backend::cpu::telemetry::record_arena_temp_copy(b_slice.size);
-            (a_buf, b_buf)
-        } else {
-            (
-                crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
-                crate::backend::cpu::microkernels::TlsVecPool::alloc(0),
-            )
-        };
-        let $output = {
-            let d = $arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[$out_start..$out_end])
-        };
-    };
-}
-
 /// Minimum number of elements for a parallel dispatch loop to be beneficial.
 /// Below this threshold, sequential execution avoids rayon's task-spawning
 /// overhead without measurable throughput loss.
@@ -3648,12 +3585,26 @@ impl Backend for CpuBackend {
                             unary_op_dispatch(input_slices, arena, out_start, out_end, mish_f32);
                         }
                         "max_f32" => {
-                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
-                            max_f32(&a, &b, out_f32);
+                            fused_binary_activation_dispatch(
+                                "max_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a: f32, b: f32| a.max(b),
+                                |x| x,
+                            );
                         }
                         "min_f32" => {
-                            get_in_out_slices!(arena, input_slices => [a, b]; out_start, out_end => [out_f32]);
-                            min_f32(&a, &b, out_f32);
+                            fused_binary_activation_dispatch(
+                                "min_f32",
+                                input_slices,
+                                arena,
+                                out_start,
+                                out_end,
+                                |a: f32, b: f32| a.min(b),
+                                |x| x,
+                            );
                         }
                         "matmul" => {
                             if let [a_slice, b_slice] = &input_slices[..] {

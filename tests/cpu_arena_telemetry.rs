@@ -134,6 +134,46 @@ fn plain_binary_add_compiled_disjoint_graph_has_zero_arena_temp_copies() {
 }
 
 #[test]
+fn plain_binary_max_min_compiled_disjoint_graph_has_zero_arena_temp_copies() {
+    let _guard = TELEMETRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    for op in ["max", "min"] {
+        let builder = GraphBuilder::new();
+        let lhs = builder.input_with_dims(&[DimExpr::Known(LEN as u64)], IrDType::F32);
+        let rhs = builder.input_with_dims(&[DimExpr::Known(LEN as u64)], IrDType::F32);
+        let output = match op {
+            "max" => builder.maximum(&lhs, &rhs),
+            "min" => builder.minimum(&lhs, &rhs),
+            _ => unreachable!(),
+        };
+        let graph = graph_from(&builder, &output);
+
+        let lhs_values = vector_data(LEN, 37);
+        let rhs_values = vector_data(LEN, 41);
+        let lhs_bytes = bytemuck::cast_slice(&lhs_values).to_vec();
+        let rhs_bytes = bytemuck::cast_slice(&rhs_values).to_vec();
+
+        reset_cpu_telemetry();
+        let actual = execute_single_output_f32(&graph, &[&lhs_bytes, &rhs_bytes]);
+        let snapshot = cpu_telemetry_snapshot();
+
+        let expected: Vec<f32> = lhs_values
+            .iter()
+            .zip(rhs_values.iter())
+            .map(|(&x, &y)| if op == "max" { x.max(y) } else { x.min(y) })
+            .collect();
+        assert_close(&actual, &expected);
+        assert_eq!(
+            snapshot.arena_temp_copies, 0,
+            "same-shape plain {op} should borrow disjoint arena input/output directly; snapshot={snapshot:?}"
+        );
+        assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+    }
+}
+
+#[test]
 fn plain_binary_broadcast_add_compiled_graph_reports_current_copy_fallback() {
     let _guard = TELEMETRY_TEST_LOCK
         .lock()
