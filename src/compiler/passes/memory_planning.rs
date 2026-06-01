@@ -422,18 +422,19 @@ pub fn plan_memory_with_env(
             .then_with(|| b.size.cmp(&a.size))
     });
 
-    // ── In-place buffer reuse for unary elementwise ops ──────────────
+    // ── In-place buffer reuse for elementwise ops ────────────────────
     // Identify candidates BEFORE the allocation loop so that the allocator
     // sees the correct (extended) input lifetimes and skips candidate
     // outputs entirely (size=0 => no active entry => no double-free).
     //
-    // When a unary elementwise node's input has no other consumers after
-    // this node, and the output is not a graph output, reuse the input's
-    // buffer instead of allocating a new one.  This reduces arena size.
+    // When a unary or binary elementwise node has a same-sized input with no
+    // other consumers after this node, and the output is not a graph output,
+    // reuse that input's buffer instead of allocating a new one.  This reduces
+    // arena size.
     //
     // We do NOT reuse buffers of Input nodes -- the autograd backward pass
-    // reads forward inputs directly, and sharing the input's buffer with
-    // the elementwise output can cause subtle data-race-like issues.
+    // reads forward inputs directly, and sharing an input's buffer with an
+    // elementwise output can cause subtle data-race-like issues.
     //
     // IMPORTANT: This analysis MUST run before the allocation loop below.
     // The original code ran it after allocation, which caused a double-free
@@ -468,6 +469,14 @@ pub fn plan_memory_with_env(
         Opcode::ToF32,
         Opcode::Cast,
     ];
+    let binary_elementwise_ops: &[Opcode] = &[
+        Opcode::Add,
+        Opcode::Sub,
+        Opcode::Mul,
+        Opcode::Div,
+        Opcode::Maximum,
+        Opcode::Minimum,
+    ];
     struct ReuseCandidate {
         node_id: NodeId,
         input_id: NodeId,
@@ -484,36 +493,53 @@ pub fn plan_memory_with_env(
             Some(n) => n,
             None => continue,
         };
-        if !unary_elementwise_ops.contains(&node.opcode) || node.inputs.len() != 1 {
-            continue;
-        }
+        let candidate_input_ids: Vec<NodeId> =
+            if unary_elementwise_ops.contains(&node.opcode) && node.inputs.len() == 1 {
+                vec![node.inputs[0]]
+            } else if binary_elementwise_ops.contains(&node.opcode) && node.inputs.len() == 2 {
+                node.inputs.clone()
+            } else {
+                continue;
+            };
         if graph.outputs.contains(&info.node_id) {
             continue;
         }
-        let input_id = node.inputs[0];
-        // Skip Input nodes -- their buffer is used directly by the executor
-        // and sharing it can interfere with autograd backward reads.
-        if let Some(input_node) = graph.get_node(input_id) {
-            if matches!(input_node.opcode, Opcode::Input) {
+        let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
+        let mut reusable_input_id = None;
+        for input_id in candidate_input_ids {
+            // Skip Input nodes -- their buffer is used directly by the executor
+            // and sharing it can interfere with autograd backward reads.
+            if let Some(input_node) = graph.get_node(input_id) {
+                if matches!(input_node.opcode, Opcode::Input) {
+                    continue;
+                }
+            }
+            let input_type = match graph.get_node(input_id) {
+                Some(n) => &n.output_type,
+                None => continue,
+            };
+            let input_size = tensor_byte_size(input_type, shape_env);
+            if input_size != info.size || input_size == 0 {
                 continue;
             }
+            let consumers = graph.consumers(input_id);
+            let has_consumer_after = consumers.iter().any(|&cid| {
+                cid != info.node_id && position.get(&cid).copied().unwrap_or(0) > node_pos
+            });
+            let direct_last_use = consumers
+                .iter()
+                .filter_map(|cid| position.get(cid).copied())
+                .max()
+                .unwrap_or(node_pos);
+            if has_consumer_after || direct_last_use != node_pos {
+                continue;
+            }
+            reusable_input_id = Some(input_id);
+            break;
         }
-        let input_type = match graph.get_node(input_id) {
-            Some(n) => &n.output_type,
-            None => continue,
+        let Some(input_id) = reusable_input_id else {
+            continue;
         };
-        let input_size = tensor_byte_size(input_type, shape_env);
-        if input_size != info.size || input_size == 0 {
-            continue;
-        }
-        let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
-        let consumers = graph.consumers(input_id);
-        let has_consumer_after = consumers
-            .iter()
-            .any(|&cid| cid != info.node_id && position.get(&cid).copied().unwrap_or(0) > node_pos);
-        if has_consumer_after {
-            continue;
-        }
         reuse_candidates.push(ReuseCandidate {
             node_id: info.node_id,
             input_id,
