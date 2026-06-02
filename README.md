@@ -1,32 +1,26 @@
 # fastnn
 
-**fastnn** is a neural network library built in Rust with Python bindings. It combines an AOT compiler pipeline (90+ IR opcodes, operator fusion, per-channel weight quantization, arena-based memory planning) with an eager-mode autograd engine for research and training.
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
 [![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 
-> **Version:** 2.2.4 — AOT compiler, compiled training (6 optimizers), FlashAttention SIMD, WGPU quantized inference, residual+add+norm fusion
+fastnn is a Rust neural-network runtime and training library with Python
+bindings. It provides an eager tensor/autograd API and an ahead-of-time graph
+compilation path for experiments with compiler passes, arena memory planning,
+quantization, and backend dispatch.
 
----
+fastnn is under active development. APIs, supported graph paths, and performance
+characteristics may change between minor versions.
 
 ## Installation
 
-### Prerequisites
+Prerequisites:
 
-| Tool   | Version  | Purpose                   |
-|--------|----------|---------------------------|
-| Rust   | stable   | Build the core library    |
-| Python | ≥ 3.12   | Python bindings           |
-| uv     | latest   | Python dependency manager |
+- Rust stable
+- Python 3.12 or newer
+- `uv` for Python environment management
 
-Install Rust via [rustup](https://rustup.rs):
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-### Build & Install
+Build and install from source:
 
 ```bash
 git clone https://github.com/PetrouilFan/fastnn.git
@@ -34,334 +28,123 @@ cd fastnn
 uv pip install -e .
 ```
 
-This builds the Rust extension via [maturin](https://www.maturin.rs) and installs the Python package.
+The Python package is built with `maturin` and exposes the Rust extension as
+`fastnn._core`.
 
-### Platform Support
-
-fastnn automatically selects the best available instruction set at runtime:
-
-| Platform             | ISA Support                          |
-|----------------------|--------------------------------------|
-| x86-64 (desktop)     | AVX-512 → AVX2 → scalar fallback     |
-| ARM64 (Raspberry Pi 4/5, Apple Silicon) | NEON intrinsics         |
-| Other                | Scalar fallback                      |
-
----
-
-## Features
-
-### IR-Based AOT Compiler Pipeline
-
-The core of fastnn is an ahead-of-time compiler that transforms computation graphs through a series of passes:
-
-```
-ComputeGraph → Shape Inference → Operator Fusion → Quantization (opt.)
-→ Memory Planning → Backend Compile → Execute
-```
-
-- **ComputeGraph IR** — 90 opcodes with symbolic dimension expressions (`DimExpr::Known`, `Symbol`, `Bounded`), tensor types carrying dtype + shape, and `GraphBuilder` fluent API
-- **Shape Inference** — Resolves symbolic dimensions at compile time; falls back to bounded estimates with runtime tightening
-- **Operator Fusion** — Modular `FusionPass` trait with independent forward fusions (Op+ReLU, MatMul+BiasAdd+ReLU, Conv2d+BiasAdd+ReLU, residual+add+norm) and backward fusions
-- **Memory Planning** — Greedy first-fit arena allocator with live-range analysis and runtime shape tightening
-- **Arena-based execution** — Zero runtime allocation after compilation
-
-### Compiled Training
-
-The forward+backward+optimizer pipeline compiles ahead of time into a single `ExecutablePlan` with persistent memory arena reuse:
-
-| Optimizer | Status |
-|-----------|--------|
-| SGD       | Compiled |
-| Adam      | Compiled |
-| AdamW     | Compiled |
-| Muon      | Compiled |
-| Lion      | Compiled |
-| RMSprop   | Compiled |
-
-```python
-model = fnn.compile_train_model(
-    graph_bytes=graph_bytes,
-    loss_node_id=...,
-    param_ids=[...],
-    param_data=[...],
-    batch_input_ids=[...],
-    optimizer="adamw",
-    lr=0.001,
-)
-loss = model.train_step([batch_bytes])
-```
-
-### Native Weight Quantization
-
-Weights are quantized at **compile time** — no runtime overhead:
-
-- **4-bit (U4x8)** — 8 values per `u32` word
-- **8-bit (U8x4)** — 4 values per `u32` word
-- **Per-channel** — One (scale, zero_point) pair per output channel
-- **Fused dequantization** inside GEMM/conv kernels — no separate dequant step
-- **CPU + WGPU GPU quantized inference**
-
-```python
-executor = fnn.AotExecutor(nodes, params, input_names, output_names, quantize=4)
-output = executor.forward({"input": tensor})
-```
-
-### Eager-Mode Training
-
-Full eager-mode autograd engine with neural network modules and optimizers:
+## Quick start
 
 ```python
 import fastnn as fnn
 
-X = fnn.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], [4, 2])
-y = fnn.tensor([0.0, 1.0, 1.0, 0.0], [4, 1])
+x = fnn.tensor([1.0, 2.0, 3.0, 4.0], [2, 2])
+w = fnn.tensor([0.5, 0.0, 0.0, 0.5], [2, 2])
 
-model = fnn.Sequential(
-    fnn.Linear(2, 16),
-    fnn.ReLU(),
-    fnn.Linear(16, 1),
-)
-
-optimizer = fnn.Adam(model.parameters(), lr=1e-2)
-for epoch in range(200):
-    pred = model(X)
-    loss = fnn.mse_loss(pred, y)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
+y = fnn.matmul(x, w)
+print(y.numpy())
 ```
 
-### Neural Network Modules
+For a longer introduction to tensors, modules, optimizers, and training loops,
+see [Getting Started](docs/getting-started.md).
 
-Layers with full autograd support: `Linear`, `Conv1d/2d/3d`, `ConvTranspose2d`, `BatchNorm1d/2d`, `LayerNorm`, `RMSNorm`, `GroupNorm`, `Dropout/Dropout2d`, `Embedding`, `Upsample`, `MaxPool1d/2d`, `AvgPool1d/2d`, `AdaptiveAvgPool2d`, `MultiHeadAttention`, `TransformerBlock/Encoder`, `ResidualBlock`, `Flatten`.
+## Project components
 
-Activations (layer + tensor method): `ReLU`, `GELU`, `Sigmoid`, `Tanh`, `SiLU`, `LeakyReLU`, `Softplus`, `Hardswish`, `ELU`, `Mish`, `PReLU`, `Softmax`, `LogSoftmax`.
+| Component | Description |
+| --- | --- |
+| Rust core | Tensor operations, autograd, graph IR, compiler passes, and backend implementations. |
+| Python package | Python-facing tensor, module, optimizer, data, callback, and model I/O APIs. |
+| AOT compiler | Graph construction, shape/type inference, fusion passes, quantization passes, and memory planning. |
+| Eager mode | Tensor/autograd execution with neural-network modules and optimizers. |
+| Backends | CPU execution paths and optional WGPU code paths where supported. |
+| Import/export | `.fnn`, PyTorch conversion, and ONNX import paths for supported models/operators. |
 
-### Optimizers
+## Supported capabilities
 
-All with fused update steps: `SGD`, `Adam`, `AdamW`, `Muon`, `Lion`, `RMSprop`. Plus learning rate schedulers (`StepLR`, `CosineAnnealingLR`, `ExponentialLR`, `ReduceLROnPlateau`), gradient clipping, and callbacks.
+fastnn currently includes:
 
-### ONNX Model Import
+- Tensor operations and eager-mode autograd.
+- Neural-network modules, losses, optimizers, schedulers, data loaders, and callbacks.
+- Ahead-of-time graph compilation for selected workloads.
+- CPU kernels with runtime dispatch for supported SIMD targets.
+- Optional WGPU backend paths behind the `gpu` feature.
+- U4/U8 weight quantization paths in selected compiled inference flows.
+- ONNX import and model conversion utilities for supported operator sets.
+- Benchmark and regression tooling for maintained CPU execution paths.
 
-90+ ONNX operator types supported via `OnnxConverter`:
-
-```python
-info = fnn.convert_from_onnx("model.onnx", "model.fnn")
-model = fnn.build_model_from_fnn("model.fnn")
-executor = fnn.AotExecutor(nodes, params, input_names, output_names)
-output = executor.forward({"input": input_tensor})
-```
-
-### YOLO Object Detection
-
-```python
-model = fnn.YOLO("yolov8n.onnx")
-detections = model("image.jpg")
-```
-
-### FlashAttention
-
-Memory-efficient attention with tiled online-softmax and SIMD tile matmul:
-
-```python
-output = fnn.flash_attention(q, k, v, causal=True)
-```
-
-### GPU Acceleration (WGPU)
-
-Cross-platform GPU compute via wgpu (Vulkan, Metal, DX12). Quantized U4/U8 inference runs entirely on GPU via WGSL compute shaders.
-
----
-
-## Quick Start
-
-### Train an MLP (Python)
-
-```python
-import fastnn as fnn
-
-X = fnn.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], [4, 2])
-y = fnn.tensor([0.0, 1.0, 1.0, 0.0], [4, 1])
-
-model = fnn.Sequential(
-    fnn.Linear(2, 16),
-    fnn.ReLU(),
-    fnn.Linear(16, 1),
-)
-
-optimizer = fnn.Adam(model.parameters(), lr=1e-2)
-for epoch in range(200):
-    pred = model(X)
-    loss = fnn.mse_loss(pred, y)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-
-model.eval()
-with fnn.no_grad():
-    print(model(X).numpy().round(2))
-```
-
-### Compile and Execute a Graph (Rust)
-
-```rust
-use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
-use fastnn::backend::cpu::CpuBackend;
-
-let gb = GraphBuilder::new();
-let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(784)], IrDType::F32);
-let weight_tt = TensorType::new(vec![DimExpr::Known(784), DimExpr::Known(10)], IrDType::F32);
-let weight = gb.constant(&weight_bytes, weight_tt);
-let output = gb.matmul(&input, &weight);
-
-let (plan, mem, graph) = gb.compile_with_quantize(&[&output], CpuBackend, Some(4))?;
-```
-
-### Complete ONNX Pipeline
-
-```python
-import fastnn as fnn
-from fastnn.io import AotExecutor
-
-info = fnn.convert_from_onnx("model.onnx", "model.fnn")
-model = fnn.build_model_from_fnn("model.fnn")
-executor = fnn.AotExecutor(nodes, params, input_names, output_names)
-output = executor.forward({"input": input_tensor})
-```
-
----
-
-## Performance
-
-Performance numbers are hardware-dependent and must be backed by a runnable benchmark command.
-
-- Run the maintained CPU suite with `cargo +stable bench --bench cpu_baselines`
-- Run WGPU benchmark entrypoints manually on machines with a compatible GPU before making GPU speed claims
-- Save a regression baseline with `cargo +stable bench --bench cpu_baselines -- --save-baseline <name>`
-- Export a normalized JSON summary with `python scripts/criterion_to_json.py --criterion-dir target/criterion --output benchmark-results/<name>.json`
-
-Public speed claims should point to a checked-in benchmark command, name the comparison baseline, and avoid hard-coded tables that cannot be reproduced locally.
-
-> See `BENCHMARKS.md` for commands, baseline capture format, and the performance-claim policy.
-
----
-
-## Architecture
-
-```
-┌──────────────┐     ┌────────────────────────────────────────────────┐
-│  Python API  │────▶│                Rust Core                       │
-│  (PyO3)      │     │                                                │
-│  AotExecutor │     │  ┌──────────────────────────────────────────┐  │
-│  Tensor API  │     │  │        ComputeGraph (IR)                 │  │
-│              │     │  │  90 opcodes · DimExpr · IrDType · F32    │  │
-│              │     │  │  F16 · BF16 · I64 · U4/U8 quantized      │  │
-│              │     │  └─────────────┬────────────────────────────┘  │
-│              │     │                │                                │
-│              │     │  ┌─────────────▼────────────────────────────┐  │
-│              │     │  │      Compiler Passes                    │  │
-│              │     │  │  Shape Inference → AutoCast → Type Inf   │  │
-│              │     │  │  → Operator Fusion → Quantization (opt.) │  │
-│              │     │  │  → Const Folding → DCE → Memory Planning │  │
-│              │     │  └─────────────┬────────────────────────────┘  │
-│              │     │                │                                │
-│              │     │  ┌─────────────▼────────────────────────────┐  │
-│              │     │  │        Backend Dispatch                   │  │
-│              │     │  │  CpuBackend (AVX-512/AVX2/NEON/scalar)    │  │
-│              │     │  │  WgpuBackend (Vulkan/Metal/DX12)          │  │
-│              │     │  │  Arena-based execution                     │  │
-│              │     │  └────────────────────────────────────────────┘  │
-│              │     │                                                  │
-│              │     │  ┌────────────────────────────────────────────┐  │
-│              │     │  │     Eager Mode (Training)                  │  │
-│              │     │  │  Tensor · Autograd · Optimizers · Modules   │  │
-│              │     │  └────────────────────────────────────────────┘  │
-│              │     │  ┌────────────────────────────────────────────┐  │
-│              │     │  │     Compiled Training                      │  │
-│              │     │  │  build_backward_graph → TrainingPass       │  │
-│              │     │  │  → CompiledTrainingModel (6 optimizers)    │  │
-│              │     │  └────────────────────────────────────────────┘  │
-└──────────────┘     └──────────────────────────────────────────────────┘
-```
-
----
-
-## Build Flags
-
-| Feature       | Description                                       | Default |
-|---------------|---------------------------------------------------|---------|
-| `simd`        | SIMD kernels (AVX2, AVX512, NEON, F16C)           | on      |
-| `neon`        | ARM NEON SIMD kernels for packed GEMV (aarch64)   | on      |
-| `parallel`    | Rayon multi-threaded parallelism                  | on      |
-| `simd-avx512` | AVX-512 kernels (requires AVX-512 CPU)            | on      |
-| `fusion-forward` | Enable forward operator fusion passes          | on      |
-| `fusion-op-relu` | Op+Relu fusion pass                            | on      |
-| `fusion-matmul-add-relu` | MatMul+BiasAdd+Relu fusion pass       | on      |
-| `fusion-backward` | Enable backward operator fusion passes         | off     |
-| `fusion-residual-add-norm` | Enable residual+add+norm fusion pass    | off     |
-| `cli`         | Standalone runtime binary (`fastnn-runtime`)       | off     |
-| `openblas`    | Link against OpenBLAS for large matmul            | off     |
-| `blas`        | BLAS-accelerated matmul (requires system cblas)   | off     |
-
----
+Some APIs and backend paths are experimental. Check the relevant documentation
+and tests before relying on a path for production workloads.
 
 ## Testing
 
+Common local checks:
+
 ```bash
-# Rust unit and integration tests
 cargo test
-
-# Quantized pipeline integration tests
-cargo test --test quantized_pipeline
-
-# Python tests
 uv run pytest tests/ -v
 ```
 
----
+Additional focused checks are documented in [Development](docs/development.md).
+
+## Benchmarking
+
+Performance results should be reported with the exact command, hardware,
+commit, and comparison baseline. The maintained CPU benchmark suite is:
+
+```bash
+cargo +stable bench --bench cpu_baselines
+```
+
+See [BENCHMARKS.md](BENCHMARKS.md) for benchmark commands, baseline capture,
+JSON export, and the performance-claim policy.
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Getting Started](docs/getting-started.md) | Installation and quick start |
-| [Tensors](docs/tensors.md) | Tensor creation, operations, autograd |
-| [NN Modules](docs/nn-modules.md) | Neural network layer reference |
-| [Optimizers](docs/optimizers.md) | Training optimization algorithms |
-| [Training](docs/training.md) | Data loaders, callbacks, training loops |
-| [Models](docs/models.md) | Pre-built model architectures (MLP, Transformer, YOLO) |
-| [IO & Serialization](docs/io.md) | Model save/load, ONNX import |
-| [Python API](docs/python-api.md) | Compiled training, FlashAttention, WGPU |
-| [Architecture](docs/architecture.md) | AOT compiler pipeline internals |
-| [Development](docs/development.md) | Module layout and contribution guide |
-| [ONNX Support](docs/onnx.md) | ONNX import, YOLO, quantized export |
+| Document | Purpose |
+| --- | --- |
+| [Getting Started](docs/getting-started.md) | Installation and first examples. |
+| [Tensors](docs/tensors.md) | Tensor creation, operations, and autograd behavior. |
+| [Training](docs/training.md) | Training loops, data loading, callbacks, and compiled training notes. |
+| [Neural Network Modules](docs/nn-modules.md) | Layer and module reference. |
+| [Optimizers](docs/optimizers.md) | Optimizer and scheduler APIs. |
+| [Python API](docs/python-api.md) | Python-facing APIs for compiled execution and runtime features. |
+| [ONNX Support](docs/onnx.md) | ONNX import and conversion paths. |
+| [Architecture](docs/architecture.md) | IR, compiler passes, memory planning, and backend internals. |
+| [Development](docs/development.md) | Repository layout, contribution workflow, and validation commands. |
+| [Benchmarks](BENCHMARKS.md) | Maintained benchmark suites and reporting policy. |
 
----
+## Development
 
-## Roadmap
+Useful commands while working on the repository:
 
-- [x] **v1.0** — Core tensor ops, autograd, Conv2d, optimizers, FlashAttention
-- [x] **v1.1** — Packed precision, SWAR ops, GPU backend, modular architecture
-- [x] **v1.2** — Fused kernels (Conv+BN+Activation), ONNX import, fused optimizer updates
-- [x] **v1.3** — Batch GEMM, ARM NEON, WGPU packed conv, calibration/profiling
-- [x] **v2.0** — AOT compiler pipeline, IR-based execution, native U4/U8 quantization
-- [x] **v2.1** — Modular fusion (forward + backward), CLI binary, error handling (`try_*` API)
-- [x] **v2.2** — Compiled training (6 optimizers), FlashAttention SIMD, WGPU quantized inference, residual+add+norm fusion, ARM NEON validation suite
-- [ ] **v2.3** (planned) — Maintained WGPU benchmarks, WGPU-resident arena execution, optimizer sync audit, training graph export metadata
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features
+cargo test
+uv run pytest tests/ -v
+```
 
----
+Behavior changes should include tests. Performance changes should include a
+reproducible benchmark command or telemetry guardrail.
+
+## Project status
+
+fastnn is currently focused on:
+
+- CPU execution performance and copy reduction.
+- Arena memory planning and compiled graph execution.
+- Correctness coverage for compiler/runtime paths.
+- Maintained benchmark baselines for performance work.
+- Validation of optional WGPU backend paths.
+
+For current planning documents, see [v2.3 Roadmap](docs/v2.3-roadmap.md) and
+[Performance Roadmap](docs/performance-roadmap.md).
 
 ## Contributing
 
-fastnn is developed in two layers:
+Contributions should keep the README concise and move detailed API, architecture,
+and performance material into the documentation. Include tests for behavior
+changes and reproducible benchmark commands for performance claims.
 
-1. **Rust core** (`src/`) — IR nodes, compiler passes, backends, tensor ops, autograd, neural network modules, optimizers
-2. **Python facade** (`fastnn/`) — Public API, data loading, model I/O, ONNX pipeline
-
-See [`docs/development.md`](docs/development.md) for architecture, module layout, and step-by-step guides for adding ops, passes, and bindings.
-
----
+See [Development](docs/development.md) for repository layout and local validation.
 
 ## License
 
