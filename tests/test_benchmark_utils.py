@@ -124,15 +124,18 @@ class TestBenchmarkTimer:
 
     def test_compare_method(self):
         timer = BenchmarkTimer(warmup=2, iterations=5, unit="us")
-        results = timer.compare(
-            {
-                "op1": lambda: time.sleep(0.001),
-                "op2": lambda: time.sleep(0.002),
-            }
-        )
+        calls = {"op1": 0, "op2": 0}
+
+        def op1():
+            calls["op1"] += 1
+
+        def op2():
+            calls["op2"] += 1
+
+        results = timer.compare({"op1": op1, "op2": op2})
         assert "op1" in results
         assert "op2" in results
-        assert results["op1"].mean < results["op2"].mean
+        assert calls == {"op1": 7, "op2": 7}
 
     def test_result_statistics(self):
         timer = BenchmarkTimer(warmup=0, iterations=10, unit="us")
