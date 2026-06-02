@@ -53,14 +53,17 @@ def docs_have_resolvable_local_markdown_links() -> None:
     failures: list[str] = []
 
     for markdown_path in sorted(ROOT.rglob("*.md")):
-        if any(part in {".git", "target", ".venv"} for part in markdown_path.parts):
+        if any(
+            part in {".git", "target", ".venv", "node_modules", ".kilo"}
+            for part in markdown_path.parts
+        ):
             continue
         text = markdown_path.read_text(encoding="utf-8")
         for target in _iter_markdown_links(text):
             if not target or not _is_local_link(target):
                 continue
             if not _link_path(markdown_path, target).exists():
-                rel_path = markdown_path.relative_to(ROOT)
+                rel_path = markdown_path.relative_to(ROOT).as_posix()
                 failures.append(f"{rel_path}: missing local link target {target}")
 
     if failures:
