@@ -428,9 +428,10 @@ pub fn plan_memory_with_env(
     // outputs entirely (size=0 => no active entry => no double-free).
     //
     // When a unary or binary elementwise node has a same-sized input with no
-    // other consumers after this node, and the output is not a graph output,
-    // reuse that input's buffer instead of allocating a new one.  This reduces
-    // arena size.
+    // other consumers after this node, reuse that input's buffer instead of
+    // allocating a new one. This also applies to graph-output nodes when the
+    // operand is otherwise dead; the shared operand lifetime is extended to
+    // cover the output lifetime below.
     //
     // We do NOT reuse buffers of Input nodes -- the autograd backward pass
     // reads forward inputs directly, and sharing an input's buffer with an
@@ -501,9 +502,6 @@ pub fn plan_memory_with_env(
             } else {
                 continue;
             };
-        if graph.outputs.contains(&info.node_id) {
-            continue;
-        }
         let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
         let mut reusable_input_id = None;
         for input_id in candidate_input_ids {

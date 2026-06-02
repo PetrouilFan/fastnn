@@ -167,6 +167,50 @@ fn test_memory_plan_output_lifetime_extended() {
 }
 
 #[test]
+fn test_memory_plan_output_elementwise_reuses_dead_non_input_operand() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let intermediate_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Sigmoid,
+        vec![intermediate_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    let input_slot = plan.slots.get(&input_id).unwrap();
+    let intermediate_slot = plan.slots.get(&intermediate_id).unwrap();
+    let output_slot = plan.slots.get(&output_id).unwrap();
+
+    assert_eq!(
+        output_slot.offset, intermediate_slot.offset,
+        "graph-output elementwise node should reuse its dead non-input operand buffer"
+    );
+    assert_ne!(
+        output_slot.offset, input_slot.offset,
+        "graph-output elementwise node must not reuse graph input storage"
+    );
+    assert_eq!(
+        plan.total_size,
+        2 * 64,
+        "input plus one reusable 64-byte intermediate/output slot should be enough"
+    );
+}
+
+#[test]
 fn test_memory_plan_binary_reuses_dead_non_input_operand() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
@@ -215,8 +259,8 @@ fn test_memory_plan_binary_reuses_dead_non_input_operand() {
     );
     assert_eq!(
         plan.total_size,
-        4 * 64,
-        "without binary in-place reuse, the add output requires a fifth 64-byte slot"
+        3 * 64,
+        "binary add reuses lhs, and the graph-output relu can now reuse the add slot"
     );
 }
 
