@@ -428,9 +428,10 @@ pub fn plan_memory_with_env(
     // outputs entirely (size=0 => no active entry => no double-free).
     //
     // When a unary or binary elementwise node has a same-sized input with no
-    // other consumers after this node, and the output is not a graph output,
-    // reuse that input's buffer instead of allocating a new one.  This reduces
-    // arena size.
+    // other consumers after this node, reuse that input's buffer instead of
+    // allocating a new one. This also applies to graph-output nodes when the
+    // operand is otherwise dead; the shared operand lifetime is extended to
+    // cover the output lifetime below.
     //
     // We do NOT reuse buffers of Input nodes -- the autograd backward pass
     // reads forward inputs directly, and sharing an input's buffer with an
@@ -501,14 +502,17 @@ pub fn plan_memory_with_env(
             } else {
                 continue;
             };
-        if graph.outputs.contains(&info.node_id) {
-            continue;
-        }
         let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
         let mut reusable_input_id = None;
         for input_id in candidate_input_ids {
             // Skip Input nodes -- their buffer is used directly by the executor
             // and sharing it can interfere with autograd backward reads.
+            // Also never reuse graph outputs or required nodes: callers may
+            // read those values after this node writes its output, so sharing
+            // their storage would corrupt externally-visible tensors.
+            if graph.outputs.contains(&input_id) || graph.required_nodes.contains(&input_id) {
+                continue;
+            }
             if let Some(input_node) = graph.get_node(input_id) {
                 if matches!(input_node.opcode, Opcode::Input) {
                     continue;
@@ -518,6 +522,9 @@ pub fn plan_memory_with_env(
                 Some(n) => &n.output_type,
                 None => continue,
             };
+            if input_type != &node.output_type {
+                continue;
+            }
             let input_size = tensor_byte_size(input_type, shape_env);
             if input_size != info.size || input_size == 0 {
                 continue;
