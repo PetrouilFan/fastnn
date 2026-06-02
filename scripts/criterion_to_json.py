@@ -47,10 +47,14 @@ def main() -> int:
     if not criterion_dir.exists():
         raise SystemExit(f"criterion directory does not exist: {criterion_dir}")
 
+    benchmarks = list(benchmark_entries(criterion_dir))
+    if not benchmarks:
+        raise SystemExit(f"no Criterion benchmark estimates found under: {criterion_dir}")
+
     data = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "criterion_dir": str(criterion_dir),
-        "benchmarks": list(benchmark_entries(criterion_dir)),
+        "benchmarks": benchmarks,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
