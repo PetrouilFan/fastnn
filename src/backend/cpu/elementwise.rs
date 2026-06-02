@@ -103,7 +103,7 @@ pub(super) fn fused_binary_activation_dispatch(
     op: impl Fn(f32, f32) -> f32 + Sync,
     act: impl Fn(f32) -> f32 + Sync,
 ) {
-    if let [a_slice, b_slice] = &input_slices[..] {
+    if let [a_slice, b_slice] = input_slices {
         let output_slice = BufferSlice::new(out_start, out_end - out_start);
         arena::with_binary_f32_slices(arena, *a_slice, *b_slice, output_slice, |a, b, out_f32| {
             fused_binary_activation_dispatch_slices(kernel_name, a, b, out_f32, &op, &act);

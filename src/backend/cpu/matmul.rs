@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{BackendError, BufferSlice};
 use crate::dtypes::{PackedWord, U4x8, U8x4};
@@ -5,6 +7,9 @@ use crate::ir::node::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
 
 use super::{resolve_params, CpuBuffer};
+
+// Runtime dispatch helpers intentionally take the IR/kernel call-site context
+// directly so they do not allocate wrapper structs on hot paths.
 
 /// Helper: dispatch a fused matmul + bias + activation kernel at runtime.
 ///
@@ -153,7 +158,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
     bit_width: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
-    if let [a_slice, w_slice] = &input_slices[..] {
+    if let [a_slice, w_slice] = input_slices {
         let (activations, packed_bytes) = {
             let d = arena.data_mut();
             (
@@ -170,7 +175,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
             )
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = &matmul_params[..] else {
+        let &[m, k, n] = matmul_params.as_slice() else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
@@ -211,7 +216,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
     out_end: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
-    if let [a_slice, w_slice] = &input_slices[..] {
+    if let [a_slice, w_slice] = input_slices {
         let (activation_payload, packed_bytes) = {
             let d = arena.data_mut();
             (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
@@ -223,7 +228,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
             })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = &matmul_params[..] else {
+        let &[m, k, n] = matmul_params.as_slice() else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
@@ -271,7 +276,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
     out_end: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
-    if let [a_slice, w_slice] = &input_slices[..] {
+    if let [a_slice, w_slice] = input_slices {
         let (activation_payload, packed_bytes) = {
             let d = arena.data_mut();
             (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
@@ -283,7 +288,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
             })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = &matmul_params[..] else {
+        let &[m, k, n] = matmul_params.as_slice() else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
