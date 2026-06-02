@@ -270,3 +270,56 @@ fn fused_binary_activation_broadcast_add_relu_has_zero_arena_temp_copies() {
     );
     assert_eq!(snapshot.arena_temp_copy_bytes, 0);
 }
+
+#[test]
+fn reductions_compiled_disjoint_graph_have_zero_arena_temp_copies() {
+    let _guard = TELEMETRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let rows = 19usize;
+    let width = 31usize;
+    let len = rows * width;
+
+    for op in ["sum", "mean"] {
+        let builder = GraphBuilder::new();
+        let input = builder.input_with_dims(
+            &[DimExpr::Known(rows as u64), DimExpr::Known(width as u64)],
+            IrDType::F32,
+        );
+        let output = match op {
+            "sum" => builder.reduce_sum(&input, 1, false),
+            "mean" => builder.reduce_mean(&input, 1, false),
+            _ => unreachable!(),
+        };
+        let graph = graph_from(&builder, &output);
+
+        let input_values = vector_data(len, if op == "sum" { 101 } else { 103 });
+        let input_bytes = bytemuck::cast_slice(&input_values).to_vec();
+
+        reset_cpu_telemetry();
+        let (actual, kernels) = execute_single_output_f32_with_kernels(&graph, &[&input_bytes]);
+        let snapshot = cpu_telemetry_snapshot();
+
+        assert!(
+            kernels.iter().any(|kernel| kernel == "reduce_f32"),
+            "expected compiled reduce_f32 kernel for reduce_{op}, kernels={kernels:?}"
+        );
+        let expected: Vec<f32> = input_values
+            .chunks_exact(width)
+            .map(|row| {
+                let sum: f32 = row.iter().copied().sum();
+                if op == "mean" {
+                    sum / width as f32
+                } else {
+                    sum
+                }
+            })
+            .collect();
+        assert_close(&actual, &expected);
+        assert_eq!(
+            snapshot.arena_temp_copies, 0,
+            "compiled disjoint reduce_{op} should borrow arena input/output directly; snapshot={snapshot:?}, kernels={kernels:?}"
+        );
+        assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+    }
+}
