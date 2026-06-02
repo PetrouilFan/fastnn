@@ -20,7 +20,6 @@ clippy::items_after_test_module|src/tensor/mod.rs|items after a test module
 clippy::iter_cloned_collect|src/tensor/ops.rs|called `iter().copied().collect()` on a slice to create a `Vec`. Calling `to_vec()` is both faster and more readable
 clippy::manual_is_multiple_of|src/autograd.rs|manual implementation of `.is_multiple_of()`
 clippy::manual_range_contains|src/backend/cpu/microkernels.rs|manual `RangeInclusive::contains` implementation
-clippy::manual_repeat_n|src/compiler/passes/auto_cast.rs|this `repeat().take()` can be written more concisely
 clippy::needless_borrow|src/autograd.rs|this expression creates a reference which is immediately dereferenced by the compiler
 clippy::needless_borrow|src/ir/builder.rs|this expression creates a reference which is immediately dereferenced by the compiler
 clippy::needless_update|src/macros/optim.rs|struct update has no effect, all the fields in the struct have already been specified
