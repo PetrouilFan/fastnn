@@ -887,6 +887,71 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
         );
     }
 
+    let reduce_cases = [
+        RowwiseCase {
+            name: "batch32_hidden768",
+            batch: 32,
+            hidden: 768,
+        },
+        RowwiseCase {
+            name: "batch16_hidden4096",
+            batch: 16,
+            hidden: 4096,
+        },
+    ];
+
+    for case in reduce_cases {
+        let len = case.batch * case.hidden;
+        group.throughput(Throughput::Elements(len as u64));
+
+        for op in ["sum", "mean"] {
+            let input = vector_data(len, if op == "sum" { 101 } else { 103 });
+            let input_bytes = bytemuck::cast_slice(&input).to_vec();
+            let builder = GraphBuilder::new();
+            let x = builder.input_with_dims(
+                &[
+                    DimExpr::Known(case.batch as u64),
+                    DimExpr::Known(case.hidden as u64),
+                ],
+                IrDType::F32,
+            );
+            let out = match op {
+                "sum" => builder.reduce_sum(&x, 1, false),
+                "mean" => builder.reduce_mean(&x, 1, false),
+                _ => unreachable!(),
+            };
+            let graph = graph_from(&builder, &out);
+            let mut executor = GraphExecutor::new(CpuBackend);
+            let (mut plan, memory_plan, compiled_graph) = executor
+                .compile_with_plan_and_quantize(&graph, None)
+                .expect("reduce graph should compile");
+            group.bench_with_input(
+                BenchmarkId::new(format!("reduce_{op}_zero_copy"), case.name),
+                &case,
+                |bench, _| {
+                    bench.iter(|| {
+                        reset_cpu_telemetry();
+                        let outputs = executor
+                            .execute(
+                                &compiled_graph,
+                                &mut plan,
+                                &memory_plan,
+                                &[black_box(&input_bytes)],
+                            )
+                            .expect("reduce graph should execute");
+                        let snapshot = cpu_telemetry_snapshot();
+                        assert_eq!(
+                            snapshot.arena_temp_copies, 0,
+                            "reduce_{op} snapshot={snapshot:?}"
+                        );
+                        assert_eq!(snapshot.arena_temp_copy_bytes, 0);
+                        black_box(outputs);
+                    });
+                },
+            );
+        }
+    }
+
     let broadcast_cases = [
         ArenaBroadcastCase {
             name: "batch16_hidden768",
