@@ -892,7 +892,7 @@ fn run_kernel_precopied(
                 let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
                 let bias = bytemuck::cast_slice::<_, f32>(&inputs[1]);
                 let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let &[channel_stride] = &params[..] else {
+                let &[channel_stride] = params else {
                     return Err(BackendError::Dispatch(
                         "biasadd: expected params [channel_stride]".into(),
                     ));
@@ -902,7 +902,7 @@ fn run_kernel_precopied(
         }
         // ── Normalization ──────────────────────────────────────
         "norm_f32" => {
-            let &[eps_bits, is_batch_norm] = &params[..] else {
+            let &[eps_bits, is_batch_norm] = params else {
                 return Err(BackendError::Dispatch(
                     "norm_f32: expected params [eps_bits, is_batch_norm]".into(),
                 ));
@@ -974,7 +974,7 @@ fn run_kernel_precopied(
                 _ => None,
             };
             if inputs.len() >= 2 {
-                let &[stride, padding, dilation, groups, c, h, w, kh, kw] = &params[..] else {
+                let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
                     return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
                 };
                 let c_per_group = c / groups.max(1);
@@ -5454,12 +5454,12 @@ impl Backend for CpuBackend {
                                 if residual_slice.size == main_slice.size
                                     && main_slice.size == output_slice.size
                                     && row_size > 0
-                                    && output_slice.size / std::mem::size_of::<f32>() % row_size
-                                        == 0
-                                    && weight_slice.map_or(true, |w| {
+                                    && (output_slice.size / std::mem::size_of::<f32>())
+                                        .is_multiple_of(row_size)
+                                    && weight_slice.is_none_or(|w| {
                                         w.size / std::mem::size_of::<f32>() == row_size
                                     })
-                                    && bias_slice.map_or(true, |b| {
+                                    && bias_slice.is_none_or(|b| {
                                         b.size / std::mem::size_of::<f32>() == row_size
                                     })
                                 {
@@ -5515,9 +5515,9 @@ impl Backend for CpuBackend {
                                 if residual_slice.size == main_slice.size
                                     && main_slice.size == output_slice.size
                                     && row_size > 0
-                                    && output_slice.size / std::mem::size_of::<f32>() % row_size
-                                        == 0
-                                    && weight_slice.map_or(true, |w| {
+                                    && (output_slice.size / std::mem::size_of::<f32>())
+                                        .is_multiple_of(row_size)
+                                    && weight_slice.is_none_or(|w| {
                                         w.size / std::mem::size_of::<f32>() == row_size
                                     })
                                 {

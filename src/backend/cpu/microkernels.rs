@@ -5110,6 +5110,7 @@ pub fn rmsprop_update_f32_scalar(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn rmsprop_update_f32_scalar_into(
     w: &[f32],
     g: &[f32],
@@ -5146,6 +5147,7 @@ pub unsafe fn rmsprop_update_f32_avx2(
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn rmsprop_update_f32_avx2_into(
     w: &[f32],
     g: &[f32],

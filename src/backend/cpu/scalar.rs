@@ -39,7 +39,7 @@ pub(super) fn scalar_op_dispatch(
     out_end: usize,
     op: impl Fn(&[f32], f32, &mut [f32]),
 ) {
-    if let [data_slice, scalar_slice] = &input_slices[..] {
+    if let [data_slice, scalar_slice] = input_slices {
         let scalar = arena::read_scalar_f32(arena, *scalar_slice);
         let output_slice = BufferSlice::new(out_start, out_end - out_start);
         arena::with_unary_f32_slices(arena, *data_slice, output_slice, |data, out| {
