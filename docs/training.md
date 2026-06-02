@@ -459,7 +459,11 @@ for epoch in range(50):
 
 ## Distributed Data Parallel
 
-FastNN provides `DataParallel` for multi-GPU training using data parallelism.
+FastNN provides `DataParallel` for experimental multi-GPU training using data
+parallelism. The current synchronization path performs CPU gradient aggregation,
+so throughput and memory behavior are hardware-dependent and should be validated
+on the exact devices used for training before treating this path as production
+infrastructure.
 
 ```python
 from fastnn.parallel import DataParallel
