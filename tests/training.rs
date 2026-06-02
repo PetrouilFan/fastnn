@@ -19,10 +19,6 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 /// Helper: convert f32 bytes to a Vec<f32> for verification.
-fn read_f32(data: &[u8]) -> Vec<f32> {
-    bytemuck::cast_slice(data).to_vec()
-}
-
 /// Build a tiny MLP: x(1,4) → W(4,2)+b(2) → logits → reduce_mean → scalar loss.
 /// Returns (graph, loss_node_id, params, batch_inputs, param_data).
 fn build_mlp() -> (
@@ -36,11 +32,11 @@ fn build_mlp() -> (
 
     // Inputs and parameters
     let x = g.input(&[1, 4], IrDType::F32);
-    let W = g.parameter(&[4, 2], IrDType::F32);
+    let w = g.parameter(&[4, 2], IrDType::F32);
     let b = g.parameter(&[2], IrDType::F32);
 
     // Forward: logits = x @ W + b
-    let mm = g.matmul(&x, &W);
+    let mm = g.matmul(&x, &w);
     let logits = g.add(&mm, &b);
 
     // Loss: reduce_mean over all dims to get scalar
@@ -49,19 +45,19 @@ fn build_mlp() -> (
 
     let graph = g.to_graph();
     let x_id = x.node_id();
-    let W_id = W.node_id();
+    let w_id = w.node_id();
     let b_id = b.node_id();
     let loss_id = loss.node_id();
 
     // Parameter initial values
-    let W_data = f32_bytes(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]); // 8 f32s = 32 bytes
+    let w_data = f32_bytes(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]); // 8 f32s = 32 bytes
     let b_data = f32_bytes(&[0.0, 0.0]); // 2 f32s = 8 bytes
 
     (
         graph,
         loss_id,
-        vec![W_id, b_id],
-        vec![W_data, b_data],
+        vec![w_id, b_id],
+        vec![w_data, b_data],
         vec![x_id],
     )
 }
@@ -78,28 +74,28 @@ fn build_mlp_single_output() -> (
     let g = GraphBuilder::new();
 
     let x = g.input(&[1, 4], IrDType::F32);
-    let W = g.parameter(&[4, 1], IrDType::F32);
+    let w = g.parameter(&[4, 1], IrDType::F32);
     let b = g.parameter(&[1], IrDType::F32);
 
-    let mm = g.matmul(&x, &W); // [1,1]
+    let mm = g.matmul(&x, &w); // [1,1]
     let logits = g.add(&mm, &b); // [1,1]
     let loss = g.reduce_mean(&logits, 0, false); // [1]
     let loss = g.reduce_mean(&loss, 0, false); // scalar
 
     let graph = g.to_graph();
     let x_id = x.node_id();
-    let W_id = W.node_id();
+    let w_id = w.node_id();
     let b_id = b.node_id();
     let loss_id = loss.node_id();
 
-    let W_data = f32_bytes(&[0.5, -0.3, 0.2, 0.1]); // 4 f32s
+    let w_data = f32_bytes(&[0.5, -0.3, 0.2, 0.1]); // 4 f32s
     let b_data = f32_bytes(&[0.0]); // 1 f32
 
     (
         graph,
         loss_id,
-        vec![W_id, b_id],
-        vec![W_data, b_data],
+        vec![w_id, b_id],
+        vec![w_data, b_data],
         vec![x_id],
     )
 }
@@ -532,17 +528,17 @@ fn test_training_single_batch() {
     // Very tiny: x(1,2) → W(2,1)+b(1) → reduce_mean → scalar loss
     let g = GraphBuilder::new();
     let x = g.input(&[1, 2], IrDType::F32);
-    let W = g.parameter(&[2, 1], IrDType::F32);
+    let w = g.parameter(&[2, 1], IrDType::F32);
     let b = g.parameter(&[1], IrDType::F32);
 
-    let mm = g.matmul(&x, &W);
+    let mm = g.matmul(&x, &w);
     let logits = g.add(&mm, &b);
     let loss_tmp = g.reduce_mean(&logits, 0, false);
     let loss = g.reduce_mean(&loss_tmp, 0, false);
 
     let graph = g.to_graph();
     let x_data = f32_bytes(&[1.0, 2.0]);
-    let W_data = f32_bytes(&[0.5, -0.3]);
+    let w_data = f32_bytes(&[0.5, -0.3]);
     let b_data = f32_bytes(&[0.0]);
 
     let executor = GraphExecutor::new(CpuBackend);
@@ -550,8 +546,8 @@ fn test_training_single_batch() {
         .compile_train(
             &graph,
             loss.node_id(),
-            &[W.node_id(), b.node_id()],
-            &[&W_data, &b_data],
+            &[w.node_id(), b.node_id()],
+            &[&w_data, &b_data],
             &[x.node_id()],
             None,
             &TrainConfig {
@@ -582,18 +578,18 @@ fn test_shape_tightening_reduces_arena() {
         &[DimExpr::Symbol("N".to_string()), DimExpr::Known(4)],
         IrDType::F32,
     );
-    let W = g.parameter(&[4, 2], IrDType::F32);
+    let w = g.parameter(&[4, 2], IrDType::F32);
     let b = g.parameter(&[2], IrDType::F32);
 
-    let mm = g.matmul(&x, &W);
+    let mm = g.matmul(&x, &w);
     let logits = g.add(&mm, &b);
     let loss_tmp = g.reduce_mean(&logits, 0, false);
     let loss = g.reduce_mean(&loss_tmp, 0, false);
 
     let graph = g.to_graph();
-    let W_data = f32_bytes(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+    let w_data = f32_bytes(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
     let b_data = f32_bytes(&[0.0, 0.0]);
-    let params = vec![W.node_id(), b.node_id()];
+    let params = vec![w.node_id(), b.node_id()];
     let batch_inputs = vec![x.node_id()];
 
     let executor = GraphExecutor::new(CpuBackend);
@@ -611,7 +607,7 @@ fn test_shape_tightening_reduces_arena() {
             &graph,
             loss.node_id(),
             &params,
-            &[&W_data, &b_data],
+            &[&w_data, &b_data],
             &batch_inputs,
             None,
             &config,
@@ -627,7 +623,7 @@ fn test_shape_tightening_reduces_arena() {
             &graph,
             loss.node_id(),
             &params,
-            &[&W_data, &b_data],
+            &[&w_data, &b_data],
             &batch_inputs,
             Some(&shape_env),
             &config,
@@ -652,7 +648,7 @@ fn test_shape_tightening_reduces_arena() {
             &graph,
             loss.node_id(),
             &params,
-            &[&W_data, &b_data],
+            &[&w_data, &b_data],
             &batch_inputs,
             Some(&shape_env),
             &config,
