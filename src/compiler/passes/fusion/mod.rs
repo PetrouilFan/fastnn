@@ -1,6 +1,7 @@
 use crate::ir::node::ComputeGraph;
 
 pub mod backward;
+pub mod conv_silu;
 pub mod matmul_add_relu;
 pub mod op_relu;
 pub mod residual_add_norm;
@@ -32,9 +33,7 @@ fn apply_op_gelu(_graph: &mut ComputeGraph) -> Result<bool, String> {
 
 #[cfg(feature = "fusion-op-silu")]
 fn apply_op_silu(graph: &mut ComputeGraph) -> Result<bool, String> {
-    // TODO: implement dedicated OpSilu fusion pass when module exists
-    let _ = graph;
-    Ok(false)
+    conv_silu::ConvSilu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-op-silu"))]
 fn apply_op_silu(_graph: &mut ComputeGraph) -> Result<bool, String> {
