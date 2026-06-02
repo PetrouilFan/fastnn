@@ -266,7 +266,7 @@ fnn.AotExecutor(nodes, params, input_names, output_names, input_shapes=None, qua
 executor.forward({"input_name": tensor})
 ```
 
-See [ONNX Import](../io/#onnx-import) for usage with real ONNX models.
+See [ONNX Import](io.md#onnx-import) for usage with real ONNX models.
 
 ## Utilities
 
