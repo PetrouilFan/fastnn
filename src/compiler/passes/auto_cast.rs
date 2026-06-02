@@ -176,8 +176,7 @@ mod tests {
         value: f32,
     ) -> NodeId {
         let numel = rows * cols;
-        let data: Vec<u8> = std::iter::repeat(value)
-            .take(numel)
+        let data: Vec<u8> = std::iter::repeat_n(value, numel)
             .flat_map(|v: f32| v.to_le_bytes())
             .collect();
         let tt = TensorType::new(
@@ -447,8 +446,7 @@ mod tests {
 
         // Conv2d weight: [out_channels, in_channels, kh, kw] = [4, 3, 3, 3]
         let numel = 4 * 3 * 3 * 3;
-        let weight_data: Vec<u8> = std::iter::repeat(1.0f32)
-            .take(numel)
+        let weight_data: Vec<u8> = std::iter::repeat_n(1.0f32, numel)
             .flat_map(|v: f32| v.to_le_bytes())
             .collect();
         let tt = TensorType::new(
