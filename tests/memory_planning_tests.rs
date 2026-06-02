@@ -211,6 +211,158 @@ fn test_memory_plan_output_elementwise_reuses_dead_non_input_operand() {
 }
 
 #[test]
+fn test_memory_plan_output_elementwise_does_not_reuse_operand_that_is_graph_output() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let intermediate_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let final_id = graph.add_node(
+        Opcode::Sigmoid,
+        vec![intermediate_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![intermediate_id, final_id]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    assert_ne!(
+        plan.slots.get(&final_id).unwrap().offset,
+        plan.slots.get(&intermediate_id).unwrap().offset,
+        "graph-output elementwise node must not reuse an operand that is also a graph output"
+    );
+    assert_eq!(
+        plan.total_size,
+        3 * 64,
+        "input, intermediate output, and final output must occupy distinct aligned slots"
+    );
+}
+
+#[test]
+fn test_memory_plan_output_elementwise_does_not_reuse_operand_that_is_required_node() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let required_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Sigmoid,
+        vec![required_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+    graph.add_required_node(required_id);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    assert_ne!(
+        plan.slots.get(&output_id).unwrap().offset,
+        plan.slots.get(&required_id).unwrap().offset,
+        "graph-output elementwise node must not reuse an operand that is a required node"
+    );
+    assert_eq!(
+        plan.total_size,
+        3 * 64,
+        "input, required node, and output must occupy distinct aligned slots"
+    );
+}
+
+#[test]
+fn test_memory_plan_cast_does_not_reuse_same_byte_size_different_dtype_operand() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let intermediate_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Cast,
+        vec![intermediate_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::I32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    assert_ne!(
+        plan.slots.get(&output_id).unwrap().offset,
+        plan.slots.get(&intermediate_id).unwrap().offset,
+        "same-byte-size Cast must not reuse an operand with a different dtype"
+    );
+    assert_eq!(
+        plan.total_size,
+        3 * 64,
+        "input, f32 intermediate, and i32 output must occupy distinct aligned slots"
+    );
+}
+
+#[test]
+fn test_memory_plan_binary_does_not_reuse_same_byte_size_different_shape_operand() {
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let lhs_id = graph.add_node(
+        Opcode::Relu,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(16)], IrDType::F32),
+    );
+    let rhs_id = graph.add_node(
+        Opcode::Sigmoid,
+        vec![input_id],
+        TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+    );
+    let output_id = graph.add_node(
+        Opcode::Add,
+        vec![lhs_id, rhs_id],
+        TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
+    );
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    let plan = memory_planning::plan_memory(&graph).unwrap();
+
+    assert_ne!(
+        plan.slots.get(&output_id).unwrap().offset,
+        plan.slots.get(&lhs_id).unwrap().offset,
+        "same-byte-size binary output must not reuse an operand with a different shape"
+    );
+    assert_eq!(
+        plan.slots.get(&output_id).unwrap().offset,
+        plan.slots.get(&rhs_id).unwrap().offset,
+        "test setup keeps a same dtype/shape dead operand available for reuse"
+    );
+}
+
+#[test]
 fn test_memory_plan_binary_reuses_dead_non_input_operand() {
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
