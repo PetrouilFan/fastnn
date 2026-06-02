@@ -31,7 +31,7 @@ jobs:
       - name: Clippy baseline
         run: python3 ./scripts/ci/check-clippy-baseline.py
       - name: Rust unit tests
-        run: cargo test --lib
+        run: cargo test --lib -- --test-threads=1
       - name: Quantized pipeline tests
         run: cargo test --test quantized_pipeline
       - name: Optimizer tests
