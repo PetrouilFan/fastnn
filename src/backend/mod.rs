@@ -102,6 +102,14 @@ pub struct ExecutablePlan {
     pub levels: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    pub instruction_index: usize,
+    pub node_id: Option<NodeId>,
+    pub kernel_name: String,
+    pub elapsed_ns: u128,
+}
+
 impl ExecutablePlan {
     /// Save the plan to a binary file using bincode serialization.
     pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -159,6 +167,41 @@ pub trait Backend {
         arena: &Self::Buffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError>;
+
+    fn dispatch_profile(
+        &self,
+        plan: &ExecutablePlan,
+        arena: &Self::Buffer,
+        shape_env: &ShapeEnv,
+    ) -> Result<Vec<ProfileEntry>, BackendError> {
+        let mut entries = Vec::with_capacity(plan.instructions.len());
+        for (instruction_index, instruction) in plan.instructions.iter().cloned().enumerate() {
+            let (node_id, kernel_name) = match &instruction {
+                Instruction::CallKernel {
+                    node_id,
+                    kernel_name,
+                    ..
+                } => (*node_id, kernel_name.clone()),
+                Instruction::MemCopy { .. } => (None, "memcopy".to_string()),
+                Instruction::Fill { .. } => (None, "fill".to_string()),
+                Instruction::WriteConst { .. } => (None, "write_const".to_string()),
+            };
+            let single = ExecutablePlan {
+                instructions: vec![instruction],
+                arena_size: plan.arena_size,
+                levels: vec![0],
+            };
+            let start = std::time::Instant::now();
+            self.dispatch(&single, arena, shape_env)?;
+            entries.push(ProfileEntry {
+                instruction_index,
+                node_id,
+                kernel_name,
+                elapsed_ns: start.elapsed().as_nanos(),
+            });
+        }
+        Ok(entries)
+    }
 
     /// Write `data` into the arena at byte `offset`.
     /// Used by the executor to populate graph inputs.
