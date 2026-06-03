@@ -47,6 +47,7 @@ parallel = ["rayon"]
 simd = []
 simd_avx512 = []
 debug_canary = []
+prepared-plan = []
 
 # ── Fusion passes (compile-time modular) ─────────────────────────────
 fusion-forward = [
