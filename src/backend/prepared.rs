@@ -324,15 +324,58 @@ impl PreparedConstantArena {
     }
 }
 
+/// One static-weight binding produced by [`detect_static_weights`].
+///
+/// Each binding points a single consumer instruction's input slot at a
+/// [`PackedWeightId`] inside the attached [`PreparedConstantArena`].
+/// Runtime dispatch is unchanged — bindings are metadata-only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaticWeightBinding {
+    /// Index of the consumer instruction (`Conv2d` / `MatMul`) in the
+    /// source [`ExecutablePlan`].
+    pub instruction_index: usize,
+    /// Index of the input slot on the consumer instruction
+    /// (`1` = weight, `2` = bias for conv / fused-matmul).
+    pub input_index: usize,
+    /// Handle for the constant bytes inside the
+    /// [`PreparedConstantArena`].
+    pub weight_id: PackedWeightId,
+    /// Dtype tag for the slot. Always [`PackedWeightKind::Fp32`] in this
+    /// skeleton.
+    pub kind: PackedWeightKind,
+}
+
+/// Map of detected static-weight bindings keyed by the consumer
+/// instruction index in the source plan. One consumer may have multiple
+/// bindings (weight + bias); the order matches consumer input order.
+pub type StaticWeightMap = Vec<StaticWeightBinding>;
+
+// ── Internal helpers for the detection pass ──────────────────
+
+/// Snapshot of one [`Instruction::WriteConst`] in the plan. Used as an
+/// intermediate representation while we match consumer input slots
+/// against static producers.
+#[derive(Clone, Debug)]
+struct WriteConstEntry {
+    /// Plan-wide index of the WriteConst instruction.
+    writer_idx: usize,
+    /// Destination slot the WriteConst materialises.
+    dst: BufferSlice,
+    /// Raw bytes the WriteConst deposits into the arena.
+    data: Vec<u8>,
+}
+
 /// Map a kernel name suffix to the corresponding [`PreparedActivation`].
 ///
 /// Recognized names: `"conv2d"` (None), `"conv2d_relu"`, `"conv2d_gelu"`,
-/// `"conv2d_silu"`. Everything else returns `None`.
+/// `"conv2d_silu"`; `"matmul_relu"`, `"matmul_gelu"`, `"matmul_silu"`; and
+/// the `"fused_matmul_add_*"` family (`_relu` / `_gelu` / `_silu`).
+/// Everything else returns `None`.
 pub fn activation_from_kernel_name(kernel_name: &str) -> PreparedActivation {
     match kernel_name {
-        "conv2d_relu" | "matmul_relu" => PreparedActivation::Relu,
-        "conv2d_gelu" | "matmul_gelu" => PreparedActivation::Gelu,
-        "conv2d_silu" | "matmul_silu" => PreparedActivation::Silu,
+        "conv2d_relu" | "matmul_relu" | "fused_matmul_add_relu" => PreparedActivation::Relu,
+        "conv2d_gelu" | "matmul_gelu" | "fused_matmul_add_gelu" => PreparedActivation::Gelu,
+        "conv2d_silu" | "matmul_silu" | "fused_matmul_add_silu" => PreparedActivation::Silu,
         _ => PreparedActivation::None,
     }
 }
@@ -348,6 +391,21 @@ pub fn kernel_kind_from_kernel_name(kernel_name: &str) -> PreparedConvKernelKind
         "conv2d_u8" => PreparedConvKernelKind::FuturePackedI8,
         _ => PreparedConvKernelKind::CurrentIm2colGemm,
     }
+}
+
+/// `true` when `name` is a matmul-family kernel that the prepared plan
+/// should promote to [`PreparedInstruction::MatMul`].
+///
+/// Covers the plain `"matmul"` kernel, the activation-fused
+/// `"matmul_relu" | "matmul_gelu" | "matmul_silu"` variants, the
+/// `"fused_matmul_add_*"` family (which carry a 3rd bias input), and
+/// the quantized `"matmul_u4" | "matmul_u4_i8" | "matmul_u8" |
+/// "matmul_u8_i8"` variants. Quantized matmuls still keep the same
+/// `[m, k, n]` param layout, so detection promotion is uniform.
+pub fn is_matmul_kernel_name(kernel_name: &str) -> bool {
+    kernel_name == "matmul"
+        || kernel_name.starts_with("matmul_")
+        || kernel_name.starts_with("fused_matmul_add_")
 }
 
 /// Attempt to promote an [`Instruction`] into a [`PreparedInstruction::Conv2d`].
@@ -442,27 +500,315 @@ pub fn try_prepare_conv2d(
     }))
 }
 
+/// Attempt to promote an [`Instruction`] into a [`PreparedInstruction::MatMul`].
+///
+/// Returns `Some(PreparedInstruction::MatMul(...))` only when:
+/// - The instruction is a `CallKernel` whose `kernel_name` is recognised
+///   by [`is_matmul_kernel_name`].
+/// - `params` has exactly 3 elements: `[m, k, n]` (uniform across the
+///   plain, activation-fused, and quantized matmul kernels).
+/// - At least two input slices are present (`A` + `B`).
+///
+/// Returns `None` for any instruction that does not satisfy these
+/// invariants; callers should fall back to `PreparedInstruction::Generic`.
+///
+/// # Required metadata fields from `CallKernel`
+/// - `kernel_name`: must be a matmul-family name.
+/// - `params`: `[m, k, n]`. Concrete element counts baked in by the CPU
+///   backend; symbolic dims are resolved through `param_dims` at runtime.
+/// - `input_slices[0]`: left operand `A`.
+/// - `input_slices[1]`: right operand `B` / weight tensor.
+/// - `input_slices[2]` (optional): bias — only present for
+///   `"fused_matmul_add_*"` kernels.
+/// - `output_slice`: output tensor.
+/// - `node_id`: optional node identifier for runtime param tightening.
+pub fn try_prepare_matmul(
+    instruction: &Instruction,
+    instruction_index: usize,
+) -> Option<PreparedInstruction> {
+    let Instruction::CallKernel {
+        kernel_name,
+        input_slices,
+        output_slice,
+        params,
+        node_id,
+        ..
+    } = instruction
+    else {
+        return None;
+    };
+
+    if !is_matmul_kernel_name(kernel_name) {
+        return None;
+    }
+
+    if params.len() != 3 {
+        return None;
+    }
+    let m = params[0];
+    let k = params[1];
+    let n = params[2];
+
+    if input_slices.len() < 2 {
+        return None;
+    }
+
+    let a = input_slices[0];
+    let b = input_slices[1];
+    let bias = input_slices.get(2).copied();
+
+    let activation = activation_from_kernel_name(kernel_name);
+
+    Some(PreparedInstruction::MatMul(PreparedMatMul {
+        instruction_index,
+        node_id: *node_id,
+        a,
+        b,
+        bias,
+        output: *output_slice,
+        m,
+        k,
+        n,
+        activation,
+        packed_weight: None,
+    }))
+}
+
+/// Walk the [`ExecutablePlan`] and bind every `Conv2d` / `MatMul`
+/// input slot that is fed by an [`Instruction::WriteConst`] producer
+/// into the supplied [`PreparedConstantArena`].
+///
+/// Returns a [`StaticWeightMap`] of `(instruction_index, input_index,
+/// weight_id, kind)` bindings. The arena is populated as a side
+/// effect: each WriteConst producer registered in the plan gets exactly
+/// one slot in the arena, even when multiple consumers reference it.
+///
+/// # Detection rules
+///
+/// 1. The plan is scanned for `WriteConst { dst, data }` instructions.
+///    Each non-empty `WriteConst` becomes a candidate producer.
+/// 2. For every `CallKernel` whose name starts with `"conv2d"` or
+///    matches a matmul-family name (see
+///    [`is_matmul_kernel_name`]), the consumer's `input_slices[1]`
+///    (weight) and — when present — `input_slices[2]` (bias) are
+///    matched against producer ranges.
+/// 3. A producer "covers" a consumer slot when the producer's
+///    destination `BufferSlice` is byte-equal to the consumer slot, or
+///    strictly contains it (`wc.offset <= slot.offset` and
+///    `wc.offset + wc.data.len() >= slot.offset + slot.size`).
+/// 4. Bindings are deduplicated at the arena level by producer
+///    identity: the same `WriteConst` slot is registered once under a
+///    stable name and every consumer that points at it shares the
+///    resulting [`PackedWeightId`].
+///
+/// # Runtime impact
+///
+/// **None.** Bindings and arena entries are metadata only. The
+/// original `WriteConst` / `CallKernel` instructions remain in the
+/// [`ExecutablePlan`] untouched, so `GraphExecutor::execute` keeps its
+/// byte-identical behaviour.
+pub fn detect_static_weights(
+    plan: &ExecutablePlan,
+    arena: &mut PreparedConstantArena,
+) -> StaticWeightMap {
+    // First pass: collect every WriteConst in the plan.
+    let mut const_slots: Vec<WriteConstEntry> = Vec::new();
+    for (writer_idx, inst) in plan.instructions.iter().enumerate() {
+        if let Instruction::WriteConst { dst, data } = inst {
+            if !data.is_empty() {
+                const_slots.push(WriteConstEntry {
+                    writer_idx,
+                    dst: *dst,
+                    data: data.clone(),
+                });
+            }
+        }
+    }
+
+    // Second pass: walk Conv2d / MatMul consumers and bind their
+    // weight + optional bias input slots.
+    let mut bindings: StaticWeightMap = Vec::new();
+    for (instruction_index, inst) in plan.instructions.iter().enumerate() {
+        let (input_slices, role) = match inst {
+            Instruction::CallKernel {
+                kernel_name,
+                input_slices,
+                ..
+            } if kernel_name.starts_with("conv2d") => (input_slices.as_slice(), "conv"),
+            Instruction::CallKernel {
+                kernel_name,
+                input_slices,
+                ..
+            } if is_matmul_kernel_name(kernel_name) => (input_slices.as_slice(), "matmul"),
+            _ => continue,
+        };
+
+        // input_slices[1] is the weight tensor for both conv2d and
+        // matmul-family kernels.
+        if let Some(weight_slice) = input_slices.get(1) {
+            if let Some(binding) = bind_consumer_input(
+                &const_slots,
+                arena,
+                instruction_index,
+                1,
+                weight_slice,
+                role,
+            ) {
+                bindings.push(binding);
+            }
+        }
+
+        // input_slices[2] is the bias slot — present for conv2d (always
+        // when the plan provides one) and for "fused_matmul_add_*"
+        // matmul kernels. For plain "matmul" the slot is absent and
+        // this branch is a no-op.
+        if let Some(bias_slice) = input_slices.get(2) {
+            if let Some(binding) =
+                bind_consumer_input(&const_slots, arena, instruction_index, 2, bias_slice, role)
+            {
+                bindings.push(binding);
+            }
+        }
+    }
+
+    bindings
+}
+
+/// Look up a `WriteConst` covering `slot`, register it in `arena` under
+/// a stable producer-based name, and return the resulting
+/// [`StaticWeightBinding`]. Returns `None` when no `WriteConst` covers
+/// the slot — the consumer is treated as dynamic in that case.
+fn bind_consumer_input(
+    const_slots: &[WriteConstEntry],
+    arena: &mut PreparedConstantArena,
+    instruction_index: usize,
+    input_index: usize,
+    slot: &BufferSlice,
+    role: &str,
+) -> Option<StaticWeightBinding> {
+    let producer = find_covering_write_const(const_slots, slot)?;
+    let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
+    let payload = bytes_to_f32_vec(&producer.data);
+    let weight_id = arena.insert(&name, payload);
+    Some(StaticWeightBinding {
+        instruction_index,
+        input_index,
+        weight_id,
+        kind: PackedWeightKind::Fp32,
+    })
+}
+
+/// Return the first `WriteConst` whose destination either equals
+/// `slot` (byte-exact) or strictly covers it. Order of producers
+/// follows plan order, so a tie-break favours the earliest writer.
+fn find_covering_write_const<'a>(
+    const_slots: &'a [WriteConstEntry],
+    slot: &BufferSlice,
+) -> Option<&'a WriteConstEntry> {
+    const_slots
+        .iter()
+        .find(|entry| covers_slice(&entry.dst, entry.data.len(), slot))
+}
+
+/// Producer range covers consumer slot when offsets line up and the
+/// producer's bytes fully enclose the consumer slot.
+fn covers_slice(producer: &BufferSlice, producer_bytes: usize, slot: &BufferSlice) -> bool {
+    let producer_end = producer.offset.saturating_add(producer_bytes);
+    let slot_end = slot.offset.saturating_add(slot.size);
+    producer.offset <= slot.offset && producer_end >= slot_end && producer_bytes > 0
+}
+
+/// Interpret `bytes` as a little-endian `f32` payload. Trailing bytes
+/// that do not form a complete `f32` are dropped — `WriteConst` always
+/// carries whole-element payloads in practice.
+fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            // chunks_exact guarantees exactly 4 bytes per chunk.
+            let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            f32::from_le_bytes(arr)
+        })
+        .collect()
+}
+
+/// Apply a slice of [`StaticWeightBinding`]s to a prepared instruction,
+/// setting `packed_weight` on the corresponding `Conv2d` / `MatMul`
+/// from the binding whose `input_index == 1` (the weight slot). Bias
+/// bindings (`input_index == 2`) are recorded in the returned map but
+/// the prepared structs do not yet expose a `packed_bias` field — a
+/// later lane will plumb that into the dispatch path.
+fn apply_static_weight_bindings(
+    instruction: PreparedInstruction,
+    bindings: &[&StaticWeightBinding],
+) -> PreparedInstruction {
+    let weight_binding = bindings.iter().find(|b| b.input_index == 1).copied();
+    match (instruction, weight_binding) {
+        (PreparedInstruction::Conv2d(mut c), Some(b)) => {
+            c.packed_weight = Some(b.weight_id);
+            PreparedInstruction::Conv2d(c)
+        }
+        (PreparedInstruction::MatMul(mut m), Some(b)) => {
+            m.packed_weight = Some(b.weight_id);
+            PreparedInstruction::MatMul(m)
+        }
+        (other, _) => other,
+    }
+}
+
 /// Build a [`PreparedExecutablePlan`] by inspecting each instruction.
 ///
-/// Statically recognizable Conv2d `CallKernel` instructions are promoted to
-/// `PreparedInstruction::Conv2d`; everything else becomes
-/// `PreparedInstruction::Generic`. This preserves runtime semantics while
-/// enabling future kernel-specialization paths.
+/// Statically recognizable Conv2d and MatMul `CallKernel` instructions
+/// are promoted to `PreparedInstruction::Conv2d` /
+/// `PreparedInstruction::MatMul`; everything else becomes
+/// `PreparedInstruction::Generic`. This preserves runtime semantics
+/// while enabling future kernel-specialization paths.
+///
+/// The build also runs [`detect_static_weights`]: any Conv2d / MatMul
+/// input fed by a [`Instruction::WriteConst`] producer is bound to a
+/// [`PackedWeightId`] inside an attached [`PreparedConstantArena`]. The
+/// arena is created internally and attached via
+/// [`PreparedExecutablePlan::register_constant_arena`]; both the arena
+/// and the bindings are metadata-only.
 pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan {
-    PreparedExecutablePlan {
-        instructions: plan
-            .instructions
-            .iter()
-            .enumerate()
-            .map(|(instruction_index, inst)| {
-                try_prepare_conv2d(inst, instruction_index)
-                    .unwrap_or(PreparedInstruction::Generic { instruction_index })
-            })
-            .collect(),
+    let mut arena = PreparedConstantArena::new();
+    let bindings = detect_static_weights(plan, &mut arena);
+
+    // Bucket bindings by consumer instruction index so the
+    // per-instruction pass below can locate its bindings in O(1).
+    let mut by_instr: HashMap<usize, Vec<&StaticWeightBinding>> = HashMap::new();
+    for binding in &bindings {
+        by_instr
+            .entry(binding.instruction_index)
+            .or_default()
+            .push(binding);
+    }
+
+    let instructions: Vec<PreparedInstruction> = plan
+        .instructions
+        .iter()
+        .enumerate()
+        .map(|(instruction_index, inst)| {
+            let empty: Vec<&StaticWeightBinding> = Vec::new();
+            let inst_bindings = by_instr
+                .get(&instruction_index)
+                .map(|v| v.iter().copied().collect::<Vec<_>>())
+                .unwrap_or(empty);
+            let prepared = try_prepare_conv2d(inst, instruction_index)
+                .or_else(|| try_prepare_matmul(inst, instruction_index))
+                .unwrap_or(PreparedInstruction::Generic { instruction_index });
+            apply_static_weight_bindings(prepared, &inst_bindings)
+        })
+        .collect();
+
+    let mut prepared = PreparedExecutablePlan {
+        instructions,
         arena_size: plan.arena_size,
         scratch_size: 0,
         constant_arena: None,
-    }
+    };
+    prepared.register_constant_arena(arena);
+    prepared
 }
 
 // ── PreparedInstruction helpers ──────────────────────────────
@@ -616,6 +962,49 @@ mod tests {
             param_dims: None,
             weight_meta: None,
         }
+    }
+
+    /// Helper: build a matmul CallKernel instruction with the canonical
+    /// `[m, k, n]` param layout. Use `with_bias=true` to mimic the
+    /// `fused_matmul_add_*` family (3 inputs, kernel name prefix
+    /// `fused_matmul_add_`).
+    fn make_matmul_instruction(
+        kernel_name: &str,
+        m: usize,
+        k: usize,
+        n: usize,
+        with_bias: bool,
+    ) -> Instruction {
+        let a_size = m * k * 4;
+        let b_size = k * n * 4;
+        let bias_size = if with_bias { n * 4 } else { 0 };
+
+        let mut input_slices = vec![
+            BufferSlice::new(0, a_size),
+            BufferSlice::new(a_size, b_size),
+        ];
+        if with_bias {
+            input_slices.push(BufferSlice::new(a_size + b_size, bias_size));
+        }
+
+        Instruction::CallKernel {
+            kernel_name: kernel_name.to_string(),
+            input_slices,
+            output_slice: BufferSlice::new(a_size + b_size + bias_size, m * n * 4),
+            secondary_output_slice: None,
+            params: vec![m, k, n],
+            node_id: Some(7usize),
+            param_dims: None,
+            weight_meta: None,
+        }
+    }
+
+    /// Build a WriteConst that writes `data` (interpreted as little-endian
+    /// f32) into the given `BufferSlice`.
+    fn make_write_const(dst: BufferSlice, f32_payload: &[f32]) -> Instruction {
+        let data: Vec<u8> = f32_payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(data.len(), dst.size, "write_const payload size mismatch");
+        Instruction::WriteConst { dst, data }
     }
 
     // ── prepare_executable_plan ────────────────────────────────
@@ -953,6 +1342,125 @@ mod tests {
             weight_meta: None,
         };
         assert!(try_prepare_conv2d(&inst, 0).is_none());
+    }
+
+    // ── try_prepare_matmul ─────────────────────────────────────
+
+    #[test]
+    fn try_prepare_matmul_basic() {
+        let inst = make_matmul_instruction("matmul", 4, 8, 16, false);
+        let result = try_prepare_matmul(&inst, 0).expect("should promote matmul");
+        match &result {
+            PreparedInstruction::MatMul(m) => {
+                assert_eq!(m.node_id, Some(7usize));
+                assert_eq!(m.m, 4);
+                assert_eq!(m.k, 8);
+                assert_eq!(m.n, 16);
+                assert_eq!(m.activation, PreparedActivation::None);
+                assert!(m.bias.is_none());
+                assert!(m.packed_weight.is_none());
+            }
+            _ => panic!("expected MatMul"),
+        }
+    }
+
+    #[test]
+    fn try_prepare_matmul_with_activation() {
+        let inst = make_matmul_instruction("matmul_relu", 2, 3, 5, false);
+        let result = try_prepare_matmul(&inst, 0).expect("should promote");
+        match &result {
+            PreparedInstruction::MatMul(m) => {
+                assert_eq!(m.activation, PreparedActivation::Relu);
+                assert_eq!(m.m, 2);
+                assert_eq!(m.n, 5);
+            }
+            _ => panic!("expected MatMul"),
+        }
+    }
+
+    #[test]
+    fn try_prepare_matmul_fused_with_bias() {
+        let inst = make_matmul_instruction("fused_matmul_add_relu", 4, 8, 16, true);
+        let result = try_prepare_matmul(&inst, 3).expect("should promote");
+        match &result {
+            PreparedInstruction::MatMul(m) => {
+                let bias = m.bias.expect("fused kernel must carry a bias slot");
+                assert_eq!(bias.size, 16 * 4);
+                assert_eq!(m.activation, PreparedActivation::Relu);
+            }
+            _ => panic!("expected MatMul"),
+        }
+    }
+
+    #[test]
+    fn try_prepare_matmul_quantized() {
+        let inst = make_matmul_instruction("matmul_u4", 4, 8, 16, false);
+        let result = try_prepare_matmul(&inst, 0).expect("should promote quantized");
+        match &result {
+            PreparedInstruction::MatMul(m) => {
+                assert_eq!(m.m, 4);
+                assert_eq!(m.k, 8);
+                assert_eq!(m.n, 16);
+            }
+            _ => panic!("expected MatMul"),
+        }
+    }
+
+    #[test]
+    fn try_prepare_matmul_wrong_param_count() {
+        let inst = Instruction::CallKernel {
+            kernel_name: "matmul".to_string(),
+            input_slices: vec![BufferSlice::new(0, 16), BufferSlice::new(16, 16)],
+            output_slice: BufferSlice::new(32, 16),
+            secondary_output_slice: None,
+            params: vec![4, 4], // need 3
+            node_id: None,
+            param_dims: None,
+            weight_meta: None,
+        };
+        assert!(try_prepare_matmul(&inst, 0).is_none());
+    }
+
+    #[test]
+    fn try_prepare_matmul_insufficient_inputs() {
+        let inst = Instruction::CallKernel {
+            kernel_name: "matmul".to_string(),
+            input_slices: vec![BufferSlice::new(0, 16)],
+            output_slice: BufferSlice::new(16, 16),
+            secondary_output_slice: None,
+            params: vec![4, 4, 4],
+            node_id: None,
+            param_dims: None,
+            weight_meta: None,
+        };
+        assert!(try_prepare_matmul(&inst, 0).is_none());
+    }
+
+    #[test]
+    fn try_prepare_matmul_not_call_kernel() {
+        let inst = Instruction::Fill {
+            dst: BufferSlice::new(0, 4),
+            value: 0.0,
+        };
+        assert!(try_prepare_matmul(&inst, 0).is_none());
+    }
+
+    #[test]
+    fn is_matmul_kernel_name_recognises_family() {
+        assert!(is_matmul_kernel_name("matmul"));
+        assert!(is_matmul_kernel_name("matmul_relu"));
+        assert!(is_matmul_kernel_name("matmul_gelu"));
+        assert!(is_matmul_kernel_name("matmul_silu"));
+        assert!(is_matmul_kernel_name("matmul_u4"));
+        assert!(is_matmul_kernel_name("matmul_u4_i8"));
+        assert!(is_matmul_kernel_name("matmul_u8"));
+        assert!(is_matmul_kernel_name("matmul_u8_i8"));
+        assert!(is_matmul_kernel_name("fused_matmul_add_relu"));
+        assert!(is_matmul_kernel_name("fused_matmul_add_gelu"));
+        assert!(is_matmul_kernel_name("fused_matmul_add_silu"));
+        assert!(!is_matmul_kernel_name("conv2d"));
+        assert!(!is_matmul_kernel_name("add_f32"));
+        assert!(!is_matmul_kernel_name(""));
     }
 
     // ── PreparedActivation ─────────────────────────────────────
@@ -1326,8 +1834,17 @@ mod tests {
     #[test]
     fn plan_holds_constant_arena() {
         let mut prepared = prepare_executable_plan(&empty_plan());
-        // No arena is attached by default.
-        assert!(prepared.constant_arena().is_none());
+        // prepare_executable_plan always attaches an (initially empty)
+        // arena so callers can introspect the static-weight bindings
+        // without a follow-up registration.
+        assert!(prepared.constant_arena().is_some());
+        assert_eq!(
+            prepared
+                .constant_arena()
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            0
+        );
 
         let mut arena = PreparedConstantArena::new();
         let id = arena.insert("conv_weight", vec![1.0_f32, 2.0, 3.0]);
@@ -1357,8 +1874,339 @@ mod tests {
     }
 
     #[test]
-    fn prepare_executable_plan_starts_without_constant_arena() {
+    fn prepare_executable_plan_attaches_empty_arena_by_default() {
         let prepared = prepare_executable_plan(&empty_plan());
-        assert!(prepared.constant_arena().is_none());
+        // The static-weight detection pass always populates an arena,
+        // even when no Conv2d / MatMul was found. The arena is just
+        // empty in that case.
+        let arena = prepared
+            .constant_arena()
+            .expect("plan should carry an arena, even if empty");
+        assert!(arena.is_empty());
+    }
+
+    // ── detect_static_weights: required tests ─────────────────
+
+    /// Required test: a `Conv2d` whose weight input is fed by a
+    /// `WriteConst` gets a `packed_weight` binding pointing at the
+    /// matching arena slot.
+    #[test]
+    fn detects_conv_weight_from_write_const() {
+        // WriteConst writes 8 f32 weights (32 bytes) at offset 1024.
+        let weight_payload: Vec<f32> = (0..8).map(|i| i as f32 * 0.5).collect();
+        let write_const = make_write_const(BufferSlice::new(1024, 32), &weight_payload);
+
+        // Conv2d whose weight input exactly matches the WriteConst.
+        // input_size is 3*8*8*4 = 768, but we set the conv to read
+        // its input from a separate region. We only need the weight
+        // slice to match.
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(1024, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let plan = ExecutablePlan {
+            instructions: vec![write_const, conv],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        // The conv at plan index 1 must carry a packed_weight binding.
+        match &prepared.instructions[1] {
+            PreparedInstruction::Conv2d(c) => {
+                let id = c
+                    .packed_weight
+                    .expect("conv2d fed by write_const must have packed_weight");
+                assert_eq!(id.kind, PackedWeightKind::Fp32);
+                assert_eq!(id.index, 0);
+
+                // The arena should expose the same bytes under the
+                // expected stable name.
+                let arena = prepared
+                    .constant_arena()
+                    .expect("plan should have an attached arena");
+                assert_eq!(arena.len(), 1);
+                assert_eq!(arena.get(id), Some(weight_payload.as_slice()));
+                assert_eq!(arena.id_for("conv_0_i1"), Some(id));
+            }
+            other => panic!("expected Conv2d at index 1, got {other:?}"),
+        }
+    }
+
+    /// Required test: a `MatMul` whose weight (B) input is fed by a
+    /// `WriteConst` gets a `packed_weight` binding pointing at the
+    /// matching arena slot.
+    #[test]
+    fn detects_matmul_weight_from_write_const() {
+        // WriteConst writes a 2x3 weight tensor (6 f32 = 24 bytes)
+        // starting at offset 256.
+        let weight_payload: Vec<f32> = (0..6).map(|i| i as f32 + 1.0).collect();
+        let write_const = make_write_const(BufferSlice::new(256, 24), &weight_payload);
+
+        // Matmul: M=4, K=3, N=2 — needs B tensor of size K*N = 6 f32
+        // at the same offset 256.
+        let mut mm = make_matmul_instruction("matmul", 4, 3, 2, false);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[0] = BufferSlice::new(0, 4 * 3 * 4);
+            input_slices[1] = BufferSlice::new(256, 24);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let plan = ExecutablePlan {
+            instructions: vec![write_const, mm],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        match &prepared.instructions[1] {
+            PreparedInstruction::MatMul(m) => {
+                let id = m
+                    .packed_weight
+                    .expect("matmul fed by write_const must have packed_weight");
+                assert_eq!(id.kind, PackedWeightKind::Fp32);
+                assert_eq!(id.index, 0);
+
+                let arena = prepared
+                    .constant_arena()
+                    .expect("plan should have an attached arena");
+                assert_eq!(arena.len(), 1);
+                assert_eq!(arena.get(id), Some(weight_payload.as_slice()));
+                assert_eq!(arena.id_for("matmul_0_i1"), Some(id));
+            }
+            other => panic!("expected MatMul at index 1, got {other:?}"),
+        }
+    }
+
+    /// Required test: a Conv2d whose weight input is NOT backed by a
+    /// WriteConst (e.g. it shares an arena slot with a MemCopy-fed
+    /// dynamic tensor) gets no `packed_weight` binding.
+    #[test]
+    fn skips_dynamic_input() {
+        // A MemCopy into the weight slot — no WriteConst, so the
+        // weight is dynamic. The conv reads from the same slot.
+        let memcopy = Instruction::MemCopy {
+            dst: BufferSlice::new(512, 32),
+            src: BufferSlice::new(0, 32),
+        };
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(512, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let plan = ExecutablePlan {
+            instructions: vec![memcopy, conv],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        match &prepared.instructions[1] {
+            PreparedInstruction::Conv2d(c) => {
+                assert!(
+                    c.packed_weight.is_none(),
+                    "conv with dynamic weight must not be bound"
+                );
+            }
+            other => panic!("expected Conv2d at index 1, got {other:?}"),
+        }
+
+        // No arena slots should have been allocated.
+        let arena = prepared
+            .constant_arena()
+            .expect("plan still gets an arena, just an empty one");
+        assert_eq!(arena.len(), 0);
+    }
+
+    /// Required test: when two Conv2d consumers share the same
+    /// `WriteConst` producer, only one arena slot is allocated and
+    /// both consumers' bindings point at the same `PackedWeightId`.
+    #[test]
+    fn arena_reused_for_duplicate_weight() {
+        let weight_payload: Vec<f32> = (0..8).map(|i| i as f32 * 0.25).collect();
+        let write_const = make_write_const(BufferSlice::new(128, 32), &weight_payload);
+
+        // Two convs, both reading their weight from the same offset.
+        let mut conv_a = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv_a {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(128, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let mut conv_b = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv_b {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(128, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let plan = ExecutablePlan {
+            instructions: vec![write_const, conv_a, conv_b],
+            arena_size: 4096,
+            levels: vec![0, 1, 2],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        let arena = prepared
+            .constant_arena()
+            .expect("plan should have an attached arena");
+        // Single WriteConst → single arena slot.
+        assert_eq!(arena.len(), 1, "shared WriteConst must dedupe to one slot");
+
+        // Both convs share the same packed_weight id.
+        let id_a = match &prepared.instructions[1] {
+            PreparedInstruction::Conv2d(c) => {
+                c.packed_weight.expect("first conv must have a binding")
+            }
+            other => panic!("expected Conv2d at index 1, got {other:?}"),
+        };
+        let id_b = match &prepared.instructions[2] {
+            PreparedInstruction::Conv2d(c) => {
+                c.packed_weight.expect("second conv must have a binding")
+            }
+            other => panic!("expected Conv2d at index 2, got {other:?}"),
+        };
+        assert_eq!(id_a, id_b, "shared weight must resolve to the same id");
+        assert_eq!(arena.get(id_a), Some(weight_payload.as_slice()));
+    }
+
+    // ── extra detection coverage ──────────────────────────────
+
+    /// Fused matmul with bias: both weight and bias feed by WriteConst
+    /// producers should produce two bindings, with the weight one
+    /// landing on `packed_weight`.
+    #[test]
+    fn detects_fused_matmul_weight_and_bias() {
+        let weight_payload: Vec<f32> = (0..6).map(|i| (i + 1) as f32).collect();
+        let bias_payload: Vec<f32> = vec![0.1, 0.2];
+        let wc_weight = make_write_const(BufferSlice::new(0, 24), &weight_payload);
+        let wc_bias = make_write_const(BufferSlice::new(64, 8), &bias_payload);
+
+        let mut mm = make_matmul_instruction("fused_matmul_add_relu", 4, 3, 2, true);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[0] = BufferSlice::new(128, 4 * 3 * 4);
+            input_slices[1] = BufferSlice::new(0, 24);
+            input_slices[2] = BufferSlice::new(64, 8);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let plan = ExecutablePlan {
+            instructions: vec![wc_weight, wc_bias, mm],
+            arena_size: 4096,
+            levels: vec![0, 0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        let arena = prepared
+            .constant_arena()
+            .expect("plan should have an attached arena");
+        // Two distinct writers → two arena slots.
+        assert_eq!(arena.len(), 2);
+        assert!(arena.id_for("matmul_0_i1").is_some());
+        assert!(arena.id_for("matmul_1_i2").is_some());
+
+        match &prepared.instructions[2] {
+            PreparedInstruction::MatMul(m) => {
+                let id = m
+                    .packed_weight
+                    .expect("fused matmul must have a packed_weight binding");
+                assert_eq!(id.index, 0);
+                assert_eq!(arena.get(id), Some(weight_payload.as_slice()));
+            }
+            other => panic!("expected MatMul at index 2, got {other:?}"),
+        }
+    }
+
+    /// Conv2d with bias: both the weight and the bias feed by
+    /// `WriteConst` producers are detected.
+    #[test]
+    fn detects_conv_weight_and_bias() {
+        let params = Conv2dParams {
+            with_bias: true,
+            ..Default::default()
+        };
+        // Use the helper's layout: input (0..input_size), weight
+        // (input_size..input_size+weight_size), bias
+        // (input_size+weight_size..). Build a matching WriteConst for
+        // each.
+        let input_size = params.c * params.h * params.w * 4;
+        let c_per_group = params.c / params.groups.max(1);
+        let f = 8;
+        let weight_size = f * c_per_group * params.kh * params.kw * 4;
+        let bias_size = f * 4;
+        let weight_numel = weight_size / 4;
+        let weight_payload: Vec<f32> = (0..weight_numel).map(|i| i as f32 * 0.1).collect();
+        let bias_payload: Vec<f32> = vec![0.0; f];
+
+        let wc_weight =
+            make_write_const(BufferSlice::new(input_size, weight_size), &weight_payload);
+        let wc_bias = make_write_const(
+            BufferSlice::new(input_size + weight_size, bias_size),
+            &bias_payload,
+        );
+
+        let conv = make_conv2d_instruction("conv2d", params);
+        let plan = ExecutablePlan {
+            instructions: vec![wc_weight, wc_bias, conv],
+            arena_size: 4096,
+            levels: vec![0, 0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        let arena = prepared
+            .constant_arena()
+            .expect("plan should have an attached arena");
+        assert_eq!(arena.len(), 2);
+        assert!(arena.id_for("conv_0_i1").is_some());
+        assert!(arena.id_for("conv_1_i2").is_some());
+
+        match &prepared.instructions[2] {
+            PreparedInstruction::Conv2d(c) => {
+                let id = c
+                    .packed_weight
+                    .expect("conv with const weight must have a binding");
+                assert_eq!(id.index, 0);
+                assert_eq!(arena.get(id), Some(weight_payload.as_slice()));
+            }
+            other => panic!("expected Conv2d at index 2, got {other:?}"),
+        }
+    }
+
+    /// A plan with no Conv2d / MatMul and no WriteConst should still
+    /// produce a (metadata-only) empty arena and no bindings.
+    #[test]
+    fn detect_static_weights_empty_plan() {
+        let mut arena = PreparedConstantArena::new();
+        let bindings = detect_static_weights(&empty_plan(), &mut arena);
+        assert!(bindings.is_empty());
+        assert!(arena.is_empty());
+    }
+
+    /// Helper sanity check: `bytes_to_f32_vec` reads little-endian
+    /// f32 payloads and drops trailing partial elements.
+    #[test]
+    fn bytes_to_f32_vec_round_trip() {
+        let payload: Vec<f32> = vec![1.5, -2.25, 3.125, 4.0];
+        let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let recovered = bytes_to_f32_vec(&bytes);
+        assert_eq!(recovered, payload);
+
+        // A trailing partial chunk (1 byte after a single f32) is
+        // dropped: only the first 4 bytes survive as 1 f32.
+        let mut partial = payload[0].to_le_bytes().to_vec();
+        partial.push(0xff);
+        let recovered_partial = bytes_to_f32_vec(&partial);
+        assert_eq!(recovered_partial, vec![payload[0]]);
     }
 }
