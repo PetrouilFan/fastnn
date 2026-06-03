@@ -1384,9 +1384,38 @@ impl AotExecutor {
                 .map(|t| t.inner.as_bytes())
         }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let (_output_data, profile_entries) = self.executor
+        let (output_data, profile_entries) = self.executor
             .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let outputs = PyDict::new(py);
+        for (name, idx) in &self.output_map {
+            if let Some(data) = output_data.get(*idx) {
+                let output_node_id = self.graph.outputs[*idx];
+                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "AotExecutor: output node not found in graph",
+                    )
+                })?;
+                let shape: Vec<i64> = output_node
+                    .output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        _ => None,
+                    })
+                    .collect();
+                let f32_vals: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                outputs.set_item(
+                    name,
+                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
+                )?;
+            }
+        }
 
         let profile_list = PyList::empty(py);
         for entry in profile_entries {
@@ -1404,6 +1433,7 @@ impl AotExecutor {
         }
 
         let result = PyDict::new(py);
+        result.set_item("outputs", outputs)?;
         result.set_item("profile", profile_list)?;
         Ok(result.into())
     }
