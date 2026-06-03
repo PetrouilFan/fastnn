@@ -1354,5 +1354,44 @@ impl AotExecutor {
         }
         Ok(result)
     }
+
+    fn profile(
+        &mut self,
+        py: pyo3::Python<'_>,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let (_output_data, profile_entries) = self.executor
+            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let profile_list = PyList::empty(py);
+        for entry in profile_entries {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", entry.instruction_index)?;
+            item.set_item("node_id", entry.node_id)?;
+            item.set_item("kernel_name", entry.kernel_name)?;
+            item.set_item("elapsed_ns", entry.elapsed_ns)?;
+            let node_name = entry.node_id
+                .and_then(|node_id| self.graph.get_node(node_id))
+                .map(|node| node.name.clone())
+                .unwrap_or_default();
+            item.set_item("node_name", node_name)?;
+            profile_list.append(item)?;
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("profile", profile_list)?;
+        Ok(result.into())
+    }
 }
 
