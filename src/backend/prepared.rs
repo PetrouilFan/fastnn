@@ -34,6 +34,7 @@ pub enum PreparedConvKernelKind {
 
 #[derive(Clone, Debug)]
 pub struct PreparedConv2d {
+    pub instruction_index: usize,
     pub node_id: Option<NodeId>,
     pub input: BufferSlice,
     pub weight: BufferSlice,
@@ -59,6 +60,7 @@ pub struct PreparedConv2d {
 
 #[derive(Clone, Debug)]
 pub struct PreparedMatMul {
+    pub instruction_index: usize,
     pub node_id: Option<NodeId>,
     pub a: BufferSlice,
     pub b: BufferSlice,
@@ -121,7 +123,7 @@ pub fn kernel_kind_from_kernel_name(kernel_name: &str) -> PreparedConvKernelKind
 /// - `node_id`: optional node identifier for runtime param tightening.
 pub fn try_prepare_conv2d(
     instruction: &Instruction,
-    _instruction_index: usize,
+    instruction_index: usize,
 ) -> Option<PreparedInstruction> {
     let Instruction::CallKernel {
         kernel_name,
@@ -167,6 +169,7 @@ pub fn try_prepare_conv2d(
     let kernel = kernel_kind_from_kernel_name(kernel_name);
 
     Some(PreparedInstruction::Conv2d(PreparedConv2d {
+        instruction_index,
         node_id: *node_id,
         input,
         weight,
@@ -210,6 +213,57 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
             .collect(),
         arena_size: plan.arena_size,
         scratch_size: 0,
+    }
+}
+
+// ── PreparedInstruction helpers ──────────────────────────────
+
+impl PreparedInstruction {
+    /// Return the original instruction index within the [`ExecutablePlan`]
+    /// that produced this prepared instruction.
+    pub fn instruction_index(&self) -> usize {
+        match self {
+            PreparedInstruction::Generic { instruction_index } => *instruction_index,
+            PreparedInstruction::Conv2d(c) => c.instruction_index,
+            PreparedInstruction::MatMul(m) => m.instruction_index,
+        }
+    }
+}
+
+// ── PreparedExecutablePlan helpers ───────────────────────────
+
+impl PreparedExecutablePlan {
+    /// Number of prepared instructions.
+    pub fn len(&self) -> usize {
+        self.instructions.len()
+    }
+
+    /// Returns `true` when the plan contains no instructions.
+    pub fn is_empty(&self) -> bool {
+        self.instructions.is_empty()
+    }
+
+    /// Original instruction indices of all `Generic` fallback instructions.
+    pub fn generic_instruction_indices(&self) -> Vec<usize> {
+        self.instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                PreparedInstruction::Generic { instruction_index } => Some(*instruction_index),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The original instruction indices in plan order.
+    ///
+    /// Each entry is the index of the corresponding instruction in the
+    /// source [`ExecutablePlan`]. The returned `Vec` has the same length
+    /// and ordering as `self.instructions`.
+    pub fn original_instruction_order(&self) -> Vec<usize> {
+        self.instructions
+            .iter()
+            .map(|inst| inst.instruction_index())
+            .collect()
     }
 }
 
@@ -681,5 +735,179 @@ mod tests {
             PreparedConvKernelKind::CurrentIm2colGemm,
             PreparedConvKernelKind::FuturePackedFp32
         );
+    }
+
+    // ── PreparedInstruction::instruction_index ─────────────────
+
+    #[test]
+    fn instruction_index_generic() {
+        let inst = PreparedInstruction::Generic {
+            instruction_index: 7,
+        };
+        assert_eq!(inst.instruction_index(), 7);
+    }
+
+    #[test]
+    fn instruction_index_conv2d() {
+        let inst = PreparedInstruction::Conv2d(PreparedConv2d {
+            instruction_index: 3,
+            node_id: None,
+            input: BufferSlice::new(0, 4),
+            weight: BufferSlice::new(4, 4),
+            bias: None,
+            output: BufferSlice::new(8, 4),
+            n: 1,
+            c: 1,
+            h: 1,
+            w: 1,
+            f: 1,
+            kh: 1,
+            kw: 1,
+            stride: 1,
+            padding: 0,
+            dilation: 1,
+            groups: 1,
+            activation: PreparedActivation::None,
+            kernel: PreparedConvKernelKind::CurrentIm2colGemm,
+            packed_weight: None,
+            scratch_offset: 0,
+            scratch_len: 0,
+        });
+        assert_eq!(inst.instruction_index(), 3);
+    }
+
+    #[test]
+    fn instruction_index_matmul() {
+        let inst = PreparedInstruction::MatMul(PreparedMatMul {
+            instruction_index: 5,
+            node_id: None,
+            a: BufferSlice::new(0, 4),
+            b: BufferSlice::new(4, 4),
+            bias: None,
+            output: BufferSlice::new(8, 4),
+            m: 1,
+            k: 1,
+            n: 1,
+            activation: PreparedActivation::None,
+            packed_weight: None,
+        });
+        assert_eq!(inst.instruction_index(), 5);
+    }
+
+    // ── PreparedExecutablePlan helpers ─────────────────────────
+
+    #[test]
+    fn plan_len_and_empty() {
+        let empty = PreparedExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            scratch_size: 0,
+        };
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        let one = PreparedExecutablePlan {
+            instructions: vec![PreparedInstruction::Generic {
+                instruction_index: 0,
+            }],
+            arena_size: 0,
+            scratch_size: 0,
+        };
+        assert_eq!(one.len(), 1);
+        assert!(!one.is_empty());
+    }
+
+    #[test]
+    fn plan_preserves_instruction_count_and_order() {
+        let conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        let fill = Instruction::Fill {
+            dst: BufferSlice::new(0, 4),
+            value: 1.0,
+        };
+        let memcopy = Instruction::MemCopy {
+            dst: BufferSlice::new(0, 4),
+            src: BufferSlice::new(4, 4),
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![conv, fill, memcopy],
+            arena_size: 4096,
+            levels: vec![0, 0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        assert_eq!(prepared.len(), 3);
+        let order = prepared.original_instruction_order();
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn conv2d_promoted_preserves_original_instruction_index() {
+        let conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        let fill = Instruction::Fill {
+            dst: BufferSlice::new(0, 4),
+            value: 1.0,
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![conv, fill],
+            arena_size: 4096,
+            levels: vec![0, 0],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        assert_eq!(prepared.len(), 2);
+        // Conv2d at original index 0
+        assert_eq!(prepared.instructions[0].instruction_index(), 0);
+        assert!(matches!(
+            &prepared.instructions[0],
+            PreparedInstruction::Conv2d(_)
+        ));
+        // Generic at original index 1
+        assert_eq!(prepared.instructions[1].instruction_index(), 1);
+        assert!(matches!(
+            &prepared.instructions[1],
+            PreparedInstruction::Generic {
+                instruction_index: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn generic_fallback_preserves_instruction_index() {
+        let fill = Instruction::Fill {
+            dst: BufferSlice::new(0, 4),
+            value: 0.0,
+        };
+        let memcopy = Instruction::MemCopy {
+            dst: BufferSlice::new(0, 4),
+            src: BufferSlice::new(4, 4),
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![fill, memcopy],
+            arena_size: 1024,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        let order = prepared.original_instruction_order();
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    #[test]
+    fn generic_instruction_indices_only_returns_generics() {
+        let conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        let fill = Instruction::Fill {
+            dst: BufferSlice::new(0, 4),
+            value: 0.0,
+        };
+        let memcopy = Instruction::MemCopy {
+            dst: BufferSlice::new(0, 4),
+            src: BufferSlice::new(4, 4),
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![conv, fill, memcopy],
+            arena_size: 4096,
+            levels: vec![0, 0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        let generic_indices = prepared.generic_instruction_indices();
+        // Only fill (index 1) and memcopy (index 2) are generic
+        assert_eq!(generic_indices, vec![1, 2]);
     }
 }
