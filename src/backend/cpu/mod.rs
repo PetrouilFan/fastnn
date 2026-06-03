@@ -990,16 +990,11 @@ fn run_kernel_precopied(
                 let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
                 let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
                 let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
-                let gelu_fn: fn(f32) -> f32 =
-                    |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
-                let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
-                let identity_fn: fn(f32) -> f32 = |x| x;
-                let conv_act: Option<fn(f32) -> f32> = fused_act.map(|act| match act {
-                    "relu" => relu_fn,
-                    "gelu" => gelu_fn,
-                    "silu" => silu_fn,
-                    _ => identity_fn,
+                let conv_act = fused_act.map(|act| match act {
+                    "relu" => crate::backend::cpu::microkernels::ConvActivation::Relu,
+                    "gelu" => crate::backend::cpu::microkernels::ConvActivation::Gelu,
+                    "silu" => crate::backend::cpu::microkernels::ConvActivation::Silu,
+                    _ => unreachable!(),
                 });
                 crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
                     &input_data,
@@ -4308,38 +4303,14 @@ impl Backend for CpuBackend {
                                     return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
                                 };
                                 let c_per_group = c / groups.max(1);
-
-                                // Copy input and weight from arena (arena regions may overlap with
-                                // output — the memory planner reuses space for dead tensors — so
-                                // we cannot safely pass arena slices directly as &[f32] and &mut [f32]
-                                // to the same microkernel).
-                                let (input_data, weight_data) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[input_slice.offset
-                                                ..input_slice.offset + input_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let bias_data = if input_slices.len() >= 3 {
-                                    let b_slice = &input_slices[2];
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec()
-                                } else {
-                                    vec![]
-                                };
-                                let n = input_data.len() / (c * h * w).max(1);
-                                let f = weight_data.len() / (c_per_group * kh * kw).max(1);
+                                // Recover batch (n) and output-channel (f) counts from the input
+                                // and weight byte counts: each f32 is 4 bytes. The previous code
+                                // computed these from copied `Vec<f32>::len()` which was the
+                                // whole point of the per-call copy.
+                                let f32_size = std::mem::size_of::<f32>();
+                                let n_in = (input_slice.size / f32_size) / (c * h * w).max(1);
+                                let f_out =
+                                    (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
                                 let _h_out = (h + 2 * padding)
                                     .saturating_sub(dilation * (kh - 1) + 1)
                                     / stride
@@ -4348,50 +4319,54 @@ impl Backend for CpuBackend {
                                     .saturating_sub(dilation * (kw - 1) + 1)
                                     / stride
                                     + 1;
-
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                let out_slice = BufferSlice::new(out_start, out_end - out_start);
                                 // Build optional activation closure for fused conv+activation.
                                 // The activation is applied inside the scatter loop, avoiding a
                                 // separate memory round-trip over the output tensor.
-                                // Note: this is scalar activation per-element (inside the scatter loop
-                                // which processes one output channel at a time) rather than the SIMD
-                                // vectorized activation used in the separate pass. But it saves the
-                                // entire extra memory round-trip over the output tensor.
-                                let relu_fn: fn(f32) -> f32 = |x| x.max(0.0);
-                                let gelu_fn: fn(f32) -> f32 =
-                                    |x| 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh());
-                                let silu_fn: fn(f32) -> f32 = |x| x / (1.0 + (-x).exp());
-                                let identity_fn: fn(f32) -> f32 = |x| x;
-                                let conv_act: Option<fn(f32) -> f32> =
-                                    fused_act.map(|act| match act {
-                                        "relu" => relu_fn,
-                                        "gelu" => gelu_fn,
-                                        "silu" => silu_fn,
-                                        _ => identity_fn,
-                                    });
-
-                                // Delegate to the im2col + GEMM microkernel (falls back to tiled for small tensors)
-                                crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
-                                    &input_data,
-                                    &weight_data,
-                                    &bias_data,
-                                    out_f32,
-                                    n,
-                                    c,
-                                    h,
-                                    w,
-                                    f,
-                                    kh,
-                                    kw,
-                                    stride,
-                                    padding,
-                                    dilation,
-                                    groups,
-                                    conv_act,
-                                );
+                                let conv_act = fused_act.map(|act| match act {
+                                    "relu" => {
+                                        crate::backend::cpu::microkernels::ConvActivation::Relu
+                                    }
+                                    "gelu" => {
+                                        crate::backend::cpu::microkernels::ConvActivation::Gelu
+                                    }
+                                    "silu" => {
+                                        crate::backend::cpu::microkernels::ConvActivation::Silu
+                                    }
+                                    _ => unreachable!(),
+                                });
+                                // Borrow the kernel call with arena slices directly: input, weight,
+                                // and bias (if present) are read-only, output is the only mut
+                                // region. with_nary_f32_slices handles disjoint/overlap correctly
+                                // and avoids the previous per-call `.to_vec()` copies of the input
+                                // and weight tensors.
+                                if let [input_s, weight_s, bias_s @ ..] = &input_slices[..] {
+                                    let inputs_for_kernel: Vec<BufferSlice> = if bias_s.is_empty() {
+                                        vec![*input_s, *weight_s]
+                                    } else {
+                                        vec![*input_s, *weight_s, bias_s[0]]
+                                    };
+                                    arena::with_nary_f32_slices(
+                                        arena,
+                                        &inputs_for_kernel,
+                                        out_slice,
+                                        |inputs, out_f32| {
+                                            let input = inputs[0];
+                                            let weight = inputs[1];
+                                            let bias = if inputs.len() >= 3 {
+                                                inputs[2]
+                                            } else {
+                                                &[][..]
+                                            };
+                                            // Delegate to the im2col + GEMM microkernel
+                                            // (falls back to tiled for small tensors).
+                                            crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
+                                                input, weight, bias, out_f32, n_in, c, h, w, f_out,
+                                                kh, kw, stride, padding, dilation, groups, conv_act,
+                                            );
+                                        },
+                                    );
+                                }
                             }
                         }
                         "conv2d_u4" | "conv2d_u8" => {
