@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LOCAL_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 
 
 def training_doc_qualifies_data_parallel_as_experimental() -> None:
@@ -35,6 +36,26 @@ def _link_path(markdown_path: Path, target: str) -> Path:
     return candidate
 
 
+def _github_heading_slug(heading: str) -> str:
+    """Return the GitHub-style anchor slug for a markdown heading."""
+    slug = heading.strip().lower()
+    slug = re.sub(r"<[^>]+>", "", slug)
+    slug = re.sub(r"[`*_~]", "", slug)
+    slug = re.sub(r"[^a-z0-9 _-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug)
+    return slug
+
+
+def _markdown_anchors(markdown_path: Path) -> set[str]:
+    anchors: set[str] = set()
+    text = markdown_path.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        match = HEADING_RE.match(line)
+        if match:
+            anchors.add(_github_heading_slug(match.group(1)))
+    return anchors
+
+
 def _iter_markdown_links(text: str) -> list[str]:
     """Return inline markdown link targets outside fenced code blocks."""
     targets: list[str] = []
@@ -62,9 +83,17 @@ def docs_have_resolvable_local_markdown_links() -> None:
         for target in _iter_markdown_links(text):
             if not target or not _is_local_link(target):
                 continue
-            if not _link_path(markdown_path, target).exists():
+            link_path = _link_path(markdown_path, target)
+            if not link_path.exists():
                 rel_path = markdown_path.relative_to(ROOT).as_posix()
                 failures.append(f"{rel_path}: missing local link target {target}")
+                continue
+
+            if "#" in target:
+                anchor = target.split("#", 1)[1]
+                if anchor and anchor not in _markdown_anchors(link_path):
+                    rel_path = markdown_path.relative_to(ROOT).as_posix()
+                    failures.append(f"{rel_path}: missing local link anchor {target}")
 
     if failures:
         raise AssertionError("\n".join(failures))
