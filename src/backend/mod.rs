@@ -128,6 +128,9 @@ pub mod cpu;
 #[cfg(feature = "gpu")]
 pub mod wgpu;
 
+/// Prepared executable plan for AOT inference compilation.
+pub mod prepared;
+
 /// Standalone runtime for executing pre-compiled plans
 pub mod runtime;
 
