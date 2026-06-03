@@ -1437,5 +1437,42 @@ impl AotExecutor {
         result.set_item("profile", profile_list)?;
         Ok(result.into())
     }
+
+    #[cfg(feature = "prepared-plan")]
+    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
+        use crate::backend::prepared::PreparedInstruction;
+        let instructions = &self.prepared_plan.instructions;
+        let mut stats = std::collections::HashMap::new();
+        stats.insert("total".to_string(), instructions.len());
+        stats.insert(
+            "generic".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::Generic { .. }))
+                .count(),
+        );
+        stats.insert(
+            "conv2d".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::Conv2d(_)))
+                .count(),
+        );
+        stats.insert(
+            "matmul".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::MatMul(_)))
+                .count(),
+        );
+        Ok(stats)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "prepared_stats requires the 'prepared-plan' feature",
+        ))
+    }
 }
 
