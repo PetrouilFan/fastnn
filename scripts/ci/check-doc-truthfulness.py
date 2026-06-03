@@ -19,14 +19,16 @@ def training_doc_qualifies_data_parallel_as_experimental() -> None:
 
 
 def _is_local_link(target: str) -> bool:
-    if target.startswith(("http://", "https://", "mailto:", "tel:", "#")):
+    if target.startswith(("http://", "https://", "mailto:", "tel:")):
         return False
     path_without_anchor = target.split("#", 1)[0]
-    return bool(path_without_anchor)
+    return bool(path_without_anchor or target.startswith("#"))
 
 
 def _link_path(markdown_path: Path, target: str) -> Path:
     path_without_anchor = target.split("#", 1)[0]
+    if not path_without_anchor:
+        return markdown_path
     candidate = (markdown_path.parent / path_without_anchor).resolve()
     if candidate.exists():
         return candidate
