@@ -248,14 +248,11 @@ mod tests {
         let bias_size = if with_bias { f * 4 } else { 0 };
 
         let mut input_slices = vec![
-            BufferSlice::new(0, input_size),          // input
+            BufferSlice::new(0, input_size),           // input
             BufferSlice::new(input_size, weight_size), // weight
         ];
         if with_bias {
-            input_slices.push(BufferSlice::new(
-                input_size + weight_size,
-                bias_size,
-            ));
+            input_slices.push(BufferSlice::new(input_size + weight_size, bias_size));
         }
 
         Instruction::CallKernel {
@@ -337,7 +334,9 @@ mod tests {
         ));
         assert!(matches!(
             &prepared.instructions[1],
-            PreparedInstruction::Generic { instruction_index: 1 }
+            PreparedInstruction::Generic {
+                instruction_index: 1
+            }
         ));
     }
 
@@ -450,10 +449,7 @@ mod tests {
                 assert_eq!(c.n, 1);
                 assert_eq!(c.f, 8);
                 assert_eq!(c.activation, PreparedActivation::None);
-                assert_eq!(
-                    c.kernel,
-                    PreparedConvKernelKind::CurrentIm2colGemm
-                );
+                assert_eq!(c.kernel, PreparedConvKernelKind::CurrentIm2colGemm);
                 assert!(c.bias.is_none());
                 assert_eq!(c.scratch_offset, 0);
                 assert_eq!(c.scratch_len, 0);
