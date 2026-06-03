@@ -46,10 +46,8 @@ impl PyTensor {
         // Treat this as a scalar tensor with shape [].
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
         let data_len: usize = if shape.is_empty() { 1 } else { shape.iter().product::<i64>() as usize };
-        let nbytes = data_len * 4;
-        let mut storage_bytes = vec![0u8; nbytes];
-        let f32_slice = bytemuck::cast_slice_mut(&mut storage_bytes);
-        buffer.copy_to_slice(py, f32_slice).map_err(|e| {
+        let mut data = vec![0.0f32; data_len];
+        buffer.copy_to_slice(py, &mut data).map_err(|e| {
             pyo3::exceptions::PyBufferError::new_err(format!("copy_to_slice failed: {e}"))
         })?;
         let device = device
@@ -57,9 +55,11 @@ impl PyTensor {
             .and_then(|s| crate::storage::Device::from_str_label(s))
             .unwrap_or_else(crate::python::get_default_device);
         let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
-        let storage = std::sync::Arc::new(
-            crate::storage::Storage::from_vec_owned(storage_bytes, DType::F32, device)
-        );
+        let storage = std::sync::Arc::new(crate::storage::Storage::from_vec(
+            data,
+            DType::F32,
+            device,
+        ));
         Ok(PyTensor::from_tensor(
             crate::tensor::Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, DType::F32))
         ))

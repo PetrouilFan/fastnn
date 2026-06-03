@@ -431,10 +431,16 @@ mod tests {
 
         // Conv is tagged with OpSilu.
         let conv_node = graph.get_node(conv).expect("conv should remain");
-        assert_eq!(conv_node.attrs.get("fused_op").map(|s| s.as_str()), Some("OpSilu"));
+        assert_eq!(
+            conv_node.attrs.get("fused_op").map(|s| s.as_str()),
+            Some("OpSilu")
+        );
 
         // Reshape, Sigmoid, and Mul are removed.
-        assert!(graph.get_node(reshape).is_none(), "intermediate reshape should be removed");
+        assert!(
+            graph.get_node(reshape).is_none(),
+            "intermediate reshape should be removed"
+        );
         assert!(graph.get_node(sig).is_none(), "sigmoid should be removed");
         assert!(graph.get_node(mul).is_none(), "mul should be removed");
 
