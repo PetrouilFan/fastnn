@@ -205,7 +205,7 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
             .enumerate()
             .map(|(instruction_index, inst)| {
                 try_prepare_conv2d(inst, instruction_index)
-                    .unwrap_or_else(|| PreparedInstruction::Generic { instruction_index })
+                    .unwrap_or(PreparedInstruction::Generic { instruction_index })
             })
             .collect(),
         arena_size: plan.arena_size,
@@ -227,8 +227,8 @@ mod tests {
     }
 
     /// Helper: build a conv2d CallKernel instruction with the canonical param layout.
-    fn make_conv2d_instruction(
-        kernel_name: &str,
+    #[derive(Clone, Copy)]
+    struct Conv2dParams {
         stride: usize,
         padding: usize,
         dilation: usize,
@@ -239,19 +239,38 @@ mod tests {
         kh: usize,
         kw: usize,
         with_bias: bool,
-    ) -> Instruction {
+    }
+
+    impl Default for Conv2dParams {
+        fn default() -> Self {
+            Self {
+                stride: 1,
+                padding: 0,
+                dilation: 1,
+                groups: 1,
+                c: 3,
+                h: 8,
+                w: 8,
+                kh: 3,
+                kw: 3,
+                with_bias: false,
+            }
+        }
+    }
+
+    fn make_conv2d_instruction(kernel_name: &str, params: Conv2dParams) -> Instruction {
         // f32 element size = 4 bytes
-        let input_size = c * h * w * 4; // 1 batch
-        let c_per_group = c / groups.max(1);
+        let input_size = params.c * params.h * params.w * 4; // 1 batch
+        let c_per_group = params.c / params.groups.max(1);
         let f = 8; // arbitrary output channels
-        let weight_size = f * c_per_group * kh * kw * 4;
-        let bias_size = if with_bias { f * 4 } else { 0 };
+        let weight_size = f * c_per_group * params.kh * params.kw * 4;
+        let bias_size = if params.with_bias { f * 4 } else { 0 };
 
         let mut input_slices = vec![
             BufferSlice::new(0, input_size),           // input
             BufferSlice::new(input_size, weight_size), // weight
         ];
-        if with_bias {
+        if params.with_bias {
             input_slices.push(BufferSlice::new(input_size + weight_size, bias_size));
         }
 
@@ -263,7 +282,17 @@ mod tests {
                 input_size, // output size doesn't matter for metadata
             ),
             secondary_output_slice: None,
-            params: vec![stride, padding, dilation, groups, c, h, w, kh, kw],
+            params: vec![
+                params.stride,
+                params.padding,
+                params.dilation,
+                params.groups,
+                params.c,
+                params.h,
+                params.w,
+                params.kh,
+                params.kw,
+            ],
             node_id: Some(42usize),
             param_dims: None,
             weight_meta: None,
@@ -316,7 +345,7 @@ mod tests {
 
     #[test]
     fn conv2d_promoted_in_full_plan() {
-        let conv = make_conv2d_instruction("conv2d", 1, 0, 1, 1, 3, 8, 8, 3, 3, false);
+        let conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
         let fill = Instruction::Fill {
             dst: BufferSlice::new(0, 4),
             value: 1.0,
@@ -432,7 +461,17 @@ mod tests {
 
     #[test]
     fn try_prepare_conv2d_basic() {
-        let inst = make_conv2d_instruction("conv2d", 2, 1, 1, 1, 16, 32, 32, 3, 3, false);
+        let inst = make_conv2d_instruction(
+            "conv2d",
+            Conv2dParams {
+                stride: 2,
+                padding: 1,
+                c: 16,
+                h: 32,
+                w: 32,
+                ..Default::default()
+            },
+        );
         let result = try_prepare_conv2d(&inst, 0).expect("should promote conv2d");
         match &result {
             PreparedInstruction::Conv2d(c) => {
@@ -460,7 +499,18 @@ mod tests {
 
     #[test]
     fn try_prepare_conv2d_with_bias() {
-        let inst = make_conv2d_instruction("conv2d_relu", 1, 0, 1, 1, 8, 16, 16, 1, 1, true);
+        let inst = make_conv2d_instruction(
+            "conv2d_relu",
+            Conv2dParams {
+                c: 8,
+                h: 16,
+                w: 16,
+                kh: 1,
+                kw: 1,
+                with_bias: true,
+                ..Default::default()
+            },
+        );
         let result = try_prepare_conv2d(&inst, 5).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
@@ -477,7 +527,14 @@ mod tests {
 
     #[test]
     fn try_prepare_conv2d_with_groups() {
-        let inst = make_conv2d_instruction("conv2d", 1, 0, 1, 4, 32, 8, 8, 3, 3, false);
+        let inst = make_conv2d_instruction(
+            "conv2d",
+            Conv2dParams {
+                groups: 4,
+                c: 32,
+                ..Default::default()
+            },
+        );
         let result = try_prepare_conv2d(&inst, 2).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
@@ -491,7 +548,13 @@ mod tests {
 
     #[test]
     fn try_prepare_conv2d_quantized_u4() {
-        let inst = make_conv2d_instruction("conv2d_u4", 1, 0, 1, 1, 16, 8, 8, 3, 3, false);
+        let inst = make_conv2d_instruction(
+            "conv2d_u4",
+            Conv2dParams {
+                c: 16,
+                ..Default::default()
+            },
+        );
         let result = try_prepare_conv2d(&inst, 0).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
@@ -503,7 +566,13 @@ mod tests {
 
     #[test]
     fn try_prepare_conv2d_quantized_u8() {
-        let inst = make_conv2d_instruction("conv2d_u8", 1, 0, 1, 1, 16, 8, 8, 3, 3, false);
+        let inst = make_conv2d_instruction(
+            "conv2d_u8",
+            Conv2dParams {
+                c: 16,
+                ..Default::default()
+            },
+        );
         let result = try_prepare_conv2d(&inst, 0).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
