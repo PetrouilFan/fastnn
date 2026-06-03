@@ -345,7 +345,7 @@ mod tests {
 
         assert!(!ConvSilu::fuse(&mut graph).unwrap());
         let conv_node = graph.get_node(conv).unwrap();
-        assert!(conv_node.attrs.get("fused_op").is_none());
+        assert!(!conv_node.attrs.contains_key("fused_op"));
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod tests {
             "mul should remain when pattern is unsafe"
         );
         let conv_node = graph.get_node(conv).unwrap();
-        assert!(conv_node.attrs.get("fused_op").is_none());
+        assert!(!conv_node.attrs.contains_key("fused_op"));
     }
 
     #[test]
