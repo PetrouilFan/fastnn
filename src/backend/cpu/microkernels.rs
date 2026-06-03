@@ -5252,6 +5252,23 @@ pub unsafe fn muon_update_f32_avx2(
 // im2col + GEMM based conv2d
 // ============================================================
 
+/// Optional fused activation for conv2d kernels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConvActivation {
+    Relu,
+    Gelu,
+    Silu,
+}
+
+#[inline]
+fn apply_conv_activation(x: f32, activation: ConvActivation) -> f32 {
+    match activation {
+        ConvActivation::Relu => x.max(0.0),
+        ConvActivation::Gelu => 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh()),
+        ConvActivation::Silu => x / (1.0 + (-x).exp()),
+    }
+}
+
 /// Optimized conv2d using im2col transformation + sgemm.
 /// Fast path for 1x1 convolutions (no im2col needed).
 #[allow(clippy::too_many_arguments)]
@@ -5271,7 +5288,7 @@ pub fn conv2d_f32_im2col_gemm(
     padding: usize,
     dilation: usize,
     groups: usize,
-    activation: Option<fn(f32) -> f32>,
+    activation: Option<ConvActivation>,
 ) {
     let c_per_group = c / groups.max(1);
     let f_per_group = f / groups.max(1);
@@ -5289,111 +5306,84 @@ pub fn conv2d_f32_im2col_gemm(
         // Apply activation separately for tiled path
         if let Some(act) = activation {
             for x in output.iter_mut() {
-                *x = act(*x);
+                *x = apply_conv_activation(*x, act);
             }
         }
         return;
     }
 
     // Fast path for 1x1 convolutions (no im2col, no weight transpose).
-    // The input NCHW data is treated as a column-major [c_per_group, num_pixels] matrix
-    // (rs_a=1, cs_a=spatial_size_per_batch) and the weight as column-major [c, f]
-    // (rs_b=1, cs_b=c_per_group). This avoids the im2col copy and the weight transpose,
-    // saving ~2 * num_pixels * c elements of memory traffic per group.
+    // Run GEMM as C[f, hw] = W[f, c] * X[c, hw] so the result lands directly
+    // in NCHW output order. This avoids the previous temp_out[faster-NHWC]
+    // buffer plus per-element scatter back to NCHW. The important NCHW stride:
+    // B[ch, spatial] = input[ch * hw + spatial], so rs_b=hw and cs_b=1.
     if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 {
         let col_w = c_per_group; // = c since groups == 1
-        let num_pixels = n * spatial_size;
         let hw_per_img = h * w;
 
         for g in 0..groups {
             let f_start = g * f_per_group;
             let input_group_off = g * col_w * hw_per_img;
             let weight_off = f_start * col_w;
+            let group_out_off = g * f_per_group * hw_per_img;
+            let batch_stride = f * hw_per_img;
 
-            let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f_per_group);
-            unsafe {
-                // Direct GEMM: A[num_pixels, col_w] = input[col_w, hw] with rs_a=1, cs_a=hw
-                //   A[spatial][ch] = input[ch * hw + spatial]  (NCHW: within each batch, channels are outer)
-                // B[col_w, f] = weight[f, col_w] with rs_b=1, cs_b=col_w
-                //   B[ch][oc] = weight[oc * col_w + ch]
-                matrixmultiply::sgemm(
-                    num_pixels,
-                    col_w,
-                    f_per_group,
-                    1.0,
-                    input.as_ptr().add(input_group_off),
-                    1isize,
-                    hw_per_img as isize,
-                    weight.as_ptr().add(weight_off),
-                    1isize,
-                    col_w as isize,
-                    0.0,
-                    temp_out.as_mut_ptr(),
-                    f_per_group as isize,
-                    1isize,
-                );
+            for nn in 0..n {
+                unsafe {
+                    matrixmultiply::sgemm(
+                        f_per_group,
+                        col_w,
+                        hw_per_img,
+                        1.0,
+                        weight.as_ptr().add(weight_off),
+                        col_w as isize,
+                        1isize,
+                        input
+                            .as_ptr()
+                            .add(input_group_off + nn * col_w * hw_per_img),
+                        hw_per_img as isize,
+                        1isize,
+                        0.0,
+                        output.as_mut_ptr().add(group_out_off + nn * batch_stride),
+                        hw_per_img as isize,
+                        1isize,
+                    );
+                }
             }
 
-            // Scatter temp_out [num_pixels, f] to NCHW output with bias and optional activation
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                let num_pixels = num_pixels;
-                let f_per_group = f_per_group;
-                let f_start = f_start;
-                let spatial_size = spatial_size;
-                let f = f;
-                let bias = bias;
-                let activation = activation;
-                // RefMut<Vec<f32>> is !Sync, so cast to usize (Sync) and
-                // reconstruct the pointer inside the closure.
-                let temp_ptr = temp_out.as_ptr() as usize;
-                let out_ptr = output.as_mut_ptr() as usize;
-                let f_whole = f;
-                (0..num_pixels * f_per_group)
-                    .into_par_iter()
-                    .for_each(|idx| {
-                        let pixel = idx / f_per_group;
-                        let ff = idx % f_per_group;
-                        let nn = pixel / spatial_size;
-                        let spatial = pixel % spatial_size;
-                        let mut val =
-                            unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
-                        if !bias.is_empty() {
-                            val += bias[f_start + ff];
-                        }
+            // Bias + activation in contiguous per-output-channel rows.
+            if !bias.is_empty() || activation.is_some() {
+                for nn in 0..n {
+                    let out_base = group_out_off + nn * batch_stride;
+                    for oc in 0..f_per_group {
+                        let bias_val = if !bias.is_empty() {
+                            bias[f_start + oc]
+                        } else {
+                            0.0
+                        };
+                        let row_start = out_base + oc * hw_per_img;
                         if let Some(act) = activation {
-                            val = act(val);
+                            for s in 0..hw_per_img {
+                                let v = output[row_start + s] + bias_val;
+                                output[row_start + s] = apply_conv_activation(v, act);
+                            }
+                        } else if bias_val != 0.0 {
+                            for s in 0..hw_per_img {
+                                output[row_start + s] += bias_val;
+                            }
                         }
-                        unsafe {
-                            *(out_ptr as *mut f32).add(
-                                nn * (f_whole * spatial_size)
-                                    + (f_start + ff) * spatial_size
-                                    + spatial,
-                            ) = val;
-                        }
-                    });
-            }
-            #[cfg(not(feature = "parallel"))]
-            for pixel in 0..num_pixels {
-                let nn = pixel / spatial_size;
-                let spatial = pixel % spatial_size;
-                for ff in 0..f_per_group {
-                    let mut val = temp_out[pixel * f_per_group + ff];
-                    if !bias.is_empty() {
-                        val += bias[f_start + ff];
                     }
-                    if let Some(act) = activation {
-                        val = act(val);
-                    }
-                    output[nn * (f * spatial_size) + (f_start + ff) * spatial_size + spatial] = val;
                 }
             }
         }
         return;
     }
 
-    // General case: im2col + GEMM (for non-1x1 convolutions)
+    // General case: im2col + GEMM (for non-1x1 convolutions).
+    // im2col is [spatial, col_w] row-major. Run GEMM as
+    // C[f, spatial] = W[f, col_w] * Col[col_w, spatial], with
+    // Col[col, spatial] = col_matrix[spatial * col_w + col]
+    // (rs_b=1, cs_b=col_w), so C lands directly in NCHW output order.
     for g in 0..groups {
         let f_start = g * f_per_group;
         let input_group_off = g * c_per_group * (h * w);
@@ -5421,79 +5411,53 @@ pub fn conv2d_f32_im2col_gemm(
         }
 
         let weight_off = f_start * col_w;
+        let group_out_off = g * f_per_group * spatial_size;
+        let batch_stride = f * spatial_size;
 
-        let mut temp_out = get_conv_buf!(&CONV_TEMP_OUT_BUF, num_pixels * f_per_group);
-        unsafe {
-            // Read weight directly as column-major to avoid explicit transpose.
-            // Weight is stored as [f_per_group][col_w] row-major. With rs_b=1, cs_b=col_w,
-            // sgemm reads it as [col_w][f_per_group] column-major, eliminating the transpose.
-            matrixmultiply::sgemm(
-                num_pixels,
-                col_w,
-                f_per_group,
-                1.0,
-                col_matrix.as_ptr(),
-                col_w as isize,
-                1isize,
-                weight.as_ptr().add(weight_off),
-                1isize,
-                col_w as isize,
-                0.0,
-                temp_out.as_mut_ptr(),
-                f_per_group as isize,
-                1isize,
-            );
+        for nn in 0..n {
+            let col_start = nn * spatial_size * col_w;
+            unsafe {
+                matrixmultiply::sgemm(
+                    f_per_group,
+                    col_w,
+                    spatial_size,
+                    1.0,
+                    weight.as_ptr().add(weight_off),
+                    col_w as isize,
+                    1isize,
+                    col_matrix.as_ptr().add(col_start),
+                    1isize,
+                    col_w as isize,
+                    0.0,
+                    output.as_mut_ptr().add(group_out_off + nn * batch_stride),
+                    spatial_size as isize,
+                    1isize,
+                );
+            }
         }
 
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            let num_pixels = num_pixels;
-            let f_per_group = f_per_group;
-            let f_start = f_start;
-            let spatial_size = spatial_size;
-            let f = f;
-            let bias = bias;
-            let activation = activation;
-            // Same usize-cast Sync-safe approach as the 1×1 fast-path scatter above.
-            let temp_ptr = temp_out.as_ptr() as usize;
-            let out_ptr = output.as_mut_ptr() as usize;
-            let f_whole = f;
-            (0..num_pixels * f_per_group)
-                .into_par_iter()
-                .for_each(|idx| {
-                    let pixel = idx / f_per_group;
-                    let ff = idx % f_per_group;
-                    let nn = pixel / spatial_size;
-                    let spatial = pixel % spatial_size;
-                    let mut val =
-                        unsafe { *(temp_ptr as *const f32).add(pixel * f_per_group + ff) };
-                    if !bias.is_empty() {
-                        val += bias[f_start + ff];
-                    }
+        // Bias + activation in contiguous per-output-channel rows.
+        if !bias.is_empty() || activation.is_some() {
+            for nn in 0..n {
+                let out_base = group_out_off + nn * batch_stride;
+                for oc in 0..f_per_group {
+                    let bias_val = if !bias.is_empty() {
+                        bias[f_start + oc]
+                    } else {
+                        0.0
+                    };
+                    let row_start = out_base + oc * spatial_size;
                     if let Some(act) = activation {
-                        val = act(val);
+                        for s in 0..spatial_size {
+                            let v = output[row_start + s] + bias_val;
+                            output[row_start + s] = apply_conv_activation(v, act);
+                        }
+                    } else if bias_val != 0.0 {
+                        for s in 0..spatial_size {
+                            output[row_start + s] += bias_val;
+                        }
                     }
-                    unsafe {
-                        *(out_ptr as *mut f32).add(
-                            nn * (f_whole * spatial_size) + (f_start + ff) * spatial_size + spatial,
-                        ) = val;
-                    }
-                });
-        }
-        #[cfg(not(feature = "parallel"))]
-        for pixel in 0..num_pixels {
-            let nn = pixel / spatial_size;
-            let spatial = pixel % spatial_size;
-            for ff in 0..f_per_group {
-                let mut val = temp_out[pixel * f_per_group + ff];
-                if !bias.is_empty() {
-                    val += bias[f_start + ff];
                 }
-                if let Some(act) = activation {
-                    val = act(val);
-                }
-                output[nn * (f * spatial_size) + (f_start + ff) * spatial_size + spatial] = val;
             }
         }
     }
