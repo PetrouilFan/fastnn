@@ -1115,6 +1115,8 @@ pub struct AotExecutor {
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
+    #[cfg(feature = "prepared-plan")]
+    prepared_plan: crate::backend::prepared::PreparedExecutablePlan,
 }
 
 #[pymethods]
@@ -1212,7 +1214,19 @@ impl AotExecutor {
         let output_map: Vec<(String, usize)> = output_names
             .iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
 
-        Ok(AotExecutor { plan, memory_plan, graph: compiled_graph, executor, input_names, output_map })
+        #[cfg(feature = "prepared-plan")]
+        let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan);
+
+        Ok(AotExecutor {
+            plan,
+            memory_plan,
+            graph: compiled_graph,
+            executor,
+            input_names,
+            output_map,
+            #[cfg(feature = "prepared-plan")]
+            prepared_plan,
+        })
     }
 
     fn forward(
