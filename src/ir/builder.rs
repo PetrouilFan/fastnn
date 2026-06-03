@@ -444,6 +444,43 @@ impl GraphBuilder {
         dilation: usize,
         groups: usize,
     ) -> GraphTensor {
+        self.conv2d_with_optional_bias_params(
+            input, weight, None, stride, padding, dilation, groups,
+        )
+    }
+
+    /// Convolution 2D with an already-broadcastable channel bias.
+    pub fn conv2d_with_bias_params(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        bias: &GraphTensor,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> GraphTensor {
+        self.conv2d_with_optional_bias_params(
+            input,
+            weight,
+            Some(bias),
+            stride,
+            padding,
+            dilation,
+            groups,
+        )
+    }
+
+    fn conv2d_with_optional_bias_params(
+        &self,
+        input: &GraphTensor,
+        weight: &GraphTensor,
+        bias: Option<&GraphTensor>,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> GraphTensor {
         let a_shape = input.shape();
         let w_shape = weight.shape();
         let batch = a_shape.first().cloned().unwrap_or(DimExpr::Known(1));
@@ -469,13 +506,16 @@ impl GraphBuilder {
         attrs.insert("dilation".to_string(), dilation.to_string());
         attrs.insert("groups".to_string(), groups.to_string());
 
+        let mut inputs = vec![input.node_id, weight.node_id];
+        if let Some(bias) = bias {
+            inputs.push(bias.node_id);
+        }
+
         let mut inner = self.inner.borrow_mut();
-        let node_id = inner.graph.add_node_with_attrs(
-            Opcode::Conv2d,
-            vec![input.node_id, weight.node_id],
-            output_type.clone(),
-            attrs,
-        );
+        let node_id =
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::Conv2d, inputs, output_type.clone(), attrs);
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -791,12 +831,30 @@ impl GraphBuilder {
     pub fn concat(&self, tensors: &[&GraphTensor], dim: usize) -> GraphTensor {
         let mut output_shape = tensors[0].shape().to_vec();
         if dim < output_shape.len() && !tensors.is_empty() {
-            let mut total = DimExpr::Known(0);
-            for t in tensors {
-                let d = t.shape().get(dim).cloned().unwrap_or(DimExpr::Known(1));
-                total = dim_add(&total, &d);
+            let dims: Vec<DimExpr> = tensors
+                .iter()
+                .map(|t| t.shape().get(dim).cloned().unwrap_or(DimExpr::Known(1)))
+                .collect();
+            if dims.iter().all(|d| matches!(d, DimExpr::Known(_))) {
+                let mut total = DimExpr::Known(0);
+                for d in &dims {
+                    total = dim_add(&total, d);
+                }
+                output_shape[dim] = total;
+            } else if let Some(total) = tensors
+                .iter()
+                .map(|t| t.shape().get(dim).and_then(|d| d.evaluate()))
+                .collect::<Option<Vec<_>>>()
+                .map(|vals| vals.into_iter().sum::<u64>())
+            {
+                output_shape[dim] = DimExpr::Known(total);
+            } else {
+                let mut total = DimExpr::Known(0);
+                for d in &dims {
+                    total = dim_add(&total, d);
+                }
+                output_shape[dim] = total;
             }
-            output_shape[dim] = total;
         }
         let output_type = TensorType::new(output_shape, tensors[0].dtype());
         let input_ids: Vec<NodeId> = tensors.iter().map(|t| t.node_id).collect();

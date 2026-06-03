@@ -17,7 +17,9 @@
 #![allow(dead_code)]
 
 use crate::autograd::build_backward_graph;
-use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan};
+use crate::backend::{
+    Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan, ProfileEntry,
+};
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::passes::{
     dead_code_elimination, memory_planning, operator_fusion, quantization, shape_inference,
@@ -143,6 +145,28 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
+        self.execute_internal(graph, plan, memory_plan, inputs, false)
+            .map(|(outputs, _profile)| outputs)
+    }
+
+    pub fn execute_profile(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        self.execute_internal(graph, plan, memory_plan, inputs, true)
+    }
+
+    fn execute_internal(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        profile: bool,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         // Build runtime shape env from input sizes, validate shapes.
         let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
             .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
@@ -216,7 +240,12 @@ impl<B: Backend> GraphExecutor<B> {
         }
 
         // Dispatch the tightened plan
-        self.backend.dispatch(plan, arena, &shape_env)?;
+        let profile_entries = if profile {
+            self.backend.dispatch_profile(plan, arena, &shape_env)?
+        } else {
+            self.backend.dispatch(plan, arena, &shape_env)?;
+            Vec::new()
+        };
 
         // Read output data — compute actual sizes via shape_env
         let mut outputs = Vec::with_capacity(graph.outputs.len());
@@ -254,7 +283,7 @@ impl<B: Backend> GraphExecutor<B> {
             outputs.push(data);
         }
 
-        Ok(outputs)
+        Ok((outputs, profile_entries))
     }
 
     /// Convenience: compile + execute in a single call.

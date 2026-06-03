@@ -351,17 +351,17 @@ impl<'a> OnnxConverter<'a> {
 
                 // All YOLO convs are 2D; use conv2d_with_params.
                 // (1D/3D would need separate dispatch from ONNX attrs.)
-                let r = self
-                    .graph
-                    .conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, group);
-                // Bias addition: ONNX Conv bias is 1D [C] which broadcasts
-                // channel-wise over [N, C, H, W]. Use bias_add, NOT add,
-                // because numpy-style broadcasting would fail (C vs H).
-                let r = if let Some(b) = ins.get(2) {
-                    self.graph.bias_add(&r, b)
+                let mut r = if let Some(b) = ins.get(2) {
+                    self.graph.conv2d_with_bias_params(
+                        &ins[0], &ins[1], b, stride, padding, dilation, group,
+                    )
                 } else {
-                    r
+                    self.graph
+                        .conv2d_with_params(&ins[0], &ins[1], stride, padding, dilation, group)
                 };
+                if let Some(shape) = parse_shape_attr(&node.attrs, "output_shape") {
+                    r = self.graph.reshape(&r, &shape);
+                }
                 self.out(node, r);
             }
             "ConvTranspose" => {
@@ -489,16 +489,7 @@ impl<'a> OnnxConverter<'a> {
             "Reshape" => {
                 let shape: Vec<i64> = parse_ints_i64(&node.attrs, "shape", &[]);
                 if !shape.is_empty() {
-                    let dims: Vec<DimExpr> = shape
-                        .iter()
-                        .map(|&d| {
-                            if d == -1 {
-                                DimExpr::Symbol("N".to_string())
-                            } else {
-                                DimExpr::Known(d as u64)
-                            }
-                        })
-                        .collect();
+                    let dims = resolve_reshape_dims(&shape, &ins[0]);
                     self.out(node, self.graph.reshape(&ins[0], &dims));
                 } else if ins.len() >= 2 {
                     // Opset 11+: shape comes from a tensor input (ins[1]).
@@ -506,17 +497,8 @@ impl<'a> OnnxConverter<'a> {
                     let shape_name = &node.inputs[1];
                     if let Some(shape_tensor) = self.params.get(shape_name) {
                         let shape_data: Vec<f32> = shape_tensor.to_numpy();
-                        let dims: Vec<DimExpr> = shape_data
-                            .iter()
-                            .map(|&v| {
-                                let d = v as i64;
-                                if d == -1 {
-                                    DimExpr::Symbol("N".to_string())
-                                } else {
-                                    DimExpr::Known(d as u64)
-                                }
-                            })
-                            .collect();
+                        let shape_i64: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
+                        let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
                         self.out(node, self.graph.reshape(&ins[0], &dims));
                     } else {
                         // Shape is dynamic; keep as pass-through for now.
@@ -646,7 +628,11 @@ impl<'a> OnnxConverter<'a> {
                 let dim = *axes.first().unwrap_or(&0);
                 let start = *starts.first().unwrap_or(&0).max(&0) as usize;
                 let end = *ends.first().unwrap_or(&1) as usize;
-                self.out(node, self.graph.slice(&ins[0], dim, start, end));
+                let mut out = self.graph.slice(&ins[0], dim, start, end);
+                if let Some(shape) = parse_shape_attr(&node.attrs, "output_shape") {
+                    out = self.graph.reshape(&out, &shape);
+                }
+                self.out(node, out);
             }
             "Squeeze" => {
                 let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
@@ -1019,16 +1005,30 @@ impl<'a> OnnxConverter<'a> {
                     .map(|s| s.as_str())
                     .unwrap_or("nearest");
                 // Resize in ONNX takes scales or sizes as tensor inputs (indices 2 and 3).
-                // Try to extract scales from the constant scales input.
-                let (scale_h, scale_w) = if node.inputs.len() > 2 {
+                // Prefer explicit attrs injected by Python-side importers, then fall back to
+                // constant scale tensors. This keeps YOLO's nearest 2x upsample honest even
+                // when scales are produced by Constant nodes rather than initializers.
+                let (scale_h, scale_w) = if let (Some(h), Some(w)) = (
+                    node.attrs
+                        .get("scale_h")
+                        .and_then(|v| v.parse::<usize>().ok()),
+                    node.attrs
+                        .get("scale_w")
+                        .and_then(|v| v.parse::<usize>().ok()),
+                ) {
+                    (h.max(1), w.max(1))
+                } else if node.inputs.len() > 2 {
                     let scales_name = &node.inputs[2];
                     if let Some(scale_tensor) = self.params.get(scales_name.as_str()) {
                         let data: Vec<f32> = scale_tensor.to_numpy();
                         if data.len() >= 4 {
-                            (data[2] as usize, data[3] as usize)
+                            (
+                                data[2].round().max(1.0) as usize,
+                                data[3].round().max(1.0) as usize,
+                            )
                         } else {
                             // Fallback: uniform 2x upsampling
-                            let s = data.last().copied().unwrap_or(2.0) as usize;
+                            let s = data.last().copied().unwrap_or(2.0).round().max(1.0) as usize;
                             (s, s)
                         }
                     } else if node.inputs.len() > 3 {
@@ -1041,22 +1041,22 @@ impl<'a> OnnxConverter<'a> {
                 } else {
                     (2, 2)
                 };
-                match mode {
-                    "nearest" => self.out(
-                        node,
-                        self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w),
-                    ),
-                    "linear" | "bilinear" => self.out(
-                        node,
-                        self.graph.upsample_bilinear2d(&ins[0], scale_h, scale_w),
-                    ),
+                let mut out = match mode {
+                    "nearest" => self.graph.upsample_nearest2d(&ins[0], scale_h, scale_w),
+                    "linear" | "bilinear" => {
+                        self.graph.upsample_bilinear2d(&ins[0], scale_h, scale_w)
+                    }
                     other => {
                         return Err(format!(
                             "Resize mode '{}' not supported (only nearest/linear)",
                             other
                         ))
                     }
+                };
+                if let Some(shape) = parse_shape_attr(&node.attrs, "output_shape") {
+                    out = self.graph.reshape(&out, &shape);
                 }
+                self.out(node, out);
             }
 
             // ── Quantized ops (decomposed to f32) ──────────────────
@@ -1542,6 +1542,52 @@ fn parse_ints_i64(attrs: &HashMap<String, String>, key: &str, default: &[i64]) -
         })
         .filter(|v: &Vec<i64>| !v.is_empty())
         .unwrap_or_else(|| default.to_vec())
+}
+
+fn parse_shape_attr(attrs: &HashMap<String, String>, key: &str) -> Option<Vec<DimExpr>> {
+    attrs.get(key).map(|s| {
+        s.split(',')
+            .filter_map(|v| v.trim().parse::<i64>().ok())
+            .map(|d| {
+                if d < 0 {
+                    DimExpr::Symbol(format!("d{}", -d))
+                } else {
+                    DimExpr::Known(d as u64)
+                }
+            })
+            .collect()
+    })
+}
+
+fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Vec<DimExpr> {
+    let input_shape = input.shape();
+    let input_numel = input_shape
+        .iter()
+        .try_fold(1u64, |acc, d| d.evaluate().map(|v| acc.saturating_mul(v)));
+    let known_product = shape
+        .iter()
+        .filter(|&&d| d > 0)
+        .fold(1u64, |acc, &d| acc.saturating_mul(d as u64));
+    let infer_idx = shape.iter().position(|&d| d == -1);
+
+    shape
+        .iter()
+        .enumerate()
+        .map(|(idx, &d)| {
+            if d == -1 {
+                if let (Some(numel), Some(_)) = (input_numel, infer_idx) {
+                    if known_product != 0 && numel % known_product == 0 {
+                        return DimExpr::Known(numel / known_product);
+                    }
+                }
+                DimExpr::Symbol("N".to_string())
+            } else if d == 0 {
+                input_shape.get(idx).cloned().unwrap_or(DimExpr::Known(0))
+            } else {
+                DimExpr::Known(d as u64)
+            }
+        })
+        .collect()
 }
 
 fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
