@@ -260,6 +260,12 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--profile", action="store_true", help="Print fastnn per-kernel profile from one measured run")
     ap.add_argument("--profile-top", type=int, default=20)
+    ap.add_argument(
+        "--profile-json",
+        type=Path,
+        default=None,
+        help="Write machine-readable benchmark/profile results to this JSON path",
+    )
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -314,7 +320,7 @@ def main() -> int:
                 bucket = profile_by_kernel.setdefault(kernel, {"count": 0.0, "total_ms": 0.0})
                 bucket["count"] += 1.0
                 bucket["total_ms"] += elapsed_ns / 1_000_000.0
-            profile_top = sorted(
+            profile_summary = sorted(
                 (
                     {
                         "kernel_name": k,
@@ -326,8 +332,11 @@ def main() -> int:
                 ),
                 key=lambda row: row["total_ms"],
                 reverse=True,
-            )[: args.profile_top]
+            )
+            profile_top = profile_summary[: args.profile_top]
             results["fastnn_profile_top"] = profile_top
+            results["fastnn_profile_summary"] = profile_summary
+            results["fastnn_profile_raw"] = profile_entries
             print("fastnn_profile_top", json.dumps(profile_top, sort_keys=True))
         print("fastnn", json.dumps({
             "shape": list(fy.shape),
@@ -337,6 +346,11 @@ def main() -> int:
     except Exception as exc:
         results["fastnn_error"] = f"{type(exc).__name__}: {exc}"
         print("fastnn_error", results["fastnn_error"])
+
+    if args.profile_json is not None:
+        args.profile_json.parent.mkdir(parents=True, exist_ok=True)
+        args.profile_json.write_text(json.dumps(results, indent=2, sort_keys=True))
+        print(f"profile_json {args.profile_json}")
 
     print("summary", json.dumps(results, sort_keys=True))
     return 0 if "fastnn_error" not in results else 2
