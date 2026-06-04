@@ -74,6 +74,11 @@ fastnn/fastnn.pdb
 .benchmarks/
 .kilo/
 *.fnn
+
+# Downloaded model/export artifacts
+*.onnx
+*.pt
+
 results.json
 tests/bench_*.py
 tests/profile_*.py
