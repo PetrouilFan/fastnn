@@ -1467,6 +1467,10 @@ impl AotExecutor {
             "transposed_fp32_conv_bindings".to_string(),
             self.prepared_plan.transposed_fp32_conv_binding_count(),
         );
+        stats.insert(
+            "transposed_fp32_conv_binding_flops".to_string(),
+            self.prepared_plan.transposed_fp32_conv_binding_flops(),
+        );
         Ok(stats)
     }
 
