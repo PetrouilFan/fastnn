@@ -1209,6 +1209,22 @@ impl PreparedExecutablePlan {
             })
             .count()
     }
+
+    /// Estimated Conv FLOPs covered by explicit transposed-fp32 Conv bindings.
+    ///
+    /// This is the safe pre-runtime integration scope for the selected YOLO
+    /// backend candidate family: only instructions with a direct
+    /// [`PreparedConv2d::transposed_weight`] handle are counted.
+    pub fn transposed_fp32_conv_binding_flops(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                PreparedInstruction::Conv2d(conv) if conv.transposed_weight.is_some() => Some(conv),
+                _ => None,
+            })
+            .map(conv2d_estimated_flops)
+            .sum()
+    }
 }
 
 fn is_packed_fp32_conv_candidate(conv: &PreparedConv2d) -> bool {
@@ -2010,6 +2026,10 @@ mod tests {
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_binding_count(), 1);
+        assert_eq!(
+            prepared.transposed_fp32_conv_binding_flops(),
+            2 * f * c * kh * kw * h * w
+        );
         assert_eq!(prepared.transposed_fp32_conv_total_bytes(), weight_size);
         match &prepared.instructions[1] {
             PreparedInstruction::Conv2d(conv) => assert!(conv.transposed_weight.is_some()),

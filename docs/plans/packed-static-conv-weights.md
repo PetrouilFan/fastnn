@@ -48,6 +48,7 @@ packed fp32 conv candidate flops: 2185996800
 transposed fp32 conv entries: 13
 transposed fp32 conv bytes: 1916928
 transposed fp32 conv bindings: 13
+transposed fp32 conv binding flops: 538214400
 ```
 
 ## Acceptance status
@@ -56,7 +57,7 @@ C2 acceptance is satisfied:
 
 - Packed/static Conv metadata exists in `src/backend/prepared.rs`.
 - Prepared stats expose candidate counts and transposed-entry byte counts through `AotExecutor.prepared_stats()`.
-- Prepared stats expose transposed-entry binding counts through `transposed_fp32_conv_bindings` so a future opt-in runtime path can consume a direct handle instead of name-scanning the arena.
+- Prepared stats expose transposed-entry binding counts and bound FLOP coverage through `transposed_fp32_conv_bindings` / `transposed_fp32_conv_binding_flops` so a future opt-in runtime path can consume a direct handle and quantify its full-YOLO scope instead of name-scanning the arena.
 - The direct handle is paired with a layout-specific accessor, preventing future runtime paths from overloading original-layout `packed_weight`/`get()` semantics.
 - Runtime behavior is unchanged; metadata-only transposed entries return `None` from `PackedWeightStore::as_f32_slice()` and are not consumed by fallback constant lookup.
 
