@@ -2,6 +2,38 @@ use std::time::Instant;
 
 use fastnn::backend::cpu::microkernels::{conv2d_f32_im2col_gemm, ConvActivation};
 
+#[cfg(feature = "openblas")]
+#[link(name = "openblas")]
+extern "C" {
+    fn cblas_sgemm(
+        layout: i32,
+        transa: i32,
+        transb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: f32,
+        a: *const f32,
+        lda: i32,
+        b: *const f32,
+        ldb: i32,
+        beta: f32,
+        c: *mut f32,
+        ldc: i32,
+    );
+}
+
+#[cfg(feature = "openblas")]
+#[inline]
+fn openblas_conv_gemm_enabled() -> bool {
+    std::env::var("FASTNN_DISABLE_OPENBLAS_CONV_GEMM")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(true)
+}
+
 #[derive(Clone, Copy)]
 struct Shape {
     name: &'static str,
@@ -117,25 +149,99 @@ fn run_gemm_only(
         for nn in 0..n {
             let col_start = group_col_off + nn * spatial_size * col_w;
             unsafe {
-                matrixmultiply::sgemm(
+                conv_phase_sgemm(
                     f_per_group,
                     col_w,
                     spatial_size,
-                    1.0,
                     weight.as_ptr().add(weight_off),
-                    col_w as isize,
-                    1isize,
                     col_matrix.as_ptr().add(col_start),
-                    1isize,
-                    col_w as isize,
-                    0.0,
                     output.as_mut_ptr().add(group_out_off + nn * batch_stride),
-                    spatial_size as isize,
-                    1isize,
                 );
             }
         }
     }
+}
+
+#[cfg(feature = "openblas")]
+unsafe fn conv_phase_sgemm(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    b_im2col_nk: *const f32,
+    c: *mut f32,
+) {
+    if openblas_conv_gemm_enabled()
+        && m <= i32::MAX as usize
+        && n <= i32::MAX as usize
+        && k <= i32::MAX as usize
+    {
+        const CBLAS_ROW_MAJOR: i32 = 101;
+        const CBLAS_NO_TRANS: i32 = 111;
+        const CBLAS_TRANS: i32 = 112;
+        // General Conv im2col stores B physically as [N,K] row-major; consume it
+        // as logical [K,N] with TransB, matching conv2d_f32_im2col_gemm.
+        cblas_sgemm(
+            CBLAS_ROW_MAJOR,
+            CBLAS_NO_TRANS,
+            CBLAS_TRANS,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0,
+            a,
+            k as i32,
+            b_im2col_nk,
+            k as i32,
+            0.0,
+            c,
+            n as i32,
+        );
+    } else {
+        matrixmultiply::sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            a,
+            k as isize,
+            1isize,
+            b_im2col_nk,
+            1isize,
+            k as isize,
+            0.0,
+            c,
+            n as isize,
+            1isize,
+        );
+    }
+}
+
+#[cfg(not(feature = "openblas"))]
+unsafe fn conv_phase_sgemm(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    b_im2col_nk: *const f32,
+    c: *mut f32,
+) {
+    matrixmultiply::sgemm(
+        m,
+        k,
+        n,
+        1.0,
+        a,
+        k as isize,
+        1isize,
+        b_im2col_nk,
+        1isize,
+        k as isize,
+        0.0,
+        c,
+        n as isize,
+        1isize,
+    );
 }
 
 fn apply_bias_silu(output: &mut [f32], bias: &[f32], n: usize, f: usize, spatial_size: usize) {
@@ -426,8 +532,29 @@ fn main() {
             groups: 1,
         },
     ];
-    println!("iters={} warmup={}", iters, warmup);
+    println!(
+        "iters={} warmup={} gemm_backend={} openblas_disabled={}",
+        iters,
+        warmup,
+        gemm_backend_name(),
+        std::env::var("FASTNN_DISABLE_OPENBLAS_CONV_GEMM").unwrap_or_default()
+    );
     for shape in shapes {
         bench_one(shape, warmup, iters);
+    }
+}
+
+fn gemm_backend_name() -> &'static str {
+    #[cfg(feature = "openblas")]
+    {
+        if openblas_conv_gemm_enabled() {
+            "openblas"
+        } else {
+            "matrixmultiply"
+        }
+    }
+    #[cfg(not(feature = "openblas"))]
+    {
+        "matrixmultiply"
     }
 }
