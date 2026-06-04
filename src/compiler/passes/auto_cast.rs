@@ -296,7 +296,7 @@ mod tests {
         // because MatMul supports quantized inputs natively.
         let mm2_node = graph.get_node(mm2_id).unwrap();
         let mm2_weight_input = mm2_node.inputs[1];
-        let mm2_weight_node = graph.get_node(mm2_weight_input).unwrap();
+        let _mm2_weight_node = graph.get_node(mm2_weight_input).unwrap();
         // mm2_weight_node could be Dequantize if shared_weight has other consumers,
         // but since we check that shared_weight IS quantized, the input to MatMul
         // should either be the quantized node or a Dequantize node.
