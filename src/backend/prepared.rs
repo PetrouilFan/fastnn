@@ -756,6 +756,55 @@ fn apply_static_weight_bindings(
     }
 }
 
+/// Validate that `prepared` is consistent with `plan` for use as the
+/// driver of an opt-in prepared-execution fallback path.
+///
+/// A prepared plan is "consistent" with an [`ExecutablePlan`] when:
+///
+/// - the prepared plan has the same number of instructions as the
+///   source plan, and
+/// - [`PreparedExecutablePlan::original_instruction_order`] reports
+///   the identity permutation `[0, 1, 2, ..., N-1]`, i.e. the prepared
+///   instructions appear in the same plan order and carry their
+///   original instruction index.
+///
+/// This is a cheap O(N) sanity check. It is intended to be called from
+/// the opt-in prepared-fallback execution path before delegating to
+/// the existing dispatch loop: a failure here means the caller handed
+/// in a prepared plan that was either built from a different
+/// [`ExecutablePlan`] or has been mutated in ways the fallback cannot
+/// reconcile, and the safe behaviour is to refuse rather than silently
+/// desynchronise prepared metadata with the live plan.
+///
+/// The check is metadata-only — it does **not** look at
+/// [`PreparedConstantArena`] contents, weight bindings, or any
+/// per-instruction payload. Future lanes that add richer prepared
+/// execution semantics will layer additional validation on top of
+/// this baseline.
+pub fn validate_prepared_against_plan(
+    prepared: &PreparedExecutablePlan,
+    plan: &ExecutablePlan,
+) -> Result<(), crate::backend::BackendError> {
+    use crate::backend::BackendError;
+    let order = prepared.original_instruction_order();
+    if order.len() != plan.instructions.len() {
+        return Err(BackendError::Dispatch(format!(
+            "prepared fallback: prepared plan has {} instructions, plan has {}",
+            order.len(),
+            plan.instructions.len(),
+        )));
+    }
+    for (i, &idx) in order.iter().enumerate() {
+        if idx != i {
+            return Err(BackendError::Dispatch(format!(
+                "prepared fallback: order mismatch at slot {}: prepared says {}, expected {}",
+                i, idx, i
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Build a [`PreparedExecutablePlan`] by inspecting each instruction.
 ///
 /// Statically recognizable Conv2d and MatMul `CallKernel` instructions
@@ -2555,5 +2604,132 @@ mod tests {
             .expect("plan should carry an arena");
         assert_eq!(prepared.constant_arena_total_bytes(), arena.total_bytes());
         assert_eq!(prepared.constant_arena_entry_count(), arena.len());
+    }
+
+    // ── validate_prepared_against_plan ──────────────────────────
+
+    /// `validate_prepared_against_plan` returns `Ok` for a freshly
+    /// prepared plan that matches the source plan in length and
+    /// original-instruction order.
+    #[test]
+    fn validate_prepared_against_plan_ok_on_consistent_plan() {
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::Fill {
+                    dst: BufferSlice::new(0, 4),
+                    value: 1.0,
+                },
+                Instruction::MemCopy {
+                    dst: BufferSlice::new(0, 4),
+                    src: BufferSlice::new(4, 4),
+                },
+                make_conv2d_instruction("conv2d", Conv2dParams::default()),
+            ],
+            arena_size: 4096,
+            levels: vec![0, 0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        validate_prepared_against_plan(&prepared, &plan)
+            .expect("consistent plan must validate cleanly");
+    }
+
+    /// `validate_prepared_against_plan` returns `Err` when the prepared
+    /// plan has a different number of instructions than the source
+    /// plan — e.g. the caller accidentally swapped a different
+    /// prepared plan in.
+    #[test]
+    fn validate_prepared_against_plan_rejects_length_mismatch() {
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::Fill {
+                    dst: BufferSlice::new(0, 4),
+                    value: 0.0,
+                },
+                Instruction::MemCopy {
+                    dst: BufferSlice::new(0, 4),
+                    src: BufferSlice::new(4, 4),
+                },
+            ],
+            arena_size: 1024,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        // Truncate the plan to a single instruction; the prepared plan
+        // (still holding the full two-instruction order) must now
+        // disagree on length.
+        let truncated = ExecutablePlan {
+            instructions: plan.instructions[..1].to_vec(),
+            arena_size: plan.arena_size,
+            levels: plan.levels[..1].to_vec(),
+        };
+        let err = validate_prepared_against_plan(&prepared, &truncated)
+            .expect_err("length mismatch must be rejected");
+        assert!(matches!(err, crate::backend::BackendError::Dispatch(_)));
+    }
+
+    /// `validate_prepared_against_plan` returns `Err` when the prepared
+    /// plan's `original_instruction_order` is not the identity
+    /// permutation. We forge a hand-built plan whose order reports
+    /// `[1, 0]` for a two-instruction source plan.
+    #[test]
+    fn validate_prepared_against_plan_rejects_scrambled_order() {
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::Fill {
+                    dst: BufferSlice::new(0, 4),
+                    value: 0.0,
+                },
+                Instruction::MemCopy {
+                    dst: BufferSlice::new(0, 4),
+                    src: BufferSlice::new(4, 4),
+                },
+            ],
+            arena_size: 1024,
+            levels: vec![0, 1],
+        };
+        // Build a hand-crafted prepared plan whose `instruction_index`
+        // for the first slot is `1` (a deliberate mismatch).
+        let scrambled = PreparedExecutablePlan {
+            instructions: vec![
+                PreparedInstruction::Generic {
+                    instruction_index: 1,
+                },
+                PreparedInstruction::Generic {
+                    instruction_index: 0,
+                },
+            ],
+            arena_size: plan.arena_size,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        let err = validate_prepared_against_plan(&scrambled, &plan)
+            .expect_err("scrambled order must be rejected");
+        assert!(matches!(err, crate::backend::BackendError::Dispatch(_)));
+    }
+
+    /// `validate_prepared_against_plan` rejects a prepared plan whose
+    /// `original_instruction_order` reports an out-of-bounds index.
+    #[test]
+    fn validate_prepared_against_plan_rejects_out_of_bounds_index() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: BufferSlice::new(0, 4),
+                value: 0.0,
+            }],
+            arena_size: 64,
+            levels: vec![0],
+        };
+        let forged = PreparedExecutablePlan {
+            instructions: vec![PreparedInstruction::Generic {
+                instruction_index: 5,
+            }],
+            arena_size: plan.arena_size,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        let err = validate_prepared_against_plan(&forged, &plan)
+            .expect_err("out-of-bounds index must be rejected");
+        assert!(matches!(err, crate::backend::BackendError::Dispatch(_)));
     }
 }
