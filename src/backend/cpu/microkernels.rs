@@ -5847,6 +5847,117 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
 }
 
 // ============================================================
+// OpenBLAS Conv GEMM layout correctness tests
+// ============================================================
+
+#[cfg(all(test, feature = "openblas"))]
+mod openblas_conv_gemm_tests {
+    use super::*;
+
+    fn deterministic(len: usize, phase: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| ((i as f32 + phase) * 0.017).sin() * 0.5)
+            .collect()
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32], eps: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let diff = (a - e).abs();
+            assert!(
+                diff <= eps,
+                "mismatch at {i}: actual={a} expected={e} diff={diff} eps={eps}"
+            );
+        }
+    }
+
+    #[test]
+    fn openblas_conv_sgemm_matches_matrixmultiply_for_1x1_layout() {
+        let (m, k, n) = (17usize, 31usize, 73usize);
+        let a = deterministic(m * k, 1.0);
+        let b = deterministic(k * n, 7.0);
+        let mut expected = vec![0.0f32; m * n];
+        let mut actual = vec![0.0f32; m * n];
+        unsafe {
+            matrixmultiply::sgemm(
+                m,
+                k,
+                n,
+                1.0,
+                a.as_ptr(),
+                k as isize,
+                1,
+                b.as_ptr(),
+                n as isize,
+                1,
+                0.0,
+                expected.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+            conv_sgemm(
+                m,
+                k,
+                n,
+                a.as_ptr(),
+                k as isize,
+                1,
+                b.as_ptr(),
+                n as isize,
+                1,
+                actual.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+        }
+        assert_close(&actual, &expected, 2e-5);
+    }
+
+    #[test]
+    fn openblas_conv_sgemm_matches_matrixmultiply_for_im2col_transb_layout() {
+        let (m, k, n) = (19usize, 29usize, 67usize);
+        let a = deterministic(m * k, 3.0);
+        // General Conv im2col is physically [N,K] row-major but logically B=[K,N].
+        let col_nk = deterministic(n * k, 11.0);
+        let mut expected = vec![0.0f32; m * n];
+        let mut actual = vec![0.0f32; m * n];
+        unsafe {
+            matrixmultiply::sgemm(
+                m,
+                k,
+                n,
+                1.0,
+                a.as_ptr(),
+                k as isize,
+                1,
+                col_nk.as_ptr(),
+                1,
+                k as isize,
+                0.0,
+                expected.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+            conv_sgemm(
+                m,
+                k,
+                n,
+                a.as_ptr(),
+                k as isize,
+                1,
+                col_nk.as_ptr(),
+                1,
+                k as isize,
+                actual.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+        }
+        assert_close(&actual, &expected, 2e-5);
+    }
+}
+
+// ============================================================
 // NEON kernel correctness tests
 // ============================================================
 
