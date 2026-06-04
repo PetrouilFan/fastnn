@@ -5292,6 +5292,20 @@ extern "C" {
 
 #[cfg(feature = "openblas")]
 #[inline]
+fn openblas_conv_gemm_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FASTNN_DISABLE_OPENBLAS_CONV_GEMM")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(true)
+    })
+}
+
+#[cfg(feature = "openblas")]
+#[inline]
 unsafe fn conv_sgemm(
     m: usize,
     k: usize,
@@ -5306,7 +5320,8 @@ unsafe fn conv_sgemm(
     rs_c: isize,
     cs_c: isize,
 ) {
-    if rs_a == k as isize
+    if openblas_conv_gemm_enabled()
+        && rs_a == k as isize
         && cs_a == 1
         && rs_c == n as isize
         && cs_c == 1
