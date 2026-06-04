@@ -201,6 +201,17 @@ pub enum PackedWeightStore {
     Reserved,
 }
 
+/// Borrowed view of a metadata-only transposed fp32 Conv weight.
+#[derive(Clone, Copy, Debug)]
+pub struct TransposedFp32WeightRef<'a> {
+    /// Row-major `[K, M]` transposed payload.
+    pub data: &'a [f32],
+    /// Original Conv GEMM `M` dimension (output channels).
+    pub m: usize,
+    /// Original Conv GEMM `K` dimension (`C/group * KH * KW`).
+    pub k: usize,
+}
+
 impl PackedWeightStore {
     /// Build an [`PackedWeightStore::Unpacked`] entry holding `data`.
     pub fn unpacked(data: Vec<f32>) -> Self {
@@ -355,6 +366,33 @@ impl PreparedConstantArena {
         self.entries
             .get(id.index)
             .and_then(|entry| entry.store.as_f32_slice())
+    }
+
+    /// Fetch a metadata-only transposed fp32 Conv weight for `id`.
+    ///
+    /// This is deliberately separate from [`PreparedConstantArena::get`]:
+    /// fallback dispatch may only consume original-layout `Unpacked` fp32
+    /// payloads, while future opt-in prepared Conv paths can call this accessor
+    /// when they explicitly understand the `[K, M]` transposed layout.
+    pub fn get_transposed_fp32(&self, id: PackedWeightId) -> Option<TransposedFp32WeightRef<'_>> {
+        self.entries
+            .get(id.index)
+            .and_then(|entry| match &entry.store {
+                PackedWeightStore::TransposedFp32 { data, m, k }
+                    if entry.kind == PackedWeightKind::Fp32
+                        && entry.numel == data.len()
+                        && entry.byte_len
+                            == data.len() * PackedWeightKind::Fp32.element_bytes()
+                        && data.len() == *m * *k =>
+                {
+                    Some(TransposedFp32WeightRef {
+                        data: data.as_slice(),
+                        m: *m,
+                        k: *k,
+                    })
+                }
+                _ => None,
+            })
     }
 
     /// Full metadata for the constant referenced by `id`, if any.
@@ -1979,6 +2017,18 @@ mod tests {
         }
         let arena = prepared.constant_arena().expect("arena attached");
         assert_eq!(arena.transposed_fp32_entry_count(), 1);
+        let transposed_id = match &prepared.instructions[1] {
+            PreparedInstruction::Conv2d(conv) => conv.transposed_weight.expect("transposed id"),
+            other => panic!("expected prepared conv2d, got {other:?}"),
+        };
+        assert!(arena.get(transposed_id).is_none());
+        let transposed_view = arena
+            .get_transposed_fp32(transposed_id)
+            .expect("transposed fp32 accessor");
+        assert_eq!((transposed_view.m, transposed_view.k), (64, 576));
+        assert_eq!(transposed_view.data[0], weights[0]);
+        assert_eq!(transposed_view.data[1], weights[576]);
+        assert_eq!(transposed_view.data[64], weights[1]);
         let entry = arena
             .entries()
             .find(|entry| matches!(entry.store, PackedWeightStore::TransposedFp32 { .. }))
