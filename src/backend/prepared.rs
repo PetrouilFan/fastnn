@@ -876,6 +876,57 @@ impl PreparedExecutablePlan {
     pub fn constant_arena(&self) -> Option<&PreparedConstantArena> {
         self.constant_arena.as_ref()
     }
+
+    /// Total number of static-weight bindings actually recorded on the
+    /// prepared instructions in this plan.
+    ///
+    /// The current wave-4 representation stores at most one
+    /// [`PackedWeightId`] per prepared consumer — the weight slot on
+    /// [`PreparedConv2d::packed_weight`] /
+    /// [`PreparedMatMul::packed_weight`]. Bias bindings produced by
+    /// [`detect_static_weights`] are still metadata-only and not
+    /// reflected in the prepared structs, so they are not counted
+    /// here. The count is therefore the number of `Conv2d` / `MatMul`
+    /// instructions whose `packed_weight` slot is `Some(...)`.
+    ///
+    /// Returns `0` when the plan carries no promoted conv/matmul
+    /// instructions or when none of them were bound to a static
+    /// constant.
+    pub fn static_weight_binding_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter(|inst| match inst {
+                PreparedInstruction::Conv2d(c) => c.packed_weight.is_some(),
+                PreparedInstruction::MatMul(m) => m.packed_weight.is_some(),
+                PreparedInstruction::Generic { .. } => false,
+            })
+            .count()
+    }
+
+    /// Number of entries in the attached [`PreparedConstantArena`].
+    ///
+    /// Returns `0` when no arena has been registered yet (e.g. a
+    /// hand-built [`PreparedExecutablePlan`] that never called
+    /// [`PreparedExecutablePlan::register_constant_arena`]).
+    pub fn constant_arena_entry_count(&self) -> usize {
+        self.constant_arena
+            .as_ref()
+            .map(|arena| arena.len())
+            .unwrap_or(0)
+    }
+
+    /// Total payload size, in bytes, of the attached
+    /// [`PreparedConstantArena`].
+    ///
+    /// Mirrors [`PreparedConstantArena::total_bytes`]: sums
+    /// [`PreparedConstantEntry::byte_len`] across all entries. Returns
+    /// `0` when no arena is attached.
+    pub fn constant_arena_total_bytes(&self) -> usize {
+        self.constant_arena
+            .as_ref()
+            .map(|arena| arena.total_bytes())
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -2208,5 +2259,301 @@ mod tests {
         partial.push(0xff);
         let recovered_partial = bytes_to_f32_vec(&partial);
         assert_eq!(recovered_partial, vec![payload[0]]);
+    }
+
+    // ── introspection helpers: static_weight_binding_count ────
+
+    #[test]
+    fn static_weight_binding_count_empty_plan() {
+        let prepared = prepare_executable_plan(&empty_plan());
+        assert_eq!(prepared.static_weight_binding_count(), 0);
+    }
+
+    #[test]
+    fn static_weight_binding_count_no_static_weights() {
+        // A plan with a Conv2d whose weight is fed by a MemCopy (i.e.
+        // dynamic) gets no `packed_weight` binding.
+        let memcopy = Instruction::MemCopy {
+            dst: BufferSlice::new(512, 32),
+            src: BufferSlice::new(0, 32),
+        };
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(512, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let plan = ExecutablePlan {
+            instructions: vec![memcopy, conv],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        // The conv was promoted but never bound to a static weight.
+        assert_eq!(prepared.static_weight_binding_count(), 0);
+    }
+
+    #[test]
+    fn static_weight_binding_count_counts_conv_and_matmul() {
+        // Build a plan with a WriteConst feeding a Conv2d weight, a
+        // second WriteConst feeding a fused matmul weight, and a third
+        // consumer (a plain matmul) that is dynamic.
+        let weight_payload: Vec<f32> = (0..8).map(|i| i as f32 * 0.5).collect();
+        let mm_weight_payload: Vec<f32> = (0..6).map(|i| (i + 1) as f32).collect();
+
+        let wc_conv = make_write_const(BufferSlice::new(0, 32), &weight_payload);
+        let wc_mm = make_write_const(BufferSlice::new(64, 24), &mm_weight_payload);
+
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(0, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let mut mm = make_matmul_instruction("fused_matmul_add_relu", 4, 3, 2, true);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[0] = BufferSlice::new(128, 4 * 3 * 4);
+            input_slices[1] = BufferSlice::new(64, 24);
+            // bias slot fed by a MemCopy → dynamic, no binding
+            input_slices[2] = BufferSlice::new(256, 8);
+        } else {
+            panic!("expected CallKernel");
+        }
+
+        let memcopy = Instruction::MemCopy {
+            dst: BufferSlice::new(256, 8),
+            src: BufferSlice::new(0, 8),
+        };
+
+        let plan = ExecutablePlan {
+            instructions: vec![wc_conv, wc_mm, memcopy, conv, mm],
+            arena_size: 4096,
+            levels: vec![0, 0, 0, 1, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+
+        // Two weight bindings: the conv and the fused matmul.
+        // Bias bindings are still metadata-only and not counted.
+        assert_eq!(prepared.static_weight_binding_count(), 2);
+    }
+
+    #[test]
+    fn static_weight_binding_count_hand_construction() {
+        // A hand-built plan with explicit packed_weight assignments.
+        let mut conv = PreparedConv2d {
+            instruction_index: 0,
+            node_id: None,
+            input: BufferSlice::new(0, 4),
+            weight: BufferSlice::new(4, 4),
+            bias: None,
+            output: BufferSlice::new(8, 4),
+            n: 1,
+            c: 1,
+            h: 1,
+            w: 1,
+            f: 1,
+            kh: 1,
+            kw: 1,
+            stride: 1,
+            padding: 0,
+            dilation: 1,
+            groups: 1,
+            activation: PreparedActivation::None,
+            kernel: PreparedConvKernelKind::CurrentIm2colGemm,
+            packed_weight: Some(PackedWeightId::new(0)),
+            scratch_offset: 0,
+            scratch_len: 0,
+        };
+        let mut mm = PreparedMatMul {
+            instruction_index: 1,
+            node_id: None,
+            a: BufferSlice::new(0, 4),
+            b: BufferSlice::new(4, 4),
+            bias: None,
+            output: BufferSlice::new(8, 4),
+            m: 1,
+            k: 1,
+            n: 1,
+            activation: PreparedActivation::None,
+            packed_weight: None,
+        };
+        let plan = PreparedExecutablePlan {
+            instructions: vec![
+                PreparedInstruction::Conv2d(conv.clone()),
+                PreparedInstruction::MatMul(mm.clone()),
+            ],
+            arena_size: 0,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        assert_eq!(plan.static_weight_binding_count(), 1);
+
+        // Flip both to bound → count climbs to 2.
+        mm.packed_weight = Some(PackedWeightId::new(1));
+        let plan = PreparedExecutablePlan {
+            instructions: vec![
+                PreparedInstruction::Conv2d(conv.clone()),
+                PreparedInstruction::MatMul(mm),
+            ],
+            arena_size: 0,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        assert_eq!(plan.static_weight_binding_count(), 2);
+
+        // Reset conv → only matmul is bound, count drops to 1.
+        conv.packed_weight = None;
+        let plan = PreparedExecutablePlan {
+            instructions: vec![
+                PreparedInstruction::Conv2d(conv),
+                PreparedInstruction::Generic {
+                    instruction_index: 2,
+                },
+            ],
+            arena_size: 0,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        assert_eq!(plan.static_weight_binding_count(), 0);
+    }
+
+    // ── introspection helpers: constant_arena_entry_count ─────
+
+    #[test]
+    fn constant_arena_entry_count_empty_plan_starts_at_zero() {
+        let prepared = prepare_executable_plan(&empty_plan());
+        assert_eq!(prepared.constant_arena_entry_count(), 0);
+    }
+
+    #[test]
+    fn constant_arena_entry_count_no_arena_returns_zero() {
+        // Hand-built plan with no arena attached.
+        let plan = PreparedExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        assert_eq!(plan.constant_arena_entry_count(), 0);
+    }
+
+    #[test]
+    fn constant_arena_entry_count_reflects_arena_size() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: BufferSlice::new(0, 4),
+                value: 0.0,
+            }],
+            arena_size: 0,
+            levels: vec![0],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        // No static weights were detected, so the auto-attached arena
+        // stays empty.
+        assert_eq!(prepared.constant_arena_entry_count(), 0);
+
+        // Build a plan that yields two arena entries (one Conv2d
+        // weight + one fused matmul weight).
+        let wc_a = make_write_const(BufferSlice::new(0, 32), &vec![0.0_f32; 8]);
+        let wc_b = make_write_const(BufferSlice::new(64, 24), &vec![1.0_f32; 6]);
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(0, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let mut mm = make_matmul_instruction("fused_matmul_add_relu", 4, 3, 2, true);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[0] = BufferSlice::new(128, 4 * 3 * 4);
+            input_slices[1] = BufferSlice::new(64, 24);
+            input_slices[2] = BufferSlice::new(256, 8);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let plan = ExecutablePlan {
+            instructions: vec![wc_a, wc_b, conv, mm],
+            arena_size: 4096,
+            levels: vec![0, 0, 1, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        // Two WriteConsts (weight + weight); the bias slot is dynamic
+        // so it is NOT registered in the arena.
+        assert_eq!(prepared.constant_arena_entry_count(), 2);
+    }
+
+    // ── introspection helpers: constant_arena_total_bytes ─────
+
+    #[test]
+    fn constant_arena_total_bytes_empty_plan_starts_at_zero() {
+        let prepared = prepare_executable_plan(&empty_plan());
+        assert_eq!(prepared.constant_arena_total_bytes(), 0);
+    }
+
+    #[test]
+    fn constant_arena_total_bytes_no_arena_returns_zero() {
+        let plan = PreparedExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            scratch_size: 0,
+            constant_arena: None,
+        };
+        assert_eq!(plan.constant_arena_total_bytes(), 0);
+    }
+
+    #[test]
+    fn constant_arena_total_bytes_sums_entry_sizes() {
+        // 8 f32 (32 bytes) + 6 f32 (24 bytes) = 56 bytes.
+        let wc_a = make_write_const(BufferSlice::new(0, 32), &vec![0.0_f32; 8]);
+        let wc_b = make_write_const(BufferSlice::new(64, 24), &vec![1.0_f32; 6]);
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(0, 32);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let mut mm = make_matmul_instruction("matmul", 4, 3, 2, false);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[0] = BufferSlice::new(128, 4 * 3 * 4);
+            input_slices[1] = BufferSlice::new(64, 24);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let plan = ExecutablePlan {
+            instructions: vec![wc_a, wc_b, conv, mm],
+            arena_size: 4096,
+            levels: vec![0, 0, 1, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        assert_eq!(prepared.constant_arena_total_bytes(), 32 + 24);
+    }
+
+    #[test]
+    fn constant_arena_total_bytes_matches_arena_helper() {
+        // Cross-check: the helper should report the same value as
+        // reading the arena directly.
+        let wc = make_write_const(BufferSlice::new(0, 16), &vec![0.0_f32; 4]);
+        let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
+        if let Instruction::CallKernel { input_slices, .. } = &mut conv {
+            input_slices[0] = BufferSlice::new(0, 768);
+            input_slices[1] = BufferSlice::new(0, 16);
+        } else {
+            panic!("expected CallKernel");
+        }
+        let plan = ExecutablePlan {
+            instructions: vec![wc, conv],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        let arena = prepared
+            .constant_arena()
+            .expect("plan should carry an arena");
+        assert_eq!(prepared.constant_arena_total_bytes(), arena.total_bytes());
+        assert_eq!(prepared.constant_arena_entry_count(), arena.len());
     }
 }
