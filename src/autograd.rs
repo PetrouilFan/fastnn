@@ -955,7 +955,7 @@ mod tests {
         backward(&loss, None);
 
         let grad_a = a.grad().expect("a should have grad");
-        let grad_b = b.grad().expect("b should have grad");
+        let _grad_b = b.grad().expect("b should have grad");
         let vals_a: Vec<f32> = unsafe {
             let ptr = grad_a.data_ptr_f32() as *const f32;
             (0..4).map(|i| *ptr.add(i)).collect()
