@@ -82,3 +82,28 @@ VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv \
 OPENBLAS_NUM_THREADS=2 \
   .venv/bin/python scripts/yolo_compare_fastnn_pytorch.py --profile --profile-top 8 --warmup 3 --iters 10
 ```
+
+Runtime escape hatch for A/B testing or machines where OpenBLAS regresses:
+
+```bash
+FASTNN_DISABLE_OPENBLAS_CONV_GEMM=1 \
+  .venv/bin/python scripts/yolo_compare_fastnn_pytorch.py --profile --profile-top 8 --warmup 3 --iters 10
+```
+
+The escape hatch is read once per process. Set it before importing/running fastnn.
+
+Verification of the escape hatch in an OpenBLAS build, `OPENBLAS_NUM_THREADS=2`, 3 YOLO iterations:
+
+```text
+OpenBLAS enabled:
+mean_ms=38.0030
+conv2d_silu total_ms=35.4304
+max_abs_vs_pytorch=0.00048828125
+mean_abs_vs_pytorch=1.406245e-06
+
+FASTNN_DISABLE_OPENBLAS_CONV_GEMM=1:
+mean_ms=50.0798
+conv2d_silu total_ms=43.6652
+max_abs_vs_pytorch=0.000457763671875
+mean_abs_vs_pytorch=1.404639e-06
+```
