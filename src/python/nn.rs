@@ -1408,6 +1408,157 @@ impl AotExecutor {
         Ok(result.into())
     }
 
+    /// Return static memory-efficiency statistics for the compiled graph/plan.
+    ///
+    /// This is model-agnostic compiler/runtime introspection: it reports arena
+    /// pressure, physical-copy/write-constant bytes, instruction mix, and alias
+    /// reuse groups without executing the graph. Use it to find broad memory and
+    /// layout efficiency targets before adding kernel-specific optimisations.
+    fn memory_stats(&self, py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+        use crate::backend::Instruction;
+        use std::collections::{BTreeMap, HashMap};
+
+        let stats = PyDict::new(py);
+        let plan = &self.plan;
+        let memory_plan = &self.memory_plan;
+
+        let mut logical_slot_bytes = 0usize;
+        let mut physical_by_offset: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut nodes_by_offset: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (node_id, slot) in &memory_plan.slots {
+            logical_slot_bytes += slot.size;
+            physical_by_offset
+                .entry(slot.offset)
+                .and_modify(|size| *size = (*size).max(slot.size))
+                .or_insert(slot.size);
+            nodes_by_offset
+                .entry(slot.offset)
+                .or_default()
+                .push(*node_id);
+        }
+        for ((node_id, _output_index), slot) in &memory_plan.secondary_slots {
+            logical_slot_bytes += slot.size;
+            physical_by_offset
+                .entry(slot.offset)
+                .and_modify(|size| *size = (*size).max(slot.size))
+                .or_insert(slot.size);
+            nodes_by_offset
+                .entry(slot.offset)
+                .or_default()
+                .push(*node_id);
+        }
+        let physical_slot_bytes: usize = physical_by_offset.values().copied().sum();
+        let alias_groups = nodes_by_offset.values().filter(|nodes| nodes.len() > 1).count();
+        let aliased_nodes: usize = nodes_by_offset
+            .values()
+            .filter(|nodes| nodes.len() > 1)
+            .map(|nodes| nodes.len())
+            .sum();
+
+        let mut call_kernel_count = 0usize;
+        let mut memcpy_count = 0usize;
+        let mut fill_count = 0usize;
+        let mut write_const_count = 0usize;
+        let mut kernel_read_bytes = 0usize;
+        let mut kernel_write_bytes = 0usize;
+        let mut memcpy_bytes = 0usize;
+        let mut fill_bytes = 0usize;
+        let mut write_const_bytes = 0usize;
+        let mut kernel_counts: HashMap<String, usize> = HashMap::new();
+
+        for instr in &plan.instructions {
+            match instr {
+                Instruction::CallKernel {
+                    kernel_name,
+                    input_slices,
+                    output_slice,
+                    secondary_output_slice,
+                    ..
+                } => {
+                    call_kernel_count += 1;
+                    *kernel_counts.entry(kernel_name.clone()).or_insert(0) += 1;
+                    kernel_read_bytes += input_slices.iter().map(|s| s.size).sum::<usize>();
+                    kernel_write_bytes += output_slice.size;
+                    if let Some(sec) = secondary_output_slice {
+                        kernel_write_bytes += sec.size;
+                    }
+                }
+                Instruction::MemCopy { dst, src } => {
+                    memcpy_count += 1;
+                    memcpy_bytes += dst.size.min(src.size);
+                }
+                Instruction::Fill { dst, .. } => {
+                    fill_count += 1;
+                    fill_bytes += dst.size;
+                }
+                Instruction::WriteConst { dst, data } => {
+                    write_const_count += 1;
+                    write_const_bytes += dst.size.min(data.len());
+                }
+            }
+        }
+
+        stats.set_item("arena_size", plan.arena_size)?;
+        stats.set_item("memory_plan_total_size", memory_plan.total_size)?;
+        stats.set_item("logical_slot_bytes", logical_slot_bytes)?;
+        stats.set_item("physical_slot_bytes", physical_slot_bytes)?;
+        stats.set_item("slot_reuse_saved_bytes", logical_slot_bytes.saturating_sub(physical_slot_bytes))?;
+        stats.set_item("alias_groups", alias_groups)?;
+        stats.set_item("aliased_nodes", aliased_nodes)?;
+        stats.set_item("primary_slots", memory_plan.slots.len())?;
+        stats.set_item("secondary_slots", memory_plan.secondary_slots.len())?;
+        stats.set_item("instructions", plan.instructions.len())?;
+        stats.set_item("call_kernel_count", call_kernel_count)?;
+        stats.set_item("memcpy_count", memcpy_count)?;
+        stats.set_item("fill_count", fill_count)?;
+        stats.set_item("write_const_count", write_const_count)?;
+        stats.set_item("kernel_read_bytes", kernel_read_bytes)?;
+        stats.set_item("kernel_write_bytes", kernel_write_bytes)?;
+        stats.set_item("memcpy_bytes", memcpy_bytes)?;
+        stats.set_item("fill_bytes", fill_bytes)?;
+        stats.set_item("write_const_bytes", write_const_bytes)?;
+        stats.set_item(
+            "estimated_static_traffic_bytes",
+            kernel_read_bytes + kernel_write_bytes + memcpy_bytes + fill_bytes + write_const_bytes,
+        )?;
+
+        let top_kernels = PyList::empty(py);
+        let mut kernel_counts: Vec<(String, usize)> = kernel_counts.into_iter().collect();
+        kernel_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for (kernel, count) in kernel_counts.into_iter().take(20) {
+            let item = PyDict::new(py);
+            item.set_item("kernel", kernel)?;
+            item.set_item("count", count)?;
+            top_kernels.append(item)?;
+        }
+        stats.set_item("top_kernels_by_count", top_kernels)?;
+
+        let top_alias_groups = PyList::empty(py);
+        let mut alias_vec: Vec<(usize, Vec<usize>, usize)> = nodes_by_offset
+            .into_iter()
+            .filter_map(|(offset, mut nodes)| {
+                if nodes.len() <= 1 {
+                    return None;
+                }
+                nodes.sort_unstable();
+                let size = physical_by_offset.get(&offset).copied().unwrap_or(0);
+                Some((offset, nodes, size))
+            })
+            .collect();
+        alias_vec.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.1.len().cmp(&a.1.len())));
+        for (offset, nodes, size) in alias_vec.into_iter().take(20) {
+            let item = PyDict::new(py);
+            item.set_item("offset", offset)?;
+            item.set_item("size", size)?;
+            item.set_item("nodes", nodes)?;
+            top_alias_groups.append(item)?;
+        }
+        stats.set_item("top_alias_groups", top_alias_groups)?;
+
+        Ok(stats.into())
+    }
+
     #[cfg(feature = "prepared-plan")]
     fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
         use crate::backend::prepared::PreparedInstruction;
