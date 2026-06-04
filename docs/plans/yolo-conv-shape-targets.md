@@ -13,6 +13,14 @@ Generated with:
 ```text
 total conv: 64
 conv+silu patterns: 57
+prepared packed fp32 conv candidates: 64
+prepared packed fp32 conv candidate flops: 2185996800
+```
+
+The prepared candidate counts come from:
+
+```bash
+.venv/bin/python scripts/yolo_prepared_stats.py --onnx yolov8n.onnx --json /tmp/yolo_prepared_stats_candidates.json
 ```
 
 ## Top grouped Conv+SiLU targets
