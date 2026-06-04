@@ -40,3 +40,26 @@ Findings:
 
 Next recommended action:
 - Implement `scripts/graph_memory_profile.py` or equivalent to combine profile timings with static byte estimates and rank memory/layout bottlenecks by bytes per ms.
+
+## 2026-06-05 01:35 — autonomous cron
+
+Intent:
+- Complete P0 dynamic memory traffic profiling by combining `AotExecutor.memory_stats()` with dynamic profile timings.
+
+Changed:
+- Added `scripts/graph_memory_profile.py` with JSON output and a reusable `build_memory_profile()` helper.
+- Added `tests/test_graph_memory_profile.py` covering kernel byte ranking, unprofiled copy/const traffic, and no-double-count handling for profiled `memcopy`/`write_const` entries.
+- Added `docs/plans/graph-memory-profile.md` with usage, JSON schema notes, limitations, and a YOLOv8n smoke result.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q` initially failed with `ModuleNotFoundError: No module named 'scripts.graph_memory_profile'`.
+- GREEN: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q && .venv/bin/python -m py_compile scripts/graph_memory_profile.py` → 3 passed.
+- Smoke: `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py --onnx yolov8n.onnx --json /tmp/graph_memory_profile_yolo.json --top 10` → wrote `/tmp/graph_memory_profile_yolo.json`; profiled total 311.920 ms; estimated static traffic 92.81 MiB; profiled kernel static traffic 79.05 MiB; unprofiled copy/const traffic 0 B.
+- `git diff --check` → pass.
+
+Findings:
+- Top dynamic/static memory signals in the YOLO smoke: `conv2d_silu` 37.55 MiB / 233.180 ms, `write_const` 12.06 MiB / 1.821 ms, `slice_f32` 11.86 MiB / 1.377 ms, `concat` 11.20 MiB / 5.546 ms, `memcopy` 1.70 MiB / 0.831 ms.
+- Profile entries include `write_const` and `memcopy`, so the profiler must treat those as special traffic classes instead of apportioning aggregate kernel bytes to them; tests now guard this.
+
+Next recommended action:
+- Start P1 with a measurement-first design for safe persistent constants or immutable constant slots; `write_const` is small in wall time but broad and clearly per-forward traffic.
