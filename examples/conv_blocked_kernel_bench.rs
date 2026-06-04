@@ -1,5 +1,8 @@
 use std::time::Instant;
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use std::arch::x86_64::*;
+
 use fastnn::backend::cpu::microkernels::{conv2d_f32_im2col_gemm, ConvActivation};
 
 #[cfg(feature = "openblas")]
@@ -126,6 +129,47 @@ fn materialize_im2col_nk(input: &[f32], shape: Shape, out: &mut [f32]) {
     }
 }
 
+fn materialize_im2col_kn(input: &[f32], shape: Shape, out: &mut [f32]) {
+    let h_out = shape.h_out();
+    let w_out = shape.w_out();
+    let spatial = shape.spatial();
+    let k = shape.k();
+    debug_assert_eq!(out.len(), spatial * k);
+    out.fill(0.0);
+
+    for cc in 0..shape.c {
+        for r in 0..shape.kh {
+            for s in 0..shape.kw {
+                let k_idx = (cc * shape.kh + r) * shape.kw + s;
+                let col_row = k_idx * spatial;
+                for oh in 0..h_out {
+                    let ih_unpadded = oh * shape.stride + r * shape.dilation;
+                    if ih_unpadded < shape.padding {
+                        continue;
+                    }
+                    let ih = ih_unpadded - shape.padding;
+                    if ih >= shape.h {
+                        continue;
+                    }
+                    for ow in 0..w_out {
+                        let iw_unpadded = ow * shape.stride + s * shape.dilation;
+                        if iw_unpadded < shape.padding {
+                            continue;
+                        }
+                        let iw = iw_unpadded - shape.padding;
+                        if iw >= shape.w {
+                            continue;
+                        }
+                        let n_idx = oh * w_out + ow;
+                        let src = cc * shape.h * shape.w + ih * shape.w + iw;
+                        out[col_row + n_idx] = input[src];
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn transpose_weight_km(weight: &[f32], m: usize, k: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; k * m];
     for mm in 0..m {
@@ -175,11 +219,51 @@ fn apply_bias_silu(shape: Shape, bias: &[f32], out: &mut [f32]) {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn blocked_weight_t_gemm_avx2(
     shape: Shape,
-    col_nk: &[f32],
+    col_kn: &[f32],
     weight_km: &[f32],
     out: &mut [f32],
 ) {
-    blocked_weight_t_gemm_scalar(shape, col_nk, weight_km, out);
+    let m = shape.f;
+    let k = shape.k();
+    let n = shape.spatial();
+    out.fill(0.0);
+
+    for m0 in (0..m).step_by(4) {
+        for n0 in (0..n).step_by(8) {
+            let nb = (n - n0).min(8);
+            if m0 + 4 <= m && nb == 8 {
+                let mut acc0 = _mm256_setzero_ps();
+                let mut acc1 = _mm256_setzero_ps();
+                let mut acc2 = _mm256_setzero_ps();
+                let mut acc3 = _mm256_setzero_ps();
+                for kk in 0..k {
+                    let x = _mm256_loadu_ps(col_kn.as_ptr().add(kk * n + n0));
+                    let w0 = _mm256_set1_ps(*weight_km.get_unchecked(kk * m + m0));
+                    let w1 = _mm256_set1_ps(*weight_km.get_unchecked(kk * m + m0 + 1));
+                    let w2 = _mm256_set1_ps(*weight_km.get_unchecked(kk * m + m0 + 2));
+                    let w3 = _mm256_set1_ps(*weight_km.get_unchecked(kk * m + m0 + 3));
+                    acc0 = _mm256_fmadd_ps(w0, x, acc0);
+                    acc1 = _mm256_fmadd_ps(w1, x, acc1);
+                    acc2 = _mm256_fmadd_ps(w2, x, acc2);
+                    acc3 = _mm256_fmadd_ps(w3, x, acc3);
+                }
+                _mm256_storeu_ps(out.as_mut_ptr().add(m0 * n + n0), acc0);
+                _mm256_storeu_ps(out.as_mut_ptr().add((m0 + 1) * n + n0), acc1);
+                _mm256_storeu_ps(out.as_mut_ptr().add((m0 + 2) * n + n0), acc2);
+                _mm256_storeu_ps(out.as_mut_ptr().add((m0 + 3) * n + n0), acc3);
+            } else {
+                for mm in m0..(m0 + 4).min(m) {
+                    for nn in n0..(n0 + nb) {
+                        let mut acc = 0.0f32;
+                        for kk in 0..k {
+                            acc += weight_km[kk * m + mm] * col_kn[kk * n + nn];
+                        }
+                        out[mm * n + nn] = acc;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn blocked_weight_t_gemm_scalar(shape: Shape, col_nk: &[f32], weight_km: &[f32], out: &mut [f32]) {
@@ -208,18 +292,31 @@ fn blocked_weight_t_gemm_scalar(shape: Shape, col_nk: &[f32], weight_km: &[f32],
 }
 
 fn blocked_weight_t_gemm(shape: Shape, col_nk: &[f32], weight_km: &[f32], out: &mut [f32]) {
+    blocked_weight_t_gemm_scalar(shape, col_nk, weight_km, out);
+}
+
+fn blocked_weight_t_gemm_kn(shape: Shape, col_kn: &[f32], weight_km: &[f32], out: &mut [f32]) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            // The target-feature guard is in place for the C3 experiment. The
-            // current implementation intentionally delegates to the exact scalar
-            // kernel so the benchmark can reject/accept the integration shape
-            // before adding unsafe SIMD math.
-            unsafe { blocked_weight_t_gemm_avx2(shape, col_nk, weight_km, out) };
+            unsafe { blocked_weight_t_gemm_avx2(shape, col_kn, weight_km, out) };
             return;
         }
     }
-    blocked_weight_t_gemm_scalar(shape, col_nk, weight_km, out);
+
+    let m = shape.f;
+    let k = shape.k();
+    let n = shape.spatial();
+    out.fill(0.0);
+    for mm in 0..m {
+        for nn in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += weight_km[kk * m + mm] * col_kn[kk * n + nn];
+            }
+            out[mm * n + nn] = acc;
+        }
+    }
 }
 
 fn bench<F: FnMut()>(warmup: usize, iters: usize, mut f: F) -> f64 {
@@ -260,11 +357,15 @@ fn main() {
     let bias = fill(shape.f, 3);
     let weight_km = transpose_weight_km(&weight, shape.f, shape.k());
     let mut col_nk = vec![0.0f32; shape.spatial() * shape.k()];
+    let mut col_kn = vec![0.0f32; shape.spatial() * shape.k()];
     materialize_im2col_nk(&input, shape, &mut col_nk);
+    materialize_im2col_kn(&input, shape, &mut col_kn);
 
     let mut fastnn_out = vec![0.0f32; shape.f * shape.spatial()];
     let mut blocked_out = fastnn_out.clone();
+    let mut avx2_out = fastnn_out.clone();
     let mut blocked_no_epilogue = fastnn_out.clone();
+    let mut avx2_no_epilogue = fastnn_out.clone();
 
     conv2d_f32_im2col_gemm(
         &input,
@@ -287,6 +388,9 @@ fn main() {
     blocked_weight_t_gemm(shape, &col_nk, &weight_km, &mut blocked_no_epilogue);
     blocked_out.copy_from_slice(&blocked_no_epilogue);
     apply_bias_silu(shape, &bias, &mut blocked_out);
+    blocked_weight_t_gemm_kn(shape, &col_kn, &weight_km, &mut avx2_no_epilogue);
+    avx2_out.copy_from_slice(&avx2_no_epilogue);
+    apply_bias_silu(shape, &bias, &mut avx2_out);
 
     let fastnn_ms = bench(warmup, iters, || {
         conv2d_f32_im2col_gemm(
@@ -312,12 +416,22 @@ fn main() {
     let materialize_ms = bench(warmup, iters, || {
         materialize_im2col_nk(&input, shape, &mut col_nk)
     });
+    let materialize_kn_ms = bench(warmup, iters, || {
+        materialize_im2col_kn(&input, shape, &mut col_kn)
+    });
     let blocked_gemm_ms = bench(warmup, iters, || {
         blocked_weight_t_gemm(shape, &col_nk, &weight_km, &mut blocked_no_epilogue)
+    });
+    let avx2_gemm_ms = bench(warmup, iters, || {
+        blocked_weight_t_gemm_kn(shape, &col_kn, &weight_km, &mut avx2_no_epilogue)
     });
     let epilogue_ms = bench(warmup, iters, || {
         blocked_out.copy_from_slice(&blocked_no_epilogue);
         apply_bias_silu(shape, &bias, &mut blocked_out);
+    });
+    let avx2_epilogue_ms = bench(warmup, iters, || {
+        avx2_out.copy_from_slice(&avx2_no_epilogue);
+        apply_bias_silu(shape, &bias, &mut avx2_out);
     });
 
     #[cfg(feature = "openblas")]
@@ -329,6 +443,7 @@ fn main() {
     };
 
     let blocked_total_ms = materialize_ms + blocked_gemm_ms + epilogue_ms;
+    let avx2_total_ms = materialize_kn_ms + avx2_gemm_ms + avx2_epilogue_ms;
     let flops = 2.0 * shape.f as f64 * shape.k() as f64 * shape.spatial() as f64;
 
     println!(
@@ -346,18 +461,28 @@ fn main() {
     println!("blocked_im2col_ms={materialize_ms:.4}");
     println!("blocked_gemm_ms={blocked_gemm_ms:.4}");
     println!("blocked_epilogue_ms={epilogue_ms:.4}");
+    println!("avx2_total_ms={avx2_total_ms:.4}");
+    println!("avx2_im2col_kn_ms={materialize_kn_ms:.4}");
+    println!("avx2_gemm_ms={avx2_gemm_ms:.4}");
+    println!("avx2_epilogue_ms={avx2_epilogue_ms:.4}");
     #[cfg(feature = "openblas")]
     println!("openblas_gemm_only_ms={openblas_gemm_ms:.4}");
     println!(
         "blocked_vs_fastnn_ratio={:.3}",
         blocked_total_ms / fastnn_ms
     );
+    println!("avx2_vs_fastnn_ratio={:.3}", avx2_total_ms / fastnn_ms);
     println!(
         "max_abs_vs_fastnn={:.3e}",
         max_abs(&fastnn_out, &blocked_out)
     );
     println!(
+        "avx2_max_abs_vs_fastnn={:.3e}",
+        max_abs(&fastnn_out, &avx2_out)
+    );
+    println!(
         "blocked_gemm_gflops={:.1}",
         flops / (blocked_gemm_ms * 1.0e6)
     );
+    println!("avx2_gemm_gflops={:.1}", flops / (avx2_gemm_ms * 1.0e6));
 }
