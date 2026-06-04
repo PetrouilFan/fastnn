@@ -4,6 +4,24 @@ Persistent append-only coordination log for human sessions, cron jobs, and auton
 
 Keep entries concise. Record intent, actual changes, validation, findings, and next recommended action. Do not paste giant logs.
 
+## 2026-06-05 — cost-aware OpenCode policy added
+
+Intent:
+- Reduce paid Hermes/GPT API token usage during autonomous fastnn work by delegating token-heavy codebase reading, coding, and summarization to free OpenCode MiniMax M3 where practical.
+
+Changed:
+- Added a cost-aware agent policy to `docs/plans/autonomous-fastnn-persistent-plan.md`.
+- Updated the fastnn autonomous cron prompt to prefer `opencode/minimax-m3-free` for read-only investigations and bounded coding tasks, with Hermes still responsible for verification.
+
+Validation:
+- Documentation/cron policy change only.
+
+Findings:
+- OpenCode should be treated as a worker, not a source of truth. Its code changes and summaries still need independent diff/test/file verification before reporting success or pushing.
+
+Next recommended action:
+- Future P0/P1 autonomous runs should launch OpenCode MiniMax M3 for large code-reading or implementation lanes, then use Hermes for orchestration, validation, and final integration.
+
 ## 2026-06-05 — persistent plan initialized
 
 Intent:
