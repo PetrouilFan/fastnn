@@ -205,13 +205,14 @@ impl PackedWeightStore {
         PackedWeightStore::Unpacked(data)
     }
 
-    /// View the stored data as an `f32` slice when the store is
-    /// `Unpacked`; returns `None` for every other variant.
+    /// View the stored runtime `f32` payload when the store is
+    /// `Unpacked`; metadata-only alternative layouts return `None` so
+    /// fallback dispatch cannot accidentally consume bytes in a non-runtime
+    /// layout.
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         match self {
             PackedWeightStore::Unpacked(data) => Some(data.as_slice()),
-            PackedWeightStore::TransposedFp32 { data, .. } => Some(data.as_slice()),
-            PackedWeightStore::Reserved => None,
+            PackedWeightStore::TransposedFp32 { .. } | PackedWeightStore::Reserved => None,
         }
     }
 
@@ -2177,6 +2178,28 @@ mod tests {
         arena.insert("a", vec![0.0_f32; 32]);
         assert_eq!(arena.len(), 2);
         assert_eq!(arena.total_bytes(), 14 * std::mem::size_of::<f32>());
+    }
+
+    #[test]
+    fn arena_get_returns_none_for_non_runtime_transposed_layout() {
+        let mut arena = PreparedConstantArena::new();
+        let transposed_id = arena.insert_store(
+            "conv_transposed_fp32_i0",
+            PackedWeightKind::Fp32,
+            4,
+            4 * std::mem::size_of::<f32>(),
+            PackedWeightStore::TransposedFp32 {
+                data: vec![1.0_f32, 3.0, 2.0, 4.0],
+                m: 2,
+                k: 2,
+            },
+        );
+
+        assert!(arena.get(transposed_id).is_none());
+        let entry = arena
+            .entry(transposed_id)
+            .expect("entry metadata remains visible");
+        assert_eq!(entry.store.kind_name(), "transposed_fp32");
     }
 
     #[test]
