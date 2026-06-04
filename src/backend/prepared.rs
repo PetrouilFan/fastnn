@@ -59,6 +59,13 @@ pub struct PreparedConv2d {
     pub activation: PreparedActivation,
     pub kernel: PreparedConvKernelKind,
     pub packed_weight: Option<PackedWeightId>,
+    /// Optional handle to a metadata-only transposed fp32 weight entry.
+    ///
+    /// This is distinct from `packed_weight`: fallback/runtime paths keep using
+    /// `packed_weight` as the original fp32 layout, while future opt-in YOLO
+    /// Conv backends can explicitly consume this alternate layout without
+    /// name-scanning the constant arena or changing fallback semantics.
+    pub transposed_weight: Option<PackedWeightId>,
     pub scratch_offset: usize,
     pub scratch_len: usize,
 }
@@ -547,6 +554,7 @@ pub fn try_prepare_conv2d(
         activation,
         kernel,
         packed_weight: None,
+        transposed_weight: None,
         scratch_offset: 0,
         scratch_len: 0,
     }))
@@ -885,7 +893,7 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
             .push(binding);
     }
 
-    let instructions: Vec<PreparedInstruction> = plan
+    let mut instructions: Vec<PreparedInstruction> = plan
         .instructions
         .iter()
         .enumerate()
@@ -903,7 +911,7 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         .collect();
 
     let mut arena = arena;
-    materialize_transposed_fp32_conv_weights(&mut arena, &instructions);
+    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions);
 
     let mut prepared = PreparedExecutablePlan {
         instructions,
@@ -940,22 +948,23 @@ fn transpose_row_major_mk_to_km(data: &[f32], m: usize, k: usize) -> Vec<f32> {
 
 fn materialize_transposed_fp32_conv_weights(
     arena: &mut PreparedConstantArena,
-    instructions: &[PreparedInstruction],
+    instructions: &mut [PreparedInstruction],
 ) {
-    let candidates: Vec<(PackedWeightId, usize, usize, usize)> = instructions
+    let candidates: Vec<(usize, PackedWeightId, usize, usize, usize)> = instructions
         .iter()
-        .filter_map(|inst| match inst {
+        .enumerate()
+        .filter_map(|(prepared_index, inst)| match inst {
             PreparedInstruction::Conv2d(conv) if should_materialize_transposed_fp32_conv(conv) => {
                 let id = conv.packed_weight?;
                 let m = conv.f;
                 let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
-                Some((id, m, k, conv.instruction_index))
+                Some((prepared_index, id, m, k, conv.instruction_index))
             }
             _ => None,
         })
         .collect();
 
-    for (id, m, k, instruction_index) in candidates {
+    for (prepared_index, id, m, k, instruction_index) in candidates {
         let Some(src) = arena.get(id) else {
             continue;
         };
@@ -964,7 +973,7 @@ fn materialize_transposed_fp32_conv_weights(
         }
         let transposed = transpose_row_major_mk_to_km(src, m, k);
         let name = format!("conv_transposed_fp32_i{}", instruction_index);
-        arena.insert_store(
+        let transposed_id = arena.insert_store(
             name,
             PackedWeightKind::Fp32,
             transposed.len(),
@@ -975,6 +984,9 @@ fn materialize_transposed_fp32_conv_weights(
                 k,
             },
         );
+        if let Some(PreparedInstruction::Conv2d(conv)) = instructions.get_mut(prepared_index) {
+            conv.transposed_weight = Some(transposed_id);
+        }
     }
 }
 
@@ -1146,6 +1158,18 @@ impl PreparedExecutablePlan {
             .as_ref()
             .map(|arena| arena.transposed_fp32_total_bytes())
             .unwrap_or(0)
+    }
+
+    /// Number of prepared Conv2d instructions explicitly bound to a
+    /// metadata-only transposed fp32 weight entry.
+    pub fn transposed_fp32_conv_binding_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter(|inst| match inst {
+                PreparedInstruction::Conv2d(conv) => conv.transposed_weight.is_some(),
+                _ => false,
+            })
+            .count()
     }
 }
 
@@ -1855,6 +1879,7 @@ mod tests {
             activation: PreparedActivation::None,
             kernel: PreparedConvKernelKind::CurrentIm2colGemm,
             packed_weight: None,
+            transposed_weight: None,
             scratch_offset: 0,
             scratch_len: 0,
         });
@@ -1946,7 +1971,12 @@ mod tests {
         let prepared = prepare_executable_plan(&plan);
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 1);
+        assert_eq!(prepared.transposed_fp32_conv_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_total_bytes(), weight_size);
+        match &prepared.instructions[1] {
+            PreparedInstruction::Conv2d(conv) => assert!(conv.transposed_weight.is_some()),
+            other => panic!("expected prepared conv2d, got {other:?}"),
+        }
         let arena = prepared.constant_arena().expect("arena attached");
         assert_eq!(arena.transposed_fp32_entry_count(), 1);
         let entry = arena
@@ -1996,6 +2026,7 @@ mod tests {
         let prepared = prepare_executable_plan(&plan);
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 0);
+        assert_eq!(prepared.transposed_fp32_conv_binding_count(), 0);
         assert_eq!(prepared.transposed_fp32_conv_total_bytes(), 0);
     }
 
@@ -2724,6 +2755,7 @@ mod tests {
             activation: PreparedActivation::None,
             kernel: PreparedConvKernelKind::CurrentIm2colGemm,
             packed_weight: Some(PackedWeightId::new(0)),
+            transposed_weight: None,
             scratch_offset: 0,
             scratch_len: 0,
         };
