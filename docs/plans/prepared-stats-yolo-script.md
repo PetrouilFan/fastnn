@@ -15,8 +15,9 @@ this script prints diverge from the baseline below.
    `_make_fastnn_executor` from `scripts/yolo_compare_fastnn_pytorch.py`
    so the ONNX -> fastnn lowering is identical to the comparison harness.
 3. Calls `executor.prepared_stats()` and prints a small human-readable
-   summary with counts for `total`, `conv2d`, `matmul`, and `generic`
-   instructions.
+   summary with counts for `total`, `conv2d`, `matmul`, `generic`,
+   `static_weight_bindings`, `constant_arena_entries`, and
+   `constant_arena_bytes`.
 4. Optionally writes the raw dict to `--json OUT.json` (atomic
    `tempfile` + `os.replace`).
 
@@ -60,6 +61,9 @@ YOLO prepared stats
   conv2d: 64
   matmul: 0
   generic (other): 195
+  static weight bindings: 64
+  constant arena entries: 127
+  constant arena bytes: 12607616
 ```
 
 `conv2d == 64` matches the baseline doc (`docs/plans/prepared-plan-baseline.md`,
@@ -69,6 +73,12 @@ plan reports `matmul == 0`. A future regression that demoted Conv2d nodes
 to the `Generic` instruction bucket would shrink the `conv2d` count below
 64 (and inflate `generic` accordingly), which is easy to spot by diffing
 the JSON output.
+
+`static_weight_bindings == 64` confirms every Conv2d picked up its
+specialized static-weight binding (one per Conv2d kernel). The two
+`constant_arena_*` counters track the size of the immutable activation
+arena materialized for the prepared plan and are a useful regression
+signal for unintended growth in constant footprint.
 
 ## Exit codes
 
