@@ -7,6 +7,7 @@ Roadmap task: C2 — Packed static Conv weights for OpenBLAS/custom kernels.
 This slice records the existing prepared-plan packed-weight metadata surface for YOLO Conv weights. It is intentionally metadata/storage only:
 
 - `PackedWeightStore::TransposedFp32 { data, m, k }` stores a row-major `[K, M]` transpose for selected static Conv weights.
+- `PreparedConv2d::transposed_weight` explicitly binds eligible prepared Conv instructions to their metadata-only transposed arena entry.
 - Runtime dispatch is unchanged.
 - Default `forward()` is unchanged.
 - Prepared fallback paths do not consume metadata-only transposed entries as runtime `f32` constants.
@@ -45,6 +46,7 @@ packed fp32 conv candidates: 64
 packed fp32 conv candidate flops: 2185996800
 transposed fp32 conv entries: 13
 transposed fp32 conv bytes: 1916928
+transposed fp32 conv bindings: 13
 ```
 
 ## Acceptance status
@@ -53,6 +55,7 @@ C2 acceptance is satisfied:
 
 - Packed/static Conv metadata exists in `src/backend/prepared.rs`.
 - Prepared stats expose candidate counts and transposed-entry byte counts through `AotExecutor.prepared_stats()`.
+- Prepared stats expose transposed-entry binding counts through `transposed_fp32_conv_bindings` so a future opt-in runtime path can consume a direct handle instead of name-scanning the arena.
 - Runtime behavior is unchanged; metadata-only transposed entries return `None` from `PackedWeightStore::as_f32_slice()` and are not consumed by fallback constant lookup.
 
 Next runtime-changing work must be opt-in and gated by full YOLO speed + accuracy, not microbench-only wins.
