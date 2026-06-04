@@ -270,7 +270,7 @@ fn test_broadcast_mismatch_error() {
     let g = GraphBuilder::new();
     let a = g.input(&[3, 4], IrDType::F32);
     let b = g.input(&[2, 4], IrDType::F32);
-    let add = g.add(&a, &b);
+    let _add = g.add(&a, &b);
 
     let mut graph = g.to_graph();
     let result = shape_inference::infer_shapes(&mut graph);
@@ -282,7 +282,7 @@ fn test_matmul_inner_dim_mismatch_error() {
     let g = GraphBuilder::new();
     let a = g.input(&[4, 8], IrDType::F32);
     let b = g.input(&[7, 16], IrDType::F32);
-    let mm = g.matmul(&a, &b);
+    let _mm = g.matmul(&a, &b);
 
     let mut graph = g.to_graph();
     let result = shape_inference::infer_shapes(&mut graph);
