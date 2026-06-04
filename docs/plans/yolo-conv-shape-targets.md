@@ -15,6 +15,10 @@ total conv: 64
 conv+silu patterns: 57
 prepared packed fp32 conv candidates: 64
 prepared packed fp32 conv candidate flops: 2185996800
+transposed fp32 conv entries: 13
+transposed fp32 conv bytes: 1916928
+constant arena entries after transposed metadata: 140
+constant arena bytes after transposed metadata: 14524544
 ```
 
 The prepared candidate counts come from:
