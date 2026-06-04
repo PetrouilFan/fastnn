@@ -5269,6 +5269,125 @@ fn apply_conv_activation(x: f32, activation: ConvActivation) -> f32 {
     }
 }
 
+#[cfg(feature = "openblas")]
+#[link(name = "openblas")]
+extern "C" {
+    fn cblas_sgemm(
+        layout: i32,
+        transa: i32,
+        transb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: f32,
+        a: *const f32,
+        lda: i32,
+        b: *const f32,
+        ldb: i32,
+        beta: f32,
+        c: *mut f32,
+        ldc: i32,
+    );
+}
+
+#[cfg(feature = "openblas")]
+#[inline]
+unsafe fn conv_sgemm(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    rs_a: isize,
+    cs_a: isize,
+    b: *const f32,
+    rs_b: isize,
+    cs_b: isize,
+    c: *mut f32,
+    rs_c: isize,
+    cs_c: isize,
+) {
+    if rs_a == k as isize
+        && cs_a == 1
+        && rs_c == n as isize
+        && cs_c == 1
+        && m <= i32::MAX as usize
+        && n <= i32::MAX as usize
+        && k <= i32::MAX as usize
+    {
+        const CBLAS_ROW_MAJOR: i32 = 101;
+        const CBLAS_NO_TRANS: i32 = 111;
+        const CBLAS_TRANS: i32 = 112;
+        if rs_b == n as isize && cs_b == 1 {
+            // 1x1 Conv fast path: input is already B=[K,N] row-major.
+            cblas_sgemm(
+                CBLAS_ROW_MAJOR,
+                CBLAS_NO_TRANS,
+                CBLAS_NO_TRANS,
+                m as i32,
+                n as i32,
+                k as i32,
+                1.0,
+                a,
+                k as i32,
+                b,
+                n as i32,
+                0.0,
+                c,
+                n as i32,
+            );
+        } else if rs_b == 1 && cs_b == k as isize {
+            // General Conv im2col stores Col as [spatial, K] row-major. The
+            // GEMM view is B=[K,spatial] with strides rs_b=1, cs_b=K, i.e.
+            // row-major B^T. Use CBLAS TransB to consume without repacking.
+            cblas_sgemm(
+                CBLAS_ROW_MAJOR,
+                CBLAS_NO_TRANS,
+                CBLAS_TRANS,
+                m as i32,
+                n as i32,
+                k as i32,
+                1.0,
+                a,
+                k as i32,
+                b,
+                k as i32,
+                0.0,
+                c,
+                n as i32,
+            );
+        } else {
+            matrixmultiply::sgemm(
+                m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
+            );
+        }
+    } else {
+        matrixmultiply::sgemm(
+            m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
+        );
+    }
+}
+
+#[cfg(not(feature = "openblas"))]
+#[inline]
+unsafe fn conv_sgemm(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: *const f32,
+    rs_a: isize,
+    cs_a: isize,
+    b: *const f32,
+    rs_b: isize,
+    cs_b: isize,
+    c: *mut f32,
+    rs_c: isize,
+    cs_c: isize,
+) {
+    matrixmultiply::sgemm(
+        m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
+    );
+}
+
 /// Optimized conv2d using im2col transformation + sgemm.
 /// Fast path for 1x1 convolutions (no im2col needed).
 #[allow(clippy::too_many_arguments)]
@@ -5330,11 +5449,10 @@ pub fn conv2d_f32_im2col_gemm(
 
             for nn in 0..n {
                 unsafe {
-                    matrixmultiply::sgemm(
+                    conv_sgemm(
                         f_per_group,
                         col_w,
                         hw_per_img,
-                        1.0,
                         weight.as_ptr().add(weight_off),
                         col_w as isize,
                         1isize,
@@ -5343,7 +5461,6 @@ pub fn conv2d_f32_im2col_gemm(
                             .add(input_group_off + nn * col_w * hw_per_img),
                         hw_per_img as isize,
                         1isize,
-                        0.0,
                         output.as_mut_ptr().add(group_out_off + nn * batch_stride),
                         hw_per_img as isize,
                         1isize,
@@ -5417,18 +5534,16 @@ pub fn conv2d_f32_im2col_gemm(
         for nn in 0..n {
             let col_start = nn * spatial_size * col_w;
             unsafe {
-                matrixmultiply::sgemm(
+                conv_sgemm(
                     f_per_group,
                     col_w,
                     spatial_size,
-                    1.0,
                     weight.as_ptr().add(weight_off),
                     col_w as isize,
                     1isize,
                     col_matrix.as_ptr().add(col_start),
                     1isize,
                     col_w as isize,
-                    0.0,
                     output.as_mut_ptr().add(group_out_off + nn * batch_stride),
                     spatial_size as isize,
                     1isize,
