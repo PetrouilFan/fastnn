@@ -6,6 +6,19 @@ Canonical repo: `/home/petrouil/Projects/github/fastnn`
 Canonical branch: `dev`
 Protected branch: `main` — do not commit or push main autonomously.
 
+## Cost-aware agent policy
+
+Prefer free OpenCode MiniMax M3 for codebase reading, coding, and summarization where practical, instead of spending paid Hermes/GPT API tokens on large code-reading loops.
+
+Recommended worker model:
+
+```bash
+opencode run --model opencode/minimax-m3-free --agent researcher "<read-only investigation>"
+opencode run --model opencode/minimax-m3-free "<bounded coding task>"
+```
+
+Use Hermes as orchestrator/reviewer: write the mission, launch OpenCode for token-heavy investigation or implementation, then independently verify its claims with file inspection, diffs, and tests before committing. Do not blindly trust OpenCode final reports.
+
 ## Operating contract
 
 Autonomous work must produce meaningful library improvements, not cosmetic churn.
