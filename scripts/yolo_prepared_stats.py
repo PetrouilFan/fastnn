@@ -58,6 +58,8 @@ def _print_summary(onnx_path: Path, stats: dict) -> None:
     constant_arena_bytes = int(stats.get("constant_arena_bytes", 0))
     packed_fp32_conv_candidates = int(stats.get("packed_fp32_conv_candidates", 0))
     packed_fp32_conv_candidate_flops = int(stats.get("packed_fp32_conv_candidate_flops", 0))
+    transposed_fp32_conv_entries = int(stats.get("transposed_fp32_conv_entries", 0))
+    transposed_fp32_conv_bytes = int(stats.get("transposed_fp32_conv_bytes", 0))
     print("YOLO prepared stats")
     print(f"  model: {onnx_path}")
     print(f"  total instructions: {total}")
@@ -69,6 +71,8 @@ def _print_summary(onnx_path: Path, stats: dict) -> None:
     print(f"  constant arena bytes: {constant_arena_bytes}")
     print(f"  packed fp32 conv candidates: {packed_fp32_conv_candidates}")
     print(f"  packed fp32 conv candidate flops: {packed_fp32_conv_candidate_flops}")
+    print(f"  transposed fp32 conv entries: {transposed_fp32_conv_entries}")
+    print(f"  transposed fp32 conv bytes: {transposed_fp32_conv_bytes}")
 
 
 def main(argv: list[str] | None = None) -> int:
