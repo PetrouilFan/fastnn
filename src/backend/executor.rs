@@ -145,7 +145,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, false)
+        self.execute_internal(graph, plan, memory_plan, inputs, false, None)
             .map(|(outputs, _profile)| outputs)
     }
 
@@ -156,7 +156,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, true)
+        self.execute_internal(graph, plan, memory_plan, inputs, true, None)
     }
 
     /// Opt-in prepared-execution fallback path.
@@ -204,6 +204,29 @@ impl<B: Backend> GraphExecutor<B> {
         self.execute(graph, plan, memory_plan, inputs)
     }
 
+    /// Opt-in prepared fallback that preloads fp32 constants from the
+    /// [`PreparedConstantArena`] into their original runtime arena slots
+    /// before delegating to the existing backend dispatch.
+    ///
+    /// This is still behaviour-identical: `WriteConst` instructions are
+    /// not skipped, so the normal plan writes the same bytes again before
+    /// any consumer reads them. The purpose is to prove the prepared
+    /// arena-to-runtime plumbing before later lanes remove redundant
+    /// `WriteConst` work.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_arena_fallback(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        self.execute_internal(graph, plan, memory_plan, inputs, false, Some(prepared))
+            .map(|(outputs, _profile)| outputs)
+    }
+
     fn execute_internal(
         &mut self,
         graph: &ComputeGraph,
@@ -211,6 +234,8 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
         profile: bool,
+        #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
+        prepared_preload: Option<&crate::backend::prepared::PreparedExecutablePlan>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         // Build runtime shape env from input sizes, validate shapes.
         let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
@@ -282,6 +307,11 @@ impl<B: Backend> GraphExecutor<B> {
                 })?;
 
             self.backend.write_arena(arena, slot.offset, input_bytes);
+        }
+
+        #[cfg(feature = "prepared-plan")]
+        if let Some(prepared) = prepared_preload {
+            preload_prepared_constants_into_arena(&self.backend, arena, plan, prepared)?;
         }
 
         // Dispatch the tightened plan
@@ -1225,6 +1255,53 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
 
 // ── tests for the opt-in prepared execution fallback ──────────────────
 
+#[cfg(feature = "prepared-plan")]
+fn preload_prepared_constants_into_arena<B: Backend>(
+    backend: &B,
+    arena: &B::Buffer,
+    plan: &ExecutablePlan,
+    prepared: &crate::backend::prepared::PreparedExecutablePlan,
+) -> Result<(), BackendError> {
+    use crate::backend::prepared::{PackedWeightKind, PreparedInstruction};
+
+    let Some(constant_arena) = prepared.constant_arena() else {
+        return Ok(());
+    };
+
+    for prepared_instruction in &prepared.instructions {
+        let PreparedInstruction::Conv2d(conv) = prepared_instruction else {
+            continue;
+        };
+        let Some(weight_id) = conv.packed_weight else {
+            continue;
+        };
+        if weight_id.kind != PackedWeightKind::Fp32 {
+            continue;
+        }
+        let Some(weight_values) = constant_arena.get(weight_id) else {
+            continue;
+        };
+        let weight_bytes = bytemuck::cast_slice(weight_values);
+        if weight_bytes.len() != conv.weight.size {
+            return Err(BackendError::Dispatch(format!(
+                "prepared arena conv weight byte length mismatch at instruction {}: arena {} bytes, plan slot {} bytes",
+                conv.instruction_index,
+                weight_bytes.len(),
+                conv.weight.size
+            )));
+        }
+        if conv.instruction_index >= plan.instructions.len() {
+            return Err(BackendError::Dispatch(format!(
+                "prepared arena conv instruction index {} out of bounds for plan length {}",
+                conv.instruction_index,
+                plan.instructions.len()
+            )));
+        }
+        backend.write_arena(arena, conv.weight.offset, weight_bytes);
+    }
+    Ok(())
+}
+
 #[cfg(all(test, feature = "prepared-plan"))]
 mod prepared_fallback_tests {
     //! End-to-end coverage of
@@ -1356,7 +1433,7 @@ mod prepared_fallback_tests {
     /// reject with a `Dispatch` error.
     #[test]
     fn execute_prepared_fallback_rejects_inconsistent_prepared_plan() {
-        use crate::backend::prepared::{PreparedExecutablePlan, PreparedInstruction};
+        use crate::backend::prepared::PreparedExecutablePlan;
 
         let g = GraphBuilder::new();
         let x = g.input(&[1, 4], IrDType::F32);

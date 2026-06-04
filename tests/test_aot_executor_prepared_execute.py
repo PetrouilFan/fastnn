@@ -173,3 +173,46 @@ def test_forward_prepared_fallback_method_exists():
     executor = _relu_graph()
     assert hasattr(executor, "forward_prepared_fallback")
     assert callable(executor.forward_prepared_fallback)
+
+
+
+def test_forward_prepared_arena_fallback_matches_forward_with_constant_input():
+    """Arena-preload fallback is behaviour-identical on a WriteConst plan.
+
+    This graph does not contain Conv2d, but it verifies the Python entry
+    point and the shared prepared fallback plumbing. The YOLO smoke test
+    covers the Conv2d/static-weight case end-to-end.
+    """
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    expected = executor.forward({"x": x})
+    fallback = executor.forward_prepared_fallback({"x": x})
+    arena_fallback = executor.forward_prepared_arena_fallback({"x": x})
+
+    np.testing.assert_array_equal(expected["y"].numpy(), fallback["y"].numpy())
+    np.testing.assert_array_equal(expected["y"].numpy(), arena_fallback["y"].numpy())
+
+
+def test_forward_prepared_arena_fallback_method_exists():
+    """Smoke: arena-preload fallback is exposed on AotExecutor."""
+    executor = _relu_graph()
+    assert hasattr(executor, "forward_prepared_arena_fallback")
+    assert callable(executor.forward_prepared_arena_fallback)

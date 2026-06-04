@@ -1299,6 +1299,46 @@ impl AotExecutor {
         ))
     }
 
+    /// Opt-in prepared fallback that preloads fp32 constants from the
+    /// PreparedConstantArena into the runtime arena before normal
+    /// dispatch. WriteConst instructions still run, so this is a
+    /// behaviour-identical plumbing check rather than an optimisation.
+    #[cfg(feature = "prepared-plan")]
+    fn forward_prepared_arena_fallback(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let output_data = self.executor
+            .execute_prepared_arena_fallback(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.decode_outputs(output_data)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn forward_prepared_arena_fallback(
+        &self,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "forward_prepared_arena_fallback requires the 'prepared-plan' feature",
+        ))
+    }
+
     fn profile(
         &mut self,
         py: pyo3::Python<'_>,
