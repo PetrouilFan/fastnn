@@ -133,9 +133,10 @@ impl From<usize> for PackedWeightId {
 /// The remaining variants reserve discriminant space for future packed
 /// precision modes (`i8`, packed `u4`, NF4) so consumers can match
 /// exhaustively without breaking when those lanes light up.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PackedWeightKind {
+    #[default]
     Fp32 = 0,
     /// Reserved — symmetric int8 weight-only quantisation.
     I8 = 1,
@@ -166,12 +167,6 @@ impl PackedWeightKind {
             // u4/nf4 are sub-byte; report 1 byte per *pair* of elements.
             PackedWeightKind::U4 | PackedWeightKind::Nf4 => 1,
         }
-    }
-}
-
-impl Default for PackedWeightKind {
-    fn default() -> Self {
-        PackedWeightKind::Fp32
     }
 }
 
