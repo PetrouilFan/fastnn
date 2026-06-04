@@ -188,6 +188,12 @@ pub enum PackedWeightStore {
     /// Reference `fp32` payload — the layout the current CPU backend
     /// consumes directly via `WriteConst`.
     Unpacked(Vec<f32>),
+    /// Pretransposed fp32 matrix payload for future prepared Conv GEMM paths.
+    ///
+    /// The source Conv weight is interpreted as row-major `[M, K]`; this
+    /// variant stores a row-major `[K, M]` transpose. It is metadata/storage
+    /// only until an opt-in prepared runtime path consumes it.
+    TransposedFp32 { data: Vec<f32>, m: usize, k: usize },
     /// Reserved discriminant for future packed precision variants. Carries
     /// no payload and is never produced by the current code paths.
     Reserved,
@@ -204,6 +210,7 @@ impl PackedWeightStore {
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         match self {
             PackedWeightStore::Unpacked(data) => Some(data.as_slice()),
+            PackedWeightStore::TransposedFp32 { data, .. } => Some(data.as_slice()),
             PackedWeightStore::Reserved => None,
         }
     }
@@ -212,6 +219,7 @@ impl PackedWeightStore {
     pub const fn kind_name(&self) -> &'static str {
         match self {
             PackedWeightStore::Unpacked(_) => "unpacked",
+            PackedWeightStore::TransposedFp32 { .. } => "transposed_fp32",
             PackedWeightStore::Reserved => "reserved",
         }
     }
@@ -282,6 +290,54 @@ impl PreparedConstantArena {
         });
         self.name_to_id.insert(name, id);
         id
+    }
+
+    /// Register a named constant with an explicit storage variant.
+    ///
+    /// This is used for metadata-only alternative layouts, such as
+    /// pretransposed fp32 Conv weights. Duplicate names return the existing
+    /// id and do not duplicate storage.
+    pub fn insert_store(
+        &mut self,
+        name: impl Into<String>,
+        kind: PackedWeightKind,
+        numel: usize,
+        byte_len: usize,
+        store: PackedWeightStore,
+    ) -> PackedWeightId {
+        let name = name.into();
+        if let Some(id) = self.name_to_id.get(&name) {
+            return *id;
+        }
+        let index = self.entries.len();
+        let id = PackedWeightId::with_kind(index, kind, None);
+        self.entries.push(PreparedConstantEntry {
+            id,
+            name: name.clone(),
+            kind,
+            numel,
+            byte_len,
+            store,
+        });
+        self.name_to_id.insert(name, id);
+        id
+    }
+
+    /// Number of metadata-only transposed-fp32 entries in the arena.
+    pub fn transposed_fp32_entry_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.store, PackedWeightStore::TransposedFp32 { .. }))
+            .count()
+    }
+
+    /// Total bytes occupied by metadata-only transposed-fp32 entries.
+    pub fn transposed_fp32_total_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.store, PackedWeightStore::TransposedFp32 { .. }))
+            .map(|entry| entry.byte_len)
+            .sum()
     }
 
     /// Resolve `name` to its registered [`PackedWeightId`].
@@ -850,6 +906,9 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         })
         .collect();
 
+    let mut arena = arena;
+    materialize_transposed_fp32_conv_weights(&mut arena, &instructions);
+
     let mut prepared = PreparedExecutablePlan {
         instructions,
         arena_size: plan.arena_size,
@@ -858,6 +917,69 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
     };
     prepared.register_constant_arena(arena);
     prepared
+}
+
+fn should_materialize_transposed_fp32_conv(conv: &PreparedConv2d) -> bool {
+    let m = conv.f;
+    let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
+    conv.packed_weight.is_some()
+        && conv.groups == 1
+        && conv.dilation == 1
+        && conv.kh == 3
+        && conv.kw == 3
+        && m == 64
+        && k == 576
+        && matches!(conv.activation, PreparedActivation::Silu)
+}
+
+fn transpose_row_major_mk_to_km(data: &[f32], m: usize, k: usize) -> Vec<f32> {
+    let mut out = vec![0.0; data.len()];
+    for i in 0..m {
+        for j in 0..k {
+            out[j * m + i] = data[i * k + j];
+        }
+    }
+    out
+}
+
+fn materialize_transposed_fp32_conv_weights(
+    arena: &mut PreparedConstantArena,
+    instructions: &[PreparedInstruction],
+) {
+    let candidates: Vec<(PackedWeightId, usize, usize, usize)> = instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            PreparedInstruction::Conv2d(conv) if should_materialize_transposed_fp32_conv(conv) => {
+                let id = conv.packed_weight?;
+                let m = conv.f;
+                let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
+                Some((id, m, k, conv.instruction_index))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for (id, m, k, instruction_index) in candidates {
+        let Some(src) = arena.get(id) else {
+            continue;
+        };
+        if src.len() != m * k {
+            continue;
+        }
+        let transposed = transpose_row_major_mk_to_km(src, m, k);
+        let name = format!("conv_transposed_fp32_i{}", instruction_index);
+        arena.insert_store(
+            name,
+            PackedWeightKind::Fp32,
+            transposed.len(),
+            transposed.len() * PackedWeightKind::Fp32.element_bytes(),
+            PackedWeightStore::TransposedFp32 {
+                data: transposed,
+                m,
+                k,
+            },
+        );
+    }
 }
 
 // ── PreparedInstruction helpers ──────────────────────────────
@@ -1010,6 +1132,23 @@ impl PreparedExecutablePlan {
         self.constant_arena
             .as_ref()
             .map(|arena| arena.total_bytes())
+            .unwrap_or(0)
+    }
+
+    /// Number of pretransposed fp32 Conv weight entries materialized in
+    /// the attached constant arena.
+    pub fn transposed_fp32_conv_entry_count(&self) -> usize {
+        self.constant_arena
+            .as_ref()
+            .map(|arena| arena.transposed_fp32_entry_count())
+            .unwrap_or(0)
+    }
+
+    /// Total bytes used by pretransposed fp32 Conv weight entries.
+    pub fn transposed_fp32_conv_total_bytes(&self) -> usize {
+        self.constant_arena
+            .as_ref()
+            .map(|arena| arena.transposed_fp32_total_bytes())
             .unwrap_or(0)
     }
 }
@@ -1767,6 +1906,101 @@ mod tests {
         };
         assert_eq!(one.len(), 1);
         assert!(!one.is_empty());
+    }
+
+    #[test]
+    fn prepare_plan_materializes_transposed_fp32_for_target_conv() {
+        let c = 64usize;
+        let f = 64usize;
+        let h = 20usize;
+        let w = 20usize;
+        let kh = 3usize;
+        let kw = 3usize;
+        let input_size = c * h * w * 4;
+        let weight_elems = f * c * kh * kw;
+        let weight_size = weight_elems * 4;
+        let weight_offset = input_size;
+        let output_offset = input_size + weight_size;
+        let weights: Vec<f32> = (0..weight_elems).map(|v| v as f32).collect();
+        let data = bytemuck::cast_slice(&weights).to_vec();
+        let conv = Instruction::CallKernel {
+            kernel_name: "conv2d_silu".to_string(),
+            input_slices: vec![
+                BufferSlice::new(0, input_size),
+                BufferSlice::new(weight_offset, weight_size),
+            ],
+            output_slice: BufferSlice::new(output_offset, f * h * w * 4),
+            secondary_output_slice: None,
+            params: vec![1, 1, 1, 1, c, h, w, kh, kw],
+            node_id: Some(7usize),
+            param_dims: None,
+            weight_meta: None,
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::WriteConst {
+                    dst: BufferSlice::new(weight_offset, weight_size),
+                    data,
+                },
+                conv,
+            ],
+            arena_size: output_offset + f * h * w * 4,
+            levels: vec![],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        assert_eq!(prepared.static_weight_binding_count(), 1);
+        assert_eq!(prepared.transposed_fp32_conv_entry_count(), 1);
+        assert_eq!(prepared.transposed_fp32_conv_total_bytes(), weight_size);
+        let arena = prepared.constant_arena().expect("arena attached");
+        assert_eq!(arena.transposed_fp32_entry_count(), 1);
+        let entry = arena
+            .entries()
+            .find(|entry| matches!(entry.store, PackedWeightStore::TransposedFp32 { .. }))
+            .expect("transposed entry");
+        match &entry.store {
+            PackedWeightStore::TransposedFp32 { data, m, k } => {
+                assert_eq!((*m, *k), (64, 576));
+                assert_eq!(data[0], weights[0]);
+                assert_eq!(data[1], weights[576]);
+                assert_eq!(data[64], weights[1]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn prepare_plan_does_not_transpose_non_target_conv() {
+        let conv = make_conv2d_instruction(
+            "conv2d_silu",
+            Conv2dParams {
+                c: 32,
+                h: 40,
+                w: 40,
+                kh: 3,
+                kw: 3,
+                padding: 1,
+                ..Conv2dParams::default()
+            },
+        );
+        let weight = match &conv {
+            Instruction::CallKernel { input_slices, .. } => input_slices[1],
+            _ => unreachable!(),
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::WriteConst {
+                    dst: weight,
+                    data: vec![0u8; weight.size],
+                },
+                conv,
+            ],
+            arena_size: 8192,
+            levels: vec![],
+        };
+        let prepared = prepare_executable_plan(&plan);
+        assert_eq!(prepared.static_weight_binding_count(), 1);
+        assert_eq!(prepared.transposed_fp32_conv_entry_count(), 0);
+        assert_eq!(prepared.transposed_fp32_conv_total_bytes(), 0);
     }
 
     #[test]

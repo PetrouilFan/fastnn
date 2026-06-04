@@ -1455,6 +1455,14 @@ impl AotExecutor {
             "packed_fp32_conv_candidate_flops".to_string(),
             self.prepared_plan.packed_fp32_conv_candidate_flops(),
         );
+        stats.insert(
+            "transposed_fp32_conv_entries".to_string(),
+            self.prepared_plan.transposed_fp32_conv_entry_count(),
+        );
+        stats.insert(
+            "transposed_fp32_conv_bytes".to_string(),
+            self.prepared_plan.transposed_fp32_conv_total_bytes(),
+        );
         Ok(stats)
     }
 
