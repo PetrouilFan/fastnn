@@ -1245,6 +1245,192 @@ impl AotExecutor {
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+        self.decode_outputs(output_data)
+    }
+
+    /// Opt-in prepared-execution fallback. Accepts the same input dict
+    /// shape as [`Self::forward`] and returns a `dict` of output tensors
+    /// that is **byte-identical** to the corresponding `forward` call.
+    ///
+    /// This method is the user-facing entry point on top of the
+    /// `prepared-plan` Rust feature. It validates that the prepared
+    /// plan attached at construction time stays in lock-step with the
+    /// underlying [`ExecutablePlan`] and then delegates to the existing
+    /// executor path, so its observable behaviour is exactly the same
+    /// as `forward` on the same inputs. Future lanes can layer
+    /// specialised prepared-instruction execution on top of this entry
+    /// point without changing the contract.
+    ///
+    /// Falls back to a clear runtime error when the `prepared-plan`
+    /// cargo feature is not enabled at build time.
+    #[cfg(feature = "prepared-plan")]
+    fn forward_prepared_fallback(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let output_data = self.executor
+            .execute_prepared_fallback(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.decode_outputs(output_data)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn forward_prepared_fallback(
+        &self,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "forward_prepared_fallback requires the 'prepared-plan' feature",
+        ))
+    }
+
+    fn profile(
+        &mut self,
+        py: pyo3::Python<'_>,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let (output_data, profile_entries) = self.executor
+            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let outputs = PyDict::new(py);
+        for (name, idx) in &self.output_map {
+            if let Some(data) = output_data.get(*idx) {
+                let output_node_id = self.graph.outputs[*idx];
+                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "AotExecutor: output node not found in graph",
+                    )
+                })?;
+                let shape: Vec<i64> = output_node
+                    .output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        _ => None,
+                    })
+                    .collect();
+                let f32_vals: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                outputs.set_item(
+                    name,
+                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
+                )?;
+            }
+        }
+
+        let profile_list = PyList::empty(py);
+        for entry in profile_entries {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", entry.instruction_index)?;
+            item.set_item("node_id", entry.node_id)?;
+            item.set_item("kernel_name", entry.kernel_name)?;
+            item.set_item("elapsed_ns", entry.elapsed_ns)?;
+            let node_name = entry.node_id
+                .and_then(|node_id| self.graph.get_node(node_id))
+                .map(|node| node.name.clone())
+                .unwrap_or_default();
+            item.set_item("node_name", node_name)?;
+            profile_list.append(item)?;
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("outputs", outputs)?;
+        result.set_item("profile", profile_list)?;
+        Ok(result.into())
+    }
+
+    #[cfg(feature = "prepared-plan")]
+    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
+        use crate::backend::prepared::PreparedInstruction;
+        let instructions = &self.prepared_plan.instructions;
+        let mut stats = std::collections::HashMap::new();
+        stats.insert("total".to_string(), instructions.len());
+        stats.insert(
+            "generic".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::Generic { .. }))
+                .count(),
+        );
+        stats.insert(
+            "conv2d".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::Conv2d(_)))
+                .count(),
+        );
+        stats.insert(
+            "matmul".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::MatMul(_)))
+                .count(),
+        );
+        stats.insert(
+            "static_weight_bindings".to_string(),
+            self.prepared_plan.static_weight_binding_count(),
+        );
+        stats.insert(
+            "constant_arena_entries".to_string(),
+            self.prepared_plan.constant_arena_entry_count(),
+        );
+        stats.insert(
+            "constant_arena_bytes".to_string(),
+            self.prepared_plan.constant_arena_total_bytes(),
+        );
+        Ok(stats)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "prepared_stats requires the 'prepared-plan' feature",
+        ))
+    }
+}
+
+// ── AotExecutor helpers (not exposed to Python) ────────────────────────
+
+impl AotExecutor {
+    /// Decode the raw `Vec<Vec<u8>>` returned by `GraphExecutor::execute`
+    /// into a `HashMap<output_name, PyTensor>` keyed by the executor's
+    /// `output_map`. Shared by [`AotExecutor::forward`] and
+    /// [`AotExecutor::forward_prepared_fallback`] so both code paths
+    /// produce identical Python-visible outputs for the same input
+    /// bytes.
+    fn decode_outputs(
+        &self,
+        output_data: Vec<Vec<u8>>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let mut result = std::collections::HashMap::new();
         for (name, idx) in &self.output_map {
             if let Some(data) = output_data.get(*idx) {
@@ -1367,124 +1553,6 @@ impl AotExecutor {
             }
         }
         Ok(result)
-    }
-
-    fn profile(
-        &mut self,
-        py: pyo3::Python<'_>,
-        inputs: std::collections::HashMap<String, PyTensor>,
-    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        use pyo3::types::{PyDict, PyList};
-
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
-
-        let (output_data, profile_entries) = self.executor
-            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-        let outputs = PyDict::new(py);
-        for (name, idx) in &self.output_map {
-            if let Some(data) = output_data.get(*idx) {
-                let output_node_id = self.graph.outputs[*idx];
-                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        "AotExecutor: output node not found in graph",
-                    )
-                })?;
-                let shape: Vec<i64> = output_node
-                    .output_type
-                    .shape
-                    .iter()
-                    .filter_map(|d| match d {
-                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
-                        _ => None,
-                    })
-                    .collect();
-                let f32_vals: Vec<f32> = data
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-                outputs.set_item(
-                    name,
-                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
-                )?;
-            }
-        }
-
-        let profile_list = PyList::empty(py);
-        for entry in profile_entries {
-            let item = PyDict::new(py);
-            item.set_item("instruction_index", entry.instruction_index)?;
-            item.set_item("node_id", entry.node_id)?;
-            item.set_item("kernel_name", entry.kernel_name)?;
-            item.set_item("elapsed_ns", entry.elapsed_ns)?;
-            let node_name = entry.node_id
-                .and_then(|node_id| self.graph.get_node(node_id))
-                .map(|node| node.name.clone())
-                .unwrap_or_default();
-            item.set_item("node_name", node_name)?;
-            profile_list.append(item)?;
-        }
-
-        let result = PyDict::new(py);
-        result.set_item("outputs", outputs)?;
-        result.set_item("profile", profile_list)?;
-        Ok(result.into())
-    }
-
-    #[cfg(feature = "prepared-plan")]
-    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
-        use crate::backend::prepared::PreparedInstruction;
-        let instructions = &self.prepared_plan.instructions;
-        let mut stats = std::collections::HashMap::new();
-        stats.insert("total".to_string(), instructions.len());
-        stats.insert(
-            "generic".to_string(),
-            instructions
-                .iter()
-                .filter(|i| matches!(i, PreparedInstruction::Generic { .. }))
-                .count(),
-        );
-        stats.insert(
-            "conv2d".to_string(),
-            instructions
-                .iter()
-                .filter(|i| matches!(i, PreparedInstruction::Conv2d(_)))
-                .count(),
-        );
-        stats.insert(
-            "matmul".to_string(),
-            instructions
-                .iter()
-                .filter(|i| matches!(i, PreparedInstruction::MatMul(_)))
-                .count(),
-        );
-        stats.insert(
-            "static_weight_bindings".to_string(),
-            self.prepared_plan.static_weight_binding_count(),
-        );
-        stats.insert(
-            "constant_arena_entries".to_string(),
-            self.prepared_plan.constant_arena_entry_count(),
-        );
-        stats.insert(
-            "constant_arena_bytes".to_string(),
-            self.prepared_plan.constant_arena_total_bytes(),
-        );
-        Ok(stats)
-    }
-
-    #[cfg(not(feature = "prepared-plan"))]
-    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "prepared_stats requires the 'prepared-plan' feature",
-        ))
     }
 }
 
