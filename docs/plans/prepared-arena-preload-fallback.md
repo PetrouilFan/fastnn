@@ -1,6 +1,6 @@
 # Prepared arena preload fallback
 
-Wave 7 adds the first opt-in runtime use of `PreparedConstantArena`.
+Wave 7 added the first opt-in runtime use of `PreparedConstantArena`; the follow-up slice makes that path skip redundant exact Conv2d weight `WriteConst` instructions.
 
 ## Public API
 
@@ -8,20 +8,21 @@ Wave 7 adds the first opt-in runtime use of `PreparedConstantArena`.
 
 ## Contract
 
-This method is intentionally behaviour-identical to `AotExecutor.forward(inputs)`:
+This method is behaviour-equivalent to `AotExecutor.forward(inputs)` and remains opt-in:
 
 - validates the prepared plan against the live executable plan
 - materializes graph inputs into the runtime arena like the normal executor
 - preloads fp32 Conv2d static weights from `PreparedConstantArena` into their original runtime arena slots
-- keeps all `WriteConst` instructions in the plan, so the normal dispatch path writes the same bytes again
-- delegates to the existing backend dispatch
+- dispatches a temporary plan with only the matching exact Conv2d weight-slot `WriteConst` instructions removed
+- keeps bias constants, non-Conv constants, dynamic weights, unsupported packed kinds, and non-exact slots on the original dispatch path
+- delegates all remaining work to the existing backend dispatch
 - reads outputs through the same decoder as `forward()` and `forward_prepared_fallback()`
 
-Because `WriteConst` is not skipped yet, this is a plumbing/correctness slice, not a speed optimization. It proves that the prepared arena can source bytes into runtime execution without changing kernels or default execution.
+Default `AotExecutor.forward()` is unchanged.
 
-## What remains
+## Performance note
 
-A later lane can use this foundation to skip selected `WriteConst` instructions after proving exactness and measuring speed on YOLO. That should remain opt-in until YOLO accuracy and profile gates pass.
+This is a small dispatch-pruning/correctness slice, not the main packed-kernel optimization. On the local YOLOv8n smoke, the path is exact (`max_abs=0.0`, `mean_abs=0.0`) but timing is neutral/noisy rather than a clear win. The expected upside is bounded by the removed `write_const` work; real speedups require prepared Conv kernels and/or packed layouts.
 
 ## YOLO expectation
 
