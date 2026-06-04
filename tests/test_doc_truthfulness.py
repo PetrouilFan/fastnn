@@ -67,3 +67,22 @@ def test_doc_truthfulness_script_rejects_missing_same_doc_anchor():
     assert result.returncode != 0
     assert "docs/training.md" in result.stderr
     assert "#missing-anchor-for-guardrail" in result.stderr
+
+
+def test_doc_truthfulness_script_rejects_missing_local_image_link():
+    repo_root = Path(__file__).resolve().parents[1]
+    doc_path = repo_root / "docs" / "training.md"
+    original = doc_path.read_text(encoding="utf-8")
+
+    try:
+        doc_path.write_text(
+            original + "\n![Broken local image](missing-image-for-guardrail.png)\n",
+            encoding="utf-8",
+        )
+        result = _run_doc_truthfulness(repo_root)
+    finally:
+        doc_path.write_text(original, encoding="utf-8")
+
+    assert result.returncode != 0
+    assert "docs/training.md" in result.stderr
+    assert "missing-image-for-guardrail.png" in result.stderr
