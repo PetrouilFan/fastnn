@@ -1465,6 +1465,18 @@ impl AotExecutor {
                 .filter(|i| matches!(i, PreparedInstruction::MatMul(_)))
                 .count(),
         );
+        stats.insert(
+            "static_weight_bindings".to_string(),
+            self.prepared_plan.static_weight_binding_count(),
+        );
+        stats.insert(
+            "constant_arena_entries".to_string(),
+            self.prepared_plan.constant_arena_entry_count(),
+        );
+        stats.insert(
+            "constant_arena_bytes".to_string(),
+            self.prepared_plan.constant_arena_total_bytes(),
+        );
         Ok(stats)
     }
 
