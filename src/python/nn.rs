@@ -1447,6 +1447,14 @@ impl AotExecutor {
             "constant_arena_bytes".to_string(),
             self.prepared_plan.constant_arena_total_bytes(),
         );
+        stats.insert(
+            "packed_fp32_conv_candidates".to_string(),
+            self.prepared_plan.packed_fp32_conv_candidate_count(),
+        );
+        stats.insert(
+            "packed_fp32_conv_candidate_flops".to_string(),
+            self.prepared_plan.packed_fp32_conv_candidate_flops(),
+        );
         Ok(stats)
     }
 

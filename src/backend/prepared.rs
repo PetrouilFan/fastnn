@@ -952,6 +952,42 @@ impl PreparedExecutablePlan {
             .count()
     }
 
+    /// Number of Conv2d instructions that are plausible fp32 packed-GEMM
+    /// candidates.
+    ///
+    /// This is metadata only: it does not alter runtime dispatch. The
+    /// selector intentionally mirrors the conservative first packed-fp32
+    /// target family: static fp32 weights, ungrouped, dilation-1 Conv2d,
+    /// with either 1x1 or 3x3 kernels. Dynamic weights, grouped convs,
+    /// dilated convs, and reserved packed-precision kinds are excluded.
+    pub fn packed_fp32_conv_candidate_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                PreparedInstruction::Conv2d(conv) => Some(conv),
+                _ => None,
+            })
+            .filter(|conv| is_packed_fp32_conv_candidate(conv))
+            .count()
+    }
+
+    /// Estimated fused multiply-add FLOPs covered by
+    /// [`PreparedExecutablePlan::packed_fp32_conv_candidate_count`].
+    ///
+    /// Uses the same GEMM estimate as the YOLO profiling helper:
+    /// `2 * F * (C/groups * KH * KW) * (N * OH * OW)`.
+    pub fn packed_fp32_conv_candidate_flops(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                PreparedInstruction::Conv2d(conv) => Some(conv),
+                _ => None,
+            })
+            .filter(|conv| is_packed_fp32_conv_candidate(conv))
+            .map(conv2d_estimated_flops)
+            .sum()
+    }
+
     /// Number of entries in the attached [`PreparedConstantArena`].
     ///
     /// Returns `0` when no arena has been registered yet (e.g. a
@@ -976,6 +1012,29 @@ impl PreparedExecutablePlan {
             .map(|arena| arena.total_bytes())
             .unwrap_or(0)
     }
+}
+
+fn is_packed_fp32_conv_candidate(conv: &PreparedConv2d) -> bool {
+    let Some(weight_id) = conv.packed_weight else {
+        return false;
+    };
+    weight_id.kind == PackedWeightKind::Fp32
+        && conv.groups == 1
+        && conv.dilation == 1
+        && matches!((conv.kh, conv.kw), (1, 1) | (3, 3))
+}
+
+fn conv2d_estimated_flops(conv: &PreparedConv2d) -> usize {
+    let h_out = (conv.h + 2 * conv.padding)
+        .saturating_sub(conv.dilation * (conv.kh.saturating_sub(1)) + 1)
+        / conv.stride
+        + 1;
+    let w_out = (conv.w + 2 * conv.padding)
+        .saturating_sub(conv.dilation * (conv.kw.saturating_sub(1)) + 1)
+        / conv.stride
+        + 1;
+    let c_per_group = conv.c / conv.groups.max(1);
+    2 * conv.n * conv.f * c_per_group * conv.kh * conv.kw * h_out * w_out
 }
 
 #[cfg(test)]
