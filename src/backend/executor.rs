@@ -204,15 +204,15 @@ impl<B: Backend> GraphExecutor<B> {
         self.execute(graph, plan, memory_plan, inputs)
     }
 
-    /// Opt-in prepared fallback that preloads fp32 constants from the
-    /// [`PreparedConstantArena`] into their original runtime arena slots
-    /// before delegating to the existing backend dispatch.
+    /// Opt-in prepared fallback that preloads fp32 Conv2d weights from
+    /// the [`PreparedConstantArena`] into their original runtime arena
+    /// slots, then dispatches a temporary plan with the matching exact
+    /// weight-slot [`Instruction::WriteConst`] operations removed.
     ///
-    /// This is still behaviour-identical: `WriteConst` instructions are
-    /// not skipped, so the normal plan writes the same bytes again before
-    /// any consumer reads them. The purpose is to prove the prepared
-    /// arena-to-runtime plumbing before later lanes remove redundant
-    /// `WriteConst` work.
+    /// This remains opt-in and behaviour-equivalent: only exact fp32
+    /// Conv2d weight writes that were preloaded from prepared metadata
+    /// are skipped. Bias constants, non-Conv constants, dynamic weights,
+    /// and unsupported packed kinds stay on the original dispatch path.
     #[cfg(feature = "prepared-plan")]
     pub fn execute_prepared_arena_fallback(
         &mut self,
@@ -310,15 +310,28 @@ impl<B: Backend> GraphExecutor<B> {
         }
 
         #[cfg(feature = "prepared-plan")]
-        if let Some(prepared) = prepared_preload {
-            preload_prepared_constants_into_arena(&self.backend, arena, plan, prepared)?;
-        }
+        let arena_preloaded_plan = if let Some(prepared) = prepared_preload {
+            Some(preload_prepared_constants_and_skip_redundant_writes(
+                &self.backend,
+                arena,
+                plan,
+                prepared,
+            )?)
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "prepared-plan"))]
+        let arena_preloaded_plan: Option<ExecutablePlan> = None;
+
+        let dispatch_plan = arena_preloaded_plan.as_ref().unwrap_or(plan);
 
         // Dispatch the tightened plan
         let profile_entries = if profile {
-            self.backend.dispatch_profile(plan, arena, &shape_env)?
+            self.backend
+                .dispatch_profile(dispatch_plan, arena, &shape_env)?
         } else {
-            self.backend.dispatch(plan, arena, &shape_env)?;
+            self.backend.dispatch(dispatch_plan, arena, &shape_env)?;
             Vec::new()
         };
 
@@ -1256,18 +1269,20 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
 // ── tests for the opt-in prepared execution fallback ──────────────────
 
 #[cfg(feature = "prepared-plan")]
-fn preload_prepared_constants_into_arena<B: Backend>(
+fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
     backend: &B,
     arena: &B::Buffer,
     plan: &ExecutablePlan,
     prepared: &crate::backend::prepared::PreparedExecutablePlan,
-) -> Result<(), BackendError> {
+) -> Result<ExecutablePlan, BackendError> {
     use crate::backend::prepared::{PackedWeightKind, PreparedInstruction};
+    use std::collections::HashSet;
 
     let Some(constant_arena) = prepared.constant_arena() else {
-        return Ok(());
+        return Ok(plan.clone());
     };
 
+    let mut preloaded_weight_slots = HashSet::new();
     for prepared_instruction in &prepared.instructions {
         let PreparedInstruction::Conv2d(conv) = prepared_instruction else {
             continue;
@@ -1298,8 +1313,30 @@ fn preload_prepared_constants_into_arena<B: Backend>(
             )));
         }
         backend.write_arena(arena, conv.weight.offset, weight_bytes);
+        preloaded_weight_slots.insert((conv.weight.offset, conv.weight.size));
     }
-    Ok(())
+
+    if preloaded_weight_slots.is_empty() {
+        return Ok(plan.clone());
+    }
+
+    let instructions = plan
+        .instructions
+        .iter()
+        .filter(|instruction| match instruction {
+            Instruction::WriteConst { dst, .. } => {
+                !preloaded_weight_slots.contains(&(dst.offset, dst.size))
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect();
+
+    Ok(ExecutablePlan {
+        instructions,
+        arena_size: plan.arena_size,
+        levels: plan.levels.clone(),
+    })
 }
 
 #[cfg(all(test, feature = "prepared-plan"))]
