@@ -53,12 +53,18 @@ def _print_summary(onnx_path: Path, stats: dict) -> None:
     conv2d = int(stats.get("conv2d", 0))
     matmul = int(stats.get("matmul", 0))
     generic = int(stats.get("generic", 0))
+    static_weight_bindings = int(stats.get("static_weight_bindings", 0))
+    constant_arena_entries = int(stats.get("constant_arena_entries", 0))
+    constant_arena_bytes = int(stats.get("constant_arena_bytes", 0))
     print("YOLO prepared stats")
     print(f"  model: {onnx_path}")
     print(f"  total instructions: {total}")
     print(f"  conv2d: {conv2d}")
     print(f"  matmul: {matmul}")
     print(f"  generic (other): {generic}")
+    print(f"  static weight bindings: {static_weight_bindings}")
+    print(f"  constant arena entries: {constant_arena_entries}")
+    print(f"  constant arena bytes: {constant_arena_bytes}")
 
 
 def main(argv: list[str] | None = None) -> int:
