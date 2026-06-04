@@ -61,6 +61,7 @@ def _print_summary(onnx_path: Path, stats: dict) -> None:
     transposed_fp32_conv_entries = int(stats.get("transposed_fp32_conv_entries", 0))
     transposed_fp32_conv_bytes = int(stats.get("transposed_fp32_conv_bytes", 0))
     transposed_fp32_conv_bindings = int(stats.get("transposed_fp32_conv_bindings", 0))
+    transposed_fp32_conv_binding_flops = int(stats.get("transposed_fp32_conv_binding_flops", 0))
     print("YOLO prepared stats")
     print(f"  model: {onnx_path}")
     print(f"  total instructions: {total}")
@@ -75,6 +76,7 @@ def _print_summary(onnx_path: Path, stats: dict) -> None:
     print(f"  transposed fp32 conv entries: {transposed_fp32_conv_entries}")
     print(f"  transposed fp32 conv bytes: {transposed_fp32_conv_bytes}")
     print(f"  transposed fp32 conv bindings: {transposed_fp32_conv_bindings}")
+    print(f"  transposed fp32 conv binding flops: {transposed_fp32_conv_binding_flops}")
 
 
 def main(argv: list[str] | None = None) -> int:
