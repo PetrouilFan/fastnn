@@ -8,6 +8,7 @@ This slice records the existing prepared-plan packed-weight metadata surface for
 
 - `PackedWeightStore::TransposedFp32 { data, m, k }` stores a row-major `[K, M]` transpose for selected static Conv weights.
 - `PreparedConv2d::transposed_weight` explicitly binds eligible prepared Conv instructions to their metadata-only transposed arena entry.
+- `PreparedConstantArena::get_transposed_fp32()` is the only accessor for the alternate `[K, M]` layout; ordinary fallback `get()` still returns `None` for these entries.
 - Runtime dispatch is unchanged.
 - Default `forward()` is unchanged.
 - Prepared fallback paths do not consume metadata-only transposed entries as runtime `f32` constants.
@@ -56,6 +57,7 @@ C2 acceptance is satisfied:
 - Packed/static Conv metadata exists in `src/backend/prepared.rs`.
 - Prepared stats expose candidate counts and transposed-entry byte counts through `AotExecutor.prepared_stats()`.
 - Prepared stats expose transposed-entry binding counts through `transposed_fp32_conv_bindings` so a future opt-in runtime path can consume a direct handle instead of name-scanning the arena.
+- The direct handle is paired with a layout-specific accessor, preventing future runtime paths from overloading original-layout `packed_weight`/`get()` semantics.
 - Runtime behavior is unchanged; metadata-only transposed entries return `None` from `PackedWeightStore::as_f32_slice()` and are not consumed by fallback constant lookup.
 
 Next runtime-changing work must be opt-in and gated by full YOLO speed + accuracy, not microbench-only wins.
