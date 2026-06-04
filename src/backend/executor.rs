@@ -159,6 +159,51 @@ impl<B: Backend> GraphExecutor<B> {
         self.execute_internal(graph, plan, memory_plan, inputs, true)
     }
 
+    /// Opt-in prepared-execution fallback path.
+    ///
+    /// This is a **behaviour-identical scaffold** for future prepared lanes:
+    /// the prepared plan is only consulted to validate that it stays in
+    /// lock-step with the original [`ExecutablePlan`] (same length,
+    /// same original instruction order). Runtime execution then goes
+    /// through the existing [`Self::execute`] path so the on-the-wire
+    /// behaviour is byte-identical to a direct `forward()` call.
+    ///
+    /// In particular this path:
+    /// - does **not** read from any [`PreparedConstantArena`],
+    /// - does **not** skip or remove [`Instruction::WriteConst`],
+    /// - does **not** substitute alternative kernels,
+    /// - and does **not** perform any per-instruction rewriting.
+    ///
+    /// It is a clearly named, opt-in entry point that future lanes can
+    /// extend (e.g. by replacing individual prepared instructions with
+    /// specialised kernels) while keeping the same fallback contract
+    /// — any code path that survives the validation check is guaranteed
+    /// to behave like the original `execute`.
+    ///
+    /// The method is gated on the `prepared-plan` cargo feature to
+    /// match the rest of the prepared-plan surface; callers that build
+    /// without that feature can keep using [`Self::execute`].
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_fallback(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        // Sanity-check the prepared plan against the live plan. The
+        // actual dispatch goes through the original plan, so any
+        // mismatch detected here would silently desynchronise prepared
+        // metadata from the live plan and must be reported loudly
+        // instead.
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        // Delegate to the existing execution path so we inherit every
+        // tightening / shape-env / arena-reuse behaviour of the
+        // default forward().
+        self.execute(graph, plan, memory_plan, inputs)
+    }
+
     fn execute_internal(
         &mut self,
         graph: &ComputeGraph,
@@ -1176,4 +1221,252 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+// ── tests for the opt-in prepared execution fallback ──────────────────
+
+#[cfg(all(test, feature = "prepared-plan"))]
+mod prepared_fallback_tests {
+    //! End-to-end coverage of
+    //! [`GraphExecutor::execute_prepared_fallback`]. The plans we build
+    //! cover the three shapes that the order-mapping validation has to
+    //! accept: pure elementwise (no `WriteConst`), a single
+    //! `WriteConst` + `CallKernel` consumer, and a graph driven by a
+    //! constant bias input.
+    //!
+    //! All tests in this module require the `prepared-plan` cargo
+    //! feature to be enabled; the helper they exercise is gated on the
+    //! same feature.
+
+    use super::*;
+    use crate::backend::cpu::CpuBackend;
+    use crate::backend::prepared::{prepare_executable_plan, validate_prepared_against_plan};
+    use crate::ir::builder::GraphBuilder;
+    use crate::ir::node::{DimExpr, IrDType};
+
+    fn f32_data(values: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice(values).to_vec()
+    }
+
+    fn read_f32(bytes: &[u8]) -> Vec<f32> {
+        bytemuck::cast_slice(bytes).to_vec()
+    }
+
+    /// `execute_prepared_fallback` returns **byte-identical** output to
+    /// the regular `execute` path for a tiny graph whose compiled plan
+    /// includes a `WriteConst` producer + a `CallKernel` consumer (the
+    /// exact shape the order-mapping requirement is meant to cover).
+    #[test]
+    fn execute_prepared_fallback_matches_execute_on_add_with_constant() {
+        // y = relu(a + b) where b is a graph constant (=> WriteConst
+        // + CallKernel in the compiled plan). The plan is compiled
+        // with a non-zero constant so the prepared-detector will see
+        // a real WriteConst instruction.
+        let g = GraphBuilder::new();
+        let a = g.input(&[1, 4], IrDType::F32);
+        let b_tt = crate::ir::node::TensorType::new(
+            vec![DimExpr::Known(1), DimExpr::Known(4)],
+            IrDType::F32,
+        );
+        let b_bytes = f32_data(&[0.5, -0.5, 0.25, -0.25]);
+        let b = g.constant(&b_bytes, b_tt);
+        let s = g.add(&a, &b);
+        let y = g.relu(&s);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+        // The prepared plan must validate against the live plan before
+        // the executor will accept it.
+        validate_prepared_against_plan(&prepared, &plan)
+            .expect("prepared plan must be consistent with the live plan");
+
+        let input = f32_data(&[-1.0, 0.0, 2.0, 3.0]);
+
+        // Regular path — captured for comparison.
+        let regular = executor_run(
+            &mut GraphExecutor::new(CpuBackend),
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+        );
+
+        // Fallback path — should be byte-identical.
+        let fallback = executor_fallback(
+            &mut GraphExecutor::new(CpuBackend),
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+
+        assert_eq!(regular.len(), 1, "single output graph");
+        assert_eq!(fallback.len(), 1, "single output graph");
+        assert_eq!(
+            regular[0], fallback[0],
+            "fallback output bytes must match the regular path"
+        );
+        // y = relu([-1.0+0.5, 0.0-0.5, 2.0+0.25, 3.0-0.25])
+        //   = relu([-0.5, -0.5, 2.25, 2.75])
+        //   = [0, 0, 2.25, 2.75]
+        let out = read_f32(&fallback[0]);
+        assert_eq!(out, vec![0.0, 0.0, 2.25, 2.75]);
+    }
+
+    /// `execute_prepared_fallback` must be **re-runnable** — calling it
+    /// twice on the same executor must produce the same output without
+    /// any side-effect leakage between invocations.
+    #[test]
+    fn execute_prepared_fallback_is_repeatable() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+
+        let input = f32_data(&[-2.0, -1.0, 0.5, 1.5]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let first = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+        let second = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+        assert_eq!(first, second);
+    }
+
+    /// `execute_prepared_fallback` must surface validation errors
+    /// rather than silently desynchronising prepared metadata with the
+    /// live plan. We forge a prepared plan whose length does not match
+    /// the source plan, which `validate_prepared_against_plan` must
+    /// reject with a `Dispatch` error.
+    #[test]
+    fn execute_prepared_fallback_rejects_inconsistent_prepared_plan() {
+        use crate::backend::prepared::{PreparedExecutablePlan, PreparedInstruction};
+
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+
+        // Forge a prepared plan that is *empty* — guaranteed not to
+        // match the real plan's length. We copy the arena size from
+        // the live plan so the only mismatch is the empty instruction
+        // list. Default::default() leaves the private `constant_arena`
+        // field at `None`, which is exactly what we want.
+        let mut forged = PreparedExecutablePlan::default();
+        forged.arena_size = plan.arena_size;
+
+        let input = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let err = executor
+            .execute_prepared_fallback(&compiled_graph, &mut plan, &memory_plan, &[&input], &forged)
+            .expect_err("mismatched prepared plan must be rejected");
+        assert!(
+            matches!(err, BackendError::Dispatch(_)),
+            "expected Dispatch error, got {err:?}"
+        );
+    }
+
+    /// `execute_prepared_fallback` should also work on a graph that
+    /// has no `WriteConst` (e.g. a pure elementwise op) — the
+    /// order-mapping check should not depend on the presence of
+    /// static weights.
+    #[test]
+    fn execute_prepared_fallback_works_on_add_only_graph() {
+        let g = GraphBuilder::new();
+        let a = g.input(&[4], IrDType::F32);
+        let b = g.input(&[4], IrDType::F32);
+        let c = g.add(&a, &b);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&c], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+
+        let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let b_data = f32_data(&[10.0, 20.0, 30.0, 40.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let out = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+            &prepared,
+        );
+        assert_eq!(read_f32(&out[0]), vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    /// Smoke test: a graph with a symbolic batch dim still works
+    /// through the prepared fallback.
+    #[test]
+    fn execute_prepared_fallback_preserves_symbolic_shape_inputs() {
+        let g = GraphBuilder::new();
+        let batch = DimExpr::Symbol("N".into());
+        let x = g.input_with_dims(&[batch.clone(), DimExpr::Known(4)], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+
+        // N = 2 → input bytes = 2*4*4 = 32
+        let input = f32_data(&[-1.0, -2.0, -3.0, -4.0, 5.0, 6.0, 7.0, 8.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let out = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+        assert_eq!(
+            read_f32(&out[0]),
+            vec![0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    // ── helpers ────────────────────────────────────────────────
+
+    fn executor_run(
+        executor: &mut GraphExecutor<CpuBackend>,
+        graph: &crate::ir::node::ComputeGraph,
+        plan: &mut crate::backend::ExecutablePlan,
+        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        inputs: &[&[u8]],
+    ) -> Vec<Vec<u8>> {
+        executor
+            .execute(graph, plan, memory_plan, inputs)
+            .expect("regular execute must succeed")
+    }
+
+    fn executor_fallback(
+        executor: &mut GraphExecutor<CpuBackend>,
+        graph: &crate::ir::node::ComputeGraph,
+        plan: &mut crate::backend::ExecutablePlan,
+        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Vec<Vec<u8>> {
+        executor
+            .execute_prepared_fallback(graph, plan, memory_plan, inputs, prepared)
+            .expect("prepared fallback execute must succeed")
+    }
 }
