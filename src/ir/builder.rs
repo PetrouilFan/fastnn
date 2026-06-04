@@ -2947,13 +2947,6 @@ mod tests {
         // Add bias (broadcasts): [B, T, 128] + [B, 1, 128] → [B, T, 128]
         let out = g.add(&mm, &bias);
 
-        // Batch=2, seq_len=3: A data = 2*3*64*4 = 1536 bytes (384 f32s)
-        let a_data = f32_data(&(0..384).map(|i| i as f32).collect::<Vec<_>>());
-        // Bias data = 2*1*128*4 = 1024 bytes (256 f32s)
-        let bias_data = f32_data(&(0..256).map(|i| i as f32).collect::<Vec<_>>());
-        // Weight data = 64*128*4 = 32768 bytes (8192 f32s)
-        let w_data = f32_data(&(0..8192).map(|i| (i % 128) as f32).collect::<Vec<_>>());
-
         // Batch=2, seq_len=3: A data = 2*3*64*4 = 1536 bytes
         let a_data = f32_data(&(0..384).map(|i| i as f32).collect::<Vec<_>>());
         // Bias data = 2*128*4 = 1024 bytes
