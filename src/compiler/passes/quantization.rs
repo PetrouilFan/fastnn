@@ -658,7 +658,7 @@ mod tests {
         );
         let weight_bytes: Vec<u8> = bytemuck::cast_slice(&weight_data).to_vec();
         let weight = gb.constant(&weight_bytes, weight_tt);
-        let weight_id = weight.node_id;
+        let _weight_id = weight.node_id;
 
         // MatMul consumes the weight → quantize_weights will target this
         let _mm = gb.matmul(&input, &weight);
