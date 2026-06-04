@@ -3231,20 +3231,20 @@ mod tests {
     fn test_end_to_end_training_step() {
         let g = GraphBuilder::new();
         let x = g.input(&[1, 4], IrDType::F32);
-        let W = g.parameter(&[4, 2], IrDType::F32);
+        let w = g.parameter(&[4, 2], IrDType::F32);
         let b = g.parameter(&[2], IrDType::F32);
 
-        let mm = g.matmul(&x, &W);
+        let mm = g.matmul(&x, &w);
         let logits = g.add(&mm, &b);
         let loss = g.reduce_mean(&logits, 0, false);
 
         // First verify forward pass loss is correct
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
-        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let w_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
         let b_data = f32_data(&[0.0, 0.0]);
 
         let fwd_result = g
-            .compile_and_execute(&[&loss], CpuBackend, &[&x_data, &W_data, &b_data])
+            .compile_and_execute(&[&loss], CpuBackend, &[&x_data, &w_data, &b_data])
             .unwrap();
         let fwd_loss = read_f32(&fwd_result[0]);
         // x@W = [[5.0, 6.0]], +b = [[5.0, 6.0]], mean=0 → [5.0, 6.0]
@@ -3267,34 +3267,34 @@ mod tests {
         let grad_result = g
             .compile_and_execute(
                 &[&grads[1]],
-                CpuBackend, // dW
-                &[&x_data, &W_data, &b_data],
+                CpuBackend, // d_w
+                &[&x_data, &w_data, &b_data],
             )
             .unwrap();
-        let dW_vals = read_f32(&grad_result[0]);
-        assert_eq!(dW_vals.len(), 8, "dW should have 8 elements");
-        // dW = x^T @ dL/dy, where dL/dy = [0.5, 0.5] (mean gradient)
+        let d_w_vals = read_f32(&grad_result[0]);
+        assert_eq!(d_w_vals.len(), 8, "d_w should have 8 elements");
+        // d_w = x^T @ dL/dy, where dL/dy = [0.5, 0.5] (mean gradient)
         // But this depends on the exact implementation
         assert!(
-            dW_vals.iter().any(|&v| v.abs() > 0.0),
-            "dW should have non-zero gradients"
+            d_w_vals.iter().any(|&v| v.abs() > 0.0),
+            "d_w should have non-zero gradients"
         );
 
         // Test optimizer step
-        let dW = &grads[1];
-        let updated_W = g.apply_sgd(&W, dW, 0.1, 0.0);
+        let d_w = &grads[1];
+        let updated_w = g.apply_sgd(&w, d_w, 0.1, 0.0);
 
         let opt_result = g
-            .compile_and_execute(&[&updated_W], CpuBackend, &[&x_data, &W_data, &b_data])
+            .compile_and_execute(&[&updated_w], CpuBackend, &[&x_data, &w_data, &b_data])
             .unwrap();
-        let updated_W_vals = read_f32(&opt_result[0]);
-        assert_eq!(updated_W_vals.len(), 8, "W updated should have 8 elements");
+        let updated_w_vals = read_f32(&opt_result[0]);
+        assert_eq!(updated_w_vals.len(), 8, "W updated should have 8 elements");
 
-        let W_init: Vec<f32> = read_f32(&W_data);
+        let w_init: Vec<f32> = read_f32(&w_data);
         assert!(
-            updated_W_vals
+            updated_w_vals
                 .iter()
-                .zip(W_init.iter())
+                .zip(w_init.iter())
                 .any(|(n, o)| (n - o).abs() > 1e-6),
             "W should be updated by SGD"
         );
@@ -3305,41 +3305,41 @@ mod tests {
         let g = GraphBuilder::new();
         // Model: y = x @ W, loss = mean(y)
         let x = g.input(&[1, 4], IrDType::F32);
-        let W = g.parameter(&[4, 2], IrDType::F32);
+        let w = g.parameter(&[4, 2], IrDType::F32);
 
-        let mm = g.matmul(&x, &W);
+        let mm = g.matmul(&x, &w);
         let loss = g.reduce_mean(&mm, 0, false);
 
         // Backward
         let grads = g.backward(&loss).unwrap();
         assert_eq!(grads.len(), 2, "should return gradients for x and W");
-        let dW = &grads[1]; // second gradient is for W
+        let d_w = &grads[1]; // second gradient is for W
 
         // Adam requires m/v state tensors
         let m = g.parameter(&[4, 2], IrDType::F32);
         let v = g.parameter(&[4, 2], IrDType::F32);
-        let updated_W = g.apply_adam(&W, dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
+        let updated_w = g.apply_adam(&w, d_w, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
 
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
-        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let w_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
         let m_data = f32_data(&[0.0; 8]);
         let v_data = f32_data(&[0.0; 8]);
 
         let result = g
             .compile_and_execute(
-                &[&loss, &updated_W, &m, &v],
+                &[&loss, &updated_w, &m, &v],
                 CpuBackend,
-                &[&x_data, &W_data, &m_data, &v_data],
+                &[&x_data, &w_data, &m_data, &v_data],
             )
             .unwrap();
 
-        let updated_W_vals = read_f32(&result[1]);
-        assert_eq!(updated_W_vals.len(), 8, "W updated should have 8 elements");
-        let W_init: Vec<f32> = read_f32(&W_data);
+        let updated_w_vals = read_f32(&result[1]);
+        assert_eq!(updated_w_vals.len(), 8, "W updated should have 8 elements");
+        let w_init: Vec<f32> = read_f32(&w_data);
         assert!(
-            updated_W_vals
+            updated_w_vals
                 .iter()
-                .zip(W_init.iter())
+                .zip(w_init.iter())
                 .any(|(n, o)| (n - o).abs() > 1e-6),
             "W should be updated by Adam"
         );
@@ -3362,42 +3362,42 @@ mod tests {
         let g = GraphBuilder::new();
         // Model: y = x @ W, loss = mean(y)
         let x = g.input(&[1, 4], IrDType::F32);
-        let W = g.parameter(&[4, 2], IrDType::F32);
+        let w = g.parameter(&[4, 2], IrDType::F32);
 
-        let mm = g.matmul(&x, &W);
+        let mm = g.matmul(&x, &w);
         let loss = g.reduce_mean(&mm, 0, false);
 
         // Backward
         let grads = g.backward(&loss).unwrap();
-        let dW = &grads[1];
+        let d_w = &grads[1];
 
         // Adam with F16 state tensors — m and v are F16
         let m = g.parameter(&[4, 2], IrDType::F16);
         let v = g.parameter(&[4, 2], IrDType::F16);
-        let updated_W = g.apply_adam(&W, dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
+        let updated_w = g.apply_adam(&w, d_w, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
 
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
-        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let w_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
         // m and v are F16 — provide f16 data (all zeros)
         let m_data: Vec<u8> = vec![0u8; 8 * 2]; // 8 elements * 2 bytes = 16 bytes
         let v_data: Vec<u8> = vec![0u8; 8 * 2];
 
         let result = g
             .compile_and_execute(
-                &[&loss, &updated_W, &m, &v],
+                &[&loss, &updated_w, &m, &v],
                 CpuBackend,
-                &[&x_data, &W_data, &m_data, &v_data],
+                &[&x_data, &w_data, &m_data, &v_data],
             )
             .unwrap();
 
         // W should be updated by Adam
-        let updated_W_vals = read_f32(&result[1]);
-        assert_eq!(updated_W_vals.len(), 8);
-        let W_init: Vec<f32> = read_f32(&W_data);
+        let updated_w_vals = read_f32(&result[1]);
+        assert_eq!(updated_w_vals.len(), 8);
+        let w_init: Vec<f32> = read_f32(&w_data);
         assert!(
-            updated_W_vals
+            updated_w_vals
                 .iter()
-                .zip(W_init.iter())
+                .zip(w_init.iter())
                 .any(|(n, o)| (n - o).abs() > 1e-6),
             "W should be updated by Adam with F16 state"
         );
@@ -3439,38 +3439,38 @@ mod tests {
     fn test_training_with_adamw_f16_state() {
         let g = GraphBuilder::new();
         let x = g.input(&[1, 4], IrDType::F32);
-        let W = g.parameter(&[4, 2], IrDType::F32);
+        let w = g.parameter(&[4, 2], IrDType::F32);
 
-        let mm = g.matmul(&x, &W);
+        let mm = g.matmul(&x, &w);
         let loss = g.reduce_mean(&mm, 0, false);
 
         let grads = g.backward(&loss).unwrap();
-        let dW = &grads[1];
+        let d_w = &grads[1];
 
         // AdamW with F16 state
         let m = g.parameter(&[4, 2], IrDType::F16);
         let v = g.parameter(&[4, 2], IrDType::F16);
-        let updated_W = g.apply_adamw(&W, dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1, 0.01);
+        let updated_w = g.apply_adamw(&w, d_w, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1, 0.01);
 
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
-        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let w_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
         let m_data: Vec<u8> = vec![0u8; 16];
         let v_data: Vec<u8> = vec![0u8; 16];
 
         let result = g
             .compile_and_execute(
-                &[&loss, &updated_W, &m, &v],
+                &[&loss, &updated_w, &m, &v],
                 CpuBackend,
-                &[&x_data, &W_data, &m_data, &v_data],
+                &[&x_data, &w_data, &m_data, &v_data],
             )
             .unwrap();
 
-        let updated_W_vals = read_f32(&result[1]);
-        let W_init: Vec<f32> = read_f32(&W_data);
+        let updated_w_vals = read_f32(&result[1]);
+        let w_init: Vec<f32> = read_f32(&w_data);
         assert!(
-            updated_W_vals
+            updated_w_vals
                 .iter()
-                .zip(W_init.iter())
+                .zip(w_init.iter())
                 .any(|(n, o)| (n - o).abs() > 1e-6),
             "W should be updated by AdamW with F16 state"
         );
@@ -3494,9 +3494,9 @@ mod tests {
     fn test_gradient_scaling_with_loss_scaling() {
         let g = GraphBuilder::new();
         let x = g.input(&[1, 4], IrDType::F32);
-        let W = g.parameter(&[4, 2], IrDType::F32);
+        let w = g.parameter(&[4, 2], IrDType::F32);
 
-        let mm = g.matmul(&x, &W);
+        let mm = g.matmul(&x, &w);
         let loss = g.reduce_mean(&mm, 0, false);
 
         // Loss scaling: multiply loss by scale factor
@@ -3505,34 +3505,34 @@ mod tests {
         let scale_t = g.constant(&scale_bytes, TensorType::new(vec![], IrDType::F32));
         let scaled_loss = g.mul_scalar(&loss, &scale_t);
         let grads = g.backward(&scaled_loss).unwrap();
-        let dW_scaled = &grads[1];
+        let d_w_scaled = &grads[1];
 
         // Unscale: divide gradient by scale (multiply by 1/scale)
         let inv_scale_bytes = bytemuck::cast_slice::<_, u8>(&[1.0 / scale]).to_vec();
         let inv_scale_t = g.constant(&inv_scale_bytes, TensorType::new(vec![], IrDType::F32));
-        let dW = g.mul_scalar(dW_scaled, &inv_scale_t);
-        let updated_W = g.apply_sgd(&W, &dW, 0.1, 0.0);
+        let d_w = g.mul_scalar(d_w_scaled, &inv_scale_t);
+        let updated_w = g.apply_sgd(&w, &d_w, 0.1, 0.0);
 
         // Without scaling: grads should be different
         let g2 = GraphBuilder::new();
         let x2 = g2.input(&[1, 4], IrDType::F32);
-        let W2 = g2.parameter(&[4, 2], IrDType::F32);
-        let mm2 = g2.matmul(&x2, &W2);
+        let w2 = g2.parameter(&[4, 2], IrDType::F32);
+        let mm2 = g2.matmul(&x2, &w2);
         let loss2 = g2.reduce_mean(&mm2, 0, false);
         let grads2 = g2.backward(&loss2).unwrap();
-        let dW2 = &grads2[1];
-        let updated_W2 = g2.apply_sgd(&W2, dW2, 0.1, 0.0);
+        let d_w2 = &grads2[1];
+        let updated_w2 = g2.apply_sgd(&w2, d_w2, 0.1, 0.0);
 
         let x_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
-        let W_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
+        let w_data = f32_data(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
 
         // With scaling
         let result_scaled = g
-            .compile_and_execute(&[&loss, &updated_W], CpuBackend, &[&x_data, &W_data])
+            .compile_and_execute(&[&loss, &updated_w], CpuBackend, &[&x_data, &w_data])
             .unwrap();
         // Without scaling (reference)
         let result_ref = g2
-            .compile_and_execute(&[&loss2, &updated_W2], CpuBackend, &[&x_data, &W_data])
+            .compile_and_execute(&[&loss2, &updated_w2], CpuBackend, &[&x_data, &w_data])
             .unwrap();
 
         // Scaled-then-unscaled should produce the same weight update as no scaling
