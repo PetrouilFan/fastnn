@@ -41,6 +41,8 @@ def test_prepared_stats_has_arena_keys():
         "constant_arena_bytes",
         "packed_fp32_conv_candidates",
         "packed_fp32_conv_candidate_flops",
+        "transposed_fp32_conv_entries",
+        "transposed_fp32_conv_bytes",
     ):
         assert key in stats, f"missing arena key: {key}"
         assert isinstance(stats[key], int), f"{key} should be int"
@@ -56,5 +58,7 @@ def test_prepared_stats_has_arena_keys():
     assert stats["constant_arena_bytes"] == 0
     assert stats["packed_fp32_conv_candidates"] == 0
     assert stats["packed_fp32_conv_candidate_flops"] == 0
+    assert stats["transposed_fp32_conv_entries"] == 0
+    assert stats["transposed_fp32_conv_bytes"] == 0
     # `total` should still match the baseline counter.
     assert stats["total"] == stats["generic"] + stats["conv2d"] + stats["matmul"]
