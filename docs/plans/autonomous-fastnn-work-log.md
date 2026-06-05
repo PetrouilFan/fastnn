@@ -146,3 +146,27 @@ Findings:
 
 Next recommended action:
 - Use this delta helper in a CLI `--also-prepared`/sidecar mode or proceed to the next P1 RED guardrail for safely skipping additional non-Conv/bias constants only where slot immutability/lifetime safety is proven.
+
+## 2026-06-05 08:09 EEST — autonomous cron
+
+Intent:
+- Turn the prepared-arena profile delta helper into a one-command profiler mode so future P1/P2 runs can archive default-vs-prepared JSON without bespoke Python snippets.
+
+Changed:
+- Added `scripts/graph_memory_profile.py --also-prepared`, which runs `profile()` and `profile_prepared_arena_fallback()` on the same input and writes `{default, prepared, delta}` JSON.
+- Added `build_profile_payload()` plus regression tests for bundle shape, preserved legacy single-profile shape, and profiled `memcpy` spelling handling.
+- Updated `docs/plans/graph-memory-profile.md` with the CLI usage, JSON shape, and current YOLO smoke numbers.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py::test_build_profile_payload_embeds_default_prepared_and_delta_profiles -q` failed with missing `build_profile_payload` import before implementation.
+- GREEN: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q` → 12 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_profile.py` → pass.
+- Smoke: `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py --onnx yolov8n.onnx --json /tmp/graph_memory_profile_also_prepared_yolo.json --top 5 --also-prepared` → pass; wrote `/tmp/graph_memory_profile_also_prepared_yolo.json`.
+- `git diff --check` → pass.
+
+Findings:
+- Latest single-run YOLOv8n `--also-prepared` delta: profiled total `-30.093 ms`, `write_const_count_delta=-64`, `write_const_static_bytes_delta=-5.89 MiB`, `write_const_total_ms_delta=-8.901 ms`.
+- OpenCode MiniMax M3 researcher review confirmed no legacy JSON shape regression with `--also-prepared` absent and recommended adding the flat-shape regression test that is now included.
+
+Next recommended action:
+- Proceed to the next P1 RED guardrail for safely skipping additional non-Conv/bias constants only where slot immutability/lifetime safety is proven, or add an instruction-level constant-slot diagnostic if the safe set is still unclear.

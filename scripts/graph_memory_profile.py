@@ -202,6 +202,31 @@ def _profiled_write_const_bytes(profile: dict[str, Any], write_row: dict[str, fl
     return int(write_row["static_bytes"])
 
 
+def build_profile_payload(
+    memory_stats: dict[str, Any],
+    default_profile_entries: list[dict[str, Any]],
+    prepared_profile_entries: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the JSON payload for one default profile, optionally with a prepared delta.
+
+    When ``prepared_profile_entries`` is omitted the return shape remains the
+    historical single-profile payload.  When provided, the return shape nests the
+    default profile, prepared profile, and ``prepared - default`` delta so CLI
+    consumers can archive both the absolute measurements and the comparison that
+    quantifies removed ``WriteConst`` traffic.
+    """
+
+    default_profile = build_memory_profile(memory_stats, default_profile_entries)
+    if prepared_profile_entries is None:
+        return default_profile
+    prepared_profile = build_memory_profile(memory_stats, prepared_profile_entries)
+    return {
+        "default": default_profile,
+        "prepared": prepared_profile,
+        "delta": build_profile_delta(default_profile, prepared_profile),
+    }
+
+
 def build_profile_delta(default_profile: dict[str, Any], prepared_profile: dict[str, Any]) -> dict[str, Any]:
     """Compare two ``build_memory_profile`` payloads.
 
@@ -279,6 +304,16 @@ def _input_shape_from_executor(executor: Any, input_name: str, user_shape: str |
 
 
 def _print_summary(model: Path, payload: dict[str, Any], top: int) -> None:
+    if "default" in payload and "prepared" in payload and "delta" in payload:
+        _print_summary(model, payload["default"], top)
+        delta = payload["delta"]["summary"]
+        print("  prepared arena fallback delta (prepared - default):")
+        print(f"    profiled total: {delta['profiled_total_ms_delta']:+.3f} ms")
+        print(f"    write_const entries: {delta['write_const_count_delta']:+d}")
+        print(f"    write_const static traffic: {_fmt_bytes(int(delta['write_const_static_bytes_delta']))}")
+        print(f"    write_const profiled time: {delta['write_const_total_ms_delta']:+.3f} ms")
+        return
+
     summary = payload["summary"]
     print("Graph memory profile")
     print(f"  model: {model}")
@@ -306,6 +341,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--json", dest="json_out", default=None, help="Write combined profile JSON to this path")
+    ap.add_argument(
+        "--also-prepared",
+        action="store_true",
+        help="Also run profile_prepared_arena_fallback() and include a prepared-vs-default delta in JSON/summary",
+    )
     args = ap.parse_args(argv)
 
     onnx_path = Path(args.onnx)
@@ -324,7 +364,16 @@ def main(argv: list[str] | None = None) -> int:
         fx = fnn.tensor(x, input_shape)
         memory_stats = dict(executor.memory_stats())
         prof_result = executor.profile({input_name: fx})
-        payload = build_memory_profile(memory_stats, list(prof_result["profile"]))
+        prepared_entries = None
+        if args.also_prepared:
+            if not hasattr(executor, "profile_prepared_arena_fallback"):
+                raise RuntimeError(
+                    "--also-prepared requires fastnn built with the prepared-plan feature "
+                    "and AotExecutor.profile_prepared_arena_fallback()"
+                )
+            prepared_result = executor.profile_prepared_arena_fallback({input_name: fx})
+            prepared_entries = list(prepared_result["profile"])
+        payload = build_profile_payload(memory_stats, list(prof_result["profile"]), prepared_entries)
     except Exception as exc:
         print(f"error: graph memory profile failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 3
