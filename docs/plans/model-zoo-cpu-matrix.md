@@ -257,45 +257,83 @@ those cuts can be done offline.
    per-kernel vs `memcpy` vs `write_const` and targeting whichever
    dominates per model.
 
+## Post-Phase-1 rerun after ReduceMean/keepdims unblock
+
+After `b64aa63 fix(shape): track ReduceMean keepdims for flatten reshape`, the
+three previously blocked torchvision models now import and run end-to-end in
+fastnn. This changes the optimization picture: MobileNet/EfficientNet are no
+longer frontend failures; they are real CPU backend bottlenecks.
+
+Representative local command:
+
+```bash
+PYENV_VERSION=system OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python scripts/model_zoo_cpu_matrix.py \
+  --warmup 3 --iters 5 --profile-top 8 \
+  --json /tmp/fastnn_model_zoo_cpu_matrix_post_phase1_stable.json
+```
+
+Representative result:
+
+```text
+model                  aot    fastnn ms  onnxrt ms  pytorch ms      arena  traffic/arena class
+efficientnet_b0        ok       158.036      5.592      30.590   49073952           2.61 kernel_io_bound
+mobilenet_v2           ok        43.120      2.928      22.542   41243680           3.23 kernel_io_bound
+mobilenet_v3_small     ok        37.190      2.101       7.268   19713184           3.32 kernel_io_bound
+resnet18               ok        44.086      8.031      48.315   59691360           2.13 compute_or_unclassified
+resnet50               ok        83.370     20.110     124.974  149576032           2.43 compute_or_unclassified
+yolo11n                ok        50.620      9.181      30.949   46509760           2.19 compute_or_unclassified
+yolov8n                ok        55.218      9.480      34.850   45052288           2.16 compute_or_unclassified
+```
+
+Top profile kernels from the same run:
+
+| model | class | fastnn ms | pytorch ms | ort ms | top profile kernels |
+| --- | --- | ---: | ---: | ---: | --- |
+| efficientnet_b0 | kernel_io_bound | 158.0 | 30.6 | 5.6 | `conv2d_silu` 133.3ms, `mul_f32` 19.7ms, `conv2d` 2.7ms |
+| mobilenet_v2 | kernel_io_bound | 43.1 | 22.5 | 2.9 | `conv2d` 31.6ms, `clamp_f32` 2.0ms, `matmul` 1.1ms |
+| mobilenet_v3_small | kernel_io_bound | 37.2 | 7.3 | 2.1 | `conv2d` 25.8ms, `conv2d_relu` 5.6ms, `mul_f32` 2.6ms |
+| resnet18 | compute_or_unclassified | 44.1 | 48.3 | 8.0 | `conv2d_relu` 19.6ms, `conv2d` 17.5ms, `write_const` 3.9ms |
+| resnet50 | compute_or_unclassified | 83.4 | 125.0 | 20.1 | `conv2d_relu` 49.2ms, `conv2d` 16.9ms, `write_const` 10.8ms |
+| yolo11n | compute_or_unclassified | 50.6 | 30.9 | 9.2 | `conv2d_silu` 43.5ms, `transpose_perm_f32` 2.1ms, `conv2d` 0.9ms |
+| yolov8n | compute_or_unclassified | 55.2 | 34.9 | 9.5 | `conv2d_silu` 42.6ms, `transpose_perm_f32` 1.1ms, `write_const` 0.8ms |
+
+Interpretation:
+
+- Phase 1 was a breadth/unblock win, not a speed win.
+- ResNet18/50 are acceptable relative to PyTorch on this CPU sample, so the
+  generic standard-Conv path is not the worst cross-model problem.
+- YOLO remains `conv2d_silu` dominated and still trails raw PyTorch by about
+  1.6x in this run.
+- MobileNetV3-small and EfficientNet-B0 are now the sharpest general backend
+  failures: fastnn is about 5.1x slower than PyTorch and 17-28x slower than
+  ONNX Runtime. Their top kernels point at depthwise/group/pointwise Conv and
+  elementwise/memory traffic, not YOLO-specific graph overhead.
+
 ## Recommended next targets (ordered)
 
-1. **Fix the AOT/Reshape shape inference** for the torchvision
-   `GlobalAveragePool` / `ReduceMean` -> `Flatten` / `Reshape` chain
-   (3 of the 4 torchvision models fail today).  Without this we
-   cannot measure fastnn on MobileNet/EfficientNet and the breadth
-   claim is hollow.  Likely a small change in
-   `fastnn/io/shape_inference.py` plus the
-   `yolo_compare_fastnn_pytorch._make_fastnn_executor` Shape/Gather
-   const-folding path (the YOLO helper already does this for
-   YOLO-shaped graphs; the same logic needs to apply to the generic
-   case).
+1. **Add Conv shape/profile metadata to the model-zoo path.** Record groups,
+   kernel shape, input/output shape, activation, and per-instruction/profile
+   time where available. The current top-kernel table proves Conv dominates,
+   but it does not yet separate standard Conv, depthwise Conv, grouped Conv,
+   and pointwise Conv.
 
-2. **Add thread sweeps to the matrix** for the working models so
-   we can show the OpenBLAS Conv GEMM scaling story for ResNet18
-   and ResNet50 the same way the existing
-   `scripts/yolo_openblas_thread_sweep.py` does for YOLOv8n.  The
-   resnet50 fastnn-vs-pytorch 0.75x win at 1 thread may not hold at
-   higher thread counts; we need the data before any claim.
+2. **Use the Conv metadata to classify MobileNet/EfficientNet hotspots.** The
+   next runtime-changing lane should be based on measured depthwise/group /
+   pointwise time, not just family-level intuition.
 
-3. **Re-prioritise the `WriteConst` work on ResNet** (where it is
-   ~28% of total traffic bytes) rather than on YOLO (where it is
-   <3%).  The `prepared` plan's static-weight detection should be
-   re-evaluated against this matrix because the cost shape is
-   inverted.
+3. **Prototype a model-agnostic depthwise/group Conv specialization or backend
+   path only after the classification lands.** Gate on full-model improvement
+   for MobileNetV2, MobileNetV3-small, and EfficientNet-B0, with YOLOv8n,
+   YOLO11n, ResNet18, and ResNet50 as regression anchors.
 
-4. **Stop chasing generic-YOLO optimisation classes** for the
-   `conv2d_silu` kernel on YOLO.  That kernel is already at 0.5-0.8
-   ms mean per call locally; further microbench work on it is
-   unlikely to move the wall-time.  Instead target the YOLO-specific
-   `concat` / `transpose` layout cost, which is the same cost on
-   YOLOv8n and YOLO11n and is the next-largest single class in
-   `top_kernels_by_count` and `top_write_consts_by_size`.
+4. **Keep YOLO as a regression anchor, not the only target.** YOLO-specific
+   graph parallelism remains lower priority until the MobileNet/EfficientNet
+   Conv class is understood.
 
-5. **Run the matrix on a small multi-config set** (320 / 416 / 640
-   input sizes for YOLO, 224 / 256 / 320 for ResNet) to check
-   whether the ResNet50 win holds at larger feature maps.  Add
-   `--imgsz` override support if needed; today the script encodes
-   the per-model imgsz in `DEFAULT_MODELS`.
+5. **Revisit thread sweeps after the Conv classification.** Thread sweeps are
+   still useful, but optimizing thread settings before knowing which Conv
+   classes dominate risks tuning around the wrong kernel family.
 
 ## How to reproduce locally
 
