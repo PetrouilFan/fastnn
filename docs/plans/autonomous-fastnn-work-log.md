@@ -4,6 +4,33 @@ Persistent append-only coordination log for human sessions, cron jobs, and auton
 
 Keep entries concise. Record intent, actual changes, validation, findings, and next recommended action. Do not paste giant logs.
 
+## 2026-06-05 09:xx EEST — interactive session
+
+Intent:
+- Proceed with the best P1 path after the overnight profiler work: measure whether extending prepared-arena constant preloading beyond Conv weights is useful.
+
+Changed:
+- Added `packed_bias` metadata to `PreparedConv2d` and `PreparedMatMul`.
+- Updated prepared static binding application to attach `input_index == 2` bindings as `packed_bias`.
+- Updated the opt-in prepared-arena fallback to preload fp32 Conv/MatMul weights and biases/static slots, then skip matching `WriteConst` instructions.
+- Documented the result in `docs/plans/graph-memory-profile.md`.
+
+Validation:
+- `cargo test --release --lib --features prepared-plan prepared::tests::detects_conv_weight_and_bias` → 1 passed.
+- `cargo test --release --lib --features prepared-plan prepared_fallback_tests` → 5 passed.
+- `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → pass.
+- `.venv/bin/python -m pytest tests/test_aot_executor_prepared_execute.py tests/test_graph_memory_profile.py -q` → 20 passed.
+- `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py --onnx yolov8n.onnx --json /tmp/graph_memory_profile_bias_preload_yolo.json --top 8 --also-prepared` → pass.
+- `PYENV_VERSION=system OPENBLAS_NUM_THREADS=2 .venv/bin/python scripts/prepared_fallback_overhead.py --onnx yolov8n.onnx --warmup 2 --iters 8 --json /tmp/prepared_fallback_bias_preload_overhead.json` → pass, exact outputs.
+
+Findings:
+- The extended prepared-arena fallback reduced profiled `write_const` entries by 127 and static WriteConst traffic by 11.70 MiB, with `write_const` profiled time delta -4.558 ms in one instrumented run.
+- It did not improve end-to-end timing: `forward` mean 46.185 ms vs `forward_prepared_arena_fallback` mean 48.913 ms in the 8-iter timing sample, with `max_abs=0` and `mean_abs=0`.
+- Conclusion: more per-forward preload pruning is the wrong performance direction. It proves the traffic is removable, but copying constants from the prepared arena into the mutable arena each forward still costs too much.
+
+Next recommended action:
+- Design a persistent immutable constant/no-copy prepared plan so kernels consume static payloads without per-forward arena re-materialisation, or switch to P2 `concat` view/layout work if the no-copy prepared plan is too invasive.
+
 ## 2026-06-05 — cost-aware OpenCode policy added
 
 Intent:
