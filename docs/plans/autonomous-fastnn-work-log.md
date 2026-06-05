@@ -291,3 +291,27 @@ Findings:
 
 Next recommended action:
 - Add a RED guardrail for a no-copy prepared Conv-weight read path or immutable constant slot classification that proves kernels can consume the prepared constant payload without per-forward arena re-materialisation and without changing default `forward` semantics.
+
+
+## 2026-06-05 14:48 EEST — autonomous cron
+
+Intent:
+- Continue P2/P3 graph-memory diagnostics by turning aggregate kernel traffic into concrete instruction hotspot rows for layout/copy work.
+
+Changed:
+- Extended `scripts/graph_memory_profile.py` JSON with `instruction_hotspots[]` derived from `memory_stats.top_instructions_by_static_bytes` and overlaid with per-kernel mean profiled timing.
+- Updated the CLI summary to print top instruction hotspots with instruction index, node id, estimated per-instruction ms, bytes, and bytes/ms.
+- Added a RED/GREEN regression test for instruction hotspot timing/byte output and documented the schema in `docs/plans/graph-memory-profile.md`.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py::test_build_memory_profile_reports_instruction_hotspots_with_estimated_timing -q` → failed with `KeyError: 'instruction_hotspots'` before implementation.
+- GREEN: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q && .venv/bin/python -m py_compile scripts/graph_memory_profile.py` → 13 passed.
+- Smoke: `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py --onnx yolov8n.onnx --json /tmp/graph_memory_profile_instruction_hotspots_yolo.json --top 5` → pass.
+- `git diff --check` → pass.
+
+Findings:
+- YOLOv8n smoke now prints concrete copy/layout targets: `#139 concat` node 180 and `#190 concat` node 311 are each 2.34 MiB and estimate ~0.087 ms per concat call, ~27.05 MiB/ms, flagged memory-bound.
+- This confirms the next P2 work can start from specific large concat instructions rather than aggregate `concat` traffic alone.
+
+Next recommended action:
+- Inspect nodes 180 and 311 / instructions 139 and 190 to determine whether their concat inputs are contiguous or otherwise eligible for safe view/layout planning; add a RED guardrail for any copy-elision candidate before changing runtime semantics.

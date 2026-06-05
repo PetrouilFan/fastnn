@@ -33,6 +33,7 @@ The default JSON contains:
 - `summary.profiled_kernel_static_bytes`
 - `summary.unprofiled_static_traffic_bytes`
 - `kernels[]` rows with `kernel_name`, dynamic time, exact static bytes when available, bytes/ms, and a memory-bound heuristic
+- `instruction_hotspots[]` rows copied from `memory_stats.top_instructions_by_static_bytes` and overlaid with the matching kernel's mean profiled time. This pinpoints concrete instruction indices/node ids (for example the largest `concat` rows) while keeping timings approximate.
 - `unprofiled_static_traffic[]` for static copy/const/fill traffic that was not present in dynamic profile entries
 - raw `memory_stats` for cross-checking
 
@@ -40,9 +41,9 @@ The default JSON contains:
 
 `memory_stats()` exposes exact per-kernel aggregate read/write bytes in `top_kernels_by_count` (`read_bytes`, `write_bytes`, `static_bytes`) for the top kernel kinds. `scripts/graph_memory_profile.py` uses those fields when present, so broad kernel categories such as `concat`, `slice_f32`, and `conv2d_silu` are ranked by their actual compiled-plan byte traffic instead of by call-count apportioning. Older `memory_stats()` payloads without those fields still fall back to the prior call-count estimate.
 
-The tool still aggregates by kernel name rather than by individual instruction/node. It handles profiled `memcopy`, `write_const`, and `fill` entries separately so copy/constant traffic is not double-counted.
+The profiler also emits `instruction_hotspots[]` when `memory_stats()` provides `top_instructions_by_static_bytes`. These rows keep the exact instruction-level static bytes and attach an approximate per-instruction time equal to the profiled mean for that kernel name. That estimate is intentionally coarse when a kernel appears many times, but it is enough to turn an aggregate signal like "`concat` is expensive" into concrete rows such as `#139 concat` / `#190 concat` for P2 view/layout investigation.
 
-Use this as a prioritization signal, not as a cycle-accurate profiler. If a decision depends on exact per-node bytes, extend `memory_stats()` to expose instruction-level traffic first.
+The tool handles profiled `memcopy`, `write_const`, and `fill` entries separately so copy/constant traffic is not double-counted.
 
 ## Representative local YOLOv8n smoke
 
