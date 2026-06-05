@@ -7344,6 +7344,361 @@ impl Backend for CpuBackend {
         let end = (offset + size).min(buf.len());
         buf[offset..end].to_vec()
     }
+
+    #[cfg(feature = "prepared-plan")]
+    fn dispatch_with_persistent_view(
+        &self,
+        plan: &ExecutablePlan,
+        arena: &CpuBuffer,
+        shape_env: &ShapeEnv,
+        persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
+    ) -> Result<(), BackendError> {
+        use crate::backend::prepared::PersistentPreparedWeights;
+
+        // Fast path: empty / missing view degrades to the standard
+        // dispatch without any per-instruction overhead.
+        let view: &PersistentPreparedWeights = match persistent_view {
+            Some(v) if !v.is_empty() => v,
+            _ => return self.dispatch(plan, arena, shape_env),
+        };
+
+        for instruction in &plan.instructions {
+            match instruction {
+                // Skip WriteConst for slots the persistent view will
+                // satisfy directly.  The slot offset/size is the
+                // exact byte range that the WriteConst would have
+                // materialised; the dispatch kernel will read the
+                // same range from the persistent payload instead.
+                Instruction::WriteConst { dst, .. }
+                    if view.get(&(dst.offset, dst.size)).is_some() =>
+                {
+                    continue;
+                }
+
+                // Conv2d fp32 + (optional) bias.  Resolved directly
+                // from the persistent view when available; otherwise
+                // falls through to the standard per-instruction
+                // dispatch path which already handles the
+                // input/weight/bias reads from the mutable arena.
+                Instruction::CallKernel {
+                    kernel_name,
+                    input_slices,
+                    output_slice,
+                    params,
+                    param_dims,
+                    weight_meta,
+                    node_id,
+                    ..
+                } if matches!(
+                    kernel_name.as_str(),
+                    "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu"
+                ) =>
+                {
+                    let has_override = input_slices
+                        .get(1)
+                        .map(|w| view.get(&(w.offset, w.size)).is_some())
+                        .unwrap_or(false)
+                        || input_slices
+                            .get(2)
+                            .map(|b| view.get(&(b.offset, b.size)).is_some())
+                            .unwrap_or(false);
+                    if has_override {
+                        dispatch_conv2d_fp32_with_view(
+                            arena,
+                            shape_env,
+                            kernel_name,
+                            input_slices,
+                            *output_slice,
+                            params,
+                            node_id.unwrap_or(0),
+                            view,
+                        )?;
+                    } else {
+                        let single = ExecutablePlan {
+                            instructions: vec![instruction.clone()],
+                            arena_size: plan.arena_size,
+                            levels: vec![0],
+                        };
+                        self.dispatch(&single, arena, shape_env)?;
+                    }
+                }
+
+                // Fp32 MatMul family (matmul, matmul_relu/gelu/silu,
+                // fused_matmul_add_*).  Resolved from the persistent
+                // view for both the B slot and the optional bias slot.
+                Instruction::CallKernel {
+                    kernel_name,
+                    input_slices,
+                    output_slice,
+                    params,
+                    param_dims,
+                    weight_meta,
+                    node_id,
+                    ..
+                } if matches!(
+                    kernel_name.as_str(),
+                    "matmul"
+                        | "matmul_relu"
+                        | "matmul_gelu"
+                        | "matmul_silu"
+                        | "fused_matmul_add_relu"
+                        | "fused_matmul_add_gelu"
+                        | "fused_matmul_add_silu"
+                ) =>
+                {
+                    let has_override = input_slices
+                        .get(1)
+                        .map(|b| view.get(&(b.offset, b.size)).is_some())
+                        .unwrap_or(false)
+                        || input_slices
+                            .get(2)
+                            .map(|b| view.get(&(b.offset, b.size)).is_some())
+                            .unwrap_or(false);
+                    if has_override {
+                        dispatch_matmul_fp32_with_view(
+                            arena,
+                            shape_env,
+                            kernel_name,
+                            input_slices,
+                            *output_slice,
+                            params,
+                            param_dims,
+                            view,
+                        )?;
+                    } else {
+                        let single = ExecutablePlan {
+                            instructions: vec![instruction.clone()],
+                            arena_size: plan.arena_size,
+                            levels: vec![0],
+                        };
+                        self.dispatch(&single, arena, shape_env)?;
+                    }
+                }
+
+                // Everything else: defer to the standard per-instruction
+                // dispatch so we keep the existing single-threaded,
+                // sequential behaviour for the rest of the plan.
+                _ => {
+                    let single = ExecutablePlan {
+                        instructions: vec![instruction.clone()],
+                        arena_size: plan.arena_size,
+                        levels: vec![0],
+                    };
+                    self.dispatch(&single, arena, shape_env)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── Persistent-view dispatch helpers ────────────────────────
+//
+// These helpers are private to the CpuBackend. They are intentionally
+// near-clones of the corresponding branches in `dispatch()` so the
+// fp32 Conv2d / MatMul kernels can borrow the weight/bias bytes
+// directly from the [`PersistentPreparedWeights`] view instead of
+// pulling them out of the mutable arena.  The input tensor is still
+// read from the mutable arena; only the static weight / bias slots
+// are routed through the view.
+
+#[cfg(feature = "prepared-plan")]
+fn dispatch_conv2d_fp32_with_view(
+    arena: &CpuBuffer,
+    _shape_env: &ShapeEnv,
+    kernel_name: &str,
+    input_slices: &[BufferSlice],
+    output_slice: BufferSlice,
+    params: &[usize],
+    _node_id: usize,
+    view: &crate::backend::prepared::PersistentPreparedWeights,
+) -> Result<(), BackendError> {
+    use crate::backend::cpu::microkernels::{conv2d_f32_im2col_gemm, ConvActivation};
+
+    let fused_act: Option<ConvActivation> = match kernel_name {
+        "conv2d_relu" => Some(ConvActivation::Relu),
+        "conv2d_gelu" => Some(ConvActivation::Gelu),
+        "conv2d_silu" => Some(ConvActivation::Silu),
+        _ => None,
+    };
+
+    if input_slices.len() < 2 {
+        return Err(BackendError::Dispatch(format!(
+            "conv2d_persistent: expected ≥ 2 input slices, got {}",
+            input_slices.len()
+        )));
+    }
+    let input_slice = input_slices[0];
+    let weight_slice = input_slices[1];
+    let bias_slice = input_slices.get(2).copied();
+
+    let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
+        return Err(BackendError::Dispatch(
+            "conv2d_persistent: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
+                .into(),
+        ));
+    };
+    let c_per_group = c / groups.max(1);
+    let f32_size = std::mem::size_of::<f32>();
+    let n_in = (input_slice.size / f32_size) / (c * h * w).max(1);
+    let f_out = (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
+    let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
+    let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
+
+    // Resolve the weight / bias f32 slices.  Persistent-view entries
+    // are borrowed directly (no copy); non-overridden slots fall
+    // back to a Vec copy of the arena bytes (these are rare in
+    // practice — the no-copy plan only filters WriteConst for
+    // overridden slots, so any non-overridden slot still has its
+    // WriteConst running and the arena bytes are valid).
+    let weight_f32: Vec<f32> = match view.get(&(weight_slice.offset, weight_slice.size)) {
+        Some(payload) => payload.to_vec(),
+        None => {
+            let d = arena.data_mut();
+            bytemuck::cast_slice::<_, f32>(
+                &d[weight_slice.offset..weight_slice.offset + weight_slice.size],
+            )
+            .to_vec()
+        }
+    };
+    let bias_f32: Vec<f32> = if let Some(b) = bias_slice {
+        match view.get(&(b.offset, b.size)) {
+            Some(payload) => payload.to_vec(),
+            None => {
+                let d = arena.data_mut();
+                bytemuck::cast_slice::<_, f32>(&d[b.offset..b.offset + b.size]).to_vec()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Borrow the input tensor from the arena.
+    let input_f32: Vec<f32> = {
+        let d = arena.data_mut();
+        bytemuck::cast_slice::<_, f32>(
+            &d[input_slice.offset..input_slice.offset + input_slice.size],
+        )
+        .to_vec()
+    };
+    let out_f32: &mut [f32] = {
+        let d = arena.data_mut();
+        bytemuck::cast_slice_mut::<_, f32>(
+            &mut d[output_slice.offset..output_slice.offset + output_slice.size],
+        )
+    };
+
+    conv2d_f32_im2col_gemm(
+        &input_f32,
+        &weight_f32,
+        &bias_f32,
+        out_f32,
+        n_in,
+        c,
+        h,
+        w,
+        f_out,
+        kh,
+        kw,
+        stride,
+        padding,
+        dilation,
+        groups,
+        fused_act,
+    );
+    Ok(())
+}
+
+#[cfg(feature = "prepared-plan")]
+fn dispatch_matmul_fp32_with_view(
+    arena: &CpuBuffer,
+    shape_env: &ShapeEnv,
+    kernel_name: &str,
+    input_slices: &[BufferSlice],
+    output_slice: BufferSlice,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    view: &crate::backend::prepared::PersistentPreparedWeights,
+) -> Result<(), BackendError> {
+    use crate::backend::cpu::blas::matmul_blas_into;
+
+    if input_slices.len() < 2 {
+        return Err(BackendError::Dispatch(format!(
+            "matmul_persistent: expected ≥ 2 input slices, got {}",
+            input_slices.len()
+        )));
+    }
+    let a_slice = input_slices[0];
+    let b_slice = input_slices[1];
+    let bias_slice = input_slices.get(2).copied();
+
+    // Resolve the B (weight) / bias f32 slices.
+    let b_f32: Vec<f32> = match view.get(&(b_slice.offset, b_slice.size)) {
+        Some(payload) => payload.to_vec(),
+        None => {
+            let d = arena.data_mut();
+            bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                .to_vec()
+        }
+    };
+    let bias_f32: Vec<f32> = if let Some(b) = bias_slice {
+        match view.get(&(b.offset, b.size)) {
+            Some(payload) => payload.to_vec(),
+            None => {
+                let d = arena.data_mut();
+                bytemuck::cast_slice::<_, f32>(&d[b.offset..b.offset + b.size]).to_vec()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Borrow the activation tensor from the arena.
+    let a_f32: Vec<f32> = {
+        let d = arena.data_mut();
+        bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec()
+    };
+
+    let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+    let &[m, _k, n] = matmul_params.as_slice() else {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: expected params [M,K,N]"
+        )));
+    };
+
+    let out_f32: &mut [f32] = {
+        let d = arena.data_mut();
+        bytemuck::cast_slice_mut::<_, f32>(
+            &mut d[output_slice.offset..output_slice.offset + output_slice.size],
+        )
+    };
+
+    matmul_blas_into(&a_f32, &b_f32, out_f32, m, _k, n);
+
+    // Apply fused activation / bias on top of the GEMM output, mirroring
+    // the `matmul_activation_dispatch` semantics.
+    let has_bias = !bias_f32.is_empty();
+    let act: fn(f32) -> f32 = match kernel_name {
+        "matmul_relu" | "fused_matmul_add_relu" => |x| x.max(0.0),
+        "matmul_gelu" | "fused_matmul_add_gelu" => |x: f32| {
+            let x3 = x * x * x;
+            let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+            let t = tanh_arg.tanh();
+            0.5 * x * (1.0 + t)
+        },
+        "matmul_silu" | "fused_matmul_add_silu" => |x: f32| x / (1.0 + (-x).exp()),
+        _ => |x| x,
+    };
+    for i in 0..out_f32.len() {
+        let x = out_f32[i]
+            + if has_bias && i % n < bias_f32.len() {
+                bias_f32[i % n]
+            } else {
+                0.0
+            };
+        out_f32[i] = act(x);
+    }
+    Ok(())
 }
 
 macro_rules! impl_simd_unary_wrapper {

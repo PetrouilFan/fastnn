@@ -74,7 +74,11 @@ def main() -> None:
     baseline = executor.forward(inputs)[output_name].numpy()
     methods: list[tuple[str, Callable]] = [("forward", executor.forward)]
 
-    for name in ("forward_prepared_fallback", "forward_prepared_arena_fallback"):
+    for name in (
+        "forward_prepared_fallback",
+        "forward_prepared_arena_fallback",
+        "forward_prepared_no_copy",
+    ):
         if hasattr(executor, name):
             methods.append((name, getattr(executor, name)))
 

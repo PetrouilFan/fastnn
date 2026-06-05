@@ -242,3 +242,91 @@ def test_profile_prepared_arena_fallback_matches_profile_shape():
     assert {"instruction_index", "node_id", "kernel_name", "elapsed_ns", "node_name"}.issubset(
         prepared_profile["profile"][0].keys()
     )
+
+
+# ── forward_prepared_no_copy (persistent immutable view) ────────────
+
+
+def test_forward_prepared_no_copy_method_exists():
+    """The persistent no-copy entry point is exposed on AotExecutor."""
+    executor = _relu_graph()
+    assert hasattr(executor, "forward_prepared_no_copy")
+    assert callable(executor.forward_prepared_no_copy)
+
+
+def test_forward_prepared_no_copy_matches_forward_relu():
+    """Persistent no-copy path is bit-identical to forward on a pure Relu.
+
+    No Conv2d / MatMul with a packed Fp32 slot is present, so the
+    persistent view stays empty and the dispatch loop falls through to
+    the standard per-instruction path. This guards the entry point.
+    """
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    x = fnn.tensor(np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4])
+
+    expected = executor.forward({"x": x})
+    no_copy = executor.forward_prepared_no_copy({"x": x})
+
+    assert set(no_copy.keys()) == {"y"}
+    np.testing.assert_array_equal(
+        expected["y"].numpy(), no_copy["y"].numpy()
+    )
+
+
+def test_forward_prepared_no_copy_matches_forward_with_constant_input():
+    """Persistent no-copy path is bit-identical on a WriteConst plan."""
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    expected = executor.forward({"x": x})
+    no_copy = executor.forward_prepared_no_copy({"x": x})
+
+    np.testing.assert_array_equal(expected["y"].numpy(), no_copy["y"].numpy())
+
+
+def test_forward_prepared_no_copy_is_repeatable():
+    """Repeated calls to the persistent no-copy path return identical outputs."""
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    first = executor.forward_prepared_no_copy({"x": x})
+    second = executor.forward_prepared_no_copy({"x": x})
+
+    np.testing.assert_array_equal(first["y"].numpy(), second["y"].numpy())
+
