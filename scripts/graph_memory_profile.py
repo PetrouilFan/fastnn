@@ -172,6 +172,104 @@ def build_memory_profile(
     }
 
 
+def _kernel_index(profile: dict[str, Any]) -> dict[str, dict[str, float]]:
+    rows: dict[str, dict[str, float]] = {}
+    for row in profile.get("kernels", []):
+        kernel = str(row.get("kernel_name", "<unknown>"))
+        rows[kernel] = {
+            "count": float(row.get("profile_count", 0)),
+            "total_ms": float(row.get("total_ms", 0.0)),
+            "static_bytes": float(row.get("static_bytes", 0)),
+        }
+    return rows
+
+
+def _unprofiled_bytes(profile: dict[str, Any], kind: str) -> int:
+    return sum(
+        int(row.get("bytes", 0))
+        for row in profile.get("unprofiled_static_traffic", [])
+        if str(row.get("kind", "")) == kind
+    )
+
+
+def _profiled_write_const_bytes(profile: dict[str, Any], write_row: dict[str, float]) -> int:
+    memory_stats = profile.get("memory_stats", {})
+    total_bytes = int(memory_stats.get("write_const_bytes", 0)) if isinstance(memory_stats, dict) else 0
+    total_count = int(memory_stats.get("write_const_count", 0)) if isinstance(memory_stats, dict) else 0
+    profiled_count = int(write_row["count"])
+    if total_bytes > 0 and total_count > 0 and 0 <= profiled_count <= total_count:
+        return int(round(total_bytes * profiled_count / total_count))
+    return int(write_row["static_bytes"])
+
+
+def build_profile_delta(default_profile: dict[str, Any], prepared_profile: dict[str, Any]) -> dict[str, Any]:
+    """Compare two ``build_memory_profile`` payloads.
+
+    Deltas are computed as ``prepared - default`` so negative values mean the
+    prepared path removed time, byte traffic, or profile entries.  The helper is
+    pure-Python and intentionally accepts already-built profile payloads, making
+    it usable both from tests and from CLI smoke runs that compare the default
+    executor profile with ``profile_prepared_arena_fallback``.
+    """
+
+    default_summary = default_profile.get("summary", {})
+    prepared_summary = prepared_profile.get("summary", {})
+    default_kernels = _kernel_index(default_profile)
+    prepared_kernels = _kernel_index(prepared_profile)
+
+    kernel_rows: list[dict[str, Any]] = []
+    for kernel in sorted(set(default_kernels) | set(prepared_kernels)):
+        before = default_kernels.get(kernel, {"count": 0.0, "total_ms": 0.0, "static_bytes": 0.0})
+        after = prepared_kernels.get(kernel, {"count": 0.0, "total_ms": 0.0, "static_bytes": 0.0})
+        count_delta = int(after["count"] - before["count"])
+        total_ms_delta = after["total_ms"] - before["total_ms"]
+        static_bytes_delta = int(after["static_bytes"] - before["static_bytes"])
+        kernel_rows.append(
+            {
+                "kernel_name": kernel,
+                "default_count": int(before["count"]),
+                "prepared_count": int(after["count"]),
+                "count_delta": count_delta,
+                "default_total_ms": before["total_ms"],
+                "prepared_total_ms": after["total_ms"],
+                "total_ms_delta": total_ms_delta,
+                "default_static_bytes": int(before["static_bytes"]),
+                "prepared_static_bytes": int(after["static_bytes"]),
+                "static_bytes_delta": static_bytes_delta,
+                "removed": before["count"] > 0 and after["count"] == 0,
+                "added": before["count"] == 0 and after["count"] > 0,
+            }
+        )
+    kernel_rows.sort(key=lambda row: (abs(row["static_bytes_delta"]), abs(row["total_ms_delta"])), reverse=True)
+
+    write_before = default_kernels.get("write_const", {"count": 0.0, "total_ms": 0.0, "static_bytes": 0.0})
+    write_after = prepared_kernels.get("write_const", {"count": 0.0, "total_ms": 0.0, "static_bytes": 0.0})
+    default_unprofiled_write_const = _unprofiled_bytes(default_profile, "write_const")
+    prepared_unprofiled_write_const = _unprofiled_bytes(prepared_profile, "write_const")
+    default_write_const_bytes = _profiled_write_const_bytes(default_profile, write_before) + default_unprofiled_write_const
+    prepared_write_const_bytes = _profiled_write_const_bytes(prepared_profile, write_after) + prepared_unprofiled_write_const
+
+    summary = {
+        "profiled_total_ms_delta": float(prepared_summary.get("profiled_total_ms", 0.0))
+        - float(default_summary.get("profiled_total_ms", 0.0)),
+        "profiled_kernel_static_bytes_delta": int(prepared_summary.get("profiled_kernel_static_bytes", 0))
+        - int(default_summary.get("profiled_kernel_static_bytes", 0)),
+        "estimated_static_traffic_bytes_delta": int(prepared_summary.get("estimated_static_traffic_bytes", 0))
+        - int(default_summary.get("estimated_static_traffic_bytes", 0)),
+        "write_const_count_delta": int(write_after["count"] - write_before["count"]),
+        "write_const_static_bytes_delta": prepared_write_const_bytes - default_write_const_bytes,
+        "write_const_total_ms_delta": write_after["total_ms"] - write_before["total_ms"],
+        "unprofiled_write_const_bytes_delta": prepared_unprofiled_write_const - default_unprofiled_write_const,
+    }
+
+    return {
+        "summary": summary,
+        "kernels": kernel_rows,
+        "default_summary": default_summary,
+        "prepared_summary": prepared_summary,
+    }
+
+
 def _input_shape_from_executor(executor: Any, input_name: str, user_shape: str | None) -> list[int]:
     if user_shape:
         return [int(part) for part in user_shape.split(",") if part]

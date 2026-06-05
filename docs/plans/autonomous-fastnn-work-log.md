@@ -122,3 +122,27 @@ Findings:
 
 Next recommended action:
 - Either extend `scripts/prepared_fallback_overhead.py`/`graph_memory_profile.py` to emit default-vs-prepared profile deltas automatically, or proceed to the next safe P1 step: include bias/non-Conv constants only with a RED guardrail that proves slot immutability/lifetime safety before skipping more WriteConst instructions.
+
+## 2026-06-05 06:31 EEST — autonomous cron
+
+Intent:
+- Make P1 prepared-arena WriteConst traffic reduction measurable from profiler JSON instead of manual profile diffs.
+
+Changed:
+- Added `build_profile_delta(default_profile, prepared_profile)` to `scripts/graph_memory_profile.py` for default-vs-prepared memory profile deltas.
+- Added RED/GREEN tests for removed/added kernels, profile-time/static-byte summary deltas, unprofiled write_const handling, and shared-`memory_stats()` WriteConst byte apportioning.
+- Updated `docs/plans/graph-memory-profile.md` with the delta schema and a YOLOv8n smoke result.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q` initially failed with missing `build_profile_delta`; the shared-memory-stats apportioning test then failed with `0 == -8192` before the count-based byte estimator.
+- GREEN: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q` → 9 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_profile.py` → pass.
+- YOLO smoke: `PYENV_VERSION=system .venv/bin/python <default/profile_prepared_arena_fallback delta snippet>` wrote `/tmp/graph_memory_profile_prepared_delta_yolo.json`.
+- `git diff --check` → pass.
+
+Findings:
+- YOLOv8n prepared-arena fallback delta: `write_const_count_delta=-64`, `write_const_static_bytes_delta=-6,179,967` bytes (~5.89 MiB), `write_const_total_ms_delta=-2.284 ms` in the latest single instrumented run.
+- Because default and prepared profiles share one static `memory_stats()` payload, profiled `write_const` bytes must be apportioned by observed profiled count over `memory_stats.write_const_count`; otherwise both sides appear to write the full 12.06 MiB aggregate.
+
+Next recommended action:
+- Use this delta helper in a CLI `--also-prepared`/sidecar mode or proceed to the next P1 RED guardrail for safely skipping additional non-Conv/bias constants only where slot immutability/lifetime safety is proven.
