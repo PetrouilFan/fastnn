@@ -1455,14 +1455,16 @@ impl AotExecutor {
         let mut fill_bytes = 0usize;
         let mut write_const_bytes = 0usize;
         let mut kernel_counts: HashMap<String, (usize, usize, usize)> = HashMap::new();
+        let mut instruction_traffic: Vec<(usize, String, String, Option<usize>, usize, usize)> = Vec::new();
 
-        for instr in &plan.instructions {
+        for (instruction_index, instr) in plan.instructions.iter().enumerate() {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
                     input_slices,
                     output_slice,
                     secondary_output_slice,
+                    node_id,
                     ..
                 } => {
                     call_kernel_count += 1;
@@ -1477,18 +1479,52 @@ impl AotExecutor {
                     entry.2 += write_bytes;
                     kernel_read_bytes += read_bytes;
                     kernel_write_bytes += write_bytes;
+                    instruction_traffic.push((
+                        instruction_index,
+                        "call_kernel".to_string(),
+                        kernel_name.clone(),
+                        *node_id,
+                        read_bytes,
+                        write_bytes,
+                    ));
                 }
                 Instruction::MemCopy { dst, src } => {
                     memcpy_count += 1;
-                    memcpy_bytes += dst.size.min(src.size);
+                    let bytes = dst.size.min(src.size);
+                    memcpy_bytes += bytes;
+                    instruction_traffic.push((
+                        instruction_index,
+                        "memcopy".to_string(),
+                        "memcopy".to_string(),
+                        None,
+                        bytes,
+                        bytes,
+                    ));
                 }
                 Instruction::Fill { dst, .. } => {
                     fill_count += 1;
                     fill_bytes += dst.size;
+                    instruction_traffic.push((
+                        instruction_index,
+                        "fill".to_string(),
+                        "fill".to_string(),
+                        None,
+                        0,
+                        dst.size,
+                    ));
                 }
                 Instruction::WriteConst { dst, data } => {
                     write_const_count += 1;
-                    write_const_bytes += dst.size.min(data.len());
+                    let bytes = dst.size.min(data.len());
+                    write_const_bytes += bytes;
+                    instruction_traffic.push((
+                        instruction_index,
+                        "write_const".to_string(),
+                        "write_const".to_string(),
+                        None,
+                        0,
+                        bytes,
+                    ));
                 }
             }
         }
@@ -1530,6 +1566,27 @@ impl AotExecutor {
             top_kernels.append(item)?;
         }
         stats.set_item("top_kernels_by_count", top_kernels)?;
+
+        let top_instructions = PyList::empty(py);
+        instruction_traffic.sort_by(|a, b| {
+            let a_total = a.4 + a.5;
+            let b_total = b.4 + b.5;
+            b_total.cmp(&a_total).then_with(|| a.0.cmp(&b.0))
+        });
+        for (instruction_index, kind, kernel_name, node_id, read_bytes, write_bytes) in
+            instruction_traffic.into_iter().take(50)
+        {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", instruction_index)?;
+            item.set_item("kind", kind)?;
+            item.set_item("kernel_name", kernel_name)?;
+            item.set_item("node_id", node_id)?;
+            item.set_item("read_bytes", read_bytes)?;
+            item.set_item("write_bytes", write_bytes)?;
+            item.set_item("static_bytes", read_bytes + write_bytes)?;
+            top_instructions.append(item)?;
+        }
+        stats.set_item("top_instructions_by_static_bytes", top_instructions)?;
 
         let top_alias_groups = PyList::empty(py);
         let mut alias_vec: Vec<(usize, Vec<usize>, usize)> = nodes_by_offset

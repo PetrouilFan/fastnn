@@ -14,6 +14,7 @@ compiled ONNX graph:
 - logical slot bytes vs physical bytes by arena offset
 - slot-reuse savings, alias group count, and largest alias groups
 - instruction mix
+- exact per-instruction traffic rows ranked by static bytes (`top_instructions_by_static_bytes`)
 - estimated static traffic bytes from kernel inputs/outputs, `MemCopy`, `Fill`,
   and `WriteConst`
 - top kernels by instruction count
@@ -50,6 +51,15 @@ estimated static traffic: 92.81 MiB (2.16x arena)
   write_const: 12.06 MiB
   fill: 0.00 B
 instruction mix: call_kernel=120, memcpy=8, write_const=131, fill=0
+
+top instruction-level static traffic rows after the instruction diagnostic
+addition:
+
+- `#131 conv2d_silu` (node 157): 2.74 MiB
+- `#132 conv2d_silu` (node 161): 2.36 MiB
+- `#139 concat` (node 180): 2.34 MiB
+- `#190 concat` (node 311): 2.34 MiB
+- `#140 conv2d_silu` (node 181): 1.96 MiB
 ```
 
 ## Interpretation

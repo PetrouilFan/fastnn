@@ -31,6 +31,37 @@ Findings:
 Next recommended action:
 - Design a persistent immutable constant/no-copy prepared plan so kernels consume static payloads without per-forward arena re-materialisation, or switch to P2 `concat` view/layout work if the no-copy prepared plan is too invasive.
 
+## 2026-06-05 09:53 EEST — autonomous cron
+
+Intent:
+- Add the P3/P2 diagnostic needed before doing layout-copy work: exact instruction-level static traffic rows, not just aggregate kernel-kind bytes.
+
+Changed:
+- Extended `AotExecutor.memory_stats()` with `top_instructions_by_static_bytes` rows containing instruction index, kind, kernel name, node id, read bytes, write bytes, and static bytes.
+- Updated `scripts/graph_memory_stats.py` to print the top instruction traffic rows and continue writing them in raw JSON.
+- Added a Python regression test that first failed on the missing memory-stats key, then passed after the Rust API change.
+- Updated `docs/plans/graph-memory-stats.md` with the new diagnostic and current YOLO instruction-level findings.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_aot_executor_profile.py::test_memory_stats_reports_instruction_level_static_traffic -q` → failed with `KeyError: 'top_instructions_by_static_bytes'` before implementation.
+- `cargo check --release --lib` → pass.
+- `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → pass.
+- `.venv/bin/python -m pytest tests/test_aot_executor_profile.py -q` → 2 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_stats.py` → pass.
+- `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_stats.py --onnx yolov8n.onnx --json /tmp/graph_memory_stats_instruction_traffic_yolo.json` → pass.
+- `cargo fmt --check` → pass.
+- `cargo test --release --lib` → 241 passed.
+- `cargo test --release --lib --features prepared-plan` → 246 passed.
+- `cargo test --release --lib --features 'prepared-plan openblas'` → 248 passed.
+- `git diff --check` → pass.
+
+Findings:
+- YOLOv8n top instruction-level static traffic now identifies the concrete plan rows to inspect next: `#131 conv2d_silu` 2.74 MiB, `#132 conv2d_silu` 2.36 MiB, `#139 concat` 2.34 MiB, `#190 concat` 2.34 MiB, and `#140 conv2d_silu` 1.96 MiB.
+- This confirms aggregate `concat` traffic is concentrated in a few large copy-like instructions, making P2 view/layout planning more actionable than aggregate counts alone.
+
+Next recommended action:
+- Use the new instruction indices/node ids to inspect the two largest YOLO `concat` rows and add a RED guardrail for any safe view/layout or copy-elision candidate; otherwise continue P1 persistent immutable constants if no safe concat pattern is found.
+
 ## 2026-06-05 — cost-aware OpenCode policy added
 
 Intent:
