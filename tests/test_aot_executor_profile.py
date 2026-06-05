@@ -95,3 +95,41 @@ def test_memory_stats_reports_write_const_rows_for_persistent_constant_work():
     assert row["dst_offset"] >= 0
     assert row["dst_size"] == 16
     assert row["data_len"] == 16
+
+
+def test_memory_stats_cross_references_prepared_static_weight_write_consts():
+    import fastnn as fnn
+
+    weight = fnn.tensor(np.asarray([[[[2.0]]]], dtype=np.float32), [1, 1, 1, 1])
+    bias = fnn.tensor(np.asarray([0.25], dtype=np.float32), [1])
+    nodes = [
+        {
+            "name": "conv1",
+            "op_type": "Conv",
+            "inputs": "x,w,b",
+            "outputs": "y",
+            "stride": "1",
+            "padding": "0",
+            "dilation": "1",
+            "group": "1",
+        }
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"w": weight, "b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 1, 2, 2]},
+    )
+
+    rows = executor.memory_stats()["top_write_consts_by_size"]
+
+    prepared_rows = [row for row in rows if row.get("prepared_static_role")]
+    assert prepared_rows, "Conv WriteConst rows should identify prepared static bindings"
+    roles = {row["prepared_static_role"] for row in prepared_rows}
+    assert roles == {"conv_weight", "conv_bias"}
+    for row in prepared_rows:
+        assert row["prepared_consumer_instruction_index"] >= 0
+        assert row["prepared_input_index"] in {1, 2}
+        assert row["prepared_constant_index"] >= 0
+        assert row["prepared_constant_name"].startswith("conv_")
