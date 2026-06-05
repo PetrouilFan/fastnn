@@ -1501,7 +1501,21 @@ impl AotExecutor {
         let mut fill_bytes = 0usize;
         let mut write_const_bytes = 0usize;
         let mut kernel_counts: HashMap<String, (usize, usize, usize)> = HashMap::new();
-        let mut instruction_traffic: Vec<(usize, String, String, Option<usize>, usize, usize)> = Vec::new();
+        #[derive(Clone)]
+        struct InstructionTrafficRow {
+            instruction_index: usize,
+            kind: String,
+            kernel_name: String,
+            node_id: Option<usize>,
+            read_bytes: usize,
+            write_bytes: usize,
+            node_name: Option<String>,
+            op_type: Option<String>,
+            input_nodes: Vec<usize>,
+            input_shapes: Vec<Vec<Option<u64>>>,
+            output_shape: Option<Vec<Option<u64>>>,
+        }
+        let mut instruction_traffic: Vec<InstructionTrafficRow> = Vec::new();
         let mut write_const_traffic: Vec<(usize, usize, usize, usize)> = Vec::new();
 
         #[derive(Clone)]
@@ -1612,53 +1626,88 @@ impl AotExecutor {
                     entry.2 += write_bytes;
                     kernel_read_bytes += read_bytes;
                     kernel_write_bytes += write_bytes;
-                    instruction_traffic.push((
+
+                    let node = node_id.and_then(|id| self.graph.get_node(id));
+                    let input_nodes = node.map(|n| n.inputs.clone()).unwrap_or_default();
+                    let input_shapes = input_nodes
+                        .iter()
+                        .filter_map(|id| self.graph.get_node(*id))
+                        .map(|input| input.output_type.shape.iter().map(|d| d.evaluate()).collect())
+                        .collect();
+                    let output_shape = node.map(|n| {
+                        n.output_type
+                            .shape
+                            .iter()
+                            .map(|d| d.evaluate())
+                            .collect()
+                    });
+                    instruction_traffic.push(InstructionTrafficRow {
                         instruction_index,
-                        "call_kernel".to_string(),
-                        kernel_name.clone(),
-                        *node_id,
+                        kind: "call_kernel".to_string(),
+                        kernel_name: kernel_name.clone(),
+                        node_id: *node_id,
                         read_bytes,
                         write_bytes,
-                    ));
+                        node_name: node.map(|n| n.name.clone()),
+                        op_type: node.map(|n| format!("{:?}", n.opcode)),
+                        input_nodes,
+                        input_shapes,
+                        output_shape,
+                    });
                 }
                 Instruction::MemCopy { dst, src } => {
                     memcpy_count += 1;
                     let bytes = dst.size.min(src.size);
                     memcpy_bytes += bytes;
-                    instruction_traffic.push((
+                    instruction_traffic.push(InstructionTrafficRow {
                         instruction_index,
-                        "memcopy".to_string(),
-                        "memcopy".to_string(),
-                        None,
-                        bytes,
-                        bytes,
-                    ));
+                        kind: "memcopy".to_string(),
+                        kernel_name: "memcopy".to_string(),
+                        node_id: None,
+                        read_bytes: bytes,
+                        write_bytes: bytes,
+                        node_name: None,
+                        op_type: None,
+                        input_nodes: Vec::new(),
+                        input_shapes: Vec::new(),
+                        output_shape: None,
+                    });
                 }
                 Instruction::Fill { dst, .. } => {
                     fill_count += 1;
                     fill_bytes += dst.size;
-                    instruction_traffic.push((
+                    instruction_traffic.push(InstructionTrafficRow {
                         instruction_index,
-                        "fill".to_string(),
-                        "fill".to_string(),
-                        None,
-                        0,
-                        dst.size,
-                    ));
+                        kind: "fill".to_string(),
+                        kernel_name: "fill".to_string(),
+                        node_id: None,
+                        read_bytes: 0,
+                        write_bytes: dst.size,
+                        node_name: None,
+                        op_type: None,
+                        input_nodes: Vec::new(),
+                        input_shapes: Vec::new(),
+                        output_shape: None,
+                    });
                 }
                 Instruction::WriteConst { dst, data } => {
                     write_const_count += 1;
                     let bytes = dst.size.min(data.len());
                     write_const_bytes += bytes;
                     write_const_traffic.push((instruction_index, dst.offset, dst.size, data.len()));
-                    instruction_traffic.push((
+                    instruction_traffic.push(InstructionTrafficRow {
                         instruction_index,
-                        "write_const".to_string(),
-                        "write_const".to_string(),
-                        None,
-                        0,
-                        bytes,
-                    ));
+                        kind: "write_const".to_string(),
+                        kernel_name: "write_const".to_string(),
+                        node_id: None,
+                        read_bytes: 0,
+                        write_bytes: bytes,
+                        node_name: None,
+                        op_type: None,
+                        input_nodes: Vec::new(),
+                        input_shapes: Vec::new(),
+                        output_shape: None,
+                    });
                 }
             }
         }
@@ -1703,21 +1752,35 @@ impl AotExecutor {
 
         let top_instructions = PyList::empty(py);
         instruction_traffic.sort_by(|a, b| {
-            let a_total = a.4 + a.5;
-            let b_total = b.4 + b.5;
-            b_total.cmp(&a_total).then_with(|| a.0.cmp(&b.0))
+            let a_total = a.read_bytes + a.write_bytes;
+            let b_total = b.read_bytes + b.write_bytes;
+            b_total
+                .cmp(&a_total)
+                .then_with(|| a.instruction_index.cmp(&b.instruction_index))
         });
-        for (instruction_index, kind, kernel_name, node_id, read_bytes, write_bytes) in
-            instruction_traffic.into_iter().take(50)
-        {
+        for row in instruction_traffic.into_iter().take(50) {
             let item = PyDict::new(py);
-            item.set_item("instruction_index", instruction_index)?;
-            item.set_item("kind", kind)?;
-            item.set_item("kernel_name", kernel_name)?;
-            item.set_item("node_id", node_id)?;
-            item.set_item("read_bytes", read_bytes)?;
-            item.set_item("write_bytes", write_bytes)?;
-            item.set_item("static_bytes", read_bytes + write_bytes)?;
+            item.set_item("instruction_index", row.instruction_index)?;
+            item.set_item("kind", row.kind)?;
+            item.set_item("kernel_name", row.kernel_name)?;
+            item.set_item("node_id", row.node_id)?;
+            item.set_item("read_bytes", row.read_bytes)?;
+            item.set_item("write_bytes", row.write_bytes)?;
+            item.set_item("static_bytes", row.read_bytes + row.write_bytes)?;
+            if let Some(node_name) = row.node_name {
+                item.set_item("node_name", node_name)?;
+            }
+            if let Some(op_type) = row.op_type {
+                item.set_item("op_type", op_type)?;
+            }
+            if !row.input_nodes.is_empty() {
+                item.set_item("input_nodes", row.input_nodes.clone())?;
+                item.set_item("input_node_ids", row.input_nodes)?;
+                item.set_item("input_shapes", row.input_shapes)?;
+            }
+            if let Some(output_shape) = row.output_shape {
+                item.set_item("output_shape", output_shape)?;
+            }
             top_instructions.append(item)?;
         }
         stats.set_item("top_instructions_by_static_bytes", top_instructions)?;

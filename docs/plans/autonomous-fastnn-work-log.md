@@ -315,3 +315,36 @@ Findings:
 
 Next recommended action:
 - Inspect nodes 180 and 311 / instructions 139 and 190 to determine whether their concat inputs are contiguous or otherwise eligible for safe view/layout planning; add a RED guardrail for any copy-elision candidate before changing runtime semantics.
+
+
+## 2026-06-05 18:05 EEST — autonomous cron
+
+Intent:
+- Continue P2 layout/copy diagnostics by making instruction-level memory rows self-contained enough to inspect concrete concat hotspots without a separate IR dump.
+
+Changed:
+- Extended `AotExecutor.memory_stats()["top_instructions_by_static_bytes"]` kernel-call rows with node name/opcode, input node ids, input shapes, and output shape.
+- Updated `scripts/graph_memory_stats.py` to print node and shape metadata for top instruction rows.
+- Added a RED/GREEN Python regression for concat instruction row graph I/O metadata.
+- Updated `docs/plans/graph-memory-stats.md` with the new schema and current YOLO concat hotspot shapes.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_aot_executor_profile.py::test_memory_stats_instruction_rows_include_graph_io_shapes_for_layout_work -q` → failed with `KeyError: 'node_name'` before implementation.
+- `cargo check --release --lib` → pass.
+- `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → pass.
+- `.venv/bin/python -m pytest tests/test_aot_executor_profile.py -q` → 5 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_stats.py tests/test_aot_executor_profile.py` → pass.
+- `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_stats.py --onnx yolov8n.onnx --json /tmp/graph_memory_stats_instruction_shapes_yolo.json` → pass.
+- `cargo fmt --check` → pass.
+- `cargo test --release --lib` → 244 passed.
+- `cargo test --release --lib --features prepared-plan` → 249 passed.
+- `cargo test --release --lib --features 'prepared-plan openblas'` → 251 passed.
+- `git diff --check` → pass.
+
+Findings:
+- The largest YOLO concat hotspots are now directly described in memory stats: `#139` `/model.2/Concat` concatenates three `[1,16,80,80]` tensors to `[1,48,80,80]`; `#190` `/model.14/Concat` concatenates `[1,128,40,40]` and `[1,64,40,40]` to `[1,192,40,40]`.
+- These are channel-axis NCHW concats. They are real physical layout copies in the current flat-contiguous tensor model; safe copy-elision likely needs a view/strided-layout representation or a downstream consumer that can read segmented channel inputs, not just a local concat tweak.
+- OpenCode MiniMax M3 was used for read-only codebase investigation, but the run timed out before its final report; Hermes independently implemented and verified the diagnostic.
+
+Next recommended action:
+- Add a RED guardrail for a segmented/channel-concat-to-following-1x1-conv planning candidate, or continue diagnostics by cross-referencing concat output consumers to find the safest broad copy-elision boundary.
