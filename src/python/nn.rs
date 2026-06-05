@@ -1456,6 +1456,7 @@ impl AotExecutor {
         let mut write_const_bytes = 0usize;
         let mut kernel_counts: HashMap<String, (usize, usize, usize)> = HashMap::new();
         let mut instruction_traffic: Vec<(usize, String, String, Option<usize>, usize, usize)> = Vec::new();
+        let mut write_const_traffic: Vec<(usize, usize, usize, usize)> = Vec::new();
 
         for (instruction_index, instr) in plan.instructions.iter().enumerate() {
             match instr {
@@ -1517,6 +1518,7 @@ impl AotExecutor {
                     write_const_count += 1;
                     let bytes = dst.size.min(data.len());
                     write_const_bytes += bytes;
+                    write_const_traffic.push((instruction_index, dst.offset, dst.size, data.len()));
                     instruction_traffic.push((
                         instruction_index,
                         "write_const".to_string(),
@@ -1587,6 +1589,25 @@ impl AotExecutor {
             top_instructions.append(item)?;
         }
         stats.set_item("top_instructions_by_static_bytes", top_instructions)?;
+
+        let top_write_consts = PyList::empty(py);
+        write_const_traffic.sort_by(|a, b| {
+            let a_bytes = a.2.min(a.3);
+            let b_bytes = b.2.min(b.3);
+            b_bytes.cmp(&a_bytes).then_with(|| a.0.cmp(&b.0))
+        });
+        for (instruction_index, dst_offset, dst_size, data_len) in
+            write_const_traffic.into_iter().take(50)
+        {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", instruction_index)?;
+            item.set_item("dst_offset", dst_offset)?;
+            item.set_item("dst_size", dst_size)?;
+            item.set_item("data_len", data_len)?;
+            item.set_item("write_bytes", dst_size.min(data_len))?;
+            top_write_consts.append(item)?;
+        }
+        stats.set_item("top_write_consts_by_size", top_write_consts)?;
 
         let top_alias_groups = PyList::empty(py);
         let mut alias_vec: Vec<(usize, Vec<usize>, usize)> = nodes_by_offset

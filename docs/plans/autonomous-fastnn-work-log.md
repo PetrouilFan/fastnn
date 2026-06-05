@@ -228,3 +228,35 @@ Findings:
 
 Next recommended action:
 - Proceed to the next P1 RED guardrail for safely skipping additional non-Conv/bias constants only where slot immutability/lifetime safety is proven, or add an instruction-level constant-slot diagnostic if the safe set is still unclear.
+
+## 2026-06-05 11:32 EEST — autonomous cron
+
+Intent:
+- Add the P1 diagnostic needed before designing persistent immutable constants: rank concrete WriteConst instructions by size and arena destination.
+
+Changed:
+- Extended `AotExecutor.memory_stats()` with `top_write_consts_by_size` rows containing instruction index, destination offset/size, data length, and write bytes.
+- Updated `scripts/graph_memory_stats.py` to print the largest WriteConst instructions.
+- Added a RED/GREEN Python regression test for the new memory-stats key.
+- Updated `docs/plans/graph-memory-stats.md` with the new diagnostic.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_aot_executor_profile.py::test_memory_stats_reports_write_const_rows_for_persistent_constant_work -q` → failed with `KeyError: 'top_write_consts_by_size'` before implementation.
+- `cargo check --release --lib` → pass.
+- `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → pass.
+- `.venv/bin/python -m pytest tests/test_aot_executor_profile.py -q` → 3 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_stats.py` → pass.
+- `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_stats.py --onnx yolov8n.onnx --json /tmp/graph_memory_stats_write_const_rows_yolo.json` → pass.
+- `cargo fmt --check` → pass.
+- `cargo test --release --lib` → 241 passed.
+- `cargo test --release --lib --features prepared-plan` → 246 passed.
+- `cargo test --release --lib --features 'prepared-plan openblas'` → 248 passed.
+- `git diff --check` → pass.
+
+Findings:
+- YOLOv8n still reports 131 `WriteConst` instructions and 12.06 MiB per-forward WriteConst traffic.
+- The largest concrete WriteConst rows are now identifiable: `#118` 1.12 MiB at arena offset `10203968`, `#83` 720 KiB at `7853440`, then several 576 KiB rows (`#35`, `#49`, `#51`, `#65`, `#124`, `#126`).
+- This is a diagnostic improvement, not a runtime speed change; it narrows the next persistent-constant/no-copy design to specific large constant slots.
+
+Next recommended action:
+- Cross-reference the largest WriteConst destination offsets with static-weight bindings/prepared constant arena entries, then add a RED guardrail for a no-copy immutable-constant read path for one proven-safe Conv/MatMul constant class.
