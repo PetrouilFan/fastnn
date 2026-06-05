@@ -211,6 +211,140 @@ def _to_numpy(x: Any) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _tensor_shape(value_info: Any) -> list[int | None]:
+    tensor_type = value_info.type.tensor_type
+    if not tensor_type.HasField("shape"):
+        return []
+    return [
+        int(d.dim_value) if d.HasField("dim_value") and d.dim_value > 0 else None
+        for d in tensor_type.shape.dim
+    ]
+
+
+def _conv_class(groups: int, input_shape: list[int | None], weight_shape: list[int]) -> str:
+    out_channels = weight_shape[0] if len(weight_shape) >= 1 else None
+    per_group_in = weight_shape[1] if len(weight_shape) >= 2 else None
+    in_channels = input_shape[1] if len(input_shape) >= 2 else None
+    kh = weight_shape[2] if len(weight_shape) >= 3 else None
+    kw = weight_shape[3] if len(weight_shape) >= 4 else None
+    if (
+        groups > 1
+        and in_channels is not None
+        and out_channels is not None
+        and groups == in_channels
+        and groups == out_channels
+        and per_group_in == 1
+    ):
+        return "depthwise"
+    if groups > 1:
+        return "grouped"
+    if kh == 1 and kw == 1:
+        return "pointwise"
+    return "standard"
+
+
+def _conv_shape_metadata(model: Any) -> dict[str, Any]:
+    """Summarize Conv shape classes from an inferred ONNX graph."""
+
+    import onnx
+    from onnx import numpy_helper
+
+    inferred = onnx.shape_inference.infer_shapes(model)
+    shapes: dict[str, list[int | None]] = {}
+    for value in list(inferred.graph.input) + list(inferred.graph.value_info) + list(inferred.graph.output):
+        shapes[value.name] = _tensor_shape(value)
+    initializers = {init.name: numpy_helper.to_array(init) for init in inferred.graph.initializer}
+
+    by_class: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"count": 0, "estimated_flops": 0.0, "examples": []}
+    )
+    by_shape: dict[str, dict[str, Any]] = {}
+    total_flops = 0.0
+    conv_count = 0
+
+    for idx, node in enumerate(inferred.graph.node):
+        if node.op_type != "Conv" or len(node.input) < 2:
+            continue
+        conv_count += 1
+        attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in node.attribute}
+        groups = int(attrs.get("group", 1))
+        weight = initializers.get(node.input[1])
+        weight_shape = list(weight.shape) if weight is not None else []
+        input_shape = shapes.get(node.input[0], [])
+        output_shape = shapes.get(node.output[0], []) if node.output else []
+        strides_raw = attrs.get("strides", [])
+        pads_raw = attrs.get("pads", [])
+        strides = [int(v) for v in strides_raw] if strides_raw is not None else []
+        pads = [int(v) for v in pads_raw] if pads_raw is not None else []
+        klass = _conv_class(groups, input_shape, weight_shape)
+        if len(output_shape) >= 4 and len(weight_shape) >= 4:
+            n = output_shape[0] or 1
+            out_c = output_shape[1] or weight_shape[0]
+            out_h = output_shape[2] or 0
+            out_w = output_shape[3] or 0
+            k_per_group = weight_shape[1] * weight_shape[2] * weight_shape[3]
+            flops = float(2 * n * out_c * out_h * out_w * k_per_group)
+        else:
+            flops = 0.0
+        total_flops += flops
+        row = {
+            "node_index": idx,
+            "name": node.name or f"Conv_{idx}",
+            "class": klass,
+            "groups": groups,
+            "input_shape": input_shape,
+            "weight_shape": weight_shape,
+            "output_shape": output_shape,
+            "strides": strides,
+            "pads": pads,
+            "estimated_flops": flops,
+        }
+        bucket = by_class[klass]
+        bucket["count"] += 1
+        bucket["estimated_flops"] += flops
+        if len(bucket["examples"]) < 5:
+            bucket["examples"].append(row)
+        shape_key = json.dumps(
+            {
+                "class": klass,
+                "groups": groups,
+                "input": input_shape,
+                "weight": weight_shape,
+                "output": output_shape,
+                "strides": strides,
+                "pads": pads,
+            },
+            sort_keys=True,
+        )
+        shape_bucket = by_shape.setdefault(
+            shape_key,
+            {**row, "count": 0, "total_estimated_flops": 0.0},
+        )
+        shape_bucket["count"] += 1
+        shape_bucket["total_estimated_flops"] += flops
+
+    class_rows = {
+        k: {
+            "count": int(v["count"]),
+            "estimated_flops": float(v["estimated_flops"]),
+            "flop_fraction": float(v["estimated_flops"] / total_flops) if total_flops else 0.0,
+            "examples": v["examples"],
+        }
+        for k, v in sorted(by_class.items())
+    }
+    repeated_shapes = sorted(
+        by_shape.values(),
+        key=lambda r: (float(r["total_estimated_flops"]), int(r["count"])),
+        reverse=True,
+    )[:20]
+    return {
+        "conv_count": conv_count,
+        "estimated_flops": float(total_flops),
+        "by_class": class_rows,
+        "top_repeated_shapes": repeated_shapes,
+    }
+
+
 def _load_onnx(onnx_path: Path) -> dict[str, Any]:
     import onnx
 
@@ -218,7 +352,7 @@ def _load_onnx(onnx_path: Path) -> dict[str, Any]:
     op_counter: dict[str, int] = defaultdict(int)
     for node in model.graph.node:
         op_counter[node.op_type] += 1
-    return {
+    metadata = {
         "path": str(onnx_path),
         "size_bytes": int(onnx_path.stat().st_size),
         "num_nodes": int(len(model.graph.node)),
@@ -246,7 +380,11 @@ def _load_onnx(onnx_path: Path) -> dict[str, Any]:
         ],
         "op_counts": dict(sorted(op_counter.items())),
     }
-
+    try:
+        metadata["conv_shape_summary"] = _conv_shape_metadata(model)
+    except Exception as exc:
+        metadata["conv_shape_summary_error"] = f"{type(exc).__name__}: {exc}"
+    return metadata
 
 def _summarize_profile(profile: list[dict[str, Any]], top: int) -> list[dict[str, Any]]:
     per_kernel: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0.0, "total_ms": 0.0})
@@ -623,6 +761,15 @@ DEFAULT_MODELS: list[dict[str, Any]] = [
         "description": "YOLO11n detection (newer Ultralytics architecture)",
     },
     {
+        "key": "yolo11l",
+        "family": "yolo",
+        "ultralytics_name": "yolo11l.pt",
+        "pt": "yolo11l.pt",
+        "imgsz": 320,
+        "description": "YOLO11l detection (larger YOLO curiosity comparison)",
+        "optional": True,
+    },
+    {
         "key": "resnet18",
         "family": "torchvision",
         "torchvision_factory": "resnet18",
@@ -759,8 +906,13 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--models",
-        default=",".join(entry["key"] for entry in DEFAULT_MODELS),
-        help="Comma-separated subset of model keys to run (default: all).",
+        default=",".join(
+            entry["key"] for entry in DEFAULT_MODELS if not entry.get("optional")
+        ),
+        help=(
+            "Comma-separated subset of model keys to run. Default excludes "
+            "optional larger models; include yolo11l explicitly for the large YOLO probe."
+        ),
     )
     ap.add_argument("--cache-dir", type=Path, default=Path("/tmp/fastnn-zoo"))
     ap.add_argument("--warmup", type=int, default=1)

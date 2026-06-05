@@ -20,6 +20,9 @@ results it produced locally.
 Optional flags:
 
 - `--models yolov8n,yolo11n,resnet18,resnet50` to run a subset.
+- `--models yolo11n,yolo11l` to include the optional larger YOLO11l
+  curiosity comparison. Optional larger models are not part of the default
+  matrix because they download/export larger artifacts and take longer.
 - `--cache-dir /tmp/fastnn-zoo` (default) to control where the downloaded
   Ultralytics `.pt` weights and exported ONNX files are written.  The
   cache is not committed; the repo's `.gitignore` already covers
@@ -40,6 +43,10 @@ Each model record in the JSON contains:
 
 - `export`: source (ultralytics / torchvision), artifact path, onnx
   metadata (`num_nodes`, `op_counts`, `inputs`, `outputs`, `size_bytes`).
+- `onnx_metadata.conv_shape_summary`: model-agnostic Conv class metadata from
+  ONNX shape inference: per-class counts/estimated FLOPs for `standard`,
+  `pointwise`, `depthwise`, and `grouped` Conv; representative examples; and
+  the top repeated Conv shapes by total estimated FLOPs.
 - `pytorch`: PyTorch reference forward timing (ms), output shape, and
   the reference tensor for accuracy checks.
 - `onnxruntime`: ORT timing, output shape, errors when ORT is not
@@ -310,28 +317,86 @@ Interpretation:
   ONNX Runtime. Their top kernels point at depthwise/group/pointwise Conv and
   elementwise/memory traffic, not YOLO-specific graph overhead.
 
+## Conv class metadata and YOLO11l curiosity run
+
+The matrix now records `onnx_metadata.conv_shape_summary`, which classifies
+Conv nodes as `standard`, `pointwise`, `depthwise`, or `grouped`, with
+estimated FLOP fractions and top repeated shapes. This is metadata-only and
+comes from ONNX shape inference; it does not change fastnn execution.
+
+Representative default-matrix smoke with Conv metadata:
+
+```bash
+PYENV_VERSION=system OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python scripts/model_zoo_cpu_matrix.py \
+  --warmup 1 --iters 2 --profile-top 8 \
+  --json /tmp/fastnn_model_zoo_convmeta_full.json
+```
+
+Conv class split from that run:
+
+| model | Conv class split by estimated FLOPs |
+| --- | --- |
+| yolov8n | pointwise 25 nodes / 19.1%, standard 39 / 80.9% |
+| yolo11n | depthwise 7 / 0.4%, pointwise 46 / 35.9%, standard 35 / 63.7% |
+| resnet18 | pointwise 3 / 1.1%, standard 17 / 98.9% |
+| resnet50 | pointwise 36 / 51.9%, standard 17 / 48.1% |
+| mobilenet_v2 | depthwise 17 / 6.9%, pointwise 34 / 89.5%, standard 1 / 3.6% |
+| mobilenet_v3_small | depthwise 11 / 13.6%, pointwise 40 / 76.5%, standard 1 / 9.9% |
+| efficientnet_b0 | depthwise 16 / 9.0%, pointwise 64 / 88.2%, standard 1 / 2.8% |
+
+Important correction to the earlier intuition: MobileNet/EfficientNet are not
+mostly depthwise by FLOPs. They are mostly pointwise 1x1 Conv by estimated
+FLOPs, with depthwise Conv still important by count and memory behavior. A
+runtime optimization should therefore classify/profile pointwise and depthwise
+separately instead of assuming depthwise alone is the culprit.
+
+The optional larger YOLO comparison is selected explicitly so it does not slow
+down the default matrix:
+
+```bash
+PYENV_VERSION=system OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python scripts/model_zoo_cpu_matrix.py \
+  --models yolo11n,yolo11l \
+  --warmup 1 --iters 2 --profile-top 8 \
+  --json /tmp/fastnn_yolo11n_l_compare.json
+```
+
+Representative result:
+
+| model | fastnn ms | pytorch ms | ort ms | fastnn/PyTorch | fastnn/ORT | Conv class split by estimated FLOPs |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| yolo11n | 50.7 | 30.7 | 8.1 | 1.65x | 6.26x | depthwise 0.4%, pointwise 35.9%, standard 63.7% |
+| yolo11l | 309.9 | 262.1 | 63.4 | 1.18x | 4.88x | depthwise 0.1%, pointwise 38.8%, standard 61.1% |
+
+Blunt read: bigger YOLO is less relatively bad versus PyTorch than YOLO11n
+(1.18x vs 1.65x slower in this sample), but still far from ORT. The bigger
+model is dominated by the same standard/pointwise Conv mix, so it does not
+justify a separate YOLO-large-specific lane yet.
+
 ## Recommended next targets (ordered)
 
-1. **Add Conv shape/profile metadata to the model-zoo path.** Record groups,
-   kernel shape, input/output shape, activation, and per-instruction/profile
-   time where available. The current top-kernel table proves Conv dominates,
-   but it does not yet separate standard Conv, depthwise Conv, grouped Conv,
-   and pointwise Conv.
+1. **Join Conv class metadata to fastnn per-instruction profile timing.** The
+   current metadata proves the graph's Conv class/FLOP mix, but profile timing
+   is still aggregated by kernel name. The next measurement slice should map
+   runtime Conv instructions back to their class so we can report actual time
+   in standard vs pointwise vs depthwise Conv.
 
-2. **Use the Conv metadata to classify MobileNet/EfficientNet hotspots.** The
-   next runtime-changing lane should be based on measured depthwise/group /
-   pointwise time, not just family-level intuition.
+2. **Use the joined timing to classify MobileNet/EfficientNet hotspots.** The
+   next runtime-changing lane should be based on measured pointwise/depthwise
+   time, not just FLOP fractions or family-level intuition.
 
-3. **Prototype a model-agnostic depthwise/group Conv specialization or backend
-   path only after the classification lands.** Gate on full-model improvement
-   for MobileNetV2, MobileNetV3-small, and EfficientNet-B0, with YOLOv8n,
-   YOLO11n, ResNet18, and ResNet50 as regression anchors.
+3. **Prototype a model-agnostic pointwise/depthwise Conv specialization or
+   backend path only after the timing join lands.** Gate on full-model
+   improvement for MobileNetV2, MobileNetV3-small, and EfficientNet-B0, with
+   YOLOv8n, YOLO11n, YOLO11l, ResNet18, and ResNet50 as regression anchors.
 
-4. **Keep YOLO as a regression anchor, not the only target.** YOLO-specific
-   graph parallelism remains lower priority until the MobileNet/EfficientNet
-   Conv class is understood.
+4. **Keep YOLO as a regression anchor, not the only target.** YOLO11l suggests
+   larger YOLOs are less relatively bad vs PyTorch than small YOLOs, so the
+   immediate general lane should stay focused on the cross-model Conv class
+   split rather than a YOLO-large-specific path.
 
-5. **Revisit thread sweeps after the Conv classification.** Thread sweeps are
+5. **Revisit thread sweeps after the Conv timing join.** Thread sweeps are
    still useful, but optimizing thread settings before knowing which Conv
    classes dominate risks tuning around the wrong kernel family.
 
