@@ -216,3 +216,29 @@ def test_forward_prepared_arena_fallback_method_exists():
     executor = _relu_graph()
     assert hasattr(executor, "forward_prepared_arena_fallback")
     assert callable(executor.forward_prepared_arena_fallback)
+
+
+def test_profile_prepared_arena_fallback_matches_profile_shape():
+    """Prepared arena profiling exposes the same shape as profile().
+
+    This is the public measurement hook needed before comparing
+    WriteConst traffic on the arena-preload path against the default
+    dynamic profile.
+    """
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    x = fnn.tensor(np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4])
+
+    default_profile = executor.profile({"x": x})
+    prepared_profile = executor.profile_prepared_arena_fallback({"x": x})
+
+    assert set(default_profile.keys()) == {"outputs", "profile"}
+    assert set(prepared_profile.keys()) == {"outputs", "profile"}
+    np.testing.assert_array_equal(
+        default_profile["outputs"]["y"].numpy(), prepared_profile["outputs"]["y"].numpy()
+    )
+    assert prepared_profile["profile"]
+    assert {"instruction_index", "node_id", "kernel_name", "elapsed_ns", "node_name"}.issubset(
+        prepared_profile["profile"][0].keys()
+    )
