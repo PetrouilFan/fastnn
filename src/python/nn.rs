@@ -1465,7 +1465,7 @@ impl AotExecutor {
         let mut memcpy_bytes = 0usize;
         let mut fill_bytes = 0usize;
         let mut write_const_bytes = 0usize;
-        let mut kernel_counts: HashMap<String, usize> = HashMap::new();
+        let mut kernel_counts: HashMap<String, (usize, usize, usize)> = HashMap::new();
 
         for instr in &plan.instructions {
             match instr {
@@ -1477,12 +1477,17 @@ impl AotExecutor {
                     ..
                 } => {
                     call_kernel_count += 1;
-                    *kernel_counts.entry(kernel_name.clone()).or_insert(0) += 1;
-                    kernel_read_bytes += input_slices.iter().map(|s| s.size).sum::<usize>();
-                    kernel_write_bytes += output_slice.size;
+                    let entry = kernel_counts.entry(kernel_name.clone()).or_insert((0, 0, 0));
+                    entry.0 += 1;
+                    let read_bytes = input_slices.iter().map(|s| s.size).sum::<usize>();
+                    let mut write_bytes = output_slice.size;
                     if let Some(sec) = secondary_output_slice {
-                        kernel_write_bytes += sec.size;
+                        write_bytes += sec.size;
                     }
+                    entry.1 += read_bytes;
+                    entry.2 += write_bytes;
+                    kernel_read_bytes += read_bytes;
+                    kernel_write_bytes += write_bytes;
                 }
                 Instruction::MemCopy { dst, src } => {
                     memcpy_count += 1;
@@ -1524,12 +1529,15 @@ impl AotExecutor {
         )?;
 
         let top_kernels = PyList::empty(py);
-        let mut kernel_counts: Vec<(String, usize)> = kernel_counts.into_iter().collect();
-        kernel_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        for (kernel, count) in kernel_counts.into_iter().take(20) {
+        let mut kernel_counts: Vec<(String, (usize, usize, usize))> = kernel_counts.into_iter().collect();
+        kernel_counts.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+        for (kernel, (count, read_bytes, write_bytes)) in kernel_counts.into_iter().take(20) {
             let item = PyDict::new(py);
             item.set_item("kernel", kernel)?;
             item.set_item("count", count)?;
+            item.set_item("read_bytes", read_bytes)?;
+            item.set_item("write_bytes", write_bytes)?;
+            item.set_item("static_bytes", read_bytes + write_bytes)?;
             top_kernels.append(item)?;
         }
         stats.set_item("top_kernels_by_count", top_kernels)?;
