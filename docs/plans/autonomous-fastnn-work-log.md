@@ -260,3 +260,34 @@ Findings:
 
 Next recommended action:
 - Cross-reference the largest WriteConst destination offsets with static-weight bindings/prepared constant arena entries, then add a RED guardrail for a no-copy immutable-constant read path for one proven-safe Conv/MatMul constant class.
+
+## 2026-06-05 13:13 EEST — autonomous cron
+
+Intent:
+- Continue P1 persistent-constant diagnostics by cross-referencing large `WriteConst` rows with prepared Conv/MatMul static-weight metadata.
+
+Changed:
+- Extended `AotExecutor.memory_stats()["top_write_consts_by_size"]` rows with prepared consumer instruction index, input index, static role, and constant arena name/id when the destination slot is a prepared Conv/MatMul weight or bias.
+- Updated `scripts/graph_memory_stats.py` to print the prepared-static cross-reference inline for largest WriteConst rows.
+- Added a RED/GREEN Python regression using a tiny Conv with static weight+bias.
+- Updated `docs/plans/graph-memory-stats.md` with the new diagnostic and YOLO findings.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_aot_executor_profile.py::test_memory_stats_cross_references_prepared_static_weight_write_consts -q` → failed before implementation because no WriteConst row exposed `prepared_static_role`.
+- `cargo check --release --lib --features prepared-plan` → pass.
+- `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → pass.
+- `.venv/bin/python -m pytest tests/test_aot_executor_profile.py -q` → 4 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_stats.py tests/test_aot_executor_profile.py` → pass.
+- `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_stats.py --onnx yolov8n.onnx --json /tmp/graph_memory_stats_prepared_writeconst_yolo.json` → pass.
+- `cargo fmt --check` → pass.
+- `cargo test --release --lib` → 241 passed.
+- `cargo test --release --lib --features prepared-plan` → 246 passed.
+- `cargo test --release --lib --features 'prepared-plan openblas'` → 248 passed.
+- `git diff --check` → pass.
+
+Findings:
+- YOLOv8n largest WriteConst rows are all prepared Conv weights, not ambiguous standalone constants: `#118` is 1.12 MiB feeding prepared consumer `#165` (`conv_118_i1`), `#83` is 720 KiB feeding consumer `#233`, and the next several 576 KiB rows are also prepared Conv weights.
+- This narrows the next P1 no-copy design: start with immutable/static Conv weight slots, because the largest WriteConst traffic already maps to prepared Conv consumers.
+
+Next recommended action:
+- Add a RED guardrail for a no-copy prepared Conv-weight read path or immutable constant slot classification that proves kernels can consume the prepared constant payload without per-forward arena re-materialisation and without changing default `forward` semantics.
