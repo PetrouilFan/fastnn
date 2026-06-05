@@ -14,7 +14,18 @@ PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py \
   --json /tmp/graph_memory_profile_yolo.json
 ```
 
-The JSON contains:
+To include the opt-in prepared arena fallback comparison in the same artifact, build the extension with `prepared-plan` and add `--also-prepared`:
+
+```bash
+PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py \
+  --onnx yolov8n.onnx \
+  --input-shape 1,3,320,320 \
+  --top 20 \
+  --json /tmp/graph_memory_profile_also_prepared_yolo.json \
+  --also-prepared
+```
+
+The default JSON contains:
 
 - `summary.profiled_total_ms`
 - `summary.estimated_static_traffic_bytes`
@@ -59,7 +70,7 @@ Top memory/layout signals from exact per-kernel bytes were `conv2d_silu` (43.05 
 
 `build_profile_delta(default_profile, prepared_profile)` compares two `build_memory_profile()` payloads, with deltas reported as `prepared - default`. Negative values mean the prepared path removed profile entries, time, or estimated traffic.
 
-This is intended for P1 persistent-constant work: run the default `profile()` path and `profile_prepared_arena_fallback()` on the same input, build memory profiles from the shared `memory_stats()` payload, then write a JSON bundle with `default`, `prepared_arena_fallback`, and `delta`. The delta summary includes:
+This is intended for P1 persistent-constant work: pass `--also-prepared` to run the default `profile()` path and `profile_prepared_arena_fallback()` on the same input, build memory profiles from the shared `memory_stats()` payload, then write a JSON bundle with `default`, `prepared`, and `delta`. The delta summary includes:
 
 - `profiled_total_ms_delta`
 - `profiled_kernel_static_bytes_delta`
@@ -71,13 +82,13 @@ This is intended for P1 persistent-constant work: run the default `profile()` pa
 
 When default and prepared profiles share the same static `memory_stats()` payload, `write_const_static_bytes_delta` is apportioned from `write_const_bytes / write_const_count` and the observed profiled `write_const` count. This makes skipped `WriteConst` instructions visible instead of assigning the whole aggregate constant byte total to both profiles.
 
-Representative YOLOv8n smoke written to `/tmp/graph_memory_profile_prepared_delta_yolo.json` on 2026-06-05:
+Representative YOLOv8n smoke written to `/tmp/graph_memory_profile_also_prepared_yolo.json` on 2026-06-05 with `--also-prepared`:
 
 ```text
-profiled total delta: -189.073 ms
+profiled total delta: -30.093 ms
 write_const count delta: -64
 write_const static bytes delta: -5.89 MiB
-write_const total time delta: -2.284 ms
+write_const total time delta: -8.901 ms
 ```
 
 The large total profile delta is an instrumented single-run signal, not a stable benchmark. The stable P1 finding is that the existing prepared-arena preload path measurably removes 64 profiled `WriteConst` instructions and about 6 MiB of per-forward constant write traffic on YOLOv8n while leaving the default runtime path unchanged.

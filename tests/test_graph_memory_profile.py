@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.graph_memory_profile import build_memory_profile, build_profile_delta
+from scripts.graph_memory_profile import build_memory_profile, build_profile_delta, build_profile_payload
 
 
 def test_build_memory_profile_ranks_kernels_by_profiled_static_traffic() -> None:
@@ -247,3 +247,63 @@ def test_build_profile_delta_apportions_write_const_bytes_when_memory_stats_are_
 
     assert delta["summary"]["write_const_count_delta"] == -2
     assert delta["summary"]["write_const_static_bytes_delta"] == -8192
+
+
+def test_build_memory_profile_treats_memcpy_spelling_as_profiled_copy_traffic() -> None:
+    memory_stats = {
+        "estimated_static_traffic_bytes": 1536,
+        "kernel_read_bytes": 0,
+        "kernel_write_bytes": 0,
+        "memcpy_bytes": 1536,
+        "write_const_bytes": 0,
+        "fill_bytes": 0,
+        "top_kernels_by_count": [],
+    }
+
+    profile = build_memory_profile(memory_stats, [{"kernel_name": "memcpy", "elapsed_ns": 500_000}])
+
+    assert profile["summary"]["profiled_static_traffic_bytes"] == 1536
+    assert profile["summary"]["unprofiled_static_traffic_bytes"] == 0
+    assert profile["unprofiled_static_traffic"] == []
+    assert profile["kernels"][0]["kernel_name"] == "memcpy"
+    assert profile["kernels"][0]["static_bytes"] == 1536
+
+
+def test_build_profile_payload_preserves_single_profile_shape_without_prepared_entries() -> None:
+    memory_stats = {
+        "estimated_static_traffic_bytes": 1024,
+        "kernel_read_bytes": 0,
+        "kernel_write_bytes": 1024,
+        "top_kernels_by_count": [{"kernel": "add_f32", "count": 1}],
+    }
+
+    payload = build_profile_payload(memory_stats, [{"kernel_name": "add_f32", "elapsed_ns": 1_000_000}])
+
+    assert set(payload) == {"summary", "kernels", "unprofiled_static_traffic", "memory_stats"}
+    assert payload["summary"]["profiled_total_ms"] == 1.0
+    assert payload["kernels"][0]["kernel_name"] == "add_f32"
+
+
+def test_build_profile_payload_embeds_default_prepared_and_delta_profiles() -> None:
+    memory_stats = {
+        "estimated_static_traffic_bytes": 12_288,
+        "kernel_read_bytes": 0,
+        "kernel_write_bytes": 0,
+        "write_const_bytes": 12_288,
+        "write_const_count": 3,
+        "top_kernels_by_count": [],
+    }
+    default_entries = [
+        {"kernel_name": "write_const", "elapsed_ns": 1_000_000},
+        {"kernel_name": "write_const", "elapsed_ns": 2_000_000},
+        {"kernel_name": "write_const", "elapsed_ns": 3_000_000},
+    ]
+    prepared_entries = [{"kernel_name": "write_const", "elapsed_ns": 500_000}]
+
+    payload = build_profile_payload(memory_stats, default_entries, prepared_entries)
+
+    assert set(payload) == {"default", "prepared", "delta"}
+    assert payload["default"]["summary"]["profiled_total_ms"] == 6.0
+    assert payload["prepared"]["summary"]["profiled_total_ms"] == 0.5
+    assert payload["delta"]["summary"]["write_const_count_delta"] == -2
+    assert payload["delta"]["summary"]["write_const_static_bytes_delta"] == -8192
