@@ -67,6 +67,33 @@ def test_memory_stats_reports_instruction_level_static_traffic():
     assert row["static_bytes"] == 32
 
 
+def test_memory_stats_instruction_rows_include_graph_io_shapes_for_layout_work():
+    import fastnn as fnn
+
+    nodes = [
+        {"name": "concat1", "op_type": "Concat", "inputs": "a,b", "outputs": "y", "axis": "1"}
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {},
+        ["a", "b"],
+        ["y"],
+        input_shapes={"a": [1, 2, 4], "b": [1, 3, 4]},
+    )
+
+    stats = executor.memory_stats()
+    rows = [row for row in stats["top_instructions_by_static_bytes"] if row["kernel_name"] == "concat"]
+    assert rows, "concat should appear as a profiled instruction row"
+    row = rows[0]
+    assert row["node_id"] >= 0
+    assert row["node_name"] == "concat1"
+    assert row["op_type"] == "Concat"
+    assert row["input_node_ids"] == row["input_nodes"]
+    assert len(row["input_nodes"]) == 2
+    assert row["input_shapes"] == [[1, 2, 4], [1, 3, 4]]
+    assert row["output_shape"] == [1, 5, 4]
+
+
 def test_memory_stats_reports_write_const_rows_for_persistent_constant_work():
     import fastnn as fnn
 
