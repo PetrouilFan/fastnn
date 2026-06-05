@@ -141,6 +141,39 @@ def build_memory_profile(
 
     kernel_rows.sort(key=lambda row: (row["static_bytes"], row["total_ms"]), reverse=True)
 
+    kernel_timing = {
+        str(row["kernel_name"]): {
+            "profile_count": int(row["profile_count"]),
+            "total_ms": float(row["total_ms"]),
+            "mean_ms": float(row["mean_ms"]),
+        }
+        for row in kernel_rows
+    }
+    instruction_hotspots: list[dict[str, Any]] = []
+    for row in memory_stats.get("top_instructions_by_static_bytes", []):
+        kernel = str(row.get("kernel_name", row.get("kernel", row.get("kind", "<unknown>"))))
+        timing = kernel_timing.get(kernel, {"profile_count": 0, "total_ms": 0.0, "mean_ms": 0.0})
+        static_bytes = int(row.get("static_bytes", int(row.get("read_bytes", 0)) + int(row.get("write_bytes", 0))))
+        estimated_total_ms = float(timing["mean_ms"])
+        bytes_per_ms = static_bytes / estimated_total_ms if estimated_total_ms > 0.0 else 0.0
+        instruction_hotspots.append(
+            {
+                "instruction_index": int(row.get("instruction_index", -1)),
+                "kind": str(row.get("kind", "")),
+                "kernel_name": kernel,
+                "node_id": row.get("node_id"),
+                "read_bytes": int(row.get("read_bytes", 0)),
+                "write_bytes": int(row.get("write_bytes", 0)),
+                "static_bytes": static_bytes,
+                "estimated_total_ms": estimated_total_ms,
+                "profile_count_for_kernel": int(timing["profile_count"]),
+                "profile_total_ms_for_kernel": float(timing["total_ms"]),
+                "bytes_per_ms": bytes_per_ms,
+                "suspected_memory_bound": static_bytes > 0 and (estimated_total_ms <= 1.0 or bytes_per_ms >= 1_000_000),
+            }
+        )
+    instruction_hotspots.sort(key=lambda row: (row["static_bytes"], row["estimated_total_ms"]), reverse=True)
+
     unprofiled = [
         {"kind": "memcpy", "bytes": int(memory_stats.get("memcpy_bytes", 0))},
         {"kind": "write_const", "bytes": int(memory_stats.get("write_const_bytes", 0))},
@@ -167,6 +200,7 @@ def build_memory_profile(
             "arena_size": int(memory_stats.get("arena_size", 0)),
         },
         "kernels": kernel_rows,
+        "instruction_hotspots": instruction_hotspots,
         "unprofiled_static_traffic": unprofiled,
         "memory_stats": memory_stats,
     }
@@ -328,6 +362,16 @@ def _print_summary(model: Path, payload: dict[str, Any], top: int) -> None:
             f"    {row['kernel_name']}: {row['total_ms']:.3f} ms, "
             f"{_fmt_bytes(int(row['static_bytes']))}, {row['bytes_per_ms'] / (1024 * 1024):.2f} MiB/ms{marker}"
         )
+    if payload.get("instruction_hotspots"):
+        print("  top instruction hotspots by static bytes:")
+        for row in payload["instruction_hotspots"][:top]:
+            marker = " memory-bound?" if row["suspected_memory_bound"] else ""
+            node = "" if row.get("node_id") is None else f", node {row['node_id']}"
+            print(
+                f"    #{row['instruction_index']} {row['kernel_name']}{node}: "
+                f"~{row['estimated_total_ms']:.3f} ms, {_fmt_bytes(int(row['static_bytes']))}, "
+                f"{row['bytes_per_ms'] / (1024 * 1024):.2f} MiB/ms{marker}"
+            )
     if payload["unprofiled_static_traffic"]:
         print("  unprofiled static traffic:")
         for row in payload["unprofiled_static_traffic"]:
