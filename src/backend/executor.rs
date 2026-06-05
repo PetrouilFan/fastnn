@@ -159,6 +159,26 @@ impl<B: Backend> GraphExecutor<B> {
         self.execute_internal(graph, plan, memory_plan, inputs, true, None)
     }
 
+    /// Profile the opt-in prepared arena fallback path.
+    ///
+    /// This is a measurement hook for comparing the default plan with
+    /// the prepared-constant preload path. It uses the same dispatch
+    /// logic as [`Self::execute_prepared_arena_fallback`] but preserves
+    /// per-instruction [`ProfileEntry`] rows so callers can observe which
+    /// `WriteConst` instructions were removed from the temporary plan.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_profile_prepared_arena_fallback(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared))
+    }
+
     /// Opt-in prepared-execution fallback path.
     ///
     /// This is a **behaviour-identical scaffold** for future prepared lanes:
