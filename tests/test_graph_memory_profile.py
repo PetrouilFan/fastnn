@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.graph_memory_profile import build_memory_profile
+from scripts.graph_memory_profile import build_memory_profile, build_profile_delta
 
 
 def test_build_memory_profile_ranks_kernels_by_profiled_static_traffic() -> None:
@@ -114,3 +114,136 @@ def test_build_memory_profile_uses_profiled_copy_and_const_bytes_without_double_
         "memcopy": 1536,
         "write_const": 512,
     }
+
+
+def _profile_payload(
+    *,
+    total_ms: float,
+    kernel_static_bytes: int,
+    estimated_static_bytes: int,
+    kernels: list[dict[str, object]],
+    unprofiled: list[dict[str, object]] | None = None,
+    write_const_bytes: int = 0,
+) -> dict[str, object]:
+    return {
+        "summary": {
+            "profiled_total_ms": total_ms,
+            "estimated_static_traffic_bytes": estimated_static_bytes,
+            "profiled_kernel_static_bytes": kernel_static_bytes,
+        },
+        "kernels": kernels,
+        "unprofiled_static_traffic": unprofiled or [],
+        "memory_stats": {"write_const_bytes": write_const_bytes},
+    }
+
+
+def test_build_profile_delta_reports_removed_write_const_entries() -> None:
+    default = _profile_payload(
+        total_ms=3.0,
+        kernel_static_bytes=4096,
+        estimated_static_bytes=16_384,
+        write_const_bytes=12_288,
+        kernels=[{"kernel_name": "write_const", "profile_count": 3, "total_ms": 1.5, "static_bytes": 12_288}],
+    )
+    prepared = _profile_payload(
+        total_ms=2.0,
+        kernel_static_bytes=4096,
+        estimated_static_bytes=8192,
+        write_const_bytes=4096,
+        kernels=[{"kernel_name": "write_const", "profile_count": 1, "total_ms": 0.5, "static_bytes": 4096}],
+    )
+
+    delta = build_profile_delta(default, prepared)
+
+    assert delta["summary"]["write_const_count_delta"] == -2
+    assert delta["summary"]["write_const_static_bytes_delta"] == -8192
+    assert delta["summary"]["write_const_total_ms_delta"] == -1.0
+    write_const = next(row for row in delta["kernels"] if row["kernel_name"] == "write_const")
+    assert write_const["count_delta"] == -2
+    assert write_const["removed"] is False
+    assert write_const["added"] is False
+
+
+def test_build_profile_delta_marks_removed_and_added_kernels() -> None:
+    default = _profile_payload(
+        total_ms=4.0,
+        kernel_static_bytes=4096,
+        estimated_static_bytes=4096,
+        kernels=[{"kernel_name": "slice_f32", "profile_count": 4, "total_ms": 4.0, "static_bytes": 4096}],
+    )
+    prepared = _profile_payload(
+        total_ms=4.0,
+        kernel_static_bytes=4096,
+        estimated_static_bytes=4096,
+        kernels=[{"kernel_name": "prepared_slice", "profile_count": 4, "total_ms": 4.0, "static_bytes": 4096}],
+    )
+
+    delta = build_profile_delta(default, prepared)
+
+    rows = {row["kernel_name"]: row for row in delta["kernels"]}
+    assert rows["slice_f32"]["removed"] is True
+    assert rows["slice_f32"]["added"] is False
+    assert rows["slice_f32"]["count_delta"] == -4
+    assert rows["slice_f32"]["total_ms_delta"] == -4.0
+    assert rows["prepared_slice"]["removed"] is False
+    assert rows["prepared_slice"]["added"] is True
+    assert rows["prepared_slice"]["count_delta"] == 4
+
+
+def test_build_profile_delta_summarises_total_profile_time() -> None:
+    default = _profile_payload(total_ms=10.0, kernel_static_bytes=12_000, estimated_static_bytes=20_000, kernels=[])
+    prepared = _profile_payload(total_ms=6.0, kernel_static_bytes=8000, estimated_static_bytes=18_000, kernels=[])
+
+    delta = build_profile_delta(default, prepared)
+
+    assert delta["summary"]["profiled_total_ms_delta"] == -4.0
+    assert delta["summary"]["profiled_kernel_static_bytes_delta"] == -4000
+    assert delta["summary"]["estimated_static_traffic_bytes_delta"] == -2000
+
+
+def test_build_profile_delta_uses_unprofiled_write_const_when_profiled_silences_it() -> None:
+    default = _profile_payload(
+        total_ms=1.0,
+        kernel_static_bytes=0,
+        estimated_static_bytes=12_288,
+        write_const_bytes=12_288,
+        kernels=[{"kernel_name": "write_const", "profile_count": 3, "total_ms": 1.5, "static_bytes": 12_288}],
+    )
+    prepared = _profile_payload(
+        total_ms=1.0,
+        kernel_static_bytes=0,
+        estimated_static_bytes=4096,
+        write_const_bytes=4096,
+        kernels=[],
+        unprofiled=[{"kind": "write_const", "bytes": 4096}],
+    )
+
+    delta = build_profile_delta(default, prepared)
+
+    assert delta["summary"]["write_const_count_delta"] == -3
+    assert delta["summary"]["write_const_static_bytes_delta"] == -8192
+    assert delta["summary"]["unprofiled_write_const_bytes_delta"] == 4096
+
+
+def test_build_profile_delta_apportions_write_const_bytes_when_memory_stats_are_shared() -> None:
+    default = _profile_payload(
+        total_ms=1.0,
+        kernel_static_bytes=0,
+        estimated_static_bytes=12_288,
+        write_const_bytes=12_288,
+        kernels=[{"kernel_name": "write_const", "profile_count": 3, "total_ms": 1.5, "static_bytes": 12_288}],
+    )
+    default["memory_stats"]["write_const_count"] = 3
+    prepared = _profile_payload(
+        total_ms=1.0,
+        kernel_static_bytes=0,
+        estimated_static_bytes=12_288,
+        write_const_bytes=12_288,
+        kernels=[{"kernel_name": "write_const", "profile_count": 1, "total_ms": 0.5, "static_bytes": 12_288}],
+    )
+    prepared["memory_stats"]["write_const_count"] = 3
+
+    delta = build_profile_delta(default, prepared)
+
+    assert delta["summary"]["write_const_count_delta"] == -2
+    assert delta["summary"]["write_const_static_bytes_delta"] == -8192
