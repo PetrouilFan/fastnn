@@ -15,6 +15,7 @@ compiled ONNX graph:
 - slot-reuse savings, alias group count, and largest alias groups
 - instruction mix
 - exact per-instruction traffic rows ranked by static bytes (`top_instructions_by_static_bytes`)
+- largest WriteConst rows with destination offsets/sizes (`top_write_consts_by_size`)
 - estimated static traffic bytes from kernel inputs/outputs, `MemCopy`, `Fill`,
   and `WriteConst`
 - top kernels by instruction count
