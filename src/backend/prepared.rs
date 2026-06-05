@@ -1,6 +1,7 @@
 use crate::backend::{BufferSlice, ExecutablePlan, Instruction};
 use crate::ir::node::NodeId;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
 pub struct PreparedExecutablePlan {
@@ -1260,6 +1261,165 @@ fn conv2d_estimated_flops(conv: &PreparedConv2d) -> usize {
         + 1;
     let c_per_group = conv.c / conv.groups.max(1);
     2 * conv.n * conv.f * c_per_group * conv.kh * conv.kw * h_out * w_out
+}
+
+// ── Persistent immutable weight view ─────────────────────────
+//
+// `PersistentPreparedWeights` is the runtime structure that the
+// opt-in no-copy dispatch path consumes.  It maps the (offset,
+// size) byte range that an `Instruction::WriteConst` would have
+// written into the mutable arena to a pre-existing, immutable
+// `Vec<f32>` payload that lives on the [`PreparedExecutablePlan`].
+//
+// The dispatch loop consults this view to decide whether to read
+// from the arena (default) or directly from the persistent weight
+// buffer (no-copy).  Persistent payloads are held behind
+// [`Arc<Vec<f32>>`] so the view can be cloned cheaply across
+// executor invocations.
+
+/// One `(offset, size)` slot in a [`PersistentPreparedWeights`].
+pub type PreparedWeightKey = (usize, usize);
+
+/// Persistent immutable weight table for the opt-in no-copy
+/// prepared dispatch path.
+///
+/// Each entry maps a `(offset, size)` byte range — the bytes an
+/// [`Instruction::WriteConst`] would have written into the mutable
+/// arena — to a pre-existing `Vec<f32>` payload that lives outside
+/// the mutable arena.  The dispatch loop consults this view to
+/// decide whether to read from the arena (default) or directly from
+/// the persistent weight buffer (no-copy).
+///
+/// `PersistentPreparedWeights` is **metadata only** when built via
+/// the default constructor: it has no entries and the dispatch
+/// loop falls back to the standard arena read.  Populate it via
+/// [`PersistentPreparedWeights::insert`] before calling
+/// [`GraphExecutor::execute_prepared_no_copy`](crate::backend::executor::GraphExecutor::execute_prepared_no_copy).
+#[derive(Default, Debug)]
+pub struct PersistentPreparedWeights {
+    by_key: HashMap<PreparedWeightKey, Arc<Vec<f32>>>,
+}
+
+impl PersistentPreparedWeights {
+    /// Build an empty view.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an immutable f32 payload for the `(offset, size)`
+    /// slot `key`.  The dispatch loop will read the weight bytes
+    /// directly from `payload` instead of the mutable arena.
+    ///
+    /// Duplicate inserts for the same key return `false` and keep
+    /// the first payload — the same dedupe-at-registration
+    /// contract used by [`PreparedConstantArena::insert`].
+    pub fn insert(&mut self, key: PreparedWeightKey, payload: Arc<Vec<f32>>) -> bool {
+        if self.by_key.contains_key(&key) {
+            return false;
+        }
+        self.by_key.insert(key, payload);
+        true
+    }
+
+    /// Look up an immutable f32 payload registered for `key`.
+    /// Returns `None` when no override is registered — the
+    /// dispatch loop falls back to the standard arena read.
+    pub fn get(&self, key: &PreparedWeightKey) -> Option<&[f32]> {
+        self.by_key.get(key).map(|arc| arc.as_slice())
+    }
+
+    /// Number of registered overrides.
+    pub fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// `true` when no overrides have been registered.
+    pub fn is_empty(&self) -> bool {
+        self.by_key.is_empty()
+    }
+
+    /// Iterate over all `(key, payload)` pairs in registration order
+    /// (insertion order is preserved by the underlying `HashMap` only
+    /// when not removed; callers must not depend on order).
+    pub fn iter(&self) -> impl Iterator<Item = (&PreparedWeightKey, &Arc<Vec<f32>>)> {
+        self.by_key.iter()
+    }
+}
+
+impl Clone for PersistentPreparedWeights {
+    fn clone(&self) -> Self {
+        Self {
+            by_key: self.by_key.clone(),
+        }
+    }
+}
+
+/// Build a [`PersistentPreparedWeights`] view from a
+/// [`PreparedExecutablePlan`] by walking every `Conv2d` /
+/// `MatMul` prepared instruction and registering its bound
+/// `packed_weight` and `packed_bias` slots.
+///
+/// Only fp32 weight/bias bindings are registered — packed transposed
+/// and quantized slots stay on the safe fallback path because the
+/// runtime kernels in this wave do not consume them.
+///
+/// Bindings whose `prepared.weight` / `prepared.bias` byte range
+/// does not match the registered arena entry are silently skipped:
+/// the dispatch loop falls back to the standard arena read for that
+/// slot, which is the same behaviour callers already get from the
+/// pre-existing prepared-arena fallback path.
+pub fn build_persistent_prepared_weights(
+    prepared: &PreparedExecutablePlan,
+) -> PersistentPreparedWeights {
+    use PreparedInstruction::*;
+
+    let Some(arena) = prepared.constant_arena() else {
+        return PersistentPreparedWeights::new();
+    };
+
+    let mut view = PersistentPreparedWeights::new();
+    for inst in &prepared.instructions {
+        match inst {
+            Conv2d(conv) => {
+                register_fp32_slot(&mut view, arena, conv.packed_weight, conv.weight);
+                if let Some(bias_slot) = conv.bias {
+                    register_fp32_slot(&mut view, arena, conv.packed_bias, bias_slot);
+                }
+            }
+            MatMul(matmul) => {
+                register_fp32_slot(&mut view, arena, matmul.packed_weight, matmul.b);
+                if let Some(bias_slot) = matmul.bias {
+                    register_fp32_slot(&mut view, arena, matmul.packed_bias, bias_slot);
+                }
+            }
+            Generic { .. } => {}
+        }
+    }
+    view
+}
+
+fn register_fp32_slot(
+    view: &mut PersistentPreparedWeights,
+    arena: &PreparedConstantArena,
+    packed_id: Option<PackedWeightId>,
+    slot: BufferSlice,
+) {
+    let Some(id) = packed_id else {
+        return;
+    };
+    if id.kind != PackedWeightKind::Fp32 {
+        return;
+    }
+    let Some(payload) = arena.get(id) else {
+        return;
+    };
+    let expected_bytes = slot.size;
+    let actual_bytes = payload.len() * std::mem::size_of::<f32>();
+    if expected_bytes != actual_bytes {
+        return;
+    }
+    let key = (slot.offset, slot.size);
+    view.insert(key, Arc::new(payload.to_vec()));
 }
 
 #[cfg(test)]
@@ -3165,5 +3325,52 @@ mod tests {
         let err = validate_prepared_against_plan(&forged, &plan)
             .expect_err("out-of-bounds index must be rejected");
         assert!(matches!(err, crate::backend::BackendError::Dispatch(_)));
+    }
+
+    // ── PersistentPreparedWeights unit tests ────────────────
+
+    /// `insert` + `get` round-trips the payload via the supplied Arc
+    /// and `len` / `is_empty` reflect the new entry.
+    #[test]
+    fn persistent_view_insert_get_roundtrip() {
+        let mut view: PersistentPreparedWeights = PersistentPreparedWeights::default();
+        assert!(view.is_empty());
+        assert_eq!(view.len(), 0);
+
+        let payload: Arc<Vec<f32>> = Arc::new(vec![1.0, 2.0, 3.0, 4.0]);
+        view.insert((128, 16), payload.clone());
+        assert!(!view.is_empty());
+        assert_eq!(view.len(), 1);
+
+        let got = view.get(&(128, 16)).expect("entry must be present");
+        assert_eq!(got.as_ref(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(view.get(&(0, 0)), None);
+    }
+
+    /// `iter` yields all `(key, value)` pairs without consuming the
+    /// view.  Order is not part of the public contract (the
+    /// underlying storage is hash-based) but the union of entries
+    /// must match what was inserted.
+    #[test]
+    fn persistent_view_iter_yields_all_entries() {
+        let mut view: PersistentPreparedWeights = PersistentPreparedWeights::default();
+        view.insert((0, 16), Arc::new(vec![0.0; 4]));
+        view.insert((16, 8), Arc::new(vec![1.0, 2.0]));
+        let mut collected: Vec<((usize, usize), usize)> =
+            view.iter().map(|(k, v)| (*k, v.len())).collect();
+        collected.sort_by_key(|(k, _)| *k);
+        assert_eq!(collected, vec![((0, 16), 4), ((16, 8), 2)]);
+    }
+
+    /// `Clone` shares the inner `Arc<Vec<f32>>` so cloning does not
+    /// duplicate the payload bytes.
+    #[test]
+    fn persistent_view_clone_shares_payload() {
+        let mut view: PersistentPreparedWeights = PersistentPreparedWeights::default();
+        let payload: Arc<Vec<f32>> = Arc::new(vec![42.0, 43.0]);
+        view.insert((0, 8), payload.clone());
+        let cloned = view.clone();
+        let got = cloned.get(&(0, 8)).expect("cloned entry must be present");
+        assert_eq!(got.as_ref(), payload.as_ref());
     }
 }

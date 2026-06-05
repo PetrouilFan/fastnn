@@ -1339,6 +1339,52 @@ impl AotExecutor {
         ))
     }
 
+    /// Opt-in prepared no-copy path.  Built on top of a persistent
+    /// immutable view of the fp32 weight / bias constants stored in
+    /// [`PreparedConstantArena`].  The runtime arena is not
+    /// pre-populated for those slots, and the corresponding
+    /// `WriteConst` instructions are filtered out of the plan; the
+    /// dispatch kernel borrows the weight / bias bytes directly from
+    /// the persistent view instead of pulling them out of the mutable
+    /// arena.  Behaviour is identical to [`AotExecutor::forward`] when
+    /// the model has no fp32 Conv2d / MatMul slot to override, and
+    /// matches it bit-exactly for the models covered by the view.
+    #[cfg(feature = "prepared-plan")]
+    fn forward_prepared_no_copy(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let output_data = self.executor
+            .execute_prepared_no_copy(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.decode_outputs(output_data)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn forward_prepared_no_copy(
+        &self,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "forward_prepared_no_copy requires the 'prepared-plan' feature",
+        ))
+    }
+
     fn profile(
         &mut self,
         py: pyo3::Python<'_>,
