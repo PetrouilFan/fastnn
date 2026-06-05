@@ -65,3 +65,33 @@ def test_memory_stats_reports_instruction_level_static_traffic():
     assert row["read_bytes"] == 16
     assert row["write_bytes"] == 16
     assert row["static_bytes"] == 32
+
+
+def test_memory_stats_reports_write_const_rows_for_persistent_constant_work():
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+
+    stats = executor.memory_stats()
+
+    rows = stats["top_write_consts_by_size"]
+    assert rows, "memory_stats should expose largest WriteConst instructions"
+    row = rows[0]
+    assert row["instruction_index"] >= 0
+    assert row["write_bytes"] == 16
+    assert row["dst_offset"] >= 0
+    assert row["dst_size"] == 16
+    assert row["data_len"] == 16
