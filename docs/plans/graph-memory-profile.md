@@ -92,3 +92,43 @@ write_const total time delta: -8.901 ms
 ```
 
 The large total profile delta is an instrumented single-run signal, not a stable benchmark. The stable P1 finding is that the existing prepared-arena preload path measurably removes 64 profiled `WriteConst` instructions and about 6 MiB of per-forward constant write traffic on YOLOv8n while leaving the default runtime path unchanged.
+
+## Prepared-arena static bias preload result
+
+Prepared static bindings now expose `packed_bias` handles for Conv2d/MatMul, and the opt-in prepared-arena fallback preloads those fp32 bias/static slots in addition to weights. Default `forward()` remains unchanged.
+
+Representative command:
+
+```bash
+PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py \
+  --onnx yolov8n.onnx \
+  --json /tmp/graph_memory_profile_bias_preload_yolo.json \
+  --top 8 \
+  --also-prepared
+```
+
+Representative delta:
+
+```text
+write_const entries: -127
+write_const static traffic: -11.70 MiB
+write_const profiled time: -4.558 ms
+profiled total: +7.654 ms
+```
+
+Correctness/timing check:
+
+```bash
+PYENV_VERSION=system OPENBLAS_NUM_THREADS=2 \
+  .venv/bin/python scripts/prepared_fallback_overhead.py \
+  --onnx yolov8n.onnx --warmup 2 --iters 8 \
+  --json /tmp/prepared_fallback_bias_preload_overhead.json
+```
+
+```text
+forward: mean=46.185 ms median=44.752 ms
+forward_prepared_arena_fallback: mean=48.913 ms median=49.072 ms
+max_abs=0, mean_abs=0
+```
+
+Interpretation: preloading more constants removes almost all profiled `WriteConst` entries, but it is not a speed win because the opt-in path still copies constants into the mutable arena every forward before dispatch. The useful next P1 target is not more per-forward preload pruning; it is a persistent immutable constant arena / no-copy prepared plan that lets kernels read static payloads without arena re-materialisation.

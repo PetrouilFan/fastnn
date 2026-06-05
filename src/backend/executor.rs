@@ -1289,54 +1289,120 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
 // ── tests for the opt-in prepared execution fallback ──────────────────
 
 #[cfg(feature = "prepared-plan")]
+fn preload_prepared_fp32_slot<B: Backend>(
+    backend: &B,
+    arena: &B::Buffer,
+    constant_arena: &crate::backend::prepared::PreparedConstantArena,
+    instruction_index: usize,
+    id: Option<crate::backend::prepared::PackedWeightId>,
+    slot: crate::backend::BufferSlice,
+    label: &str,
+    preloaded_slots: &mut std::collections::HashSet<(usize, usize)>,
+    plan_len: usize,
+) -> Result<(), BackendError> {
+    use crate::backend::prepared::PackedWeightKind;
+
+    let Some(id) = id else {
+        return Ok(());
+    };
+    if id.kind != PackedWeightKind::Fp32 {
+        return Ok(());
+    }
+    let Some(values) = constant_arena.get(id) else {
+        return Ok(());
+    };
+    let bytes = bytemuck::cast_slice(values);
+    if bytes.len() != slot.size {
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} byte length mismatch at instruction {instruction_index}: arena {} bytes, plan slot {} bytes",
+            bytes.len(),
+            slot.size
+        )));
+    }
+    if instruction_index >= plan_len {
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} instruction index {instruction_index} out of bounds for plan length {plan_len}"
+        )));
+    }
+    backend.write_arena(arena, slot.offset, bytes);
+    preloaded_slots.insert((slot.offset, slot.size));
+    Ok(())
+}
+
+#[cfg(feature = "prepared-plan")]
 fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
     backend: &B,
     arena: &B::Buffer,
     plan: &ExecutablePlan,
     prepared: &crate::backend::prepared::PreparedExecutablePlan,
 ) -> Result<ExecutablePlan, BackendError> {
-    use crate::backend::prepared::{PackedWeightKind, PreparedInstruction};
+    use crate::backend::prepared::PreparedInstruction;
     use std::collections::HashSet;
 
     let Some(constant_arena) = prepared.constant_arena() else {
         return Ok(plan.clone());
     };
 
-    let mut preloaded_weight_slots = HashSet::new();
+    let mut preloaded_slots = HashSet::new();
     for prepared_instruction in &prepared.instructions {
-        let PreparedInstruction::Conv2d(conv) = prepared_instruction else {
-            continue;
-        };
-        let Some(weight_id) = conv.packed_weight else {
-            continue;
-        };
-        if weight_id.kind != PackedWeightKind::Fp32 {
-            continue;
+        match prepared_instruction {
+            PreparedInstruction::Conv2d(conv) => {
+                preload_prepared_fp32_slot(
+                    backend,
+                    arena,
+                    constant_arena,
+                    conv.instruction_index,
+                    conv.packed_weight,
+                    conv.weight,
+                    "conv weight",
+                    &mut preloaded_slots,
+                    plan.instructions.len(),
+                )?;
+                if let Some(bias) = conv.bias {
+                    preload_prepared_fp32_slot(
+                        backend,
+                        arena,
+                        constant_arena,
+                        conv.instruction_index,
+                        conv.packed_bias,
+                        bias,
+                        "conv bias",
+                        &mut preloaded_slots,
+                        plan.instructions.len(),
+                    )?;
+                }
+            }
+            PreparedInstruction::MatMul(matmul) => {
+                preload_prepared_fp32_slot(
+                    backend,
+                    arena,
+                    constant_arena,
+                    matmul.instruction_index,
+                    matmul.packed_weight,
+                    matmul.b,
+                    "matmul weight",
+                    &mut preloaded_slots,
+                    plan.instructions.len(),
+                )?;
+                if let Some(bias) = matmul.bias {
+                    preload_prepared_fp32_slot(
+                        backend,
+                        arena,
+                        constant_arena,
+                        matmul.instruction_index,
+                        matmul.packed_bias,
+                        bias,
+                        "matmul bias",
+                        &mut preloaded_slots,
+                        plan.instructions.len(),
+                    )?;
+                }
+            }
+            PreparedInstruction::Generic { .. } => {}
         }
-        let Some(weight_values) = constant_arena.get(weight_id) else {
-            continue;
-        };
-        let weight_bytes = bytemuck::cast_slice(weight_values);
-        if weight_bytes.len() != conv.weight.size {
-            return Err(BackendError::Dispatch(format!(
-                "prepared arena conv weight byte length mismatch at instruction {}: arena {} bytes, plan slot {} bytes",
-                conv.instruction_index,
-                weight_bytes.len(),
-                conv.weight.size
-            )));
-        }
-        if conv.instruction_index >= plan.instructions.len() {
-            return Err(BackendError::Dispatch(format!(
-                "prepared arena conv instruction index {} out of bounds for plan length {}",
-                conv.instruction_index,
-                plan.instructions.len()
-            )));
-        }
-        backend.write_arena(arena, conv.weight.offset, weight_bytes);
-        preloaded_weight_slots.insert((conv.weight.offset, conv.weight.size));
     }
 
-    if preloaded_weight_slots.is_empty() {
+    if preloaded_slots.is_empty() {
         return Ok(plan.clone());
     }
 
@@ -1345,7 +1411,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
         .iter()
         .filter(|instruction| match instruction {
             Instruction::WriteConst { dst, .. } => {
-                !preloaded_weight_slots.contains(&(dst.offset, dst.size))
+                !preloaded_slots.contains(&(dst.offset, dst.size))
             }
             _ => true,
         })
