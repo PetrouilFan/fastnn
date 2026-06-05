@@ -767,6 +767,10 @@ impl GraphBuilder {
         let output_type = TensorType::new(output_shape, input.dtype());
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
+        attrs.insert(
+            "keepdim".to_string(),
+            if keepdim { "1" } else { "0" }.to_string(),
+        );
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::ReduceSum,
@@ -790,6 +794,10 @@ impl GraphBuilder {
         let output_type = TensorType::new(output_shape, input.dtype());
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
+        attrs.insert(
+            "keepdim".to_string(),
+            if keepdim { "1" } else { "0" }.to_string(),
+        );
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::ReduceMean,

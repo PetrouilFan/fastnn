@@ -146,6 +146,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => {
                 inputs.first().map(|i| {
                     let mut s = i.output_type.shape.clone();
+                    let keepdim: bool = node
+                        .attrs
+                        .get("keepdim")
+                        .map(|v| parse_keepdim_attr(v))
+                        .unwrap_or(true);
                     if let Some(axis_str) = node.attrs.get("axis") {
                         if let Ok(axis_i64) = axis_str.parse::<i64>() {
                             let rank = s.len();
@@ -160,7 +165,11 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                                 axis_i64 as usize
                             };
                             if axis < s.len() {
-                                s.remove(axis);
+                                if keepdim {
+                                    s[axis] = DimExpr::Known(1);
+                                } else {
+                                    s.remove(axis);
+                                }
                             }
                         }
                     }
@@ -779,4 +788,14 @@ fn add_dim_exprs(a: DimExpr, b: DimExpr) -> DimExpr {
 
 fn max_u64_for_symbol(_v: &u64) -> u64 {
     u64::MAX
+}
+
+/// Parse a `keepdim` attribute string. The builder stores it as `"1"`
+/// or `"0"` to match the rest of the IR's stringly-typed attrs, but
+/// existing call sites also pass `"true"` / `"false"`. Accept both.
+fn parse_keepdim_attr(v: &str) -> bool {
+    match v.trim() {
+        "0" | "false" | "False" | "FALSE" => false,
+        _ => true,
+    }
 }
