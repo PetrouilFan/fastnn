@@ -206,6 +206,34 @@ pub trait Backend {
         Ok(entries)
     }
 
+    /// Execute a compiled plan with an optional persistent immutable
+    /// weight view.
+    ///
+    /// `persistent_view` is the opt-in no-copy path consumed by
+    /// [`crate::backend::prepared::PersistentPreparedWeights`]: when
+    /// a `(offset, size)` slot is present in the view, the dispatch
+    /// loop reads the weight bytes directly from the persistent
+    /// payload instead of from the mutable arena.  When the view is
+    /// `None` (or empty), the behaviour is identical to
+    /// [`Self::dispatch`].
+    ///
+    /// Default implementation: ignore the view and call
+    /// [`Self::dispatch`]. Backends that support the no-copy path
+    /// (currently only `CpuBackend` with the `prepared-plan` cargo
+    /// feature) override this to consult the view at the relevant
+    /// `CallKernel` sites.
+    fn dispatch_with_persistent_view(
+        &self,
+        plan: &ExecutablePlan,
+        arena: &Self::Buffer,
+        shape_env: &ShapeEnv,
+        #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
+        persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
+    ) -> Result<(), BackendError> {
+        let _ = persistent_view;
+        self.dispatch(plan, arena, shape_env)
+    }
+
     /// Write `data` into the arena at byte `offset`.
     /// Used by the executor to populate graph inputs.
     /// Default implementation panics — backends that support host-visible
