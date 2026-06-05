@@ -59,6 +59,7 @@ pub struct PreparedConv2d {
     pub activation: PreparedActivation,
     pub kernel: PreparedConvKernelKind,
     pub packed_weight: Option<PackedWeightId>,
+    pub packed_bias: Option<PackedWeightId>,
     /// Optional handle to a metadata-only transposed fp32 weight entry.
     ///
     /// This is distinct from `packed_weight`: fallback/runtime paths keep using
@@ -83,6 +84,7 @@ pub struct PreparedMatMul {
     pub n: usize,
     pub activation: PreparedActivation,
     pub packed_weight: Option<PackedWeightId>,
+    pub packed_bias: Option<PackedWeightId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -592,6 +594,7 @@ pub fn try_prepare_conv2d(
         activation,
         kernel,
         packed_weight: None,
+        packed_bias: None,
         transposed_weight: None,
         scratch_offset: 0,
         scratch_len: 0,
@@ -669,6 +672,7 @@ pub fn try_prepare_matmul(
         n,
         activation,
         packed_weight: None,
+        packed_bias: None,
     }))
 }
 
@@ -831,26 +835,34 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
 }
 
 /// Apply a slice of [`StaticWeightBinding`]s to a prepared instruction,
-/// setting `packed_weight` on the corresponding `Conv2d` / `MatMul`
-/// from the binding whose `input_index == 1` (the weight slot). Bias
-/// bindings (`input_index == 2`) are recorded in the returned map but
-/// the prepared structs do not yet expose a `packed_bias` field — a
-/// later lane will plumb that into the dispatch path.
+/// setting `packed_weight` from the binding whose `input_index == 1` and
+/// `packed_bias` from the binding whose `input_index == 2`.
 fn apply_static_weight_bindings(
     instruction: PreparedInstruction,
     bindings: &[&StaticWeightBinding],
 ) -> PreparedInstruction {
     let weight_binding = bindings.iter().find(|b| b.input_index == 1).copied();
-    match (instruction, weight_binding) {
-        (PreparedInstruction::Conv2d(mut c), Some(b)) => {
-            c.packed_weight = Some(b.weight_id);
+    let bias_binding = bindings.iter().find(|b| b.input_index == 2).copied();
+    match instruction {
+        PreparedInstruction::Conv2d(mut c) => {
+            if let Some(b) = weight_binding {
+                c.packed_weight = Some(b.weight_id);
+            }
+            if let Some(b) = bias_binding {
+                c.packed_bias = Some(b.weight_id);
+            }
             PreparedInstruction::Conv2d(c)
         }
-        (PreparedInstruction::MatMul(mut m), Some(b)) => {
-            m.packed_weight = Some(b.weight_id);
+        PreparedInstruction::MatMul(mut m) => {
+            if let Some(b) = weight_binding {
+                m.packed_weight = Some(b.weight_id);
+            }
+            if let Some(b) = bias_binding {
+                m.packed_bias = Some(b.weight_id);
+            }
             PreparedInstruction::MatMul(m)
         }
-        (other, _) => other,
+        other => other,
     }
 }
 
@@ -1933,6 +1945,7 @@ mod tests {
             activation: PreparedActivation::None,
             kernel: PreparedConvKernelKind::CurrentIm2colGemm,
             packed_weight: None,
+            packed_bias: None,
             transposed_weight: None,
             scratch_offset: 0,
             scratch_len: 0,
@@ -1954,6 +1967,7 @@ mod tests {
             n: 1,
             activation: PreparedActivation::None,
             packed_weight: None,
+            packed_bias: None,
         });
         assert_eq!(inst.instruction_index(), 5);
     }
@@ -2690,6 +2704,11 @@ mod tests {
                     .expect("conv with const weight must have a binding");
                 assert_eq!(id.index, 0);
                 assert_eq!(arena.get(id), Some(weight_payload.as_slice()));
+                let bias_id = c
+                    .packed_bias
+                    .expect("conv with const bias must have a bias binding");
+                assert_eq!(bias_id.index, 1);
+                assert_eq!(arena.get(bias_id), Some(bias_payload.as_slice()));
             }
             other => panic!("expected Conv2d at index 2, got {other:?}"),
         }
@@ -2825,6 +2844,7 @@ mod tests {
             activation: PreparedActivation::None,
             kernel: PreparedConvKernelKind::CurrentIm2colGemm,
             packed_weight: Some(PackedWeightId::new(0)),
+            packed_bias: None,
             transposed_weight: None,
             scratch_offset: 0,
             scratch_len: 0,
@@ -2841,6 +2861,7 @@ mod tests {
             n: 1,
             activation: PreparedActivation::None,
             packed_weight: None,
+            packed_bias: None,
         };
         let plan = PreparedExecutablePlan {
             instructions: vec![
