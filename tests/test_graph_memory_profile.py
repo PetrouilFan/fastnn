@@ -64,6 +64,56 @@ def test_build_memory_profile_prefers_exact_per_kernel_static_bytes_when_availab
     assert profile["summary"]["profiled_kernel_static_bytes"] == 8128
 
 
+def test_build_memory_profile_reports_instruction_hotspots_with_estimated_timing() -> None:
+    memory_stats = {
+        "estimated_static_traffic_bytes": 8192,
+        "kernel_read_bytes": 4096,
+        "kernel_write_bytes": 4096,
+        "memcpy_bytes": 0,
+        "write_const_bytes": 0,
+        "fill_bytes": 0,
+        "top_kernels_by_count": [
+            {"kernel": "concat", "count": 2, "read_bytes": 5000, "write_bytes": 3000},
+            {"kernel": "conv2d_silu", "count": 1, "read_bytes": 1000, "write_bytes": 1000},
+        ],
+        "top_instructions_by_static_bytes": [
+            {
+                "instruction_index": 17,
+                "kind": "call_kernel",
+                "kernel_name": "concat",
+                "node_id": 42,
+                "read_bytes": 3000,
+                "write_bytes": 1000,
+                "static_bytes": 4000,
+            },
+            {
+                "instruction_index": 3,
+                "kind": "call_kernel",
+                "kernel_name": "conv2d_silu",
+                "node_id": 7,
+                "read_bytes": 1000,
+                "write_bytes": 1000,
+                "static_bytes": 2000,
+            },
+        ],
+    }
+    profile_entries = [
+        {"kernel_name": "concat", "elapsed_ns": 250_000},
+        {"kernel_name": "concat", "elapsed_ns": 750_000},
+        {"kernel_name": "conv2d_silu", "elapsed_ns": 10_000_000},
+    ]
+
+    profile = build_memory_profile(memory_stats, profile_entries)
+
+    hotspot = profile["instruction_hotspots"][0]
+    assert hotspot["instruction_index"] == 17
+    assert hotspot["kernel_name"] == "concat"
+    assert hotspot["static_bytes"] == 4000
+    assert hotspot["estimated_total_ms"] == 0.5
+    assert hotspot["bytes_per_ms"] == 8000.0
+    assert hotspot["suspected_memory_bound"] is True
+
+
 def test_build_memory_profile_accounts_unprofiled_write_and_copy_traffic() -> None:
     memory_stats = {
         "estimated_static_traffic_bytes": 4096,
@@ -279,7 +329,7 @@ def test_build_profile_payload_preserves_single_profile_shape_without_prepared_e
 
     payload = build_profile_payload(memory_stats, [{"kernel_name": "add_f32", "elapsed_ns": 1_000_000}])
 
-    assert set(payload) == {"summary", "kernels", "unprofiled_static_traffic", "memory_stats"}
+    assert set(payload) == {"summary", "kernels", "instruction_hotspots", "unprofiled_static_traffic", "memory_stats"}
     assert payload["summary"]["profiled_total_ms"] == 1.0
     assert payload["kernels"][0]["kernel_name"] == "add_f32"
 
