@@ -54,3 +54,30 @@ unprofiled copy/const traffic: 0 B when memcopy/write_const appear in profile
 ```
 
 Top memory/layout signals from exact per-kernel bytes were `conv2d_silu` (43.05 MiB), `concat` (16.12 MiB), `write_const` (12.06 MiB), `slice_f32` (7.13 MiB), and `add_f32` (3.17 MiB). Compared with the original call-count apportioning, `concat` is a stronger broad memory/layout target than `slice_f32`; `write_const` remains a clear per-forward traffic target for safe persistent-constant handling.
+
+## Default vs prepared profile deltas
+
+`build_profile_delta(default_profile, prepared_profile)` compares two `build_memory_profile()` payloads, with deltas reported as `prepared - default`. Negative values mean the prepared path removed profile entries, time, or estimated traffic.
+
+This is intended for P1 persistent-constant work: run the default `profile()` path and `profile_prepared_arena_fallback()` on the same input, build memory profiles from the shared `memory_stats()` payload, then write a JSON bundle with `default`, `prepared_arena_fallback`, and `delta`. The delta summary includes:
+
+- `profiled_total_ms_delta`
+- `profiled_kernel_static_bytes_delta`
+- `estimated_static_traffic_bytes_delta`
+- `write_const_count_delta`
+- `write_const_static_bytes_delta`
+- `write_const_total_ms_delta`
+- `unprofiled_write_const_bytes_delta`
+
+When default and prepared profiles share the same static `memory_stats()` payload, `write_const_static_bytes_delta` is apportioned from `write_const_bytes / write_const_count` and the observed profiled `write_const` count. This makes skipped `WriteConst` instructions visible instead of assigning the whole aggregate constant byte total to both profiles.
+
+Representative YOLOv8n smoke written to `/tmp/graph_memory_profile_prepared_delta_yolo.json` on 2026-06-05:
+
+```text
+profiled total delta: -189.073 ms
+write_const count delta: -64
+write_const static bytes delta: -5.89 MiB
+write_const total time delta: -2.284 ms
+```
+
+The large total profile delta is an instrumented single-run signal, not a stable benchmark. The stable P1 finding is that the existing prepared-arena preload path measurably removes 64 profiled `WriteConst` instructions and about 6 MiB of per-forward constant write traffic on YOLOv8n while leaving the default runtime path unchanged.
