@@ -63,3 +63,33 @@ Findings:
 
 Next recommended action:
 - Start P1 with a measurement-first design for safe persistent constants or immutable constant slots; `write_const` is small in wall time but broad and clearly per-forward traffic.
+
+## 2026-06-05 03:11 EEST — autonomous cron
+
+Intent:
+- Improve the P0 graph memory profiler accuracy before choosing P1/P2 implementation work, so kernel categories are ranked by actual compiled-plan traffic instead of call-count apportioning.
+
+Changed:
+- Extended `AotExecutor.memory_stats()` `top_kernels_by_count` rows with exact per-kernel aggregate `read_bytes`, `write_bytes`, and `static_bytes`.
+- Updated `scripts/graph_memory_profile.py` to prefer those exact fields when present and fall back to the old estimate for older payloads.
+- Added a RED/GREEN Python regression test for exact per-kernel byte usage.
+- Updated `docs/plans/graph-memory-profile.md` with the new schema and YOLO smoke result.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py::test_build_memory_profile_prefers_exact_per_kernel_static_bytes_when_available -q` failed with `assert 5461 == 8000` before the profiler change.
+- GREEN: `.venv/bin/python -m pytest tests/test_graph_memory_profile.py -q` → 4 passed.
+- `.venv/bin/python -m py_compile scripts/graph_memory_profile.py` → pass.
+- `cargo check --release --lib` → pass.
+- `cargo fmt --check` → pass.
+- `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → rebuilt and installed `fastnn-2.2.4`.
+- `PYENV_VERSION=system .venv/bin/python scripts/graph_memory_profile.py --onnx yolov8n.onnx --json /tmp/graph_memory_profile_exact_bytes_yolo.json --top 10` → pass; profiled total 491.677 ms, estimated static traffic 92.81 MiB, profiled kernel static traffic 79.05 MiB.
+- `cargo test --release --lib` → 241 passed.
+- `cargo test --release --lib --features prepared-plan` → 246 passed.
+- `cargo test --release --lib --features 'prepared-plan openblas'` → 248 passed.
+
+Findings:
+- Exact YOLOv8n static byte ranking changed the broad memory/layout priorities: `conv2d_silu` 43.05 MiB, `concat` 16.12 MiB, `write_const` 12.06 MiB, `slice_f32` 7.13 MiB, `add_f32` 3.17 MiB.
+- The previous call-count estimate understated `concat` and overstated `slice_f32`; future P2 view/layout work should treat `concat` as a top copy-like target alongside persistent constants.
+
+Next recommended action:
+- Use the exact-byte profiler output to start P1/P2 with guardrail tests: first persistent constants/immutable constant slots for 12.06 MiB WriteConst traffic, or a `concat` layout/view diagnostic because it now ranks above `slice_f32` by actual bytes.
