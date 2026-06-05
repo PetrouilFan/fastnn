@@ -93,3 +93,32 @@ Findings:
 
 Next recommended action:
 - Use the exact-byte profiler output to start P1/P2 with guardrail tests: first persistent constants/immutable constant slots for 12.06 MiB WriteConst traffic, or a `concat` layout/view diagnostic because it now ranks above `slice_f32` by actual bytes.
+
+## 2026-06-05 04:53 EEST — autonomous cron
+
+Intent:
+- Continue P1 prepared/persistent-constant work by making the opt-in prepared-arena path profileable, so future agents can measure WriteConst removal instead of only timing full forward calls.
+
+Changed:
+- Added `GraphExecutor::execute_profile_prepared_arena_fallback()` behind `prepared-plan`.
+- Exposed `AotExecutor.profile_prepared_arena_fallback(inputs)` with the same `{outputs, profile}` shape as `profile()`.
+- Added a Python RED/GREEN regression test for the new public profiling hook.
+
+Validation:
+- RED: `.venv/bin/python -m pytest tests/test_aot_executor_prepared_execute.py::test_profile_prepared_arena_fallback_matches_profile_shape -q` failed with missing `profile_prepared_arena_fallback` attribute.
+- Rebuild: `VIRTUAL_ENV=/home/petrouil/Projects/github/fastnn/.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → installed `fastnn-2.2.4`.
+- GREEN: `.venv/bin/python -m pytest tests/test_aot_executor_prepared_execute.py::test_profile_prepared_arena_fallback_matches_profile_shape -q` → 1 passed.
+- `.venv/bin/python -m pytest tests/test_aot_executor_prepared_execute.py -q` → 8 passed.
+- `.venv/bin/python -m py_compile scripts/prepared_fallback_overhead.py` → pass.
+- `cargo fmt --check` → pass.
+- `cargo test --release --lib` → 241 passed.
+- `cargo test --release --lib --features prepared-plan` → 246 passed.
+- `cargo test --release --lib --features 'prepared-plan openblas'` → 248 passed.
+- `git diff --check` → pass.
+
+Findings:
+- YOLOv8n profile smoke using the new hook wrote `/tmp/fastnn_prepared_arena_profile_yolo.json` and produced byte-identical outputs (`max_abs=0.0`, `mean_abs=0.0`).
+- Default profile vs prepared-arena profile reduced `write_const` profile entries from 131 to 67 and measured `write_const` time from 1.037 ms to 0.008 ms for that profiled run; this confirms the existing arena-preload fallback skips Conv weight writes but leaves other constants/biases on the safe default path.
+
+Next recommended action:
+- Either extend `scripts/prepared_fallback_overhead.py`/`graph_memory_profile.py` to emit default-vs-prepared profile deltas automatically, or proceed to the next safe P1 step: include bias/non-Conv constants only with a RED guardrail that proves slot immutability/lifetime safety before skipping more WriteConst instructions.

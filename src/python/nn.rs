@@ -1344,8 +1344,6 @@ impl AotExecutor {
         py: pyo3::Python<'_>,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        use pyo3::types::{PyDict, PyList};
-
         let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
             inputs.get(name.as_str())
                 .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
@@ -1358,54 +1356,45 @@ impl AotExecutor {
             .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let outputs = PyDict::new(py);
-        for (name, idx) in &self.output_map {
-            if let Some(data) = output_data.get(*idx) {
-                let output_node_id = self.graph.outputs[*idx];
-                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        "AotExecutor: output node not found in graph",
-                    )
-                })?;
-                let shape: Vec<i64> = output_node
-                    .output_type
-                    .shape
-                    .iter()
-                    .filter_map(|d| match d {
-                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
-                        _ => None,
-                    })
-                    .collect();
-                let f32_vals: Vec<f32> = data
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-                outputs.set_item(
-                    name,
-                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
-                )?;
-            }
-        }
+        self.encode_profile_result(py, output_data, profile_entries)
+    }
 
-        let profile_list = PyList::empty(py);
-        for entry in profile_entries {
-            let item = PyDict::new(py);
-            item.set_item("instruction_index", entry.instruction_index)?;
-            item.set_item("node_id", entry.node_id)?;
-            item.set_item("kernel_name", entry.kernel_name)?;
-            item.set_item("elapsed_ns", entry.elapsed_ns)?;
-            let node_name = entry.node_id
-                .and_then(|node_id| self.graph.get_node(node_id))
-                .map(|node| node.name.clone())
-                .unwrap_or_default();
-            item.set_item("node_name", node_name)?;
-            profile_list.append(item)?;
-        }
+    #[cfg(feature = "prepared-plan")]
+    fn profile_prepared_arena_fallback(
+        &mut self,
+        py: pyo3::Python<'_>,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let result = PyDict::new(py);
-        result.set_item("outputs", outputs)?;
-        result.set_item("profile", profile_list)?;
-        Ok(result.into())
+        let (output_data, profile_entries) = self.executor
+            .execute_profile_prepared_arena_fallback(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.encode_profile_result(py, output_data, profile_entries)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn profile_prepared_arena_fallback(
+        &self,
+        _py: pyo3::Python<'_>,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "profile_prepared_arena_fallback requires the 'prepared-plan' feature",
+        ))
     }
 
     /// Return static memory-efficiency statistics for the compiled graph/plan.
@@ -1644,6 +1633,65 @@ impl AotExecutor {
 // ── AotExecutor helpers (not exposed to Python) ────────────────────────
 
 impl AotExecutor {
+    fn encode_profile_result(
+        &self,
+        py: pyo3::Python<'_>,
+        output_data: Vec<Vec<u8>>,
+        profile_entries: Vec<crate::backend::ProfileEntry>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+
+        let outputs = PyDict::new(py);
+        for (name, idx) in &self.output_map {
+            if let Some(data) = output_data.get(*idx) {
+                let output_node_id = self.graph.outputs[*idx];
+                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "AotExecutor: output node not found in graph",
+                    )
+                })?;
+                let shape: Vec<i64> = output_node
+                    .output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        _ => None,
+                    })
+                    .collect();
+                let f32_vals: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                outputs.set_item(
+                    name,
+                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
+                )?;
+            }
+        }
+
+        let profile_list = PyList::empty(py);
+        for entry in profile_entries {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", entry.instruction_index)?;
+            item.set_item("node_id", entry.node_id)?;
+            item.set_item("kernel_name", entry.kernel_name)?;
+            item.set_item("elapsed_ns", entry.elapsed_ns)?;
+            let node_name = entry
+                .node_id
+                .and_then(|node_id| self.graph.get_node(node_id))
+                .map(|node| node.name.clone())
+                .unwrap_or_default();
+            item.set_item("node_name", node_name)?;
+            profile_list.append(item)?;
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("outputs", outputs)?;
+        result.set_item("profile", profile_list)?;
+        Ok(result.into())
+    }
+
     /// Decode the raw `Vec<Vec<u8>>` returned by `GraphExecutor::execute`
     /// into a `HashMap<output_name, PyTensor>` keyed by the executor's
     /// `output_map`. Shared by [`AotExecutor::forward`] and
