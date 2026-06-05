@@ -108,9 +108,18 @@ def _print_summary(model: Path, stats: dict[str, Any]) -> None:
     if instructions:
         print("  top instructions by static bytes:")
         for row in instructions[:10]:
+            node = ""
+            if row.get("node_id") is not None:
+                node = f" node={int(row['node_id'])}"
+            if row.get("node_name"):
+                node += f" name={row['node_name']}"
+            shape = ""
+            if row.get("input_shapes") and row.get("output_shape"):
+                shape = f" inputs={row['input_shapes']} output={row['output_shape']}"
             print(
                 f"    #{int(row['instruction_index'])} {row['kernel_name']} "
                 f"({row['kind']}): {_fmt_bytes(int(row['static_bytes']))}"
+                f"{node}{shape}"
             )
 
     write_consts = stats.get("top_write_consts_by_size", [])
