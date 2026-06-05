@@ -113,6 +113,16 @@ def _print_summary(model: Path, stats: dict[str, Any]) -> None:
                 f"({row['kind']}): {_fmt_bytes(int(row['static_bytes']))}"
             )
 
+    write_consts = stats.get("top_write_consts_by_size", [])
+    if write_consts:
+        print("  largest WriteConst instructions:")
+        for row in write_consts[:10]:
+            print(
+                f"    #{int(row['instruction_index'])}: "
+                f"{_fmt_bytes(int(row['write_bytes']))} "
+                f"dst_offset={int(row['dst_offset'])}"
+            )
+
     aliases = stats.get("top_alias_groups", [])
     if aliases:
         print("  largest alias groups:")
