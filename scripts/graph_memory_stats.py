@@ -104,6 +104,15 @@ def _print_summary(model: Path, stats: dict[str, Any]) -> None:
         for row in kernels[:10]:
             print(f"    {row['kernel']}: {row['count']}")
 
+    instructions = stats.get("top_instructions_by_static_bytes", [])
+    if instructions:
+        print("  top instructions by static bytes:")
+        for row in instructions[:10]:
+            print(
+                f"    #{int(row['instruction_index'])} {row['kernel_name']} "
+                f"({row['kind']}): {_fmt_bytes(int(row['static_bytes']))}"
+            )
+
     aliases = stats.get("top_alias_groups", [])
     if aliases:
         print("  largest alias groups:")
