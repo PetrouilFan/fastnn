@@ -14,7 +14,7 @@ compiled ONNX graph:
 - logical slot bytes vs physical bytes by arena offset
 - slot-reuse savings, alias group count, and largest alias groups
 - instruction mix
-- exact per-instruction traffic rows ranked by static bytes (`top_instructions_by_static_bytes`)
+- exact per-instruction traffic rows ranked by static bytes (`top_instructions_by_static_bytes`), including graph node id/name/opcode plus input/output shapes for kernel-call rows so layout/copy hotspots can be inspected without a separate IR dump
 - largest WriteConst rows with destination offsets/sizes (`top_write_consts_by_size`);
   when built with `prepared-plan`, rows that feed prepared Conv/MatMul static
   weights or biases also include the prepared consumer instruction, input index,
@@ -61,8 +61,10 @@ addition:
 
 - `#131 conv2d_silu` (node 157): 2.74 MiB
 - `#132 conv2d_silu` (node 161): 2.36 MiB
-- `#139 concat` (node 180): 2.34 MiB
-- `#190 concat` (node 311): 2.34 MiB
+- `#139 concat` (node 180 `/model.2/Concat`): 2.34 MiB,
+  inputs `[1,16,80,80]`, `[1,16,80,80]`, `[1,16,80,80]`, output `[1,48,80,80]`.
+- `#190 concat` (node 311 `/model.14/Concat`): 2.34 MiB,
+  inputs `[1,128,40,40]`, `[1,64,40,40]`, output `[1,192,40,40]`.
 - `#140 conv2d_silu` (node 181): 1.96 MiB
 
 largest WriteConst rows after the prepared-static cross-reference addition:
