@@ -247,6 +247,84 @@ impl<B: Backend> GraphExecutor<B> {
             .map(|(outputs, _profile)| outputs)
     }
 
+    /// Opt-in **no-copy** prepared path.
+    ///
+    /// Like [`Self::execute_prepared_arena_fallback`], the prepared
+    /// plan is consulted to detect static fp32 weight/bias bindings
+    /// for `Conv2d` and `MatMul` consumers. The key difference is
+    /// that no per-forward copy happens: the prepared weights live
+    /// in a [`crate::backend::prepared::PersistentPreparedWeights`]
+    /// view that the dispatch loop borrows directly when reading
+    /// the weight/bias slot. The corresponding `WriteConst`
+    /// instructions are also filtered out of the dispatch plan, so
+    /// the total per-forward weight traffic is zero (down from the
+    /// full `O(weights_bytes)` of the existing fallback).
+    ///
+    /// This entry point is byte-identical to [`Self::forward`] and
+    /// to [`Self::execute_prepared_arena_fallback`] on every input.
+    /// It is gated on the `prepared-plan` cargo feature to match
+    /// the rest of the prepared-plan surface; callers that build
+    /// without that feature can keep using [`Self::execute`] and
+    /// [`Self::execute_prepared_arena_fallback`].
+    ///
+    /// The no-copy optimization is currently limited to:
+    ///
+    /// - fp32 `Conv2d` weights + (optional) biases,
+    /// - fp32 `MatMul` weights + (optional) biases (including
+    ///   `matmul*` and `fused_matmul_add_*` families).
+    ///
+    /// Packed transposed and quantized slots stay on the safe
+    /// fallback path because the current kernels do not consume
+    /// them. When the prepared plan has no `Conv2d` / `MatMul`
+    /// bindings the view is empty and the path degrades to the
+    /// standard dispatch.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_no_copy(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
+        self.execute_internal_with_persistent_view(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            Some(&view),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
+    /// Profile the no-copy prepared path. Mirrors
+    /// [`Self::execute_prepared_no_copy`] but preserves per-instruction
+    /// [`ProfileEntry`] rows so callers can quantify the saved
+    /// `WriteConst` traffic on the persistent arena path.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_profile_prepared_no_copy(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
+        self.execute_internal_with_persistent_view(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            true,
+            Some(&view),
+        )
+    }
+
     fn execute_internal(
         &mut self,
         graph: &ComputeGraph,
@@ -352,6 +430,221 @@ impl<B: Backend> GraphExecutor<B> {
                 .dispatch_profile(dispatch_plan, arena, &shape_env)?
         } else {
             self.backend.dispatch(dispatch_plan, arena, &shape_env)?;
+            Vec::new()
+        };
+
+        // Read output data — compute actual sizes via shape_env
+        let mut outputs = Vec::with_capacity(graph.outputs.len());
+        for &output_node_id in graph.outputs.iter() {
+            let slot = tightened_memory_plan
+                .slots
+                .get(&output_node_id)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "no memory slot for output node {}",
+                        output_node_id
+                    ))
+                })?;
+
+            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id)
+            {
+                let resolved_shape =
+                    resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
+                        BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
+                    })?;
+                let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
+                let computed = match &node.output_type.dtype {
+                    IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                        node.output_type.dtype.packed_byte_size(actual_numel)
+                    }
+                    IrDType::I8 => actual_numel + 8,
+                    _ => actual_numel * node.output_type.dtype.byte_size(),
+                };
+                (computed, resolved_shape)
+            } else {
+                (slot.size, vec![])
+            };
+
+            let data = self.backend.read_arena(arena, slot.offset, actual_size);
+            outputs.push(data);
+        }
+
+        Ok((outputs, profile_entries))
+    }
+
+    /// Internal execution entry point for the no-copy prepared path.
+    ///
+    /// Mirrors [`Self::execute_internal`] but, after writing the
+    /// inputs into the arena, builds a dispatch plan with the
+    /// persistent-view `WriteConst` slots filtered out and calls
+    /// [`Backend::dispatch_with_persistent_view`] with the prepared
+    /// view.  When `persistent_view` is `None` (or the prepared
+    /// plan was empty), the no-copy optimisation degrades to the
+    /// standard [`Backend::dispatch`] path and the plan is used as
+    /// is.
+    #[cfg(feature = "prepared-plan")]
+    fn execute_internal_with_persistent_view(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        profile: bool,
+        persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        // Build runtime shape env from input sizes, validate shapes.
+        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
+            .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
+        validate_shapes(graph, &shape_env)
+            .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
+
+        // Tighten memory plan using runtime-resolved shapes, then adjust
+        // the existing plan's slices and params in-place via tighten_slices.
+        // This avoids a full backend re-compilation while still shrinking
+        // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
+        let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
+        tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+
+        // Safety check: every node's resolved output must fit in its slot.
+        for (&node_id, slot) in &tightened_memory_plan.slots {
+            if let Some(node) = graph.get_node(node_id) {
+                let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
+                    let numel: u64 = shape.iter().product();
+                    let raw = numel as usize * node.output_type.dtype.byte_size();
+                    match &node.output_type.dtype {
+                        IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                            node.output_type.dtype.packed_byte_size(numel as usize)
+                        }
+                        IrDType::I8 => numel as usize + 8,
+                        _ => raw,
+                    }
+                } else {
+                    continue;
+                };
+                if needed > slot.size {
+                    return Err(BackendError::Dispatch(format!(
+                        "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
+                        node_id, needed, slot.size, node.output_type.shape
+                    )));
+                }
+            }
+        }
+
+        // Arena caching: reuse or replace
+        let arena_size = plan.arena_size;
+        let enough_capacity = self
+            .cached_arena
+            .as_ref()
+            .map_or(false, |(cap, _)| *cap >= arena_size);
+        if !enough_capacity {
+            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+        }
+        let arena = &self.cached_arena.as_ref().unwrap().1;
+        // No need to zero-fill the arena — every kernel writes its output
+        // slot before it can be read, so stale data from the previous
+        // execution does not affect correctness.  (The memory planner's
+        // live-range analysis guarantees non-overlapping intervals.)
+
+        // Write input data into the arena at tightened input slots
+        for (i, &input_node_id) in graph.inputs.iter().enumerate() {
+            let input_bytes = inputs.get(i).ok_or_else(|| {
+                BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
+            })?;
+
+            let slot = tightened_memory_plan
+                .slots
+                .get(&input_node_id)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "no memory slot for input node {}",
+                        input_node_id
+                    ))
+                })?;
+
+            self.backend.write_arena(arena, slot.offset, input_bytes);
+        }
+
+        // Build a "no-copy" dispatch plan: filter out the WriteConst
+        // instructions that the persistent view will satisfy directly.
+        // When the view is empty (e.g. the prepared plan had no
+        // fp32 weight/bias bindings) the filtered plan is identical
+        // to the original.
+        let dispatch_plan: ExecutablePlan = if let Some(view) = persistent_view {
+            if view.is_empty() {
+                plan.clone()
+            } else {
+                let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
+                let mut removed = 0usize;
+                for instr in &plan.instructions {
+                    let drop = matches!(
+                        instr,
+                        Instruction::WriteConst { dst, .. }
+                            if view.get(&(dst.offset, dst.size)).is_some()
+                    );
+                    if drop {
+                        removed += 1;
+                    } else {
+                        filtered.push(instr.clone());
+                    }
+                }
+                let _ = removed; // (intentionally unused — kept for future logging)
+                ExecutablePlan {
+                    instructions: filtered,
+                    arena_size: plan.arena_size,
+                    levels: plan.levels.clone(),
+                }
+            }
+        } else {
+            plan.clone()
+        };
+
+        // Dispatch the no-copy plan
+        let profile_entries = if profile {
+            // Profile each instruction in isolation. The persistent
+            // view is shared across calls; the per-instruction cost
+            // for a fully-overridden `CallKernel` reflects the
+            // smaller read traffic from the persistent payload.
+            let mut entries = Vec::with_capacity(dispatch_plan.instructions.len());
+            for (instruction_index, instruction) in
+                dispatch_plan.instructions.iter().cloned().enumerate()
+            {
+                let (node_id, kernel_name) = match &instruction {
+                    Instruction::CallKernel {
+                        node_id,
+                        kernel_name,
+                        ..
+                    } => (*node_id, kernel_name.clone()),
+                    Instruction::MemCopy { .. } => (None, "memcopy".to_string()),
+                    Instruction::Fill { .. } => (None, "fill".to_string()),
+                    Instruction::WriteConst { .. } => (None, "write_const".to_string()),
+                };
+                let single = ExecutablePlan {
+                    instructions: vec![instruction],
+                    arena_size: dispatch_plan.arena_size,
+                    levels: vec![0],
+                };
+                let start = std::time::Instant::now();
+                self.backend.dispatch_with_persistent_view(
+                    &single,
+                    arena,
+                    &shape_env,
+                    persistent_view,
+                )?;
+                entries.push(crate::backend::ProfileEntry {
+                    instruction_index,
+                    node_id,
+                    kernel_name,
+                    elapsed_ns: start.elapsed().as_nanos(),
+                });
+            }
+            entries
+        } else {
+            self.backend.dispatch_with_persistent_view(
+                &dispatch_plan,
+                arena,
+                &shape_env,
+                persistent_view,
+            )?;
             Vec::new()
         };
 
