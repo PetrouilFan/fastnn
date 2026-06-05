@@ -1458,6 +1458,92 @@ impl AotExecutor {
         let mut instruction_traffic: Vec<(usize, String, String, Option<usize>, usize, usize)> = Vec::new();
         let mut write_const_traffic: Vec<(usize, usize, usize, usize)> = Vec::new();
 
+        #[derive(Clone)]
+        struct PreparedStaticSlotInfo {
+            consumer_instruction_index: usize,
+            input_index: usize,
+            role: &'static str,
+            constant_index: usize,
+            constant_name: String,
+        }
+
+        #[cfg(feature = "prepared-plan")]
+        let prepared_static_slots: HashMap<(usize, usize), PreparedStaticSlotInfo> = {
+            use crate::backend::prepared::PreparedInstruction;
+
+            let mut slots = HashMap::new();
+            if let Some(arena) = self.prepared_plan.constant_arena() {
+                for prepared in &self.prepared_plan.instructions {
+                    match prepared {
+                        PreparedInstruction::Conv2d(conv) => {
+                            if let Some(id) = conv.packed_weight {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (conv.weight.offset, conv.weight.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: conv.instruction_index,
+                                            input_index: 1,
+                                            role: "conv_weight",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            if let (Some(bias), Some(id)) = (conv.bias, conv.packed_bias) {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (bias.offset, bias.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: conv.instruction_index,
+                                            input_index: 2,
+                                            role: "conv_bias",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        PreparedInstruction::MatMul(matmul) => {
+                            if let Some(id) = matmul.packed_weight {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (matmul.b.offset, matmul.b.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: matmul.instruction_index,
+                                            input_index: 1,
+                                            role: "matmul_weight",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            if let (Some(bias), Some(id)) = (matmul.bias, matmul.packed_bias) {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (bias.offset, bias.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: matmul.instruction_index,
+                                            input_index: 2,
+                                            role: "matmul_bias",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        PreparedInstruction::Generic { .. } => {}
+                    }
+                }
+            }
+            slots
+        };
+        #[cfg(not(feature = "prepared-plan"))]
+        let prepared_static_slots: HashMap<(usize, usize), PreparedStaticSlotInfo> = HashMap::new();
+
         for (instruction_index, instr) in plan.instructions.iter().enumerate() {
             match instr {
                 Instruction::CallKernel {
@@ -1605,6 +1691,16 @@ impl AotExecutor {
             item.set_item("dst_size", dst_size)?;
             item.set_item("data_len", data_len)?;
             item.set_item("write_bytes", dst_size.min(data_len))?;
+            if let Some(prepared) = prepared_static_slots.get(&(dst_offset, dst_size)) {
+                item.set_item(
+                    "prepared_consumer_instruction_index",
+                    prepared.consumer_instruction_index,
+                )?;
+                item.set_item("prepared_input_index", prepared.input_index)?;
+                item.set_item("prepared_static_role", prepared.role)?;
+                item.set_item("prepared_constant_index", prepared.constant_index)?;
+                item.set_item("prepared_constant_name", prepared.constant_name.as_str())?;
+            }
             top_write_consts.append(item)?;
         }
         stats.set_item("top_write_consts_by_size", top_write_consts)?;
