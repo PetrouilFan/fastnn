@@ -82,6 +82,11 @@ def build_memory_profile(
         str(row.get("kernel", row.get("kernel_name", "<unknown>"))): int(row.get("count", 0))
         for row in memory_stats.get("top_kernels_by_count", [])
     }
+    exact_kernel_bytes: dict[str, tuple[int, int]] = {}
+    for row in memory_stats.get("top_kernels_by_count", []):
+        kernel = str(row.get("kernel", row.get("kernel_name", "<unknown>")))
+        if "read_bytes" in row or "write_bytes" in row:
+            exact_kernel_bytes[kernel] = (int(row.get("read_bytes", 0)), int(row.get("write_bytes", 0)))
     if not static_counts:
         static_counts = {kernel: int(max(1.0, values["count"])) for kernel, values in profiled.items()}
 
@@ -102,13 +107,20 @@ def build_memory_profile(
     for kernel, values in profiled.items():
         static_count = static_counts.get(kernel, int(max(1.0, values["count"])))
         if kernel in special_static_bytes:
+            static_read_bytes = 0
+            static_write_bytes = special_static_bytes[kernel]
             static_bytes = special_static_bytes[kernel]
             if kernel in {"memcopy", "memcpy"}:
                 profiled_special_kinds.add("memcpy")
             else:
                 profiled_special_kinds.add(kernel)
+        elif kernel in exact_kernel_bytes:
+            static_read_bytes, static_write_bytes = exact_kernel_bytes[kernel]
+            static_bytes = static_read_bytes + static_write_bytes
         else:
             static_bytes = int(round(kernel_static_total * static_count / total_static_calls)) if total_static_calls else 0
+            static_read_bytes = 0
+            static_write_bytes = static_bytes
         total_ms = float(values["total_ms"])
         mean_ms = total_ms / values["count"] if values["count"] else 0.0
         bytes_per_ms = static_bytes / total_ms if total_ms > 0.0 else 0.0
@@ -120,6 +132,8 @@ def build_memory_profile(
                 "total_ms": total_ms,
                 "mean_ms": mean_ms,
                 "static_bytes": static_bytes,
+                "static_read_bytes": static_read_bytes,
+                "static_write_bytes": static_write_bytes,
                 "bytes_per_ms": bytes_per_ms,
                 "suspected_memory_bound": static_bytes > 0 and (mean_ms <= 1.0 or bytes_per_ms >= 1_000_000),
             }
