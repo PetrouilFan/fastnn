@@ -15,7 +15,10 @@ compiled ONNX graph:
 - slot-reuse savings, alias group count, and largest alias groups
 - instruction mix
 - exact per-instruction traffic rows ranked by static bytes (`top_instructions_by_static_bytes`)
-- largest WriteConst rows with destination offsets/sizes (`top_write_consts_by_size`)
+- largest WriteConst rows with destination offsets/sizes (`top_write_consts_by_size`);
+  when built with `prepared-plan`, rows that feed prepared Conv/MatMul static
+  weights or biases also include the prepared consumer instruction, input index,
+  static role, and constant-arena name/id
 - estimated static traffic bytes from kernel inputs/outputs, `MemCopy`, `Fill`,
   and `WriteConst`
 - top kernels by instruction count
@@ -61,6 +64,15 @@ addition:
 - `#139 concat` (node 180): 2.34 MiB
 - `#190 concat` (node 311): 2.34 MiB
 - `#140 conv2d_silu` (node 181): 1.96 MiB
+
+largest WriteConst rows after the prepared-static cross-reference addition:
+
+- `#118` 1.12 MiB at arena offset `10203968`, prepared Conv weight for
+  consumer instruction `#165` (`conv_118_i1`).
+- `#83` 720 KiB at `7853440`, prepared Conv weight for consumer instruction
+  `#233` (`conv_83_i1`).
+- several 576 KiB prepared Conv-weight rows (`#35`, `#49`, `#51`, `#65`,
+  `#124`, `#126`).
 ```
 
 ## Interpretation

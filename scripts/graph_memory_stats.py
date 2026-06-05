@@ -117,10 +117,19 @@ def _print_summary(model: Path, stats: dict[str, Any]) -> None:
     if write_consts:
         print("  largest WriteConst instructions:")
         for row in write_consts[:10]:
+            prepared = ""
+            if row.get("prepared_static_role"):
+                prepared = (
+                    f" prepared={row['prepared_static_role']}"
+                    f" consumer=#{int(row['prepared_consumer_instruction_index'])}"
+                    f" input={int(row['prepared_input_index'])}"
+                    f" constant={row['prepared_constant_name']}"
+                )
             print(
                 f"    #{int(row['instruction_index'])}: "
                 f"{_fmt_bytes(int(row['write_bytes']))} "
                 f"dst_offset={int(row['dst_offset'])}"
+                f"{prepared}"
             )
 
     aliases = stats.get("top_alias_groups", [])
