@@ -345,6 +345,134 @@ def _conv_shape_metadata(model: Any) -> dict[str, Any]:
     }
 
 
+def _concat_shape_metadata(model: Any) -> dict[str, Any]:
+    """Summarize Concat operations from an inferred ONNX graph.
+
+    Focuses on channel-axis (axis=1 in NCHW) concatenations feeding Conv2d,
+    which are the pattern targeted by segmented concat planning.  Returns
+    per-concat detail including input/output shapes, static byte estimates,
+    and whether the output feeds a Conv node.
+    """
+
+    import onnx
+    from onnx import numpy_helper
+
+    inferred = onnx.shape_inference.infer_shapes(model)
+    shapes: dict[str, list[int | None]] = {}
+    for value in list(inferred.graph.input) + list(inferred.graph.value_info) + list(inferred.graph.output):
+        shapes[value.name] = _tensor_shape(value)
+    initializers = {init.name: numpy_helper.to_array(init) for init in inferred.graph.initializer}
+
+    output_to_node: dict[str, int] = {}
+    concat_nodes: list[tuple[int, Any]] = []
+    for idx, node in enumerate(inferred.graph.node):
+        for out in node.output:
+            output_to_node[out] = idx
+        if node.op_type == "Concat":
+            concat_nodes.append((idx, node))
+
+    conv_input_to_node: dict[str, int] = {}
+    for idx, node in enumerate(inferred.graph.node):
+        if node.op_type == "Conv" and node.input:
+            conv_input_to_node[node.input[0]] = idx
+
+    BYTE_PER_ELEM = 4  # float32
+
+    def _static_bytes_for_shape(shape: list[int | None]) -> int:
+        if not shape or any(d is None or d <= 0 for d in shape):
+            return 0
+        n = 1
+        for d in shape:
+            n *= d
+        return n * BYTE_PER_ELEM
+
+    by_axis: dict[int, dict[str, Any]] = defaultdict(
+        lambda: {"count": 0, "total_static_bytes": 0, "examples": []}
+    )
+    total_concat_count = 0
+    channel_axis_concat_count = 0
+    channel_axis_feeds_conv_count = 0
+    large_channel_axis_concat_count = 0
+    LARGE_THRESHOLD_BYTES = 32 * 1024  # 32 KiB
+
+    for idx, node in concat_nodes:
+        total_concat_count += 1
+        attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in node.attribute}
+        axis = int(attrs.get("axis", 0))
+        input_shapes = [shapes.get(inp, []) for inp in node.input]
+        output_shape = shapes.get(node.output[0], []) if node.output else []
+        output_bytes = _static_bytes_for_shape(output_shape)
+        input_bytes = [_static_bytes_for_shape(s) for s in input_shapes]
+
+        feeds_conv = node.output[0] in conv_input_to_node
+        is_channel_axis = axis == 1
+        if is_channel_axis:
+            channel_axis_concat_count += 1
+            if feeds_conv:
+                channel_axis_feeds_conv_count += 1
+            if output_bytes >= LARGE_THRESHOLD_BYTES:
+                large_channel_axis_concat_count += 1
+
+        bucket = by_axis[axis]
+        bucket["count"] += 1
+        bucket["total_static_bytes"] += output_bytes
+        if len(bucket["examples"]) < 5:
+            bucket["examples"].append({
+                "node_index": idx,
+                "name": node.name or f"Concat_{idx}",
+                "axis": axis,
+                "num_inputs": len(node.input),
+                "input_shapes": input_shapes,
+                "output_shape": output_shape,
+                "output_static_bytes": output_bytes,
+                "input_static_bytes": input_bytes,
+                "feeds_conv": feeds_conv,
+                "feeds_conv_node": conv_input_to_node.get(node.output[0]) if feeds_conv else None,
+            })
+
+    large_concat_details = []
+    for idx, node in concat_nodes:
+        attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in node.attribute}
+        axis = int(attrs.get("axis", 0))
+        if axis != 1:
+            continue
+        output_shape = shapes.get(node.output[0], []) if node.output else []
+        output_bytes = _static_bytes_for_shape(output_shape)
+        if output_bytes < LARGE_THRESHOLD_BYTES:
+            continue
+        feeds_conv = node.output[0] in conv_input_to_node
+        input_shapes = [shapes.get(inp, []) for inp in node.input]
+        large_concat_details.append({
+            "node_index": idx,
+            "name": node.name or f"Concat_{idx}",
+            "axis": axis,
+            "num_inputs": len(node.input),
+            "input_shapes": input_shapes,
+            "output_shape": output_shape,
+            "output_static_bytes": output_bytes,
+            "feeds_conv": feeds_conv,
+            "feeds_conv_node": conv_input_to_node.get(node.output[0]) if feeds_conv else None,
+        })
+    large_concat_details.sort(key=lambda r: r["output_static_bytes"], reverse=True)
+
+    by_axis_summary = {
+        str(k): {
+            "count": int(v["count"]),
+            "total_static_bytes": int(v["total_static_bytes"]),
+            "examples": v["examples"],
+        }
+        for k, v in sorted(by_axis.items())
+    }
+    return {
+        "concat_count": total_concat_count,
+        "channel_axis_concat_count": channel_axis_concat_count,
+        "channel_axis_feeds_conv_count": channel_axis_feeds_conv_count,
+        "large_channel_axis_concat_count": large_channel_axis_concat_count,
+        "by_axis": by_axis_summary,
+        "large_channel_axis_concats": large_concat_details[:10],
+    }
+
+
 def _load_onnx(onnx_path: Path) -> dict[str, Any]:
     import onnx
 
@@ -384,6 +512,10 @@ def _load_onnx(onnx_path: Path) -> dict[str, Any]:
         metadata["conv_shape_summary"] = _conv_shape_metadata(model)
     except Exception as exc:
         metadata["conv_shape_summary_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        metadata["concat_shape_summary"] = _concat_shape_metadata(model)
+    except Exception as exc:
+        metadata["concat_shape_summary_error"] = f"{type(exc).__name__}: {exc}"
     return metadata
 
 def _summarize_profile(profile: list[dict[str, Any]], top: int) -> list[dict[str, Any]]:
@@ -878,6 +1010,30 @@ def _print_summary(results: dict[str, dict[str, Any]]) -> None:
             f"{key:<22} {aot:<5} {_fmt(fast)} {_fmt(ort)} {_fmt(pt):>11} "
             f"{arena:>10d} {ratio:>14.2f} {cls:<26}"
         )
+
+    print("\n=== Concat breadth summary ===")
+    concat_header = (
+        f"{'model':<22} {'concat#':>7} {'chan_axis':>9} {'chan->Conv':>10} "
+        f"{'large_chan':>10} {'top_large_bytes':>16}"
+    )
+    print(concat_header)
+    for key, record in sorted(results.items()):
+        meta = record.get("onnx_metadata", {}) or {}
+        cs = meta.get("concat_shape_summary") or {}
+        total = cs.get("concat_count", 0)
+        chan = cs.get("channel_axis_concat_count", 0)
+        chan_conv = cs.get("channel_axis_feeds_conv_count", 0)
+        large = cs.get("large_channel_axis_concat_count", 0)
+        large_list = cs.get("large_channel_axis_concats") or []
+        top_bytes = large_list[0]["output_static_bytes"] if large_list else 0
+        err = meta.get("concat_shape_summary_error")
+        if err:
+            print(f"{key:<22} {'ERROR':>7}  {err}")
+        else:
+            print(
+                f"{key:<22} {total:>7d} {chan:>9d} {chan_conv:>10d} "
+                f"{large:>10d} {top_bytes:>16d}"
+            )
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
