@@ -2,6 +2,7 @@
 pub mod activation_quantization;
 pub mod arithmetic_simplify;
 pub mod auto_cast;
+pub mod concat_to_conv_eligibility;
 pub mod constant_folding;
 pub mod dead_code_elimination;
 pub mod fusion;
