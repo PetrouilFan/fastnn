@@ -32,6 +32,15 @@ def _load_make_executor():
     return _make_fastnn_executor
 
 
+def _load_consumer_helpers():
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from graph_memory_stats import _build_consumer_map, _infer_channel_axis
+
+    return _build_consumer_map, _infer_channel_axis
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
@@ -150,28 +159,63 @@ def build_memory_profile(
         for row in kernel_rows
     }
     instruction_hotspots: list[dict[str, Any]] = []
-    for row in memory_stats.get("top_instructions_by_static_bytes", []):
+    _build_consumer_map_fn, _infer_channel_axis_fn = _load_consumer_helpers()
+    raw_instruction_rows = memory_stats.get("top_instructions_by_static_bytes", [])
+    consumer_map = _build_consumer_map_fn(raw_instruction_rows)
+    for row in raw_instruction_rows:
         kernel = str(row.get("kernel_name", row.get("kernel", row.get("kind", "<unknown>"))))
         timing = kernel_timing.get(kernel, {"profile_count": 0, "total_ms": 0.0, "mean_ms": 0.0})
         static_bytes = int(row.get("static_bytes", int(row.get("read_bytes", 0)) + int(row.get("write_bytes", 0))))
         estimated_total_ms = float(timing["mean_ms"])
         bytes_per_ms = static_bytes / estimated_total_ms if estimated_total_ms > 0.0 else 0.0
-        instruction_hotspots.append(
-            {
-                "instruction_index": int(row.get("instruction_index", -1)),
-                "kind": str(row.get("kind", "")),
-                "kernel_name": kernel,
-                "node_id": row.get("node_id"),
-                "read_bytes": int(row.get("read_bytes", 0)),
-                "write_bytes": int(row.get("write_bytes", 0)),
-                "static_bytes": static_bytes,
-                "estimated_total_ms": estimated_total_ms,
-                "profile_count_for_kernel": int(timing["profile_count"]),
-                "profile_total_ms_for_kernel": float(timing["total_ms"]),
-                "bytes_per_ms": bytes_per_ms,
-                "suspected_memory_bound": static_bytes > 0 and (estimated_total_ms <= 1.0 or bytes_per_ms >= 1_000_000),
-            }
-        )
+        hotspot: dict[str, Any] = {
+            "instruction_index": int(row.get("instruction_index", -1)),
+            "kind": str(row.get("kind", "")),
+            "kernel_name": kernel,
+            "node_id": row.get("node_id"),
+            "read_bytes": int(row.get("read_bytes", 0)),
+            "write_bytes": int(row.get("write_bytes", 0)),
+            "static_bytes": static_bytes,
+            "estimated_total_ms": estimated_total_ms,
+            "profile_count_for_kernel": int(timing["profile_count"]),
+            "profile_total_ms_for_kernel": float(timing["total_ms"]),
+            "bytes_per_ms": bytes_per_ms,
+            "suspected_memory_bound": static_bytes > 0 and (estimated_total_ms <= 1.0 or bytes_per_ms >= 1_000_000),
+        }
+        node_name = row.get("node_name")
+        op_type = row.get("op_type")
+        if node_name is not None:
+            hotspot["node_name"] = node_name
+        if op_type is not None:
+            hotspot["op_type"] = op_type
+        input_nodes = row.get("input_nodes")
+        if input_nodes:
+            hotspot["input_nodes"] = input_nodes
+            hotspot["input_node_ids"] = input_nodes
+        input_shapes = row.get("input_shapes")
+        if input_shapes:
+            hotspot["input_shapes"] = input_shapes
+        output_shape = row.get("output_shape")
+        if output_shape is not None:
+            hotspot["output_shape"] = output_shape
+        nid = row.get("node_id")
+        if nid is not None and op_type == "Concat":
+            consumers = consumer_map.get(int(nid), [])
+            hotspot["consumers"] = [
+                {
+                    "instruction_index": int(c["instruction_index"]),
+                    "node_id": c.get("node_id"),
+                    "node_name": c.get("node_name"),
+                    "op_type": c.get("op_type"),
+                    "output_shape": c.get("output_shape"),
+                }
+                for c in consumers
+            ]
+            hotspot["channel_axis_candidate"] = _infer_channel_axis_fn(
+                [d for d in output_shape] if output_shape else [],
+                input_shapes or [],
+            )
+        instruction_hotspots.append(hotspot)
     instruction_hotspots.sort(key=lambda row: (row["static_bytes"], row["estimated_total_ms"]), reverse=True)
 
     unprofiled = [

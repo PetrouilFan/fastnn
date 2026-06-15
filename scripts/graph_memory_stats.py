@@ -57,6 +57,114 @@ def _fmt_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def _build_consumer_map(
+    instruction_rows: list[dict[str, Any]],
+) -> dict[int, list[dict[str, Any]]]:
+    """Build a reverse adjacency map: node_id -> list of consumer instruction rows.
+
+    Uses the ``input_nodes`` field from each instruction row to determine which
+    nodes consume a given node's output.  This is a Python-level reconstruction
+    of the graph consumer relationship using only the top instruction rows
+    returned by ``memory_stats()``.
+    """
+    node_to_row: dict[int, dict[str, Any]] = {}
+    for row in instruction_rows:
+        nid = row.get("node_id")
+        if nid is not None:
+            node_to_row[int(nid)] = row
+
+    consumers: dict[int, list[dict[str, Any]]] = {}
+    for row in instruction_rows:
+        for input_node_id in row.get("input_nodes", []):
+            input_node_id_int = int(input_node_id)
+            if input_node_id_int in node_to_row:
+                consumers.setdefault(input_node_id_int, []).append(row)
+    return consumers
+
+
+def _infer_channel_axis(output_shape: list[Any], input_shapes: list[list[Any]]) -> bool:
+    """Heuristic: returns True when all input shapes share spatial dims and
+    differ only along dim 1 (channel axis in NCHW), with output dim-1 equal
+    to the sum of input dim-1 values."""
+    if len(input_shapes) < 2 or not output_shape:
+        return False
+    if not all(len(s) >= 3 for s in input_shapes) or len(output_shape) < 2:
+        return False
+    spatial_match = all(
+        s[2:] == input_shapes[0][2:] for s in input_shapes[1:]
+    )
+    if not spatial_match:
+        return False
+    channel_sum = sum(
+        int(s[1]) for s in input_shapes if s[1] is not None
+    )
+    return output_shape[1] is not None and int(output_shape[1]) == channel_sum
+
+
+def _print_concat_consumer_analysis(stats: dict[str, Any]) -> None:
+    """Print consumer metadata for top concat/copy-layout hotspots."""
+    instruction_rows = stats.get("top_instructions_by_static_bytes", [])
+    if not instruction_rows:
+        return
+
+    consumer_map = _build_consumer_map(instruction_rows)
+
+    concat_rows = [
+        row for row in instruction_rows if row.get("op_type") == "Concat"
+    ]
+    if not concat_rows:
+        print("  concat consumer analysis: no concat instructions in top rows")
+        return
+
+    print("  concat consumer analysis:")
+    for row in concat_rows:
+        node_id = row.get("node_id")
+        node_name = row.get("node_name", "")
+        output_shape = row.get("output_shape")
+        input_shapes = row.get("input_shapes", [])
+
+        is_channel_axis = _infer_channel_axis(
+            [d for d in output_shape] if output_shape else [],
+            input_shapes,
+        )
+        channel_tag = " [channel-axis candidate]" if is_channel_axis else ""
+
+        shape_parts = []
+        if input_shapes:
+            shape_parts.append(f"inputs={input_shapes}")
+        if output_shape:
+            shape_parts.append(f"output={output_shape}")
+        shape_str = " " + " ".join(shape_parts) if shape_parts else ""
+
+        consumers = (
+            consumer_map.get(int(node_id), []) if node_id is not None else []
+        )
+
+        print(
+            f"    #{int(row['instruction_index'])} node={node_id} "
+            f"{node_name}: {_fmt_bytes(int(row['static_bytes']))}"
+            f"{shape_str}{channel_tag}"
+        )
+
+        if consumers:
+            for c in consumers:
+                c_name = c.get("node_name", "")
+                c_op = c.get("op_type", "")
+                c_id = c.get("node_id")
+                c_shape = c.get("output_shape")
+                extra = ""
+                if "Conv" in (c_op or "") and c.get("input_shapes"):
+                    if len(c["input_shapes"]) >= 2:
+                        extra = f" weight_shape={c['input_shapes'][1]}"
+                shape_info = f" output={c_shape}" if c_shape else ""
+                print(
+                    f"      -> consumer: #{int(c['instruction_index'])} "
+                    f"node={c_id} {c_name} ({c_op}){shape_info}{extra}"
+                )
+        else:
+            print("      -> no consumers found in top instruction rows")
+
+
 def _print_summary(model: Path, stats: dict[str, Any]) -> None:
     arena = int(stats.get("arena_size", 0))
     logical = int(stats.get("logical_slot_bytes", 0))
@@ -169,6 +277,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional path; write the raw memory_stats() dict here as JSON.",
     )
+    ap.add_argument(
+        "--consumers",
+        action="store_true",
+        help="Print consumer analysis for concat/copy-layout hotspots.",
+    )
     args = ap.parse_args(argv)
 
     onnx_path = Path(args.onnx)
@@ -203,6 +316,45 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = dict(raw_stats)
     _print_summary(onnx_path, stats)
+
+    if args.consumers:
+        _print_concat_consumer_analysis(stats)
+        # Also enrich stats dict with consumer analysis for JSON output
+        instruction_rows = stats.get("top_instructions_by_static_bytes", [])
+        consumer_map = _build_consumer_map(instruction_rows)
+        concat_analysis = []
+        for row in instruction_rows:
+            if row.get("op_type") == "Concat":
+                node_id = row.get("node_id")
+                consumers = (
+                    consumer_map.get(int(node_id), [])
+                    if node_id is not None
+                    else []
+                )
+                concat_analysis.append({
+                    "instruction_index": int(row["instruction_index"]),
+                    "node_id": node_id,
+                    "node_name": row.get("node_name"),
+                    "input_nodes": row.get("input_nodes", []),
+                    "input_shapes": row.get("input_shapes", []),
+                    "output_shape": row.get("output_shape"),
+                    "static_bytes": int(row["static_bytes"]),
+                    "channel_axis_candidate": _infer_channel_axis(
+                        [d for d in row["output_shape"]] if row.get("output_shape") else [],
+                        row.get("input_shapes", []),
+                    ),
+                    "consumers": [
+                        {
+                            "instruction_index": int(c["instruction_index"]),
+                            "node_id": c.get("node_id"),
+                            "node_name": c.get("node_name"),
+                            "op_type": c.get("op_type"),
+                            "output_shape": c.get("output_shape"),
+                        }
+                        for c in consumers
+                    ],
+                })
+        stats["concat_consumer_analysis"] = concat_analysis
 
     if args.json_out is not None:
         try:
