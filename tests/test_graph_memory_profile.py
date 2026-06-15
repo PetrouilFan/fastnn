@@ -357,3 +357,185 @@ def test_build_profile_payload_embeds_default_prepared_and_delta_profiles() -> N
     assert payload["prepared"]["summary"]["profiled_total_ms"] == 0.5
     assert payload["delta"]["summary"]["write_const_count_delta"] == -2
     assert payload["delta"]["summary"]["write_const_static_bytes_delta"] == -8192
+
+
+def test_build_consumer_map_links_upstream_to_downstream() -> None:
+    from scripts.graph_memory_stats import _build_consumer_map
+
+    rows = [
+        {
+            "instruction_index": 0,
+            "kind": "call_kernel",
+            "kernel_name": "concat",
+            "node_id": 10,
+            "input_nodes": [1, 2, 3],
+            "op_type": "Concat",
+            "read_bytes": 1000,
+            "write_bytes": 500,
+        },
+        {
+            "instruction_index": 1,
+            "kind": "call_kernel",
+            "kernel_name": "conv2d_silu",
+            "node_id": 11,
+            "input_nodes": [10],
+            "op_type": "Conv2d",
+            "read_bytes": 500,
+            "write_bytes": 500,
+        },
+        {
+            "instruction_index": 2,
+            "kind": "call_kernel",
+            "kernel_name": "add_f32",
+            "node_id": 12,
+            "input_nodes": [10, 5],
+            "op_type": "Add",
+            "read_bytes": 200,
+            "write_bytes": 200,
+        },
+    ]
+
+    consumer_map = _build_consumer_map(rows)
+
+    assert 10 in consumer_map
+    consumers_of_10 = consumer_map[10]
+    assert len(consumers_of_10) == 2
+    consumer_ids = {c["node_id"] for c in consumers_of_10}
+    assert 11 in consumer_ids
+    assert 12 in consumer_ids
+
+
+def test_build_consumer_map_returns_empty_for_no_inputs() -> None:
+    from scripts.graph_memory_stats import _build_consumer_map
+
+    rows = [
+        {
+            "instruction_index": 0,
+            "kind": "call_kernel",
+            "kernel_name": "relu_f32",
+            "node_id": 5,
+            "input_nodes": [],
+            "op_type": "Relu",
+            "read_bytes": 100,
+            "write_bytes": 100,
+        },
+    ]
+
+    consumer_map = _build_consumer_map(rows)
+
+    assert consumer_map == {}
+
+
+def test_infer_channel_axis_returns_true_for_nchw_concat() -> None:
+    from scripts.graph_memory_stats import _infer_channel_axis
+
+    output_shape = [1, 48, 80, 80]
+    input_shapes = [[1, 16, 80, 80], [1, 16, 80, 80], [1, 16, 80, 80]]
+
+    assert _infer_channel_axis(output_shape, input_shapes) is True
+
+
+def test_infer_channel_axis_returns_false_for_spatial_concat() -> None:
+    from scripts.graph_memory_stats import _infer_channel_axis
+
+    output_shape = [1, 16, 160, 80]
+    input_shapes = [[1, 16, 80, 80], [1, 16, 80, 80]]
+
+    assert _infer_channel_axis(output_shape, input_shapes) is False
+
+
+def test_infer_channel_axis_returns_false_for_too_few_inputs() -> None:
+    from scripts.graph_memory_stats import _infer_channel_axis
+
+    assert _infer_channel_axis([1, 4, 8, 8], [[1, 4, 8, 8]]) is False
+
+
+def test_infer_channel_axis_handles_none_dimensions() -> None:
+    from scripts.graph_memory_stats import _infer_channel_axis
+
+    output_shape = [1, None, 80, 80]
+    input_shapes = [[1, 16, 80, 80], [1, 16, 80, 80]]
+
+    assert _infer_channel_axis(output_shape, input_shapes) is False
+
+
+def test_build_memory_profile_includes_consumer_info_for_concat_hotspots() -> None:
+    memory_stats = {
+        "estimated_static_traffic_bytes": 8192,
+        "kernel_read_bytes": 4096,
+        "kernel_write_bytes": 4096,
+        "memcpy_bytes": 0,
+        "write_const_bytes": 0,
+        "fill_bytes": 0,
+        "top_kernels_by_count": [
+            {"kernel": "concat", "count": 1, "read_bytes": 3000, "write_bytes": 1000},
+            {"kernel": "conv2d_silu", "count": 1, "read_bytes": 1000, "write_bytes": 1000},
+        ],
+        "top_instructions_by_static_bytes": [
+            {
+                "instruction_index": 17,
+                "kind": "call_kernel",
+                "kernel_name": "concat",
+                "node_id": 42,
+                "node_name": "/model.2/Concat",
+                "op_type": "Concat",
+                "input_nodes": [10, 11, 12],
+                "input_shapes": [[1, 16, 80, 80], [1, 16, 80, 80], [1, 16, 80, 80]],
+                "output_shape": [1, 48, 80, 80],
+                "read_bytes": 3000,
+                "write_bytes": 1000,
+                "static_bytes": 4000,
+            },
+            {
+                "instruction_index": 18,
+                "kind": "call_kernel",
+                "kernel_name": "conv2d_silu",
+                "node_id": 43,
+                "node_name": "/model.2/Conv",
+                "op_type": "Conv2d",
+                "input_nodes": [42],
+                "input_shapes": [[1, 48, 80, 80], [32, 48, 3, 3]],
+                "output_shape": [1, 32, 80, 80],
+                "read_bytes": 1000,
+                "write_bytes": 1000,
+                "static_bytes": 2000,
+            },
+        ],
+    }
+    profile_entries = [
+        {"kernel_name": "concat", "elapsed_ns": 250_000},
+        {"kernel_name": "conv2d_silu", "elapsed_ns": 10_000_000},
+    ]
+
+    profile = build_memory_profile(memory_stats, profile_entries)
+
+    concat_hotspot = next(
+        h for h in profile["instruction_hotspots"] if h["kernel_name"] == "concat"
+    )
+    assert concat_hotspot["node_name"] == "/model.2/Concat"
+    assert concat_hotspot["op_type"] == "Concat"
+    assert concat_hotspot["input_nodes"] == [10, 11, 12]
+    assert concat_hotspot["input_shapes"] == [[1, 16, 80, 80], [1, 16, 80, 80], [1, 16, 80, 80]]
+    assert concat_hotspot["output_shape"] == [1, 48, 80, 80]
+    assert concat_hotspot["channel_axis_candidate"] is True
+    assert len(concat_hotspot["consumers"]) == 1
+    consumer = concat_hotspot["consumers"][0]
+    assert consumer["node_id"] == 43
+    assert consumer["node_name"] == "/model.2/Conv"
+    assert consumer["op_type"] == "Conv2d"
+
+
+def test_build_memory_profile_consumer_map_is_empty_when_no_top_instructions() -> None:
+    memory_stats = {
+        "estimated_static_traffic_bytes": 1024,
+        "kernel_read_bytes": 512,
+        "kernel_write_bytes": 512,
+        "memcpy_bytes": 0,
+        "write_const_bytes": 0,
+        "fill_bytes": 0,
+        "top_kernels_by_count": [{"kernel": "relu_f32", "count": 1}],
+    }
+
+    profile = build_memory_profile(memory_stats, [{"kernel_name": "relu_f32", "elapsed_ns": 1_000_000}])
+
+    assert profile["instruction_hotspots"] == []
