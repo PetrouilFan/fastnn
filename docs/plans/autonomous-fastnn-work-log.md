@@ -348,3 +348,32 @@ Findings:
 
 Next recommended action:
 - Add a RED guardrail for a segmented/channel-concat-to-following-1x1-conv planning candidate, or continue diagnostics by cross-referencing concat output consumers to find the safest broad copy-elision boundary.
+
+## 2026-06-15 agent/concat-consumers — concat consumer diagnostic
+
+Intent:
+- Add Python-level consumer analysis to identify downstream consumers of concat/copy-layout hotspots without modifying Rust code (src/python/nn.rs outside owned scope).
+
+Changed:
+- `scripts/graph_memory_stats.py`: Added `_build_consumer_map()`, `_infer_channel_axis()`, `_print_concat_consumer_analysis()`. Added `--consumers` CLI flag. When enabled, prints consumer metadata for concat rows and enriches JSON output with `concat_consumer_analysis` key.
+- `scripts/graph_memory_profile.py`: Imported consumer helpers; `instruction_hotspots[]` rows for Concat nodes now include `consumers[]` (list of downstream consumer dicts) and `channel_axis_candidate` bool. Also propagates `node_name`, `op_type`, `input_nodes`, `input_shapes`, `output_shape` to all hotspot rows.
+- `tests/test_graph_memory_profile.py`: 8 new tests for `_build_consumer_map`, `_infer_channel_axis`, and consumer info propagation in `build_memory_profile`.
+
+Validation:
+- `.venv/bin/python -m py_compile scripts/graph_memory_stats.py scripts/graph_memory_profile.py` → pass.
+- `.venv/bin/python -m pytest tests/test_graph_memory_profile.py tests/test_aot_executor_profile.py -q` → 26 passed.
+- `cargo check --release --lib` → pass.
+- `VIRTUAL_ENV=.venv .venv/bin/python -m maturin develop --release --features 'prepared-plan openblas'` → pass.
+- Live test with concat→Conv2d graph: correctly identifies channel-axis candidate, consumer Conv2d node, weight shape `[8,5,3,3]`.
+- `git diff --name-only` → only owned files changed.
+- `git diff --check` → pass.
+
+Findings:
+- The Python-only consumer analysis uses `top_instructions_by_static_bytes` rows (top 50 by static bytes) to reconstruct a reverse adjacency map. This is accurate for concat hotspots because both concat nodes and their primary consumers (e.g. Conv2d) appear in the top 50.
+- Channel-axis classification heuristic: NCHW concat where all inputs share spatial dims and output channel dim = sum of input channel dims. Correctly identifies `/model.2/Concat` (3x[1,16,80,80]→[1,48,80,80]) and `/model.14/Concat` ([1,128,40,40]+[1,64,40,40]→[1,192,40,40]) as channel-axis candidates.
+- Conv2d weight shape is extracted from `input_shapes[1]` (second input to the Conv node).
+- Limitation: consumer data only covers nodes in the top 50 instruction rows. For deeper analysis, `src/python/nn.rs` should be extended to call `self.graph.consumers(node_id)` and expose a `consumers[]` field natively in `InstructionTrafficRow`.
+
+Next recommended action:
+- Evaluate whether to commit this diagnostic or pursue the Rust-native consumer field in `InstructionTrafficRow` (requires editing `src/python/nn.rs:1504-1656`).
+- Use this diagnostic on YOLOv8n with `--consumers` to confirm concat→Conv2d consumer chains and assess segmented-channel planning safety.
