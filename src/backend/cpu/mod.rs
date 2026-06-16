@@ -3880,14 +3880,7 @@ impl Backend for CpuBackend {
                         }
                         "transpose_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let transpose_params =
                                     resolve_params(params, param_dims, shape_env, 2)?;
                                 let &[m, n] = &transpose_params[..] else {
@@ -3895,58 +3888,50 @@ impl Backend for CpuBackend {
                                         "transpose_f32: expected params [M,N]".into(),
                                     ));
                                 };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
-                                    unsafe {
-                                        microkernels::transpose_f32_avx2(&input, out_f32, m, n);
-                                    }
-                                } else {
-                                    #[cfg(not(feature = "parallel"))]
-                                    {
-                                        for i in 0..m {
-                                            for j in 0..n {
-                                                out_f32[j * m + i] = input[i * n + j];
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
+                                            unsafe {
+                                                microkernels::transpose_f32_avx2(input, out_f32, m, n);
+                                            }
+                                        } else {
+                                            #[cfg(not(feature = "parallel"))]
+                                            {
+                                                for i in 0..m {
+                                                    for j in 0..n {
+                                                        out_f32[j * m + i] = input[i * n + j];
+                                                    }
+                                                }
+                                            }
+                                            #[cfg(feature = "parallel")]
+                                            {
+                                                use rayon::prelude::*;
+                                                out_f32.par_chunks_mut(m).enumerate().for_each(
+                                                    |(j, col)| {
+                                                        for i in 0..m {
+                                                            col[i] = input[i * n + j];
+                                                        }
+                                                    },
+                                                );
                                             }
                                         }
-                                    }
-                                    #[cfg(feature = "parallel")]
-                                    {
-                                        use rayon::prelude::*;
-                                        out_f32.par_chunks_mut(m).enumerate().for_each(
-                                            |(j, col)| {
-                                                for i in 0..m {
-                                                    col[i] = input[i * n + j];
-                                                }
-                                            },
-                                        );
-                                    }
-                                }
+                                    },
+                                );
                             }
                         }
                         "transpose_perm_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 // params: [rank, d0..dN, p0..pN]
                                 let rank = params.first().copied().unwrap_or(2);
                                 let nd_params =
                                     resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
                                 let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
                                 let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
                                 // Pre-compute input and output strides
                                 let mut in_strides = vec![1usize; rank];
                                 let mut out_strides = vec![1usize; rank];
@@ -3957,35 +3942,43 @@ impl Backend for CpuBackend {
                                     out_strides[perm[i]] =
                                         out_strides[perm[i + 1]] * dims[perm[i + 1]];
                                 }
-                                let _total = out_f32.len();
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    let total = _total;
-                                    for out_idx in 0..total {
-                                        let mut in_idx = 0usize;
-                                        let mut remaining = out_idx;
-                                        for k in 0..rank {
-                                            let coord = remaining / out_strides[perm[k]];
-                                            remaining %= out_strides[perm[k]];
-                                            in_idx += coord * in_strides[perm[k]];
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let _total = out_f32.len();
+                                        #[cfg(not(feature = "parallel"))]
+                                        {
+                                            for out_idx in 0..total {
+                                                let mut in_idx = 0usize;
+                                                let mut remaining = out_idx;
+                                                for k in 0..rank {
+                                                    let coord = remaining / out_strides[perm[k]];
+                                                    remaining %= out_strides[perm[k]];
+                                                    in_idx += coord * in_strides[perm[k]];
+                                                }
+                                                out_f32[out_idx] = input[in_idx];
+                                            }
                                         }
-                                        out_f32[out_idx] = input[in_idx];
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    out_f32.par_iter_mut().enumerate().for_each(|(out_idx, v)| {
-                                        let mut in_idx = 0usize;
-                                        let mut remaining = out_idx;
-                                        for k in 0..rank {
-                                            let coord = remaining / out_strides[perm[k]];
-                                            remaining %= out_strides[perm[k]];
-                                            in_idx += coord * in_strides[perm[k]];
+                                        #[cfg(feature = "parallel")]
+                                        {
+                                            use rayon::prelude::*;
+                                            out_f32.par_iter_mut().enumerate().for_each(
+                                                |(out_idx, v)| {
+                                                    let mut in_idx = 0usize;
+                                                    let mut remaining = out_idx;
+                                                    for k in 0..rank {
+                                                        let coord = remaining / out_strides[perm[k]];
+                                                        remaining %= out_strides[perm[k]];
+                                                        in_idx += coord * in_strides[perm[k]];
+                                                    }
+                                                    *v = input[in_idx];
+                                                },
+                                            );
                                         }
-                                        *v = input[in_idx];
-                                    });
-                                }
+                                    },
+                                );
                             }
                         }
                         "add_relu_f32" => {
@@ -5720,434 +5713,344 @@ impl Backend for CpuBackend {
                         }
                         "topk_fused" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let k = params.first().copied().unwrap_or(1);
-                                let mut indexed: Vec<(usize, f32)> =
-                                    input.iter().copied().enumerate().collect();
-                                if input.len() > k {
-                                    indexed.select_nth_unstable_by(
-                                        input.len().saturating_sub(k),
-                                        |a, b| {
-                                            a.1.partial_cmp(&b.1)
-                                                .unwrap_or(std::cmp::Ordering::Equal)
-                                        },
-                                    );
-                                }
-
-                                // Write values (f32) to primary output
-                                let d = arena.data_mut();
-                                let out_slice =
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]);
-                                for i in 0..k.min(out_slice.len()) {
-                                    out_slice[i] = indexed[input.len().saturating_sub(k) + i].1;
-                                }
-
-                                // Write indices (i64) to secondary output
-                                if let Some(sec_slice) = secondary_output_slice {
-                                    let sec_start = sec_slice.offset;
-                                    let sec_end = sec_slice.offset + sec_slice.size;
-                                    let idx_slice = bytemuck::cast_slice_mut::<_, u64>(
-                                        &mut d[sec_start..sec_end],
-                                    );
-                                    for i in 0..k.min(idx_slice.len()) {
-                                        idx_slice[i] =
-                                            indexed[input.len().saturating_sub(k) + i].0 as u64;
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_slice| {
+                                    let mut indexed: Vec<(usize, f32)> =
+                                        input.iter().copied().enumerate().collect();
+                                    if input.len() > k {
+                                        indexed.select_nth_unstable_by(
+                                            input.len().saturating_sub(k),
+                                            |a, b| {
+                                                a.1.partial_cmp(&b.1)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            },
+                                        );
                                     }
-                                }
+
+                                    // Write values (f32) to primary output
+                                    for i in 0..k.min(out_slice.len()) {
+                                        out_slice[i] = indexed[input.len().saturating_sub(k) + i].1;
+                                    }
+
+                                    // Write indices (i64) to secondary output
+                                    if let Some(sec_slice) = secondary_output_slice {
+                                        let d = arena.data_mut();
+                                        let sec_start = sec_slice.offset;
+                                        let sec_end = sec_slice.offset + sec_slice.size;
+                                        let idx_slice = bytemuck::cast_slice_mut::<_, u64>(
+                                            &mut d[sec_start..sec_end],
+                                        );
+                                        for i in 0..k.min(idx_slice.len()) {
+                                            idx_slice[i] =
+                                                indexed[input.len().saturating_sub(k) + i].0 as u64;
+                                        }
+                                    }
+                                });
                             }
                         }
                         "topk_values" | "topk_indices" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let k = params.first().copied().unwrap_or(1);
                                 let _axis = params.get(1).copied().unwrap_or(usize::MAX);
                                 let is_values = kernel_name == "topk_values";
-
-                                let d = arena.data_mut();
-                                if is_values {
-                                    let out_slice = bytemuck::cast_slice_mut::<_, f32>(
-                                        &mut d[out_start..out_end],
-                                    );
-                                    let mut indexed: Vec<(usize, f32)> =
-                                        input.iter().copied().enumerate().collect();
-                                    if input.len() > k {
-                                        indexed.select_nth_unstable_by(
-                                            input.len().saturating_sub(k),
-                                            |a, b| {
-                                                a.1.partial_cmp(&b.1)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            },
-                                        );
-                                    }
-                                    for i in 0..k.min(out_slice.len()) {
-                                        out_slice[i] = indexed[input.len().saturating_sub(k) + i].1;
-                                    }
-                                } else {
-                                    let out_slice = bytemuck::cast_slice_mut::<_, u64>(
-                                        &mut d[out_start..out_end],
-                                    );
-                                    let mut indexed: Vec<(usize, f32)> =
-                                        input.iter().copied().enumerate().collect();
-                                    if input.len() > k {
-                                        indexed.select_nth_unstable_by(
-                                            input.len().saturating_sub(k),
-                                            |a, b| {
-                                                a.1.partial_cmp(&b.1)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            },
-                                        );
-                                    }
-                                    for i in 0..k.min(out_slice.len()) {
-                                        out_slice[i] =
-                                            indexed[input.len().saturating_sub(k) + i].0 as u64;
-                                    }
-                                }
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_slice| {
+                                        let mut indexed: Vec<(usize, f32)> =
+                                            input.iter().copied().enumerate().collect();
+                                        if input.len() > k {
+                                            indexed.select_nth_unstable_by(
+                                                input.len().saturating_sub(k),
+                                                |a, b| {
+                                                    a.1.partial_cmp(&b.1)
+                                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                                },
+                                            );
+                                        }
+                                        if is_values {
+                                            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(out_slice);
+                                            for i in 0..k.min(out_f32.len()) {
+                                                out_f32[i] =
+                                                    indexed[input.len().saturating_sub(k) + i].1;
+                                            }
+                                        } else {
+                                            let out_u64 = bytemuck::cast_slice_mut::<_, u64>(out_slice);
+                                            for i in 0..k.min(out_u64.len()) {
+                                                out_u64[i] =
+                                                    indexed[input.len().saturating_sub(k) + i].0
+                                                        as u64;
+                                            }
+                                        }
+                                    },
+                                );
                             }
                         }
                         "upsample_nearest2d" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let scale_h = params.first().copied().unwrap_or(2);
                                 let scale_w = params.get(1).copied().unwrap_or(2);
                                 let h_in = params.get(2).copied().unwrap_or(1);
                                 let w_in = params.get(3).copied().unwrap_or(1);
                                 let hw = h_in * w_in;
-                                let in_len = input.len();
-                                if scale_h > 0
-                                    && scale_w > 0
-                                    && hw > 0
-                                    && in_len > 0
-                                    && in_len % hw == 0
-                                {
-                                    let nc = in_len / hw;
-                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
+                                    let in_len = input.len();
+                                    if scale_h > 0
+                                        && scale_w > 0
+                                        && hw > 0
+                                        && in_len > 0
+                                        && in_len % hw == 0
                                     {
-                                        use crate::backend::cpu::microkernels::has_avx2;
-                                        if has_avx2() {
-                                            unsafe {
-                                                crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
-                                                    &input, out_f32, nc, h_in, w_in, scale_h, scale_w,
-                                                );
+                                        let nc = in_len / hw;
+                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                        {
+                                            use crate::backend::cpu::microkernels::has_avx2;
+                                            if has_avx2() {
+                                                unsafe {
+                                                    crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
+                                                        input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                                    );
+                                                }
+                                                return;
                                             }
-                                            continue; // skip scalar fallback
                                         }
+                                        crate::backend::cpu::microkernels::upsample_nearest2d_f32(
+                                            input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                        );
                                     }
-                                    crate::backend::cpu::microkernels::upsample_nearest2d_f32(
-                                        &input, out_f32, nc, h_in, w_in, scale_h, scale_w,
-                                    );
-                                }
+                                });
                             }
                         }
                         "upsample_bilinear2d" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let scale_h = params.first().copied().unwrap_or(2);
                                 let scale_w = params.get(1).copied().unwrap_or(2);
                                 let h_in = params.get(2).copied().unwrap_or(1);
                                 let w_in = params.get(3).copied().unwrap_or(1);
                                 let hw = h_in * w_in;
-                                let out_len = out_f32.len();
-                                let in_len = input.len();
-                                if scale_h > 0
-                                    && scale_w > 0
-                                    && hw > 0
-                                    && out_len == in_len * scale_h * scale_w
-                                    && in_len > 0
-                                    && in_len % hw == 0
-                                {
-                                    let nc = in_len / hw;
-                                    for nci in 0..nc {
-                                        for hi in 0..h_in * scale_h {
-                                            for wi in 0..w_in * scale_w {
-                                                let src_h = (hi as f64 / scale_h as f64)
-                                                    .min((h_in - 1) as f64);
-                                                let src_w = (wi as f64 / scale_w as f64)
-                                                    .min((w_in - 1) as f64);
-                                                let h0 = src_h.floor() as usize;
-                                                let w0 = src_w.floor() as usize;
-                                                let h1 = (h0 + 1).min(h_in - 1);
-                                                let w1 = (w0 + 1).min(w_in - 1);
-                                                let dh = src_h - h0 as f64;
-                                                let dw = src_w - w0 as f64;
-                                                let v00 = input[nci * hw + h0 * w_in + w0];
-                                                let v01 = input[nci * hw + h0 * w_in + w1];
-                                                let v10 = input[nci * hw + h1 * w_in + w0];
-                                                let v11 = input[nci * hw + h1 * w_in + w1];
-                                                let v0 = v00 * (1.0 - dw as f32) + v01 * dw as f32;
-                                                let v1 = v10 * (1.0 - dw as f32) + v11 * dw as f32;
-                                                let val = v0 * (1.0 - dh as f32) + v1 * dh as f32;
-                                                let out_idx = nci * h_in * scale_h * w_in * scale_w
-                                                    + hi * w_in * scale_w
-                                                    + wi;
-                                                if out_idx < out_len {
-                                                    out_f32[out_idx] = val;
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
+                                    let out_len = out_f32.len();
+                                    let in_len = input.len();
+                                    if scale_h > 0
+                                        && scale_w > 0
+                                        && hw > 0
+                                        && out_len == in_len * scale_h * scale_w
+                                        && in_len > 0
+                                        && in_len % hw == 0
+                                    {
+                                        let nc = in_len / hw;
+                                        for nci in 0..nc {
+                                            for hi in 0..h_in * scale_h {
+                                                for wi in 0..w_in * scale_w {
+                                                    let src_h = (hi as f64 / scale_h as f64)
+                                                        .min((h_in - 1) as f64);
+                                                    let src_w = (wi as f64 / scale_w as f64)
+                                                        .min((w_in - 1) as f64);
+                                                    let h0 = src_h.floor() as usize;
+                                                    let w0 = src_w.floor() as usize;
+                                                    let h1 = (h0 + 1).min(h_in - 1);
+                                                    let w1 = (w0 + 1).min(w_in - 1);
+                                                    let dh = src_h - h0 as f64;
+                                                    let dw = src_w - w0 as f64;
+                                                    let v00 = input[nci * hw + h0 * w_in + w0];
+                                                    let v01 = input[nci * hw + h0 * w_in + w1];
+                                                    let v10 = input[nci * hw + h1 * w_in + w0];
+                                                    let v11 = input[nci * hw + h1 * w_in + w1];
+                                                    let v0 = v00 * (1.0 - dw as f32) + v01 * dw as f32;
+                                                    let v1 = v10 * (1.0 - dw as f32) + v11 * dw as f32;
+                                                    let val = v0 * (1.0 - dh as f32) + v1 * dh as f32;
+                                                    let out_idx = nci * h_in * scale_h * w_in * scale_w
+                                                        + hi * w_in * scale_w
+                                                        + wi;
+                                                    if out_idx < out_len {
+                                                        out_f32[out_idx] = val;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
+                                });
                             }
                         }
                         "adaptive_avg_pool2d" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let out_h = params.first().copied().unwrap_or(1);
                                 let out_w = params.get(1).copied().unwrap_or(1);
-                                let out_len = out_f32.len();
-                                if out_len > 0 {
-                                    let in_len = input.len();
-                                    let nc = if out_h > 0 && out_w > 0 {
-                                        out_len / (out_h * out_w)
-                                    } else {
-                                        0
-                                    };
-                                    if nc > 0 && in_len > 0 && in_len % nc == 0 {
-                                        let hw = in_len / nc;
-                                        let mut h = (hw as f64).sqrt() as usize;
-                                        while h > 0 && hw % h != 0 {
-                                            h -= 1;
-                                        }
-                                        let w = hw / h;
-                                        if h >= out_h && w >= out_w && h > 0 && w > 0 {
-                                            microkernels::adaptive_avg_pool2d_f32_scalar(
-                                                &input, out_f32, nc, h, w, out_h, out_w,
-                                            );
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
+                                    let out_len = out_f32.len();
+                                    if out_len > 0 {
+                                        let in_len = input.len();
+                                        let nc = if out_h > 0 && out_w > 0 {
+                                            out_len / (out_h * out_w)
+                                        } else {
+                                            0
+                                        };
+                                        if nc > 0 && in_len > 0 && in_len % nc == 0 {
+                                            let hw = in_len / nc;
+                                            let mut h = (hw as f64).sqrt() as usize;
+                                            while h > 0 && hw % h != 0 {
+                                                h -= 1;
+                                            }
+                                            let w = hw / h;
+                                            if h >= out_h && w >= out_w && h > 0 && w > 0 {
+                                                microkernels::adaptive_avg_pool2d_f32_scalar(
+                                                    input, out_f32, nc, h, w, out_h, out_w,
+                                                );
+                                            }
                                         }
                                     }
-                                }
+                                });
                             }
                         }
                         "repeat" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let in_len = input.len();
-                                let out_len = out_f32.len();
-                                if in_len > 0 && out_len >= in_len && out_len % in_len == 0 {
-                                    let factor = out_len / in_len;
-                                    for i in 0..in_len {
-                                        let val = input[i];
-                                        for f in 0..factor {
-                                            out_f32[i * factor + f] = val;
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
+                                    let in_len = input.len();
+                                    let out_len = out_f32.len();
+                                    if in_len > 0 && out_len >= in_len && out_len % in_len == 0 {
+                                        let factor = out_len / in_len;
+                                        for i in 0..in_len {
+                                            let val = input[i];
+                                            for f in 0..factor {
+                                                out_f32[i * factor + f] = val;
+                                            }
+                                        }
+                                    } else if in_len > 0 {
+                                        for i in 0..out_len {
+                                            out_f32[i] = input[i % in_len];
                                         }
                                     }
-                                } else if in_len > 0 {
-                                    for i in 0..out_len {
-                                        out_f32[i] = input[i % in_len];
-                                    }
-                                }
+                                });
                             }
                         }
                         "cumsum" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let _dim = params.first().copied().unwrap_or(0);
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let exclusive = params.get(1).copied().unwrap_or(0);
                                 let rev = params.get(2).copied().unwrap_or(0);
-                                let len = out_f32.len().min(input.len());
-                                if rev == 0 {
-                                    let mut s = 0.0f32;
-                                    for i in 0..len {
-                                        s += input[i];
-                                        out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
+                                    let len = out_f32.len().min(input.len());
+                                    if rev == 0 {
+                                        let mut s = 0.0f32;
+                                        for i in 0..len {
+                                            s += input[i];
+                                            out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
+                                        }
+                                    } else {
+                                        let mut s = 0.0f32;
+                                        for i in (0..len).rev() {
+                                            s += input[i];
+                                            out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
+                                        }
                                     }
-                                } else {
-                                    let mut s = 0.0f32;
-                                    for i in (0..len).rev() {
-                                        s += input[i];
-                                        out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
-                                    }
-                                }
+                                });
                             }
                         }
                         "erf_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                for i in 0..out_f32.len().min(input.len()) {
-                                    let x = input[i];
-                                    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-                                    #[allow(clippy::excessive_precision)]
-                                    let y = 1.0
-                                        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741)
-                                            * t
-                                            - 0.284496736)
-                                            * t
-                                            + 0.254829592)
-                                            * t
-                                            * (-x * x).exp();
-                                    out_f32[i] = x.signum() * y;
-                                }
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
+                                    for i in 0..out_f32.len().min(input.len()) {
+                                        let x = input[i];
+                                        let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+                                        #[allow(clippy::excessive_precision)]
+                                        let y = 1.0
+                                            - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741)
+                                                * t
+                                                - 0.284496736)
+                                                * t
+                                                + 0.254829592)
+                                                * t
+                                                * (-x * x).exp();
+                                        out_f32[i] = x.signum() * y;
+                                    }
+                                });
                             }
                         }
                         "flip" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                if params.is_empty() {
-                                    let len = out_f32.len().min(input.len());
-                                    for i in 0..len {
-                                        out_f32[i] = input[len - 1 - i];
-                                    }
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                let num_dims = params.first().copied().unwrap_or(0);
+                                let flip_dims: Vec<usize> = if num_dims > 0 {
+                                    params[1..1 + num_dims].to_vec()
                                 } else {
-                                    let num_dims = params[0];
-                                    let flip_dims: Vec<usize> = params[1..1 + num_dims].to_vec();
-                                    let shape: Vec<usize> = params[1 + num_dims..].to_vec();
-                                    let ndim = shape.len();
+                                    vec![]
+                                };
+                                let shape: Vec<usize> = if num_dims > 0 {
+                                    params[1 + num_dims..].to_vec()
+                                } else {
+                                    vec![]
+                                };
+                                let ndim = shape.len();
+                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
                                     let len = out_f32.len().min(input.len());
-                                    let mut indices = vec![0i64; ndim];
-                                    let mut strides = vec![0i64; ndim];
-                                    let mut stride = 1i64;
-                                    for d in (0..ndim).rev() {
-                                        strides[d] = stride;
-                                        stride *= shape[d] as i64;
-                                    }
-                                    for out_idx in 0..len {
-                                        let mut src_idx = 0i64;
-                                        for d in 0..ndim {
-                                            let idx = if flip_dims.contains(&d) {
-                                                shape[d] as i64 - 1 - indices[d]
-                                            } else {
-                                                indices[d]
-                                            };
-                                            src_idx += idx * strides[d];
+                                    if params.is_empty() {
+                                        for i in 0..len {
+                                            out_f32[i] = input[len - 1 - i];
                                         }
-                                        out_f32[out_idx] = input[src_idx as usize];
+                                    } else {
+                                        let mut indices = vec![0i64; ndim];
+                                        let mut strides = vec![0i64; ndim];
+                                        let mut stride = 1i64;
                                         for d in (0..ndim).rev() {
-                                            indices[d] += 1;
-                                            if indices[d] < shape[d] as i64 {
-                                                break;
+                                            strides[d] = stride;
+                                            stride *= shape[d] as i64;
+                                        }
+                                        for out_idx in 0..len {
+                                            let mut src_idx = 0i64;
+                                            for d in 0..ndim {
+                                                let idx = if flip_dims.contains(&d) {
+                                                    shape[d] as i64 - 1 - indices[d]
+                                                } else {
+                                                    indices[d]
+                                                };
+                                                src_idx += idx * strides[d];
                                             }
-                                            indices[d] = 0;
+                                            out_f32[out_idx] = input[src_idx as usize];
+                                            for d in (0..ndim).rev() {
+                                                indices[d] += 1;
+                                                if indices[d] < shape[d] as i64 {
+                                                    break;
+                                                }
+                                                indices[d] = 0;
+                                            }
                                         }
                                     }
-                                }
+                                });
                             }
                         }
                         "where_f32" => {
                             if input_slices.len() >= 3 {
-                                let cond_slice = &input_slices[0];
-                                let x_slice = &input_slices[1];
-                                let y_slice = &input_slices[2];
-                                let (cond, x, y) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[cond_slice.offset
-                                                ..cond_slice.offset + cond_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[x_slice.offset..x_slice.offset + x_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[y_slice.offset..y_slice.offset + y_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let len = out_f32.len();
-                                for i in 0..len {
-                                    let c = cond.get(i % cond.len()).copied().unwrap_or(0.0);
-                                    out_f32[i] = if c != 0.0 {
-                                        x.get(i % x.len()).copied().unwrap_or(0.0)
-                                    } else {
-                                        y.get(i % y.len()).copied().unwrap_or(0.0)
-                                    };
-                                }
+                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                let cond_slice = input_slices[0];
+                                let x_slice = input_slices[1];
+                                let y_slice = input_slices[2];
+                                arena::with_nary_f32_slices(
+                                    arena,
+                                    &[cond_slice, x_slice, y_slice],
+                                    output_slice,
+                                    |inputs, out_f32| {
+                                        let cond = inputs[0];
+                                        let x = inputs[1];
+                                        let y = inputs[2];
+                                        let len = out_f32.len();
+                                        for i in 0..len {
+                                            let c = cond.get(i % cond.len()).copied().unwrap_or(0.0);
+                                            out_f32[i] = if c != 0.0 {
+                                                x.get(i % x.len()).copied().unwrap_or(0.0)
+                                            } else {
+                                                y.get(i % y.len()).copied().unwrap_or(0.0)
+                                            };
+                                        }
+                                    },
+                                );
                             }
                         }
                         // ── Optimizer kernels ───────────────────────
