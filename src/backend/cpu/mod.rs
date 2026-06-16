@@ -1501,13 +1501,26 @@ impl Backend for CpuBackend {
                         .any(|d| matches!(d, IrDType::U4 { .. } | IrDType::U8 { .. }));
 
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
+                    // Determine fusion params for the unified "matmul" kernel
+                    let has_bias = input_slices.len() >= 3;
+                    let activation_type = match fused_type {
+                        Some("MatMulAddRelu") | Some("OpRelu") => 1, // ReLU
+                        Some("MatMulAddGelu") | Some("OpGelu") => 2,  // GELU
+                        Some("MatMulAddSilu") | Some("OpSilu") => 3,  // SiLU
+                        _ => 0,                                        // No activation
+                    };
                     let kernel_name = match (fused_type, is_quantized) {
-                        (Some("MatMulAddRelu"), _) => "fused_matmul_add_relu",
-                        (Some("MatMulAddGelu"), _) => "fused_matmul_add_gelu",
-                        (Some("MatMulAddSilu"), _) => "fused_matmul_add_silu",
+                        // Non-quantized fused patterns: use specialized kernels for now
+                        // (they have mature, tested implementations)
+                        (Some("MatMulAddRelu"), false) => "fused_matmul_add_relu",
+                        (Some("MatMulAddGelu"), false) => "fused_matmul_add_gelu",
+                        (Some("MatMulAddSilu"), false) => "fused_matmul_add_silu",
                         (Some("OpRelu"), false) => "matmul_relu",
                         (Some("OpGelu"), false) => "matmul_gelu",
                         (Some("OpSilu"), false) => "matmul_silu",
+                        // Non-quantized non-fused: use unified "matmul" kernel
+                        (_, false) => "matmul",
+                        // Quantized: keep specialized kernels
                         (_, true)
                             if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
@@ -1529,7 +1542,6 @@ impl Backend for CpuBackend {
                             "matmul_u4"
                         }
                         (_, true) => "matmul_u8",
-                        _ => "matmul",
                     };
                     // Extract M, K, N from input shapes
                     let m = input_shapes
@@ -1596,14 +1608,33 @@ impl Backend for CpuBackend {
                     } else {
                         None
                     };
+                    // For non-quantized matmul, pass fusion params (has_bias, activation_type)
+                    // Quantized kernels keep the original [M, K, N] params
+                    let (params, param_dims) = if kernel_name == "matmul" {
+                        (
+                            vec![m, k, n, has_bias as usize, activation_type],
+                            Some(vec![
+                                m_dim,
+                                k_dim,
+                                n_dim,
+                                DimExpr::Known(has_bias as u64),
+                                DimExpr::Known(activation_type as u64),
+                            ]),
+                        )
+                    } else {
+                        (
+                            vec![m, k, n],
+                            Some(vec![m_dim, k_dim, n_dim]),
+                        )
+                    };
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![m, k, n],
-                        param_dims: Some(vec![m_dim, k_dim, n_dim]),
+                        params,
+                        param_dims,
                         weight_meta,
                     });
                 }
@@ -3603,7 +3634,21 @@ impl Backend for CpuBackend {
                         }
                         "matmul" => {
                             if let [a_slice, b_slice] = &input_slices[..] {
-                                let (a, b) = {
+                                // params: [M, K, N, has_bias(0/1), activation(0=none, 1=relu, 2=gelu, 3=silu)]
+                                let matmul_params =
+                                    resolve_params(params, param_dims, shape_env, 5)?;
+                                let &[m, _k, n, has_bias, activation] = &matmul_params[..] else {
+                                    return Err(BackendError::Dispatch(
+                                        "matmul: expected params [M,K,N,has_bias,activation]".into(),
+                                    ));
+                                };
+                                let has_bias = has_bias != 0;
+                                let bias_slice = if has_bias {
+                                    Some(input_slices[2])
+                                } else {
+                                    None
+                                };
+                                let (a, b, bias) = {
                                     let d = arena.data_mut();
                                     let a_f32 = bytemuck::cast_slice::<_, f32>(
                                         &d[a_slice.offset..a_slice.offset + a_slice.size],
@@ -3613,14 +3658,15 @@ impl Backend for CpuBackend {
                                         &d[b_slice.offset..b_slice.offset + b_slice.size],
                                     )
                                     .to_vec();
-                                    (a_f32, b_f32)
-                                };
-                                let matmul_params =
-                                    resolve_params(params, param_dims, shape_env, 3)?;
-                                let &[m, _k, n] = &matmul_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "matmul: expected params [M,K,N]".into(),
-                                    ));
+                                    let bias_f32 = if let Some(bs) = bias_slice {
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[bs.offset..bs.offset + bs.size],
+                                        )
+                                        .to_vec()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    (a_f32, b_f32, bias_f32)
                                 };
                                 let out_f32 = {
                                     let d = arena.data_mut();
@@ -3639,6 +3685,7 @@ impl Backend for CpuBackend {
                                 let b_batched = b.len() > b_stride;
                                 // Skip BLAS for tiny matrices — dispatch overhead dominates.
                                 let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
+                                let apply_fusion = has_bias || activation != 0;
                                 if use_blas {
                                     for batch in 0..batch_count {
                                         let a_s = batch * a_stride;
@@ -3652,6 +3699,28 @@ impl Backend for CpuBackend {
                                             _k,
                                             n,
                                         );
+                                        if apply_fusion {
+                                            let out_batch = &mut out_f32[out_s..out_s + out_stride];
+                                            for i in 0..out_batch.len() {
+                                                let x = out_batch[i]
+                                                    + if has_bias && i % n < bias.len() {
+                                                        bias[i % n]
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                out_batch[i] = match activation {
+                                                    1 => x.max(0.0),
+                                                    2 => {
+                                                        let x3 = x * x * x;
+                                                        let tanh_arg =
+                                                            0.797_884_6 * (x + 0.044_715 * x3);
+                                                        0.5 * x * (1.0 + tanh_arg.tanh())
+                                                    }
+                                                    3 => x / (1.0 + (-x).exp()),
+                                                    _ => x,
+                                                };
+                                            }
+                                        }
                                     }
                                 } else {
                                     // Use SIMD+tiled blocked_row_matmul for small-to-medium matmuls
@@ -3660,8 +3729,6 @@ impl Backend for CpuBackend {
                                     #[cfg(feature = "parallel")]
                                     {
                                         use rayon::prelude::*;
-                                        // Wrap raw pointers in usize for Send+Sync safety.
-                                        // Each parallel task writes to a different row of output.
                                         let a_raw = a.as_ptr() as usize;
                                         let b_raw = b.as_ptr() as usize;
                                         let out_raw = out_f32.as_mut_ptr() as usize;
@@ -3678,6 +3745,32 @@ impl Backend for CpuBackend {
                                                     n, 1,
                                                 );
                                             }
+                                            if apply_fusion {
+                                                let row_start = row * n;
+                                                unsafe {
+                                                    let out_row =
+                                                        std::slice::from_raw_parts_mut(out_ptr.add(row_start), n);
+                                                    for i in 0..n {
+                                                        let x = out_row[i]
+                                                            + if has_bias && i < bias.len() {
+                                                                bias[i]
+                                                            } else {
+                                                                0.0
+                                                            };
+                                                        out_row[i] = match activation {
+                                                            1 => x.max(0.0),
+                                                            2 => {
+                                                                let x3 = x * x * x;
+                                                                let tanh_arg =
+                                                                    0.797_884_6 * (x + 0.044_715 * x3);
+                                                                0.5 * x * (1.0 + tanh_arg.tanh())
+                                                            }
+                                                            3 => x / (1.0 + (-x).exp()),
+                                                            _ => x,
+                                                        };
+                                                    }
+                                                }
+                                            }
                                         });
                                     }
                                     #[cfg(not(feature = "parallel"))]
@@ -3688,16 +3781,34 @@ impl Backend for CpuBackend {
                                                 b.as_ptr(),
                                                 out_f32.as_mut_ptr(),
                                                 row,
-                                                m,
-                                                n,
-                                                _k,
-                                                a_stride,
-                                                _k,
-                                                1,
+                                                m, n, _k,
+                                                a_stride, _k, 1,
                                                 b_batch_stride,
-                                                n,
-                                                1,
+                                                n, 1,
                                             );
+                                        }
+                                        if apply_fusion {
+                                            let row_start = row * n;
+                                            let out_row = &mut out_f32[row_start..row_start + n];
+                                            for i in 0..n {
+                                                let x = out_row[i]
+                                                    + if has_bias && i < bias.len() {
+                                                        bias[i]
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                out_row[i] = match activation {
+                                                    1 => x.max(0.0),
+                                                    2 => {
+                                                        let x3 = x * x * x;
+                                                        let tanh_arg =
+                                                            0.797_884_6 * (x + 0.044_715 * x3);
+                                                        0.5 * x * (1.0 + tanh_arg.tanh())
+                                                    }
+                                                    3 => x / (1.0 + (-x).exp()),
+                                                    _ => x,
+                                                };
+                                            }
                                         }
                                     }
                                 }
