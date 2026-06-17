@@ -1160,7 +1160,11 @@ impl AotExecutor {
                 let attrs: std::collections::HashMap<String, String> = m
                     .into_iter()
                     .filter(|(k, _)| {
-                        *k != "name" && *k != "op_type" && *k != "inputs" && *k != "outputs"
+                        *k != "name"
+                            && *k != "op_type"
+                            && *k != "inputs"
+                            && *k != "outputs"
+                            && *k != "output_shape"
                     })
                     .collect();
                 crate::onnx::converter::OnnxNode {
@@ -1910,6 +1914,36 @@ impl AotExecutor {
         Err(pyo3::exceptions::PyRuntimeError::new_err(
             "prepared_stats requires the 'prepared-plan' feature",
         ))
+    }
+
+    /// Debug method to print the compiled graph structure.
+    #[cfg(feature = "prepared-plan")]
+    fn debug_graph(&self) -> String {
+        let mut out = String::new();
+        out.push_str("=== COMPILED GRAPH ===\n");
+        for node_id in self.graph.topological_sort() {
+            if let Some(node) = self.graph.get_node(node_id) {
+                out.push_str(&format!(
+                    "  Node {}: {} / {:?} / inputs={:?}\n",
+                    node_id, node.name, node.opcode, node.inputs
+                ));
+                out.push_str(&format!(
+                    "    output_type: shape={:?}, dtype={:?}\n",
+                    node.output_type.shape, node.output_type.dtype
+                ));
+                if !node.attrs.is_empty() {
+                    out.push_str(&format!("    attrs: {:?}\n", node.attrs));
+                }
+            }
+        }
+        out.push_str(&format!("Inputs: {:?}\n", self.graph.inputs));
+        out.push_str(&format!("Outputs: {:?}\n", self.graph.outputs));
+        out
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn debug_graph(&self) -> String {
+        "debug_graph requires 'prepared-plan' feature".to_string()
     }
 }
 
