@@ -15,6 +15,8 @@ softmax = _core.softmax
 log_softmax = _core.log_softmax
 fused_add_relu = _core.fused_add_relu
 fused_conv_bn_silu = _core.fused_conv_bn_silu
+fused_linear_relu = _core.fused_linear_relu
+fused_linear_gelu = _core.fused_linear_gelu
 
 add = _core.add
 sub = _core.sub
@@ -40,24 +42,24 @@ min = _core.min
 maximum = _core.maximum
 minimum = _core.minimum
 where = _core.where_
+where_ = _core.where_
 repeat = _core.repeat
 expand = _core.expand
 fnn_slice = _core.slice
 topk = _core.topk
 gather = _core.gather
-
 einsum = _core.einsum
 flash_attention = _core.flash_attention
+cumsum = _core.cumsum
+erf = _core.erf
 
 mse_loss = _core.mse_loss
 cross_entropy_loss = _core.cross_entropy_loss
 bce_with_logits = _core.bce_with_logits
 huber_loss = _core.huber_loss
-gather = _core.gather
-where_ = _core.where_
-repeat = _core.repeat
 
 __all__ = [
+    # Activation functions
     "relu",
     "gelu",
     "sigmoid",
@@ -71,12 +73,14 @@ __all__ = [
     "log_softmax",
     "fused_add_relu",
     "fused_conv_bn_silu",
+    "fused_linear_relu",
+    "fused_linear_gelu",
+    # Arithmetic
     "add",
     "sub",
     "mul",
     "div",
     "matmul",
-    "im2col",
     "neg",
     "abs",
     "exp",
@@ -84,29 +88,34 @@ __all__ = [
     "sqrt",
     "pow",
     "clamp",
+    # Reduction
     "argmax",
     "argmin",
-    "cat",
-    "stack",
     "sum",
     "mean",
     "max",
     "min",
     "maximum",
     "minimum",
+    "cumsum",
+    # Tensor manipulation
+    "cat",
+    "stack",
     "where",
+    "where_",
     "repeat",
     "expand",
     "fnn_slice",
     "topk",
     "gather",
+    "im2col",
+    # Special
     "einsum",
     "flash_attention",
+    "erf",
+    # Loss functions
     "mse_loss",
     "cross_entropy_loss",
     "bce_with_logits",
     "huber_loss",
-    "gather",
-    "where_",
-    "repeat",
 ]

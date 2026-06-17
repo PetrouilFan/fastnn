@@ -295,7 +295,7 @@ def pad(x: Tensor, pad_width, mode='constant', value=0.0):
         out_shape.append(x.shape[i] + before + after)
 
     if mode == 'constant':
-        result = _core.full(out_shape, value, dtype=x.dtype, device=x.device)
+        result = fastnn.full(out_shape, value)
         # Copy x into the center
         slices = tuple(slice(before, before + x.shape[i]) for i in range(x.ndim))
         result[slices] = x

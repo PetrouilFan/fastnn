@@ -84,5 +84,10 @@ def set_default_device(device: str):
 
 
 def checkpoint(fn: Callable, *tensors: Tensor) -> List[Tensor]:
-    """Gradient checkpointing: saves memory by not storing intermediate activations."""
+    """Passthrough wrapper for API compatibility.
+
+    Currently a no-op — calls ``fn(*tensors)`` directly without gradient
+    checkpointing.  A future release may add actual memory-saving
+    recomputation logic here.
+    """
     return fn(*tensors)
