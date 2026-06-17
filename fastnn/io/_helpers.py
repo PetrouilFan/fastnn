@@ -131,7 +131,7 @@ def read_tensor_loop(
 
 def magic_bytes() -> bytes:
     """Return the FNN file format magic bytes."""
-    return b"FNN"
+    return b"FNN\x00"
 
 
 def write_header(fp, version: int, extra: dict | None = None) -> None:

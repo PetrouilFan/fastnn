@@ -149,14 +149,10 @@ def convert_precision(
                 for name, (data, dtype, scales, zeros, shape) in raw_params.items():
                     if dtype in (2, 3) and config.should_quantize_param(name):
                         # Get original f32 weights by dequantizing
-                        from fastnn import PackedTensor4, PackedTensor8
-                        q = config.get_quantizer(name)
-                        bit_width = q.precision.bit_width
-                        cls_map = {4: PackedTensor4, 8: PackedTensor8}
-                        cls = cls_map[bit_width]
-                        shape = data.shape if hasattr(data, 'shape') else []
-                        packed = cls.from_bytes(bytes(data), shape, scales, zeros)
-                        f32_weights = np.array(packed.to_f32_vec()).reshape(shape)
+                        raise NotImplementedError(
+                            "PackedTensor re-quantization is not yet available from Python. "
+                            "Use the Rust-side quantization pipeline instead."
+                        )
 
                         refined_scales = calibrator.refine_scales(
                             name, f32_weights, scales, method="percentile"
@@ -196,7 +192,6 @@ def convert_precision(
         from fastnn.io import read_fnn_header, read_fnn_parameters, MODEL_MAGIC, MODEL_VERSION
         from fastnn.io import write_fnn_file_v3, write_fnn_file
         from fastnn.io import DTYPE_F32, DTYPE_U4, DTYPE_U8, DTYPE_F16
-        from fastnn import PackedTensor4, PackedTensor8, PackedTensor16
 
         with open(input_path, "rb") as f:
             magic, version, header, num_params = read_fnn_header(f)
@@ -217,23 +212,10 @@ def convert_precision(
                 if config.should_quantize_param(name) and any(
                     name.endswith(s) for s in [".weight", ".gamma", ".beta"]
                 ):
-                    q = config.get_quantizer(name)
-                    bit_width = q.precision.bit_width
-                    cls_map = {4: PackedTensor4, 8: PackedTensor8, 16: PackedTensor16}
-                    cls = cls_map[bit_width]
-                    shape = list(arr.shape)
-                    use_per_channel = q.scheme == "per_channel" and arr.ndim >= 2
-                    if use_per_channel:
-                        packed = cls.from_f32_per_channel(arr.ravel().tolist(), shape)
-                    else:
-                        s = 1.0
-                        packed = cls(arr.ravel().tolist(), shape, s, 0.0)
-                    params_v3.append((
-                        name, bytes(packed.to_bytes()),
-                        {4: DTYPE_U4, 8: DTYPE_U8, 16: DTYPE_F16}[bit_width],
-                        packed.scales(), packed.zeros(),
-                        shape,
-                    ))
+                    raise NotImplementedError(
+                        "Re-quantizing v2 f32 tensors to packed types is not yet "
+                        "available from Python. Use the Rust-side quantization pipeline."
+                    )
                 else:
                     shape = list(arr.shape) if hasattr(arr, 'shape') else []
                     params_v3.append((name, arr, DTYPE_F32, [], [], shape))

@@ -174,7 +174,7 @@ class ModelCheckpoint(MonitorCallback):
 
 
 class EarlyStopping(MonitorCallback):
-    __slots__ = ('patience', 'min_delta', 'restore_best_weights', 'counter', 'best_value', 'best_weights', 'should_stop')
+    __slots__ = ('patience', 'min_delta', 'restore_best_weights', 'counter', 'best_value', 'best_weights', 'should_stop', '_epoch_count')
 
     def __init__(
         self,
@@ -191,6 +191,7 @@ class EarlyStopping(MonitorCallback):
         self.best_value: Optional[float] = None
         self.best_weights: Optional[Dict[str, Any]] = None
         self.should_stop: bool = False
+        self._epoch_count: int = 0
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         value, should_continue = self._check_monitor(logs)
@@ -227,7 +228,8 @@ class EarlyStopping(MonitorCallback):
 
         Returns True when stopping has been triggered.
         """
-        self.on_epoch_end(self.counter, logs)
+        self._epoch_count += 1
+        self.on_epoch_end(self._epoch_count, logs)
         return self.should_stop
 
     def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
@@ -273,7 +275,12 @@ class LearningRateScheduler(Callback):
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         """Update learning rate and log the new value."""
-        new_lr = self.scheduler.step()
+        from fastnn.schedulers import ReduceLROnPlateau
+        if isinstance(self.scheduler, ReduceLROnPlateau):
+            metric = logs.get(self.scheduler.monitor) if logs else None
+            new_lr = self.scheduler.step(metric=metric)
+        else:
+            new_lr = self.scheduler.step()
         if logs is not None:
             logs["lr"] = new_lr
 
@@ -299,6 +306,8 @@ class CSVLogger(Callback):
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         if not self._initialized:
+            return
+        if logs is None:
             return
         values = [str(logs.get(field, "")) for field in self.fields]
         self._file.write(",".join(values) + "\n")
