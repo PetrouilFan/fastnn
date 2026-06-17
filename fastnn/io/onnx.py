@@ -233,6 +233,20 @@ def _extract_attrs(onnx_node) -> Dict[str, Any]:
     return attrs
 
 
+def _resolve_input_names(
+    names: List[str], out_to_nid: Dict[str, int], gin_to_nid: Dict[str, int], init_names: set,
+) -> List[str]:
+    """Resolve input names to tensor names for the Rust converter.
+
+    Returns the original ONNX tensor names (e.g., 'conv_out', 'X', 'W', 'B').
+    """
+    result = []
+    for n in names:
+        if n and (n in out_to_nid or n in gin_to_nid or n in init_names):
+            result.append(n)
+    return result
+
+
 def _resolve_input_ids(
     names: List[str], out_to_nid: Dict[str, int], gin_to_nid: Dict[str, int], init_names: set,
 ) -> List[int]:
@@ -258,8 +272,14 @@ def _resolve_input_ids(
 def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -> Dict[str, Any]:
     import onnx
     import onnx.numpy_helper
+    import onnx.shape_inference
 
     model = onnx.load(onnx_path)
+    # Run ONNX shape inference to populate intermediate tensor shapes (value_info)
+    try:
+        model = onnx.shape_inference.infer_shapes(model)
+    except Exception:
+        pass  # Fall back to original model if inference fails
     init_map = {init.name: onnx.numpy_helper.to_array(init) for init in model.graph.initializer}
 
     if config is not None:
@@ -305,7 +325,8 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
 
         ir_op = ONNX_TO_IR_OP.get(onn.op_type, onn.op_type)
         attrs = _extract_attrs(onn)
-        ins = _resolve_input_ids(list(onn.input), out_to_nid, gin_to_nid, init_names)
+        ins_ids = _resolve_input_ids(list(onn.input), out_to_nid, gin_to_nid, init_names)
+        ins_names = _resolve_input_names(list(onn.input), out_to_nid, gin_to_nid, init_names)
         out_shape = vinfo.get(onn.output[0], ([], "F32")) if onn.output else ([], "F32")
         osd = {"shape": out_shape[0], "dtype": out_shape[1]}
 
@@ -315,7 +336,9 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                 params[f"{oname}.{suffix}"] = {"data": arr.tobytes(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
 
         if onn.op_type == "Gemm":
-            nodes.append({"id": oid, "opcode": "MatMul", "inputs": list(ins), "output_shape": osd, "attrs": {"alpha": attrs.get("alpha", 1.0), "transB": attrs.get("transB", 0)}, "name": f"{oname}_matmul"})
+            # Create intermediate tensor name for MatMul output
+            matmul_out_name = f"{oname}_matmul_out"
+            nodes.append({"id": oid, "opcode": "MatMul", "inputs": ins_names, "output_shape": osd, "attrs": {"alpha": attrs.get("alpha", 1.0), "transB": attrs.get("transB", 0)}, "name": f"{oname}_matmul", "outputs": [matmul_out_name]})
             weight = init_map.get(onn.input[1])
             if weight is not None:
                 if _get_attr(onn, "transB", 0):
@@ -331,14 +354,16 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                     bias = (bias * beta).astype(bias.dtype)
                 bid = nid
                 nid += 1
-                nodes.append({"id": bid, "opcode": "BiasAdd", "inputs": [oid], "output_shape": osd, "attrs": {}, "name": f"{oname}_bias"})
+                nodes.append({"id": bid, "opcode": "BiasAdd", "inputs": [matmul_out_name], "output_shape": osd, "attrs": {}, "name": f"{oname}_bias"})
                 out_to_nid[onn.output[0]] = bid
                 params[f"{oname}.bias"] = {"data": bias.tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
+            # Ensure the intermediate tensor maps to the MatMul node
+            out_to_nid[matmul_out_name] = oid
 
         elif onn.op_type in ("Conv", "ConvTranspose"):
             # For Conv/ConvTranspose, include weight and bias as input tensors
             # ins currently only has data input (X); need to add weight/bias param names
-            conv_ins = list(ins)
+            conv_ins = list(ins_names)
             for suffix, idx in _OP_PARAM_SLOTS.get(onn.op_type, []):
                 if idx < len(onn.input) and onn.input[idx] in init_map:
                     param_name = f"{oname}.{suffix}"
@@ -349,13 +374,13 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
             bias = init_map.get(onn.input[1])
             if bias is not None:
                 params[f"{oname}.bias"] = {"data": bias.tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
-            nodes.append({"id": oid, "opcode": "BiasAdd" if bias is not None else "Add", "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
+            nodes.append({"id": oid, "opcode": "BiasAdd" if bias is not None else "Add", "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Sub":
             bias = init_map.get(onn.input[1])
             if bias is not None:
                 params[f"{oname}.bias"] = {"data": (-bias).tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
-            nodes.append({"id": oid, "opcode": "BiasSub" if bias is not None else "Sub", "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
+            nodes.append({"id": oid, "opcode": "BiasSub" if bias is not None else "Sub", "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Constant":
             value = _get_attr(onn, "value", None)
@@ -365,29 +390,51 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                     params[f"{oname}.value"] = {"data": const_arr.tobytes(), "shape": list(const_arr.shape), "dtype": "F32", "is_constant": True}
                 except Exception:
                     pass
-            nodes.append({"id": oid, "opcode": ir_op, "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
+            nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Reshape":
             shape_arr = init_map.get(onn.input[1])
             if shape_arr is not None:
                 attrs["shape"] = shape_arr.tolist()
-            nodes.append({"id": oid, "opcode": ir_op, "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
+            nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         else:
-            nodes.append({"id": oid, "opcode": ir_op, "inputs": list(ins), "output_shape": osd, "attrs": attrs, "name": oname})
+            nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
     nid_map = {n["id"]: n for n in nodes}
+    # Map from node ID to its output tensor names (from ONNX)
+    node_output_names: Dict[int, List[str]] = {}
+    for onn in model.graph.node:
+        if onn.output:
+            # Find the node with this output
+            for o in onn.output:
+                if o in out_to_nid:
+                    # Store output names for the producer node
+                    prod_id = out_to_nid[o]
+                    if prod_id not in node_output_names:
+                        node_output_names[prod_id] = []
+                    node_output_names[prod_id].append(o)
+    
+    # Also include intermediate tensor names that were explicitly set on nodes
+    # (e.g., MatMul outputs for Gemm decomposition)
     for node in nodes:
-        node["outputs"] = []
-        for inp in node.get("inputs", []):
-            # Only process integer inputs for graph topology (skip param names which are strings)
-            if isinstance(inp, int):
-                producer_nid = inp & ((1 << 20) - 1)
-                producer = nid_map.get(producer_nid)
-                if producer is not None:
-                    producer["outputs"].append(node["id"])
+        if "outputs" in node and node["outputs"]:
+            nid = node["id"]
+            if nid not in node_output_names:
+                node_output_names[nid] = []
+            for out_name in node["outputs"]:
+                if out_name not in node_output_names[nid]:
+                    node_output_names[nid].append(out_name)
+    
+    # Set initial outputs based on ONNX tensor names
+    for node in nodes:
+        nid = node["id"]
+        if nid in node_output_names:
+            node["outputs"] = node_output_names[nid]
+        else:
+            node["outputs"] = []
 
-    # Map output names to output node IDs for later use
+    # For graph outputs, ensure the output node has the graph output tensor name
     out_name_to_nid = {}
     out_ids = []
     for out in model.graph.output:
@@ -404,9 +451,10 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
     for nid, name in out_name_to_nid.items():
         if nid in nid_map:
             # The output node's outputs should include the graph output tensor name
+            # (overwrite any previously inferred names for final output)
             nid_map[nid]["outputs"] = [name]
 
-    return {"nodes": nodes, "inputs": gin_ids, "outputs": out_ids, "params": params}
+    return {"nodes": nodes, "inputs": gin_ids, "outputs": out_ids, "params": params, "out_to_nid": out_to_nid}
 
 
 def _convert_bytes(obj):
@@ -493,23 +541,39 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
             # Check if next node is BiasAdd for the same op
             if i + 1 < len(nodes):
                 next_node = nodes[i + 1]
-                if next_node.get("opcode") == "BiasAdd" and next_node.get("inputs") == [node["id"]]:
-                    # Merge MatMul + BiasAdd into Linear layer
-                    layer["type"] = "Linear"
+                # The BiasAdd should have this MatMul's output tensor as input
+                matmul_outputs = node.get("outputs", [])
+                if matmul_outputs and next_node.get("opcode") == "BiasAdd":
+                    bias_inputs = next_node.get("inputs", [])
+                    # Check if any of the MatMul's outputs is an input to BiasAdd
+                    if any(out in bias_inputs for out in matmul_outputs):
+                        # Merge MatMul + BiasAdd into Linear layer
+                        layer["type"] = "Linear"
                     # Get out_features from output shape
                     out_shape = node.get("output_shape", {}).get("shape", [])
                     if out_shape and len(out_shape) >= 2:
                         layer["out_features"] = int(out_shape[-1].replace("Known(", "").replace(")", ""))
-                    # Get in_features from input shape
+                    # Get in_features from input shape - map tensor names to producer node IDs or params
                     inputs = node.get("inputs", [])
-                    if inputs:
-                        for inp_id in inputs:
-                            producer_nid = inp_id & ((1 << 20) - 1)
-                            producer = nid_map.get(producer_nid)
-                            if producer:
-                                prod_out_shape = producer.get("output_shape", {}).get("shape", [])
-                                if prod_out_shape and len(prod_out_shape) >= 2:
-                                    layer["in_features"] = int(prod_out_shape[-1].replace("Known(", "").replace(")", ""))
+                    if inputs and "out_to_nid" in cg:
+                        out_to_nid = cg["out_to_nid"]
+                        for inp_name in inputs:
+                            producer_nid = out_to_nid.get(inp_name)
+                            if producer_nid is not None:
+                                producer = nid_map.get(producer_nid)
+                                if producer:
+                                    prod_out_shape = producer.get("output_shape", {}).get("shape", [])
+                                    if prod_out_shape and len(prod_out_shape) >= 2:
+                                        layer["in_features"] = int(prod_out_shape[-1].replace("Known(", "").replace(")", ""))
+                                        break
+                            # Also check if it's an initializer (weight parameter)
+                            elif inp_name in params:
+                                weight_shape = params[inp_name].get("shape", [])
+                                if len(weight_shape) >= 2:
+                                    # Weight shape is [out_features, in_features] for transB=1
+                                    # or [in_features, out_features] for transB=0
+                                    # Default assumption: second dim is in_features
+                                    layer["in_features"] = weight_shape[1] if weight_shape[1] else weight_shape[0]
                                     break
                     # Transfer bias info
                     bias_attrs = next_node.get("attrs", {})
