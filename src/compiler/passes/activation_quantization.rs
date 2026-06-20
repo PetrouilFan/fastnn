@@ -15,25 +15,26 @@
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 
 /// Insert `QuantizeActivations`/`DequantizeActivations` around every `MatMul`
-/// node whose first input (the activation) is not already quantized.
+/// and `Conv2d` node whose first input (the activation) is not already quantized.
 ///
-/// The pass is idempotent — it skips MatMuls whose first input is already
+/// The pass is idempotent — it skips ops whose first input is already
 /// a `QuantizeActivations` output.
 pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
     struct Rewrite {
-        matmul_id: NodeId,
+        node_id: NodeId,
         act_id: NodeId,
-        matmul_shape: Vec<DimExpr>,
+        node_shape: Vec<DimExpr>,
         act_shape: Vec<DimExpr>,
         consumers: Vec<NodeId>,
         is_graph_output: bool,
+        opcode: Opcode,
     }
 
     let mut rewrites: Vec<Rewrite> = Vec::new();
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
-        if node.opcode != Opcode::MatMul {
+        if !matches!(node.opcode, Opcode::MatMul | Opcode::Conv2d) {
             return Ok(());
         }
 
@@ -42,7 +43,7 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
             None => return Ok(()),
         };
 
-        let matmul_shape = node.output_type.shape.clone();
+        let node_shape = node.output_type.shape.clone();
 
         if let Some(act_node) = graph_ref.get_node(act_id) {
             if act_node.opcode == Opcode::QuantizeActivations {
@@ -66,12 +67,13 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
             .unwrap_or_default();
 
         rewrites.push(Rewrite {
-            matmul_id: node_id,
+            node_id: node_id,
             act_id,
-            matmul_shape,
+            node_shape,
             act_shape,
             consumers,
             is_graph_output,
+            opcode: node.opcode.clone(),
         });
 
         Ok(())
@@ -81,16 +83,15 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
         let quant_type = TensorType::new(rw.act_shape, IrDType::I8);
         let quantize_id = graph.add_node(Opcode::QuantizeActivations, vec![rw.act_id], quant_type);
 
-        if let Some(mm_node) = graph.get_node_mut(rw.matmul_id) {
-            mm_node.inputs[0] = quantize_id;
+        if let Some(target) = graph.get_node_mut(rw.node_id) {
+            target.inputs[0] = quantize_id;
         }
 
-        // MatMul kernels consume quantized activations but still produce F32.
-        // Do not insert DequantizeActivations after MatMul: that node expects
-        // an I8 activation payload and would misread the F32 MatMul output.
-        let _ = rw.matmul_shape;
+        let _ = rw.node_shape;
+        let _ = rw.act_shape;
         let _ = rw.consumers;
         let _ = rw.is_graph_output;
+        let _ = rw.opcode;
     }
 
     Ok(())
