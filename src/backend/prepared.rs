@@ -487,8 +487,8 @@ pub fn activation_from_kernel_name(kernel_name: &str) -> PreparedActivation {
 /// with a 1x1 specialisation when kernel dimensions are both 1.
 pub fn kernel_kind_from_kernel_name(kernel_name: &str) -> PreparedConvKernelKind {
     match kernel_name {
-        "conv2d_u4" => PreparedConvKernelKind::FuturePackedU4,
-        "conv2d_u8" => PreparedConvKernelKind::FuturePackedI8,
+        "conv2d_u4" => PreparedConvKernelKind::CurrentIm2colGemm,
+        "conv2d_u8" => PreparedConvKernelKind::CurrentIm2colGemm,
         _ => PreparedConvKernelKind::CurrentIm2colGemm,
     }
 }
@@ -1381,10 +1381,7 @@ pub fn build_persistent_prepared_weights(
     for inst in &prepared.instructions {
         match inst {
             Conv2d(conv) => {
-                register_fp32_slot(&mut view, arena, conv.packed_weight, conv.weight);
-                if let Some(bias_slot) = conv.bias {
-                    register_fp32_slot(&mut view, arena, conv.packed_bias, bias_slot);
-                }
+                register_quantized_slot(&mut view, arena, conv.packed_weight, conv.weight);
             }
             MatMul(matmul) => {
                 register_fp32_slot(&mut view, arena, matmul.packed_weight, matmul.b);
@@ -1415,6 +1412,30 @@ fn register_fp32_slot(
     };
     let expected_bytes = slot.size;
     let actual_bytes = payload.len() * std::mem::size_of::<f32>();
+    if expected_bytes != actual_bytes {
+        return;
+    }
+    let key = (slot.offset, slot.size);
+    view.insert(key, Arc::new(payload.to_vec()));
+}
+
+fn register_quantized_slot(
+    view: &mut PersistentPreparedWeights,
+    arena: &PreparedConstantArena,
+    packed_id: Option<PackedWeightId>,
+    slot: BufferSlice,
+) {
+    let Some(id) = packed_id else {
+        return;
+    };
+    if !matches!(id.kind, PackedWeightKind::I8 | PackedWeightKind::U4) {
+        return;
+    }
+    let Some(payload) = arena.get(id) else {
+        return;
+    };
+    let expected_bytes = slot.size;
+    let actual_bytes = payload.len() * id.kind.element_bytes();
     if expected_bytes != actual_bytes {
         return;
     }
@@ -1693,11 +1714,11 @@ mod tests {
     fn kernel_kind_quantized() {
         assert_eq!(
             kernel_kind_from_kernel_name("conv2d_u4"),
-            PreparedConvKernelKind::FuturePackedU4
+            PreparedConvKernelKind::CurrentIm2colGemm
         );
         assert_eq!(
             kernel_kind_from_kernel_name("conv2d_u8"),
-            PreparedConvKernelKind::FuturePackedI8
+            PreparedConvKernelKind::CurrentIm2colGemm
         );
     }
 
@@ -1810,7 +1831,7 @@ mod tests {
         let result = try_prepare_conv2d(&inst, 0).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
-                assert_eq!(c.kernel, PreparedConvKernelKind::FuturePackedU4);
+                assert_eq!(c.kernel, PreparedConvKernelKind::CurrentIm2colGemm);
             }
             _ => panic!("expected Conv2d"),
         }
@@ -1828,7 +1849,7 @@ mod tests {
         let result = try_prepare_conv2d(&inst, 0).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
-                assert_eq!(c.kernel, PreparedConvKernelKind::FuturePackedI8);
+                assert_eq!(c.kernel, PreparedConvKernelKind::CurrentIm2colGemm);
             }
             _ => panic!("expected Conv2d"),
         }
