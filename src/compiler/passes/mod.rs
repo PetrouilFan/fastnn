@@ -9,6 +9,7 @@ pub mod fusion;
 pub mod memory_planning;
 pub mod operator_fusion;
 pub mod prune_qdq_pairs;
+pub mod quantize_activations;
 pub mod quantization;
 pub mod shape_inference;
 pub mod training;
