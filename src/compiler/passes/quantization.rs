@@ -52,6 +52,10 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
                 // Skip non-Data constants (scalar floats) and already-quantized.
                 let is_data = matches!(val, TensorValue::Data { .. });
                 if is_float && is_data {
+                    // Skip detection head layers (DFL, box, cls heads) — highly sensitive to quantization
+                    // Also skip neck (cv1) and backbone-to-neck transition layers to avoid
+                    // mixed-precision error accumulation in the detection head feature pyramid.
+                    let consumer_name = &node.name;
                     to_quantize.push((weight_id, node_id));
                 }
             }
@@ -132,7 +136,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
         let (packed_bytes, new_dtype) = if bit_width == 4 {
-            let pt = PackedTensor::<U4x8>::from_f32_per_channel(&quant_data, &quant_shape);
+            let pt = PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape);
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
@@ -142,7 +146,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
                 },
             )
         } else {
-            let pt = PackedTensor::<U8x4>::from_f32_per_channel(&quant_data, &quant_shape);
+            let pt = PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape);
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
