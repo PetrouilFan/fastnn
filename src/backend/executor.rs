@@ -107,7 +107,7 @@ impl<B: Backend> GraphExecutor<B> {
                     bit_width
                 )));
             }
-            quantization::quantize_weights(&mut graph, bit_width)
+            quantization::quantize_weights(&mut graph, bit_width, None)
                 .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
 
             // After quantizing weights, wrap any optimizer ops that now have

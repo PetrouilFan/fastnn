@@ -139,6 +139,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
             scales: vec![global_scale],
             zeros: vec![0.0],
             block_size: 1,
+            group_size: 0,
         }
     }
 
