@@ -129,12 +129,14 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     } else {
         1
     };
-    let valid_meta_len = meta.scales.len() == 1 || meta.scales.len() == rows;
+    let valid_meta_len =
+        meta.scales.len() == 1 || meta.scales.len() == rows || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0);
     if !valid_meta_len {
         return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1 or {})",
+            "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1, {}, or a divisor of {})",
             meta.scales.len(),
             meta.shape,
+            rows,
             rows
         )));
     }
@@ -155,12 +157,19 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
         )));
     }
 
-    Ok(PackedTensor::from_raw(
-        data,
-        meta.shape,
-        meta.scales,
-        meta.zero_points,
-    ))
+    Ok({
+        let scales_len = meta.scales.len();
+        let mut pt = PackedTensor::from_raw(
+            data,
+            meta.shape,
+            meta.scales,
+            meta.zero_points,
+        );
+        if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
+            pt.group_size = rows / scales_len;
+        }
+        pt
+    })
 }
 
 /// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
