@@ -1819,11 +1819,30 @@ impl Backend for CpuBackend {
                         .is_some_and(|d| matches!(d, IrDType::U4 { .. } | IrDType::U8 { .. }));
                     let (kernel_name, weight_meta) = if is_quantized {
                         let dtype = weight_dtype.as_ref().unwrap();
-                        let (kernel, bit_width) = if matches!(dtype, IrDType::U4 { .. }) {
-                            ("conv2d_u4", 4usize)
+                        let mut kernel = if matches!(dtype, IrDType::U4 { .. }) {
+                            "conv2d_u4".to_string()
                         } else {
-                            ("conv2d_u8", 8usize)
+                            "conv2d_u8".to_string()
                         };
+                        let bit_width = if matches!(dtype, IrDType::U4 { .. }) {
+                            4usize
+                        } else {
+                            8usize
+                        };
+
+                        // Detect I8 activations from QuantizeActivations and append suffix
+                        let act_dtype = node
+                            .inputs
+                            .first()
+                            .and_then(|&a_id| graph.get_node(a_id))
+                            .map(|an| an.output_type.dtype.clone());
+                        if act_dtype
+                            .as_ref()
+                            .is_some_and(|d| matches!(d, IrDType::I8))
+                        {
+                            kernel = format!("{}_i8", kernel);
+                        }
+
                         let meta = node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
                                 let (bw, scales, zero_points) = match &wn.output_type.dtype {
@@ -3093,6 +3112,34 @@ impl Backend for CpuBackend {
                     } else {
                         numel
                     };
+
+                    // If the predecessor node already carries calibrated scales/zeros
+                    // (e.g. from wrap_quantized_optimizer re-quant path), forward
+                    // them through params so the kernel can skip the O(N×K) scan.
+                    let (cached_scales, cached_zeros) = node
+                        .inputs
+                        .first()
+                        .and_then(|&input_id| graph.get_node(input_id))
+                        .map(|n| match &n.output_type.dtype {
+                            IrDType::U4 { scales, zero_points, .. }
+                            | IrDType::U8 { scales, zero_points, .. } => {
+                                (scales.clone(), zero_points.clone())
+                            }
+                            _ => (vec![], vec![]),
+                        })
+                        .unwrap_or_default();
+
+                    let mut params = vec![num_channels, num_elems_per_channel, numel];
+                    if !cached_scales.is_empty() && cached_scales.len() == num_channels {
+                        params.push(1); // flag: cached
+                        for &s in &cached_scales {
+                            params.push(s.to_bits() as usize);
+                        }
+                        for &zp in &cached_zeros {
+                            params.push(zp.to_bits() as usize);
+                        }
+                    }
+
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel_name.to_string(),
@@ -4483,10 +4530,16 @@ impl Backend for CpuBackend {
                                 let (input_data, packed_bytes) = {
                                     let d = arena.data_mut();
                                     (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
+                                        if kernel_name.ends_with("_i8") {
+                                            crate::backend::cpu::matmul::dequantize_i8_activation(
+                                                &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                            )
+                                        } else {
+                                            bytemuck::cast_slice::<_, f32>(
+                                                &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                            )
+                                            .to_vec()
+                                        },
                                         {
                                             let raw =
                                                 &d[w_slice.offset..w_slice.offset + w_slice.size];
@@ -6863,6 +6916,25 @@ impl Backend for CpuBackend {
                             let max_q = (1i32 << (bit_width - 1)) - 1; // 7 for U4, 127 for U8
                             let items_per_word = 32 / bit_width; // 8 for U4, 4 for U8
 
+                            // Check for cached scales from wrap_quantized_optimizer
+                            let has_cached = params.get(3).copied().unwrap_or(0) == 1;
+                            let mut cached_scales = vec![];
+                            let mut cached_zeros = vec![];
+                            if has_cached {
+                                let sc_start = 4;
+                                let sc_end = sc_start + num_channels;
+                                let zp_start = sc_end;
+                                let zp_end = zp_start + num_channels;
+                                for i in sc_start..sc_end {
+                                    let bits = *params.get(i).unwrap_or(&0);
+                                    cached_scales.push(f32::from_bits(bits as u32));
+                                }
+                                for i in zp_start..zp_end {
+                                    let bits = *params.get(i).unwrap_or(&0);
+                                    cached_zeros.push(f32::from_bits(bits as u32));
+                                }
+                            }
+
                             if let Some(input_slice) = input_slices.first() {
                                 let d = arena.data_mut();
                                 let f32_data: Vec<f32> = bytemuck::cast_slice::<_, f32>(
@@ -6870,37 +6942,61 @@ impl Backend for CpuBackend {
                                 )
                                 .to_vec();
 
-                                // Compute per-channel scales and pack data
                                 let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
-                                let zero_points: Vec<f32> = vec![0.0; num_channels];
+                                let mut zero_points: Vec<f32> = vec![0.0; num_channels];
                                 let packed_words = numel.div_ceil(items_per_word);
                                 let mut packed: Vec<u32> = vec![0u32; packed_words];
 
-                                for ch in 0..num_channels {
-                                    let start = ch * num_elems_per_channel;
-                                    let end = (start + num_elems_per_channel).min(f32_data.len());
-                                    // Compute scale as max absolute value
-                                    let max_abs = f32_data[start..end]
-                                        .iter()
-                                        .map(|v| v.abs())
-                                        .fold(0.0f32, f32::max);
-                                    let scale = if max_abs == 0.0 {
-                                        1.0
-                                    } else {
-                                        max_abs / max_q as f32
-                                    };
-                                    scales.push(scale);
+                                if has_cached
+                                    && cached_scales.len() == num_channels
+                                    && cached_zeros.len() == num_channels
+                                {
+                                    scales = cached_scales;
+                                    zero_points = cached_zeros;
+                                    // Pack using cached scales
+                                    for ch in 0..num_channels {
+                                        let start = ch * num_elems_per_channel;
+                                        let end = (start + num_elems_per_channel).min(f32_data.len());
+                                        let scale = scales[ch];
+                                        let inv_s = if scale != 0.0 { 1.0 / scale } else { 0.0 };
+                                        let zp = zero_points[ch];
+                                        for j in start..end {
+                                            let q = ((f32_data[j] - zp) * inv_s)
+                                                .round()
+                                                .clamp(-(max_q as f32), max_q as f32)
+                                                as i32;
+                                            let word_idx = j / items_per_word;
+                                            let shift = (j % items_per_word) * bit_width;
+                                            packed[word_idx] |= ((q as u32) & ((1 << bit_width) - 1)) << shift;
+                                        }
+                                    }
+                                } else {
+                                    // Original path: recompute per-channel scales
+                                    for ch in 0..num_channels {
+                                        let start = ch * num_elems_per_channel;
+                                        let end = (start + num_elems_per_channel).min(f32_data.len());
+                                        let max_abs = f32_data[start..end]
+                                            .iter()
+                                            .map(|v| v.abs())
+                                            .fold(0.0f32, f32::max);
+                                        let scale = if max_abs == 0.0 {
+                                            1.0
+                                        } else {
+                                            max_abs / max_q as f32
+                                        };
+                                        scales.push(scale);
 
-                                    // Quantize and pack
-                                    for j in start..end {
-                                        let q = (f32_data[j] / scale)
-                                            .round()
-                                            .clamp(-(max_q as f32), max_q as f32)
-                                            as i32;
-                                        let word_idx = j / items_per_word;
-                                        let shift = (j % items_per_word) * bit_width;
-                                        packed[word_idx] |=
-                                            ((q as u32) & ((1 << bit_width) - 1)) << shift;
+                                        // Quantize and pack
+                                        for j in start..end {
+                                            let q = (f32_data[j] / scale)
+                                                .round()
+                                                .clamp(-(max_q as f32), max_q as f32)
+                                                as i32;
+                                            let word_idx = j / items_per_word;
+                                            let shift = (j % items_per_word) * bit_width;
+                                            packed[word_idx] |=
+                                                ((q as u32) & ((1 << bit_width) - 1)) << shift;
+                                        }
                                     }
                                 }
 
