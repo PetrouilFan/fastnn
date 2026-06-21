@@ -52,10 +52,6 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
                 // Skip non-Data constants (scalar floats) and already-quantized.
                 let is_data = matches!(val, TensorValue::Data { .. });
                 if is_float && is_data {
-                    // Skip detection head layers (DFL, box, cls heads) — highly sensitive to quantization
-                    // Also skip neck (cv1) and backbone-to-neck transition layers to avoid
-                    // mixed-precision error accumulation in the detection head feature pyramid.
-                    let consumer_name = &node.name;
                     to_quantize.push((weight_id, node_id));
                 }
             }
@@ -283,16 +279,27 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
         }
 
         // 3. Create Quantize node after the optimizer: updated_f32 → updated_u4
+        // Carry through the original calibrated scales/zeros so the runtime
+        // can skip the O(N×K) per-channel abs-max scan on every optimizer step.
+        let (orig_scales, orig_zeros) = graph
+            .get_node(wrap.weight_id)
+            .map(|wn| match &wn.output_type.dtype {
+                IrDType::U4 { scales, zero_points, .. } => (scales.clone(), zero_points.clone()),
+                IrDType::U8 { scales, zero_points, .. } => (scales.clone(), zero_points.clone()),
+                _ => (vec![], vec![]),
+            })
+            .unwrap_or_default();
+
         let u_type = TensorType::new(
             weight_type.shape.clone(),
             match wrap.bit_width {
                 4 => IrDType::U4 {
-                    scales: vec![],
-                    zero_points: vec![],
+                    scales: orig_scales,
+                    zero_points: orig_zeros,
                 },
                 8 => IrDType::U8 {
-                    scales: vec![],
-                    zero_points: vec![],
+                    scales: orig_scales,
+                    zero_points: orig_zeros,
                 },
                 _ => return Err(format!("unsupported bit_width: {}", wrap.bit_width)),
             },
