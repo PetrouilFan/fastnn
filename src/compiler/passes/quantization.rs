@@ -154,8 +154,11 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
         };
 
         // Build the new TensorType with packed dtype.
+        // Use the post-transpose quant_shape so shape metadata matches
+        // the actual packed layout (scales/zeros are per-output-channel,
+        // which is dim 0 of the transposed [N, K] weight).
         let new_tensor_type = TensorType {
-            shape: const_node.output_type.shape.clone(),
+            shape: quant_shape.iter().map(|&d| DimExpr::Known(d as u64)).collect(),
             dtype: new_dtype,
         };
 
