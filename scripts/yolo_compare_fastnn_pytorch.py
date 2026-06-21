@@ -120,7 +120,7 @@ def _format_attr_value(value: Any) -> str:
     return str(value)
 
 
-def _make_fastnn_executor(onnx_path: Path):
+def _make_fastnn_executor(onnx_path: Path, quantize: str | None = None):
     import onnx
     from onnx import numpy_helper
     import fastnn as fnn
@@ -247,7 +247,7 @@ def _make_fastnn_executor(onnx_path: Path):
                     item["scale_w"] = str(int(scales[3]))
         nodes.append(item)
 
-    return fnn.AotExecutor(nodes, params, input_names, output_names, input_shapes=input_shapes), input_names[0], output_names[0]
+    return fnn.AotExecutor(nodes, params, input_names, output_names, input_shapes=input_shapes, quantize=int(quantize) if quantize else None), input_names[0], output_names[0]
 
 
 def main() -> int:
@@ -266,6 +266,7 @@ def main() -> int:
         default=None,
         help="Write machine-readable benchmark/profile results to this JSON path",
     )
+    ap.add_argument("--quantize", type=str, default=None, choices=["4", "8"], help="Quantize weights to U4 or U8")
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -301,7 +302,7 @@ def main() -> int:
 
     try:
         import fastnn as fnn
-        executor, fastnn_input, fastnn_output = _make_fastnn_executor(onnx_path)
+        executor, fastnn_input, fastnn_output = _make_fastnn_executor(onnx_path, quantize=args.quantize)
         fx = fnn.tensor(x, list(x.shape))
         fy = executor.forward({fastnn_input: fx})[fastnn_output].numpy()
         results["fastnn_output_shape"] = list(fy.shape)
