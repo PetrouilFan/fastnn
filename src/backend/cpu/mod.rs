@@ -4625,45 +4625,99 @@ impl Backend for CpuBackend {
                                             meta.zero_points,
                                         );
                                         let col_w = c_per_g * kernel_h * kernel_w;
-                                        for nn in 0..n {
-                                            let num_pixels = h_out * w_out;
-                                            let mut col_matrix = vec![0.0f32; num_pixels * col_w];
-                                            unsafe {
-                                                crate::backend::cpu::im2col::im2col_kernel_rect(
-                                                    &input_data[nn * (c * h * w)..],
-                                                    c_per_g,
-                                                    h,
-                                                    w,
-                                                    kernel_h,
-                                                    kernel_w,
-                                                    stride,
-                                                    padding,
-                                                    dilation,
-                                                    &mut col_matrix,
-                                                );
-                                            }
-                                            // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
-                                            let mut temp_out = vec![0.0f32; num_pixels * oc];
-                                            crate::backend::cpu::microkernels::gemm_cpu_flat(
-                                                &pt,
-                                                &col_matrix,
-                                                &mut temp_out,
-                                                num_pixels,
-                                                col_w,
-                                                oc,
-                                            );
-                                            for pixel in 0..num_pixels {
-                                                for ff in 0..oc {
-                                                    let mut val = temp_out[pixel * oc + ff];
-                                                    if !bias_data.is_empty() && ff < bias_data.len()
-                                                    {
-                                                        val += bias_data[ff];
+                                        let has_bias = !bias_data.is_empty();
+                                        #[cfg(feature = "parallel")]
+                                        {
+                                            let out_f32_ref = out_f32;
+                                            let input_data_ref = input_data.as_slice();
+                                            rayon::scope(|_| {
+                                                for nn in 0..n {
+                                                    let num_pixels = h_out * w_out;
+                                                    let mut col_matrix = vec![0.0f32; num_pixels * col_w];
+                                                    unsafe {
+                                                        crate::backend::cpu::im2col::im2col_kernel_rect(
+                                                            &input_data_ref[nn * (c * h * w)..],
+                                                            c_per_g,
+                                                            h,
+                                                            w,
+                                                            kernel_h,
+                                                            kernel_w,
+                                                            stride,
+                                                            padding,
+                                                            dilation,
+                                                            &mut col_matrix,
+                                                        );
                                                     }
-                                                    let out_idx = nn * (oc * h_out * w_out)
-                                                        + ff * (h_out * w_out)
-                                                        + pixel;
-                                                    if out_idx < out_f32.len() {
-                                                        out_f32[out_idx] = val;
+                                                    let mut temp_out = vec![0.0f32; num_pixels * oc];
+                                                    crate::backend::cpu::microkernels::gemm_cpu_flat(
+                                                        &pt,
+                                                        &col_matrix,
+                                                        &mut temp_out,
+                                                        num_pixels,
+                                                        col_w,
+                                                        oc,
+                                                    );
+                                                    for pixel in 0..num_pixels {
+                                                        for ff in 0..oc {
+                                                            let mut val = temp_out[pixel * oc + ff];
+                                                            if has_bias && ff < bias_data.len() {
+                                                                val += bias_data[ff];
+                                                            }
+                                                            let out_idx = nn * (oc * h_out * w_out)
+                                                                + ff * (h_out * w_out)
+                                                                + pixel;
+                                                            if out_idx < out_f32_ref.len() {
+                                                                unsafe {
+                                                                    *(out_f32_ref.as_ptr() as *mut f32).add(out_idx) = val;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        #[cfg(not(feature = "parallel"))]
+                                        {
+                                            for nn in 0..n {
+                                                let num_pixels = h_out * w_out;
+                                                let mut col_matrix = vec![0.0f32; num_pixels * col_w];
+                                                unsafe {
+                                                    crate::backend::cpu::im2col::im2col_kernel_rect(
+                                                        &input_data[nn * (c * h * w)..],
+                                                        c_per_g,
+                                                        h,
+                                                        w,
+                                                        kernel_h,
+                                                        kernel_w,
+                                                        stride,
+                                                        padding,
+                                                        dilation,
+                                                        &mut col_matrix,
+                                                    );
+                                                }
+                                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
+                                                let mut temp_out = vec![0.0f32; num_pixels * oc];
+                                                crate::backend::cpu::microkernels::gemm_cpu_flat(
+                                                    &pt,
+                                                    &col_matrix,
+                                                    &mut temp_out,
+                                                    num_pixels,
+                                                    col_w,
+                                                    oc,
+                                                );
+                                                for pixel in 0..num_pixels {
+                                                    for ff in 0..oc {
+                                                        let mut val = temp_out[pixel * oc + ff];
+                                                        if !bias_data.is_empty() && ff < bias_data.len()
+                                                        {
+                                                            val += bias_data[ff];
+                                                        }
+                                                        let out_idx = nn * (oc * h_out * w_out)
+                                                            + ff * (h_out * w_out)
+                                                            + pixel;
+                                                        if out_idx < out_f32.len() {
+                                                            out_f32[out_idx] = val;
+                                                        }
                                                     }
                                                 }
                                             }
