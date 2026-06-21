@@ -6,6 +6,9 @@
 #![allow(dead_code)]
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::dtypes::F16x2;
 use crate::dtypes::{F32x1, PackedWord, U4x8, U8x4};
@@ -2555,6 +2558,19 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
                     }
                 }
 
+                #[cfg(feature = "parallel")]
+                {
+                    output
+                        .par_chunks_mut(m)
+                        .enumerate()
+                        .for_each(|(bi, chunk)| {
+                            let act_slice =
+                                &activation[bi * k + k_start..bi * k + k_end];
+                            let acc = fma_f32_slice(unpack_buf, act_slice);
+                            chunk[row] += acc;
+                        });
+                }
+                #[cfg(not(feature = "parallel"))]
                 for bi in 0..n {
                     let act_slice = &activation[bi * k + k_start..bi * k + k_end];
                     let acc = fma_f32_slice(unpack_buf, act_slice);
@@ -2566,13 +2582,29 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
         k_start += K_BLOCK_SIZE;
     }
 
-    for bi in 0..n {
-        let input = &activation[bi * k..(bi + 1) * k];
-        let input_sum = affine_sum_term(input, k, 1.0);
-        for row in 0..m {
-            let scale = weights.scale_for_row(row);
-            let zero = weights.zero_for_row(row);
-            output[bi * m + row] = apply_affine_dot(output[bi * m + row], scale, zero, input_sum);
+    #[cfg(feature = "parallel")]
+    {
+        let k_usize = k;
+        output.par_chunks_mut(m).enumerate().for_each(|(bi, chunk)| {
+            let input = &activation[bi * k_usize..(bi + 1) * k_usize];
+            let input_sum = affine_sum_term(input, k_usize, 1.0);
+            for row in 0..m {
+                let scale = weights.scale_for_row(row);
+                let zero = weights.zero_for_row(row);
+                chunk[row] = apply_affine_dot(chunk[row], scale, zero, input_sum);
+            }
+        });
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for bi in 0..n {
+            let input = &activation[bi * k..(bi + 1) * k];
+            let input_sum = affine_sum_term(input, k, 1.0);
+            for row in 0..m {
+                let scale = weights.scale_for_row(row);
+                let zero = weights.zero_for_row(row);
+                output[bi * m + row] = apply_affine_dot(output[bi * m + row], scale, zero, input_sum);
+            }
         }
     }
 }
