@@ -65,7 +65,7 @@ fn quantize_weight_constants(graph: &mut ComputeGraph, bit_width: u8) -> Result<
     // The existing quantize_weights pass does exactly what we need:
     // it finds f32 Constants feeding MatMul/Conv and packs them.
     let count_before = graph.node_count();
-    super::quantization::quantize_weights(graph, bit_width)?;
+    super::quantization::quantize_weights(graph, bit_width, None)?;
     let count_after = graph.node_count();
     // quantize_weights modifies nodes in-place (no new nodes), so the
     // count stays the same.  We track the number of modified nodes by
