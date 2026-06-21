@@ -2327,35 +2327,7 @@ pub fn gemm_cpu_flat<T: PackedWord>(
     col_w: usize,
     oc: usize,
 ) {
-    let shape = weights.shape();
-    let m = shape[0];
-    let k = shape[1];
-    let k_packed = k.div_ceil(T::ITEMS);
-
-    with_scratch(k, |unpack_buf| {
-        for row in 0..m {
-            let scale = weights.scale_for_row(row);
-            let zero = weights.zero_for_row(row);
-            let row_offset = row * k_packed;
-            for p in 0..k_packed {
-                let word = weights.as_packed()[row_offset + p];
-                let unpacked = word.unpack_to_f32();
-                let base = p * T::ITEMS;
-                for j in 0..T::ITEMS {
-                    let idx = base + j;
-                    if idx < k {
-                        unpack_buf[idx] = unpacked.as_ref()[j];
-                    }
-                }
-            }
-            for bi in 0..num_pixels {
-                let input = &batch_inputs[bi * col_w..(bi + 1) * col_w];
-                let acc = fma_f32_slice(unpack_buf, input);
-                let input_sum = affine_sum_term(input, k, zero);
-                outputs[bi * oc + row] = apply_affine_dot(acc, scale, zero, input_sum);
-            }
-        }
-    });
+    gemm_batch_packed_simd(weights, batch_inputs, outputs, num_pixels, col_w, oc);
 }
 
 // ============================================================

@@ -27,6 +27,7 @@ use crate::compiler::passes::{
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::env;
 
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
@@ -124,6 +125,28 @@ impl<B: Backend> GraphExecutor<B> {
 
         // ── Phase 5: Backend compilation ──────────────────────────────────
         let plan = self.backend.compile(&graph, &memory_plan)?;
+
+        if std::env::var("FASTNN_DUMP_GRAPH").is_ok() {
+            use std::collections::BTreeMap;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            let mut dtypes: BTreeMap<String, usize> = BTreeMap::new();
+            for n in &graph.nodes {
+                counts.entry(format!("{:?}", n.opcode)).or_default(); // just trigger
+                *counts.entry(format!("{:?}", n.opcode)).or_default() += 1;
+                *dtypes.entry(format!("{:?}", n.output_type.dtype)).or_default() += 1;
+            }
+            eprintln!("FASTNN_DUMP: nodes={}", graph.nodes.len());
+            for (k, v) in &counts {
+                if v > &0 {
+                    eprintln!("  OP {k}: {v}");
+                }
+            }
+            for (k, v) in &dtypes {
+                if v > &0 {
+                    eprintln!("  DT {k}: {v}");
+                }
+            }
+        }
 
         Ok((plan, memory_plan, graph))
     }

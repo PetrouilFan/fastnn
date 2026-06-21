@@ -8,6 +8,29 @@ use crate::packed_tensor::PackedTensor;
 
 use super::{resolve_params, CpuBuffer};
 
+/// Dequantize I8 activation payload (format: [scale_f32][zp_f32][i8_data...]) to f32.
+pub(super) fn dequantize_i8_activation(payload: &[u8]) -> Vec<f32> {
+    let header_size = 8;
+    let numel = payload.len().saturating_sub(header_size);
+    let scale = if payload.len() >= 4 {
+        f32::from_le_bytes(payload[0..4].try_into().unwrap())
+    } else {
+        1.0
+    };
+    let zp = if payload.len() >= 8 {
+        f32::from_le_bytes(payload[4..8].try_into().unwrap())
+    } else {
+        0.0
+    };
+    let mut out = Vec::with_capacity(numel);
+    for i in 0..numel {
+        let idx = header_size + i;
+        let q = payload[idx] as i8;
+        out.push((q as f32) * scale + zp);
+    }
+    out
+}
+
 // Runtime dispatch helpers intentionally take the IR/kernel call-site context
 // directly so they do not allocate wrapper structs on hot paths.
 
