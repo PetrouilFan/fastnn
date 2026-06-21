@@ -20,7 +20,11 @@ use crate::packed_tensor::PackedTensor;
 /// (scale, zero_point) pair per output channel (row).  The scales and
 /// zero_points are stored directly on the `IrDType::U4/U8` variant so
 /// the CPU backend can feed them into `PackedTensor::from_raw(…)`.
-pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), String> {
+pub fn quantize_weights(
+    graph: &mut ComputeGraph,
+    bit_width: u8,
+    group_size: Option<usize>,
+) -> Result<(), String> {
     // ---- Phase 1: collect (constant_id, consumer_id) pairs to quantize ----
     // We collect first, then mutate, to avoid borrow-checker issues.
     let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
@@ -132,7 +136,13 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
         let (packed_bytes, new_dtype) = if bit_width == 4 {
-            let pt = PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape);
+            let pt = if let Some(gs) = group_size {
+                PackedTensor::<U4x8>::from_f32_per_channel_asymmetric_grouped(
+                    &quant_data, &quant_shape, gs,
+                )
+            } else {
+                PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
+            };
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
@@ -142,7 +152,13 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
                 },
             )
         } else {
-            let pt = PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape);
+            let pt = if let Some(gs) = group_size {
+                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric_grouped(
+                    &quant_data, &quant_shape, gs,
+                )
+            } else {
+                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
+            };
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
@@ -384,7 +400,7 @@ mod tests {
         );
 
         // Quantize to U4.
-        quantize_weights(&mut graph, 4).expect("quantization should succeed");
+        quantize_weights(&mut graph, 4, None).expect("quantization should succeed");
 
         // Verify the weight node dtype is now U4.
         let has_u4_const = graph.nodes.iter().any(|n| {
@@ -432,7 +448,7 @@ mod tests {
         ];
         let mut graph = build_matmul_graph(&weight_data, &[2, 8]);
 
-        quantize_weights(&mut graph, 8).expect("quantization should succeed");
+        quantize_weights(&mut graph, 8, None).expect("quantization should succeed");
 
         let has_u8_const = graph.nodes.iter().any(|n| {
             matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::U8 { .. }))
@@ -477,7 +493,7 @@ mod tests {
         let mut graph = gb.to_graph();
 
         // Quantize should be a no-op (already U4).
-        quantize_weights(&mut graph, 4).expect("quantization should succeed");
+        quantize_weights(&mut graph, 4, None).expect("quantization should succeed");
 
         // The weight should still be U4 (unchanged).
         let node = graph
@@ -498,7 +514,7 @@ mod tests {
         let _output = gb.relu(&input);
         let mut graph = gb.to_graph();
 
-        quantize_weights(&mut graph, 4).expect("quantization should succeed on empty graph");
+        quantize_weights(&mut graph, 4, None).expect("quantization should succeed on empty graph");
     }
 
     #[test]

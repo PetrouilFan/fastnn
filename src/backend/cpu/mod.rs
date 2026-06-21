@@ -198,6 +198,7 @@ fn quantized_matmul_dispatch_precopied<T: PackedWord>(
     weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
     bit_width: usize,
     kernel_name: &str,
+    persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
 ) -> Result<(), BackendError> {
     if inputs.len() >= 2 {
         let activations = bytemuck::cast_slice::<_, f32>(&inputs[0]);
@@ -600,6 +601,7 @@ fn run_kernel_precopied(
                 weight_meta,
                 4,
                 "matmul_u4",
+                None,
             )?;
         }
         "matmul_u4_i8" => {
@@ -634,6 +636,7 @@ fn run_kernel_precopied(
                 weight_meta,
                 8,
                 "matmul_u8",
+                None,
             )?;
         }
         // ── Reduce ────────────────────────────────────────────
@@ -3146,7 +3149,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![num_channels, num_elems_per_channel, numel],
+                        params, // includes cached scales/zeros when available
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -7585,6 +7588,56 @@ impl Backend for CpuBackend {
                     }
                 }
 
+                // Quantized MatMul family (u4, u8, and i8-activation
+                // variants).  Same persistent-view override logic as
+                // the fp32 path above.
+                Instruction::CallKernel {
+                    kernel_name,
+                    input_slices,
+                    output_slice,
+                    params,
+                    param_dims,
+                    weight_meta,
+                    node_id,
+                    ..
+                } if matches!(
+                    kernel_name.as_str(),
+                    "matmul_u4"
+                        | "matmul_u4_i8"
+                        | "matmul_u8"
+                        | "matmul_u8_i8"
+                ) =>
+                {
+                    let has_override = input_slices
+                        .get(1)
+                        .map(|b| view.get(&(b.offset, b.size)).is_some())
+                        .unwrap_or(false)
+                        || input_slices
+                            .get(2)
+                            .map(|b| view.get(&(b.offset, b.size)).is_some())
+                            .unwrap_or(false);
+                    if has_override {
+                        dispatch_matmul_quantized_with_view(
+                            arena,
+                            shape_env,
+                            kernel_name,
+                            input_slices,
+                            *output_slice,
+                            params,
+                            param_dims,
+                            weight_meta,
+                            view,
+                        )?;
+                    } else {
+                        let single = ExecutablePlan {
+                            instructions: vec![instruction.clone()],
+                            arena_size: plan.arena_size,
+                            levels: vec![0],
+                        };
+                        self.dispatch(&single, arena, shape_env)?;
+                    }
+                }
+
                 // Everything else: defer to the standard per-instruction
                 // dispatch so we keep the existing single-threaded,
                 // sequential behaviour for the rest of the plan.
@@ -7809,6 +7862,158 @@ fn dispatch_matmul_fp32_with_view(
         out_f32[i] = act(x);
     }
     Ok(())
+}
+
+#[cfg(feature = "prepared-plan")]
+fn dispatch_matmul_quantized_with_view(
+    arena: &CpuBuffer,
+    shape_env: &ShapeEnv,
+    kernel_name: &str,
+    input_slices: &[BufferSlice],
+    output_slice: BufferSlice,
+    params: &[usize],
+    param_dims: &Option<Vec<DimExpr>>,
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    view: &crate::backend::prepared::PersistentPreparedWeights,
+) -> Result<(), BackendError> {
+    if input_slices.len() < 2 {
+        return Err(BackendError::Dispatch(format!(
+            "matmul_quantized_persistent: expected ≥ 2 input slices, got {}",
+            input_slices.len()
+        )));
+    }
+    let a_slice = input_slices[0];
+    let b_slice = input_slices[1];
+    let bias_slice = input_slices.get(2).copied();
+
+    // Resolve the B (weight) raw bytes from the persistent view
+    // (no per-copy memcpy — we pass the payload directly to the
+    // typed microkernel).
+    let raw_weight: &[u8] = match view.get(&(b_slice.offset, b_slice.size)) {
+        Some(payload) => payload,
+        None => {
+            let d = arena.data_mut();
+            &d[b_slice.offset..b_slice.offset + b_slice.size]
+        }
+    };
+
+    let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+    let &[m, k, n] = matmul_params.as_slice() else {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: expected params [M,K,N]"
+        )));
+    };
+
+    let meta = weight_meta
+        .clone()
+        .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+            bit_width: 8,
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+            shape: vec![m, k],
+        });
+
+    let out_f32: &mut [f32] = {
+        let d = arena.data_mut();
+        bytemuck::cast_slice_mut::<_, f32>(
+            &mut d[output_slice.offset..output_slice.offset + output_slice.size],
+        )
+    };
+
+    match kernel_name {
+        "matmul_u4" | "matmul_u4_i8" => {
+            let typed = pack_bytes_to_u4x8(raw_weight);
+            let pt = packed_tensor_from_meta(typed, meta, kernel_name)?;
+            if kernel_name == "matmul_u4_i8" {
+                let a_raw = {
+                    let d = arena.data_mut();
+                    &d[a_slice.offset..a_slice.offset + a_slice.size]
+                };
+                crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4(
+                    &pt, a_raw, out_f32, m, k, n,
+                );
+            } else {
+                let a_f32 = {
+                    let d = arena.data_mut();
+                    bytemuck::cast_slice::<_, f32>(
+                        &d[a_slice.offset..a_slice.offset + a_slice.size],
+                    )
+                };
+                crate::backend::cpu::microkernels::gemm_cpu_flat::<
+                    crate::backend::cpu::u4x8::U4x8,
+                >(&pt, a_f32, out_f32, m, k, n);
+            }
+        }
+        "matmul_u8" | "matmul_u8_i8" => {
+            let typed = pack_bytes_to_u8x4(raw_weight);
+            let pt = packed_tensor_from_meta(typed, meta, kernel_name)?;
+            if kernel_name == "matmul_u8_i8" {
+                let a_raw = {
+                    let d = arena.data_mut();
+                    &d[a_slice.offset..a_slice.offset + a_slice.size]
+                };
+                crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
+                    &pt, a_raw, out_f32, m, k, n,
+                );
+            } else {
+                let a_f32 = {
+                    let d = arena.data_mut();
+                    bytemuck::cast_slice::<_, f32>(
+                        &d[a_slice.offset..a_slice.offset + a_slice.size],
+                    )
+                };
+                crate::backend::cpu::microkernels::gemm_cpu_flat::<
+                    crate::backend::cpu::u4x8::U8x4,
+                >(&pt, a_f32, out_f32, m, k, n);
+            }
+        }
+        other => {
+            return Err(BackendError::Dispatch(format!(
+                "matmul_quantized_persistent: unsupported kernel '{other}'"
+            )));
+        }
+    }
+
+    // Apply optional bias (quantized matmul paths don't fuse activations
+    // at the kernel level today, but bias is still supported via the
+    // standard post-process path).
+    if let Some(b_slice) = bias_slice {
+        let bias_f32: Vec<f32> = match view.get(&(b_slice.offset, b_slice.size)) {
+            Some(payload) => payload.to_vec(),
+            None => {
+                let d = arena.data_mut();
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                    .to_vec()
+            }
+        };
+        for i in 0..out_f32.len() {
+            if i % n < bias_f32.len() {
+                out_f32[i] += bias_f32[i % n];
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "prepared-plan")]
+fn pack_bytes_to_u4x8(raw: &[u8]) -> Vec<crate::backend::cpu::u4x8::U4x8> {
+    let mut packed = vec![0u32; raw.len().div_ceil(4)];
+    {
+        let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
+        bytes[..raw.len()].copy_from_slice(raw);
+    }
+    bytemuck::cast_slice(&packed).to_vec()
+}
+
+#[cfg(feature = "prepared-plan")]
+fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<crate::backend::cpu::u4x8::U8x4> {
+    let mut packed = vec![0u32; raw.len().div_ceil(4)];
+    {
+        let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
+        bytes[..raw.len()].copy_from_slice(raw);
+    }
+    bytemuck::cast_slice(&packed).to_vec()
 }
 
 macro_rules! impl_simd_unary_wrapper {
