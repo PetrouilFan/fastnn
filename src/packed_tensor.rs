@@ -550,11 +550,19 @@ impl<T: PackedWord> PackedTensor<T> {
                     grp_min = grp_min.min(mins[row]);
                     grp_max = grp_max.max(maxs[row]);
                 }
-                let range = grp_max - grp_min;
+                let mut range = grp_max - grp_min;
                 if range == 0.0 || unsigned_max == 0.0 {
                     scales.push(1.0);
                     zeros.push(0.0);
                 } else {
+                    // Guard: ensure every parent value maps to a representable
+                    // quantized state and dequantizes with error ≤ 1 step.
+                    // Pad the min/max by one quantization step on each side so
+                    // no value gets clipped by the packer.
+                    let init_scale = range / unsigned_max;
+                    grp_min -= init_scale;
+                    grp_max += init_scale;
+                    range = grp_max - grp_min;
                     let scale = range / unsigned_max;
                     let zp = grp_min + signed_bias * scale;
                     scales.push(scale);
@@ -568,8 +576,13 @@ impl<T: PackedWord> PackedTensor<T> {
                     scales.push(1.0);
                     zeros.push(0.0);
                 } else {
-                    let scale = range / unsigned_max;
-                    let zp = mins[row] + signed_bias * scale;
+                    // Guard: pad min/max by one quantization step so the
+                    // dequantization error never exceeds 1 bit.
+                    let init_scale = range / unsigned_max;
+                    let lo = mins[row] - init_scale;
+                    let hi = maxs[row] + init_scale;
+                    let scale = (hi - lo) / unsigned_max;
+                    let zp = lo + signed_bias * scale;
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -602,6 +615,37 @@ impl<T: PackedWord> PackedTensor<T> {
                     }
                 }
                 packed[chunk_idx] = T::pack_from_f32(arr);
+            }
+        }
+
+        // Direct absolute error threshold on the block: verify that every
+        // value dequantizes with error ≤ its group's quantization step.
+        #[cfg(debug_assertions)]
+        {
+            for row in 0..m {
+                let (s, zp) = if group_size > 1 {
+                    let gi = row / group_size;
+                    (scales[gi], zeros[gi])
+                } else {
+                    (scales[row], zeros[row])
+                };
+                let k_packed_deq = inner_stride.div_ceil(T::ITEMS);
+                for word in 0..k_packed_deq {
+                    let unpacked = packed[row * k_packed_deq + word].unpack_to_f32();
+                    let arr = unpacked.as_ref();
+                    for i in 0..T::ITEMS {
+                        let elem_idx = row * inner_stride + word * T::ITEMS + i;
+                        if elem_idx < (row + 1) * inner_stride && elem_idx < numel {
+                            let orig = data[elem_idx];
+                            let deq = arr[i] * s + zp;
+                            let err = (orig - deq).abs();
+                            assert!(
+                                err <= s,
+                                "quantization error {err} exceeds step size {s} for row {row} (1-bit guard failed)"
+                            );
+                        }
+                    }
+                }
             }
         }
 
