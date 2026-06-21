@@ -24,6 +24,10 @@ pub struct PackedTensor<T: PackedWord> {
     /// for SIMD-friendly access patterns: within each block, all rows' words
     /// at the same K-position are stored contiguously.
     pub(crate) block_size: usize,
+    /// Per-group quantization granularity. 0 = per-tensor, 1 = per-channel,
+    /// N > 1 = per-N-rows. When set, `scale_for_row(r)` maps to
+    /// `scales[r / group_size]`.
+    pub(crate) group_size: usize,
 }
 
 impl<T: PackedWord> PackedTensor<T> {
@@ -43,6 +47,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales: vec![1.0],
             zeros: vec![0.0],
             block_size: 1,
+            group_size: 0,
         }
     }
 
@@ -53,6 +58,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales,
             zeros,
             block_size: 1,
+            group_size: 0,
         }
     }
 
@@ -69,6 +75,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales,
             zeros,
             block_size,
+            group_size: 0,
         }
     }
 
@@ -135,6 +142,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales: vec![scale],
             zeros: vec![zero],
             block_size: 1,
+            group_size: 0,
         }
     }
 
@@ -175,12 +183,20 @@ impl<T: PackedWord> PackedTensor<T> {
             let word_in_row = i.checked_rem(k_packed).unwrap_or(0);
             let elem_idx_base = row * inner_stride + word_in_row * items;
             let s = if is_per_row {
-                self.scales[row]
+                if self.group_size > 1 {
+                    self.scales[row / self.group_size]
+                } else {
+                    self.scales[row]
+                }
             } else {
                 self.scales[0]
             };
             let z = if is_per_row {
-                self.zeros[row]
+                if self.group_size > 1 {
+                    self.zeros[row / self.group_size]
+                } else {
+                    self.zeros[row]
+                }
             } else {
                 self.zeros[0]
             };
@@ -233,6 +249,8 @@ impl<T: PackedWord> PackedTensor<T> {
     pub fn scale_for_row(&self, row: usize) -> f32 {
         if self.scales.len() == 1 {
             self.scales[0]
+        } else if self.group_size > 1 {
+            self.scales[row / self.group_size]
         } else {
             self.scales[row]
         }
@@ -242,6 +260,8 @@ impl<T: PackedWord> PackedTensor<T> {
     pub fn zero_for_row(&self, row: usize) -> f32 {
         if self.zeros.len() == 1 {
             self.zeros[0]
+        } else if self.group_size > 1 {
+            self.zeros[row / self.group_size]
         } else {
             self.zeros[row]
         }
@@ -456,10 +476,33 @@ impl<T: PackedWord> PackedTensor<T> {
             scales,
             zeros: vec![0.0; m],
             block_size: 1,
+            group_size: 0,
         }
     }
 
     pub fn from_f32_per_channel_asymmetric(data: &[f32], shape: &[usize]) -> Self {
+        Self::from_f32_per_channel_asymmetric_impl(data, shape, 0)
+    }
+
+    /// Same as `from_f32_per_channel_asymmetric` but with per-group quantization.
+    /// `group_size` divides the output channels (rows) into groups of this size.
+    /// Each group shares one (scale, zero_point). Use 0 for per-channel.
+    pub fn from_f32_per_channel_asymmetric_grouped(
+        data: &[f32],
+        shape: &[usize],
+        group_size: usize,
+    ) -> Self {
+        if group_size == 0 || group_size == 1 {
+            return Self::from_f32_per_channel_asymmetric(data, shape);
+        }
+        Self::from_f32_per_channel_asymmetric_impl(data, shape, group_size)
+    }
+
+    fn from_f32_per_channel_asymmetric_impl(
+        data: &[f32],
+        shape: &[usize],
+        group_size: usize,
+    ) -> Self {
         let numel: usize = shape.iter().product();
         assert_eq!(data.len(), numel);
 
@@ -490,18 +533,46 @@ impl<T: PackedWord> PackedTensor<T> {
         let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
 
-        let mut scales = Vec::with_capacity(m);
-        let mut zeros = Vec::with_capacity(m);
-        for row in 0..m {
-            let range = maxs[row] - mins[row];
-            if range == 0.0 || unsigned_max == 0.0 {
-                scales.push(1.0);
-                zeros.push(0.0);
-            } else {
-                let scale = range / unsigned_max;
-                let zp = mins[row] + signed_bias * scale;
-                scales.push(scale);
-                zeros.push(zp);
+        let num_groups = if group_size > 1 {
+            m.div_ceil(group_size)
+        } else {
+            m
+        };
+        let mut scales = Vec::with_capacity(num_groups);
+        let mut zeros = Vec::with_capacity(num_groups);
+        if group_size > 1 {
+            for g in 0..num_groups {
+                let start_row = g * group_size;
+                let end_row = (start_row + group_size).min(m);
+                let mut grp_min = f32::MAX;
+                let mut grp_max = f32::MIN;
+                for row in start_row..end_row {
+                    grp_min = grp_min.min(mins[row]);
+                    grp_max = grp_max.max(maxs[row]);
+                }
+                let range = grp_max - grp_min;
+                if range == 0.0 || unsigned_max == 0.0 {
+                    scales.push(1.0);
+                    zeros.push(0.0);
+                } else {
+                    let scale = range / unsigned_max;
+                    let zp = grp_min + signed_bias * scale;
+                    scales.push(scale);
+                    zeros.push(zp);
+                }
+            }
+        } else {
+            for row in 0..m {
+                let range = maxs[row] - mins[row];
+                if range == 0.0 || unsigned_max == 0.0 {
+                    scales.push(1.0);
+                    zeros.push(0.0);
+                } else {
+                    let scale = range / unsigned_max;
+                    let zp = mins[row] + signed_bias * scale;
+                    scales.push(scale);
+                    zeros.push(zp);
+                }
             }
         }
 
@@ -512,12 +583,14 @@ impl<T: PackedWord> PackedTensor<T> {
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
         for row in 0..m {
-            let inv_scale = if scales[row] != 0.0 {
-                1.0 / scales[row]
+            let (scale_idx, inv_scale, zp) = if group_size > 1 {
+                let gi = row / group_size;
+                let s = scales[gi];
+                (gi, if s != 0.0 { 1.0 / s } else { 0.0 }, zeros[gi])
             } else {
-                0.0
+                let s = scales[row];
+                (row, if s != 0.0 { 1.0 / s } else { 0.0 }, zeros[row])
             };
-            let zp = zeros[row];
             for word in 0..k_packed {
                 let chunk_idx = row * k_packed + word;
                 let mut arr = T::Array::default();
@@ -538,6 +611,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales,
             zeros,
             block_size: 1,
+            group_size,
         }
     }
 
@@ -615,6 +689,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
             block_size,
+            group_size: self.group_size,
         }
     }
 
@@ -637,6 +712,7 @@ impl<T: PackedWord> Clone for PackedTensor<T> {
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
             block_size: self.block_size,
+            group_size: self.group_size,
         }
     }
 }
