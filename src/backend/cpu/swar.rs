@@ -123,8 +123,8 @@ pub fn gemm_packed_u8x4(
     assert_eq!(k_packed, k_packed_b, "K dimension mismatch in packed GEMM");
     assert_eq!(c.len(), m * n, "Output buffer size mismatch");
 
-    let a_data: Vec<u32> = a_packed.as_packed().iter().map(|w| w.0).collect();
-    let b_data: Vec<u32> = b_packed.as_packed().iter().map(|w| w.0).collect();
+    let a_packed_slice = a_packed.as_packed();
+    let b_packed_slice = b_packed.as_packed();
 
     // Get per-tensor scale and zero_point
     let a_scale = a_packed.scale();
@@ -136,16 +136,16 @@ pub fn gemm_packed_u8x4(
 
     for row in 0..m {
         let a_row_start = row * k_packed;
-        let a_row = &a_data[a_row_start..a_row_start + k_packed];
+        let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
         for col in 0..n {
             let b_row_start = col * k_packed;
-            let b_row = &b_data[b_row_start..b_row_start + k_packed];
+            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
 
             // Accumulate in i32 (exact for K ≤ 8192 * 127²)
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed(a_row[k], b_row[k]);
+                acc += u8x4_dot_packed(a_row[k].0, b_row[k].0);
             }
 
             // Full dequantization with zero-point correction:
@@ -181,8 +181,8 @@ pub fn gemm_packed_u4x8(
     assert_eq!(k_packed, k_packed_b);
     assert_eq!(c.len(), m * n);
 
-    let a_data: Vec<u32> = a_packed.as_packed().iter().map(|w| w.0).collect();
-    let b_data: Vec<u32> = b_packed.as_packed().iter().map(|w| w.0).collect();
+    let a_packed_slice = a_packed.as_packed();
+    let b_packed_slice = b_packed.as_packed();
 
     let a_scale = a_packed.scale();
     let b_scale = b_packed.scale();
@@ -190,15 +190,15 @@ pub fn gemm_packed_u4x8(
 
     for row in 0..m {
         let a_row_start = row * k_packed;
-        let a_row = &a_data[a_row_start..a_row_start + k_packed];
+        let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
         for col in 0..n {
             let b_row_start = col * k_packed;
-            let b_row = &b_data[b_row_start..b_row_start + k_packed];
+            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u4x8_dot_packed(a_row[k], b_row[k]);
+                acc += u4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
             c[row * n + col] = acc as f32 * scale_ab;
         }
@@ -232,8 +232,8 @@ pub fn gemm_packed_u8x4_fused(
     assert_eq!(weight_packed.shape()[1], k_packed);
     assert_eq!(c.len(), m * n);
 
-    let act_data: Vec<u32> = act_packed.as_packed().iter().map(|w| w.0).collect();
-    let weight_data: Vec<u32> = weight_packed.as_packed().iter().map(|w| w.0).collect();
+    let act_packed_slice = act_packed.as_packed();
+    let weight_packed_slice = weight_packed.as_packed();
 
     let act_scale = act_packed.scale();
     let act_zp = act_packed.zero();
@@ -244,24 +244,52 @@ pub fn gemm_packed_u8x4_fused(
 
     for row in 0..m {
         let act_row_start = row * k_packed;
-        let act_row = &act_data[act_row_start..act_row_start + k_packed];
+        let act_row = &act_packed_slice[act_row_start..act_row_start + k_packed];
+
+        let act_scale = act_packed.scale_for_row(row);
+        let act_zp = act_packed.zero_for_row(row);
 
         for col in 0..n {
             let w_row_start = col * k_packed;
-            let w_row = &weight_data[w_row_start..w_row_start + k_packed];
+            let w_row = &weight_packed_slice[w_row_start..w_row_start + k_packed];
+
+            let w_scale = weight_packed.scale_for_row(col);
+            let w_zp = weight_packed.zero_for_row(col);
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed(act_row[k], w_row[k]);
+                acc += u8x4_dot_packed(act_row[k].0, w_row[k].0);
             }
 
-            // Fused dequantize + bias + activation
-            let mut val = acc as f32 * scale_ab;
+            let qa_sum: i32 = act_row.iter()
+                .map(|&w| {
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum();
+            let qb_sum: i32 = w_row.iter()
+                .map(|&w| {
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum();
+            let k_f32 = (k_packed * 4) as f32;
+            let scale_ab = act_scale * w_scale;
+
+            let mut val = (acc as f32) * scale_ab
+                + w_zp * (act_scale * qa_sum as f32)
+                + act_zp * (w_scale * qb_sum as f32)
+                + act_zp * w_zp * k_f32;
 
             if let Some(b) = bias {
                 val += b[col];
             }
-
             if let Some(act) = activation {
                 val = match act {
                     "relu" => val.max(0.0),
