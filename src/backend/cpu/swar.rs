@@ -218,6 +218,7 @@ pub fn gemm_packed_u4x8(
 /// - `bias`: Optional bias [N] f32
 /// - `activation`: Optional fused activation (None, "relu", "silu")
 /// - `c`: Output [M, N] f32 (row-major)
+#[inline]
 pub fn gemm_packed_u8x4_fused(
     act_packed: &PackedTensor<U8x4>,
     weight_packed: &PackedTensor<U8x4>,
