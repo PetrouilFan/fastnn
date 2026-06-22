@@ -267,6 +267,7 @@ def main() -> int:
         help="Write machine-readable benchmark/profile results to this JSON path",
     )
     ap.add_argument("--quantize", type=str, default=None, choices=["4", "8"], help="Quantize weights to U4 or U8")
+    ap.add_argument("--scales-json", type=Path, default=None, help="Path to calibration scales JSON (from calibrate_yolo.py)")
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -303,6 +304,10 @@ def main() -> int:
     try:
         import fastnn as fnn
         executor, fastnn_input, fastnn_output = _make_fastnn_executor(onnx_path, quantize=args.quantize)
+        if args.scales_json and args.quantize:
+            scales_text = Path(args.scales_json).read_text()
+            executor.apply_calibration(scales_text)
+            print(f"loaded calibration scales from {args.scales_json}")
         fx = fnn.tensor(x, list(x.shape))
         fy = executor.forward({fastnn_input: fx})[fastnn_output].numpy()
         results["fastnn_output_shape"] = list(fy.shape)
