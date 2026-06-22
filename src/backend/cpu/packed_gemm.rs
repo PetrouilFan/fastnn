@@ -6,8 +6,8 @@
 use crate::dtypes::{U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
 use crate::backend::cpu::swar::{
-    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed_slice, u4x8_packed_to_tensor,
-    u8x4_dot_packed, u8x4_dot_packed_slice, u8x4_packed_to_tensor,
+    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed, u4x8_dot_packed_slice,
+    u4x8_packed_to_tensor, u8x4_dot_packed, u8x4_dot_packed_slice, u8x4_packed_to_tensor,
 };
 
 /// Packed U8x4 GEMM: C = A × Bᵀ
@@ -35,26 +35,26 @@ pub fn gemm_packed_u8x4(
     assert_eq!(k_packed, k_packed_b, "K dimension mismatch in packed GEMM");
     assert_eq!(c.len(), m * n, "Output buffer size mismatch");
 
-    let a_data: Vec<u32> = a_packed.as_packed().iter().map(|w| w.0).collect();
-    let b_data: Vec<u32> = b_packed.as_packed().iter().map(|w| w.0).collect();
+    let a_packed_slice = a_packed.as_packed();
+    let b_packed_slice = b_packed.as_packed();
 
     for row in 0..m {
         let a_row_start = row * k_packed;
-        let a_row = &a_data[a_row_start..a_row_start + k_packed];
+        let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
         let a_scale = a_packed.scale_for_row(row);
         let a_zp = a_packed.zero_for_row(row);
 
         for col in 0..n {
             let b_row_start = col * k_packed;
-            let b_row = &b_data[b_row_start..b_row_start + k_packed];
+            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
 
             let b_scale = b_packed.scale_for_row(col);
             let b_zp = b_packed.zero_for_row(col);
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed(a_row[k], b_row[k]);
+                acc += u8x4_dot_packed(a_row[k].0, b_row[k].0);
             }
 
             let k_f32 = (k_packed * 4) as f32;
@@ -65,19 +65,19 @@ pub fn gemm_packed_u8x4(
             // Sum all 4 signed i8 values per packed word
             let qa_sum: i32 = a_row.iter()
                 .map(|&w| {
-                    let b0 = (w & 0xFF) as i8 as i32;
-                    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
                     b0 + b1 + b2 + b3
                 })
                 .sum();
             let qb_sum: i32 = b_row.iter()
                 .map(|&w| {
-                    let b0 = (w & 0xFF) as i8 as i32;
-                    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
                     b0 + b1 + b2 + b3
                 })
                 .sum();
@@ -109,8 +109,8 @@ pub fn gemm_packed_u4x8(
     assert_eq!(k_packed, k_packed_b);
     assert_eq!(c.len(), m * n);
 
-    let a_data: Vec<u32> = a_packed.as_packed().iter().map(|w| w.0).collect();
-    let b_data: Vec<u32> = b_packed.as_packed().iter().map(|w| w.0).collect();
+    let a_packed_slice = a_packed.as_packed();
+    let b_packed_slice = b_packed.as_packed();
 
     let a_scale = a_packed.scale();
     let b_scale = b_packed.scale();
@@ -118,15 +118,15 @@ pub fn gemm_packed_u4x8(
 
     for row in 0..m {
         let a_row_start = row * k_packed;
-        let a_row = &a_data[a_row_start..a_row_start + k_packed];
+        let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
         for col in 0..n {
             let b_row_start = col * k_packed;
-            let b_row = &b_data[b_row_start..b_row_start + k_packed];
+            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u4x8_dot_packed_slice(&[a_row[k]], &[b_row[k]]);
+                acc += u4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
             c[row * n + col] = acc as f32 * scale_ab;
         }
@@ -160,44 +160,44 @@ pub fn gemm_packed_u8x4_fused(
     assert_eq!(weight_packed.shape()[1].div_ceil(4), k_packed);
     assert_eq!(c.len(), m * n);
 
-    let act_data: Vec<u32> = act_packed.as_packed().iter().map(|w| w.0).collect();
-    let weight_data: Vec<u32> = weight_packed.as_packed().iter().map(|w| w.0).collect();
+    let act_packed_slice = act_packed.as_packed();
+    let weight_packed_slice = weight_packed.as_packed();
 
     for row in 0..m {
         let act_row_start = row * k_packed;
-        let act_row = &act_data[act_row_start..act_row_start + k_packed];
+        let act_row = &act_packed_slice[act_row_start..act_row_start + k_packed];
 
         let act_scale = act_packed.scale_for_row(row);
         let act_zp = act_packed.zero_for_row(row);
 
         for col in 0..n {
             let w_row_start = col * k_packed;
-            let w_row = &weight_data[w_row_start..w_row_start + k_packed];
+            let w_row = &weight_packed_slice[w_row_start..w_row_start + k_packed];
 
             let w_scale = weight_packed.scale_for_row(col);
             let w_zp = weight_packed.zero_for_row(col);
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed(act_row[k], w_row[k]);
+                acc += u8x4_dot_packed(act_row[k].0, w_row[k].0);
             }
 
             // Sum all 4 signed i8 values per packed word for zero-point correction
             let qa_sum: i32 = act_row.iter()
                 .map(|&w| {
-                    let b0 = (w & 0xFF) as i8 as i32;
-                    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
                     b0 + b1 + b2 + b3
                 })
                 .sum();
             let qb_sum: i32 = w_row.iter()
                 .map(|&w| {
-                    let b0 = (w & 0xFF) as i8 as i32;
-                    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
                     b0 + b1 + b2 + b3
                 })
                 .sum();
