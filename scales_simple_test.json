@@ -1,0 +1,22 @@
+{
+  "conv1": {
+    "scale": 0.027854671701788902,
+    "zero_point": 114.0,
+    "bit_width": 8
+  },
+  "conv2": {
+    "scale": 0.003921568859368563,
+    "zero_point": -0.0,
+    "bit_width": 8
+  },
+  "output": {
+    "scale": 0.5235111117362976,
+    "zero_point": 133.0,
+    "bit_width": 8
+  },
+  "sigmoid1": {
+    "scale": 0.003921568859368563,
+    "zero_point": -0.0,
+    "bit_width": 8
+  }
+}

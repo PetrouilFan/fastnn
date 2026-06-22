@@ -20,6 +20,11 @@ pub struct CalibrationStats {
     pub histogram: Option<Vec<u64>>,
     pub hist_min: f32,
     pub hist_max: f32,
+    /// Per-channel min/max (keyed by channel index).
+    /// Empty means per-tensor only.
+    pub per_channel_min: Vec<f32>,
+    pub per_channel_max: Vec<f32>,
+    pub per_channel_count: Vec<u64>,
 }
 
 impl CalibrationStats {
@@ -33,6 +38,9 @@ impl CalibrationStats {
             histogram: None,
             hist_min: 0.0,
             hist_max: 0.0,
+            per_channel_min: vec![],
+            per_channel_max: vec![],
+            per_channel_count: vec![],
         }
     }
 
@@ -64,6 +72,53 @@ impl CalibrationStats {
             }
         }
     }
+    /// Observe values for a specific channel (per-channel calibration).
+    /// Channels are 0-indexed.  Caller must ensure consistent channel count
+    /// across all observations for the same tensor.
+    pub fn observe_channel(&mut self, channel: usize, values: &[f32]) {
+        // Grow vectors if needed
+        while self.per_channel_min.len() <= channel {
+            self.per_channel_min.push(f32::INFINITY);
+            self.per_channel_max.push(f32::NEG_INFINITY);
+            self.per_channel_count.push(0);
+        }
+        for &v in values {
+            if v.is_finite() {
+                self.per_channel_min[channel] = self.per_channel_min[channel].min(v);
+                self.per_channel_max[channel] = self.per_channel_max[channel].max(v);
+                self.per_channel_count[channel] += 1;
+            }
+        }
+    }
+
+    /// Compute per-channel scale and zero_point for asymmetric quantization.
+    /// Returns (scales, zero_points) — one pair per tracked channel.
+    /// If no per-channel data was recorded, returns per-tensor values wrapped
+    /// as single-element vecs.
+    pub fn compute_scale_zp_per_channel(&self, bit_width: u8) -> (Vec<f32>, Vec<f32>) {
+        let num_channels = self.per_channel_min.len();
+        if num_channels == 0 {
+            let (s, zp) = self.compute_scale_zp(bit_width);
+            return (vec![s], vec![zp]);
+        }
+        let levels = (1u32 << bit_width) as f32 - 1.0;
+        let mut scales = Vec::with_capacity(num_channels);
+        let mut zero_points = Vec::with_capacity(num_channels);
+        for ch in 0..num_channels {
+            let range = self.per_channel_max[ch] - self.per_channel_min[ch];
+            if range <= 0.0 || levels <= 0.0 {
+                scales.push(1.0);
+                zero_points.push(0.0);
+            } else {
+                let scale = range / levels;
+                let zp = -self.per_channel_min[ch] / scale;
+                scales.push(scale);
+                zero_points.push(zp.round());
+            }
+        }
+        (scales, zero_points)
+    }
+
     pub fn mean(&self) -> f32 {
         if self.count > 0 {
             (self.sum / self.count as f64) as f32
@@ -212,6 +267,30 @@ impl CalibrationData {
             .entry(name.to_string())
             .or_insert_with(CalibrationStats::new)
             .observe(values);
+    }
+
+    /// Observe per-channel activation data (e.g. Conv2d output per filter).
+    /// `channels` is the number of channels; values should be arranged
+    /// as interleaved per-channel data (CHW or HWC layout).
+    pub fn observe_per_channel(
+        &mut self,
+        name: &str,
+        channels: usize,
+        channel_stride: usize,
+        values: &[f32],
+    ) {
+        let stats = self
+            .stats
+            .entry(name.to_string())
+            .or_insert_with(CalibrationStats::new);
+        stats.observe(values);
+        for ch in 0..channels {
+            let start = ch * channel_stride;
+            let end = (start + channel_stride).min(values.len());
+            if start < end {
+                stats.observe_channel(ch, &values[start..end]);
+            }
+        }
     }
 
     pub fn get_stats(&self, name: &str) -> Option<&CalibrationStats> {
