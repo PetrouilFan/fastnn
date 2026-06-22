@@ -6,8 +6,8 @@
 use crate::dtypes::{U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
 use crate::backend::cpu::swar::{
-    u4x8_dot_packed_slice, u8x4_dot_packed_slice, quantize_f32_to_u4x8, quantize_f32_to_u8x4,
-    u4x8_packed_to_tensor, u8x4_packed_to_tensor,
+    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed_slice, u4x8_packed_to_tensor,
+    u8x4_dot_packed, u8x4_dot_packed_slice, u8x4_packed_to_tensor,
 };
 
 /// Packed U8x4 GEMM: C = A × Bᵀ
@@ -54,7 +54,7 @@ pub fn gemm_packed_u8x4(
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed_slice(&[a_row[k]], &[b_row[k]]);
+                acc += u8x4_dot_packed(a_row[k], b_row[k]);
             }
 
             let k_f32 = (k_packed * 4) as f32;
@@ -179,7 +179,7 @@ pub fn gemm_packed_u8x4_fused(
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed_slice(&[act_row[k]], &[w_row[k]]);
+                acc += u8x4_dot_packed(act_row[k], w_row[k]);
             }
 
             // Sum all 4 signed i8 values per packed word for zero-point correction
