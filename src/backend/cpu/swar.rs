@@ -145,7 +145,7 @@ pub fn gemm_packed_u8x4(
             // Accumulate in i32 (exact for K ≤ 8192 * 127²)
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed_slice(&[a_row[k]], &[b_row[k]]);
+                acc += u8x4_dot_packed(a_row[k], b_row[k]);
             }
 
             // Full dequantization with zero-point correction:
@@ -198,7 +198,7 @@ pub fn gemm_packed_u4x8(
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u4x8_dot_packed_slice(&[a_row[k]], &[b_row[k]]);
+                acc += u4x8_dot_packed(a_row[k], b_row[k]);
             }
             c[row * n + col] = acc as f32 * scale_ab;
         }
@@ -252,7 +252,7 @@ pub fn gemm_packed_u8x4_fused(
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed_slice(&[act_row[k]], &[w_row[k]]);
+                acc += u8x4_dot_packed(act_row[k], w_row[k]);
             }
 
             // Fused dequantize + bias + activation
