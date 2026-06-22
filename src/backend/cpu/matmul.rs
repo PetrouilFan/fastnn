@@ -8,27 +8,75 @@ use crate::packed_tensor::PackedTensor;
 
 use super::{resolve_params, CpuBuffer};
 
-/// Dequantize I8 activation payload (format: [scale_f32][zp_f32][i8_data...]) to f32.
+/// Dequantize I8 activation payload to f32.
+///
+/// Supports two formats:
+/// - **Per-tensor** (legacy): `[scale_f32][zp_f32][i8_data...]` (header_size = 8)
+/// - **Per-channel**: `[num_channels(u32)][chunk_size(u32)][scale_1..scale_n(zp_1..zp_n)][ch_data...]`
+///
+/// Detection: if the first 4 bytes, read as u32, are > 0 and the payload is
+/// large enough for the per-channel header, we treat it as per-channel.
 pub(super) fn dequantize_i8_activation(payload: &[u8]) -> Vec<f32> {
-    let header_size = 8;
-    let numel = payload.len().saturating_sub(header_size);
-    let scale = if payload.len() >= 4 {
-        f32::from_le_bytes(payload[0..4].try_into().unwrap())
-    } else {
-        1.0
+    // Attempt to detect per-channel format: num_channels > 0 and payload
+    // is larger than the minimal per-channel header (4 + 4 + 2*4 = 16 bytes
+    // for 1 channel).
+    let per_channel_detected = {
+        if payload.len() >= 16 {
+            let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0; 4])) as usize;
+            let chunk_size = u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0; 4])) as usize;
+            let expected = 8 + nc * 8 + nc * chunk_size;
+            nc > 0 && chunk_size > 0 && payload.len() >= expected
+        } else {
+            false
+        }
     };
-    let zp = if payload.len() >= 8 {
-        f32::from_le_bytes(payload[4..8].try_into().unwrap())
+
+    if per_channel_detected {
+        let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+        let chunk_size = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+        let data_start = 8 + nc * 8;
+        let numel = nc * chunk_size;
+        let mut out = Vec::with_capacity(numel);
+        for ch in 0..nc {
+            let scale = f32::from_le_bytes(
+                payload[8 + ch * 4..8 + (ch + 1) * 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            let zp = f32::from_le_bytes(
+                payload[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            let ch_start = ch * chunk_size;
+            for j in 0..chunk_size {
+                let di = data_start + j;
+                let q = if di < payload.len() { payload[di] as i8 } else { 0i8 };
+                out.push((q as f32) * scale + zp);
+            }
+        }
+        out
     } else {
-        0.0
-    };
-    let mut out = Vec::with_capacity(numel);
-    for i in 0..numel {
-        let idx = header_size + i;
-        let q = payload[idx] as i8;
-        out.push((q as f32) * scale + zp);
+        let header_size = 8;
+        let numel = payload.len().saturating_sub(header_size);
+        let scale = if payload.len() >= 4 {
+            f32::from_le_bytes(payload[0..4].try_into().unwrap())
+        } else {
+            1.0
+        };
+        let zp = if payload.len() >= 8 {
+            f32::from_le_bytes(payload[4..8].try_into().unwrap())
+        } else {
+            0.0
+        };
+        let mut out = Vec::with_capacity(numel);
+        for i in 0..numel {
+            let idx = header_size + i;
+            let q = payload[idx] as i8;
+            out.push((q as f32) * scale + zp);
+        }
+        out
     }
-    out
 }
 
 // Runtime dispatch helpers intentionally take the IR/kernel call-site context

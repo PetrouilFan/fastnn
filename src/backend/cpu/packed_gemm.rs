@@ -182,8 +182,25 @@ pub fn gemm_packed_u8x4_fused(
                 acc += u8x4_dot_packed_slice(&[act_row[k]], &[w_row[k]]);
             }
 
-            let qa_sum: i32 = act_row.iter().map(|&w| ((w & 0xFF) as i8) as i32).sum();
-            let qb_sum: i32 = w_row.iter().map(|&w| ((w & 0xFF) as i8) as i32).sum();
+            // Sum all 4 signed i8 values per packed word for zero-point correction
+            let qa_sum: i32 = act_row.iter()
+                .map(|&w| {
+                    let b0 = (w & 0xFF) as i8 as i32;
+                    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum();
+            let qb_sum: i32 = w_row.iter()
+                .map(|&w| {
+                    let b0 = (w & 0xFF) as i8 as i32;
+                    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum();
             let k_f32 = (k_packed * 4) as f32;
 
             let scale_ab = act_scale * w_scale;
