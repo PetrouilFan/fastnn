@@ -12,6 +12,7 @@ use crate::backend::cpu::swar::{
 use crate::dtypes::{PackedWord, U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
 
+#[inline(always)]
 fn conv_out_size(input: usize, kernel: usize, stride: usize, padding: usize, dilation: usize) -> usize {
     let dk = (kernel - 1) * dilation + 1;
     if input + 2 * padding >= dk {
@@ -22,6 +23,7 @@ fn conv_out_size(input: usize, kernel: usize, stride: usize, padding: usize, dil
 }
 
 /// im2col for a single image (no batch).
+#[inline(always)]
 unsafe fn im2col_f32(
     input_n: &[f32],
     c: usize,
@@ -119,6 +121,7 @@ unsafe fn im2col_pack_u4x8(
 }
 
 /// Extract a row-subset of a PackedTensor (copies data).
+#[inline(always)]
 unsafe fn slice_packed<U: PackedWord>(t: &PackedTensor<U>, row_start: usize, row_count: usize) -> PackedTensor<U> {
     let inner: usize = t.shape()[1..].iter().product();
     let k_packed = inner.div_ceil(U::ITEMS);
@@ -259,6 +262,7 @@ pub unsafe fn conv2d_packed_u4x8(
 }
 
 /// Fused U4x8 GEMM: C = A × Bᵀ with dequantize + bias + activation.
+#[inline]
 pub fn gemm_packed_u4x8_fused(
     act_packed: &PackedTensor<U4x8>,
     weight_packed: &PackedTensor<U4x8>,
