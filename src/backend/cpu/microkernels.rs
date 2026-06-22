@@ -2401,6 +2401,66 @@ pub fn gemm_cpu_flat_i8_u8x4(
     // Fast path: zero activation offset keeps the qW*qA term in integer space,
     // then reuses the shared Σactivation helper for the affine zero_w term.
     let k_packed = k.div_ceil(U8x4::ITEMS);
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::backend::cpu::microkernels::has_avx2() {
+        unsafe {
+        for row in 0..oc {
+            let scale_w = weights.scale_for_row(row);
+            let zero_w = weights.zero_for_row(row);
+            let row_offset = row * k_packed;
+            for bi in 0..m {
+                let mut acc = _mm256_setzero_ps();
+                let mut act_sum_vec = _mm256_setzero_ps();
+                let act_base = bi * k;
+                let mut p = 0usize;
+
+                while p + 1 < k_packed && p * 4 + 8 <= k {
+                    let w0 = weights.as_packed()[row_offset + p].0;
+                    let w1 = weights.as_packed()[row_offset + p + 1].0;
+                    let word_pair = _mm_set_epi32(0, 0, w1 as i32, w0 as i32);
+                    let qw_f32 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(word_pair));
+
+                    let act_ptr = act_i8.as_ptr().add(act_base + p * 4);
+                    let act_128 = _mm_loadl_epi64(act_ptr as *const __m128i);
+                    let act_lo4 = _mm256_cvtepi8_epi32(act_128);
+                    let act_hi4 = _mm256_cvtepi8_epi32(_mm_bsrli_si128(act_128, 4));
+                    let act_i32 = _mm256_insertf128_si256(act_lo4, _mm256_castsi256_si128(act_hi4), 1);
+                    let act_f32 = _mm256_cvtepi32_ps(act_i32);
+
+                    acc = _mm256_fmadd_ps(qw_f32, act_f32, acc);
+                    act_sum_vec = _mm256_add_ps(act_sum_vec, act_f32);
+                    p += 2;
+                }
+
+                let mut acc_tail = 0.0f32;
+                let mut act_sum_tail = 0.0f32;
+                while p < k_packed {
+                    let word = weights.as_packed()[row_offset + p].0;
+                    let bytes = word.to_le_bytes();
+                    for lane in 0..4 {
+                        let idx = p * 4 + lane;
+                        if idx < k {
+                            let q_w = bytes[lane] as i8 as i32;
+                            let q_a = act_i8[act_base + idx] as i8 as i32;
+                            acc_tail += q_w as f32 * q_a as f32;
+                            act_sum_tail += q_a as f32;
+                        }
+                    }
+                    p += 1;
+                }
+
+                let raw_acc = hsum256_ps(acc) + acc_tail;
+                let raw_q_sum = hsum256_ps(act_sum_vec) + act_sum_tail;
+                let dot = raw_acc * activation_affine.scale;
+                let input_sum = raw_q_sum * activation_affine.scale + (k as f32) * activation_affine.zero;
+                outputs[bi * n + row] = apply_affine_dot(dot, scale_w, zero_w, input_sum);
+            }
+        }
+        }
+        return;
+    }
+
     for row in 0..oc {
         let scale_w = weights.scale_for_row(row);
         let zero_w = weights.zero_for_row(row);
@@ -2472,18 +2532,107 @@ pub fn gemm_cpu_flat_i8_u4x8(
                 let mut acc_f32 = 0.0f32;
                 let mut activation_sum = 0.0f32;
                 for p in 0..k_packed {
-                    let unpacked = weights.as_packed()[row_offset + p].unpack_to_f32();
+                    let word = weights.as_packed()[row_offset + p].0;
                     for lane in 0..U4x8::ITEMS {
                         let idx = p * U4x8::ITEMS + lane;
                         if idx < k {
+                            let nibble = (word >> (lane * 4)) & 0xF;
+                            let signed = if nibble & 0x8 != 0 {
+                                (nibble | 0xFFFFFFF0) as i32
+                            } else {
+                                nibble as i32
+                            };
                             let a = activation_affine.dequantize(act_i8[bi * k + idx] as i8);
-                            acc_f32 += unpacked[lane] * a;
+                            acc_f32 += signed as f32 * a;
                             activation_sum += a;
                         }
                     }
                 }
                 outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
             }
+        }
+        return;
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::backend::cpu::microkernels::has_avx2() {
+        unsafe {
+        for row in 0..oc {
+            let scale_w = weights.scale_for_row(row);
+            let zero_w = weights.zero_for_row(row);
+            let row_offset = row * k_packed;
+            for bi in 0..m {
+                let mut acc0 = _mm256_setzero_ps();
+                let mut acc1 = _mm256_setzero_ps();
+                let mut act_sum_vec = _mm256_setzero_ps();
+                let act_base = bi * k;
+                let mut p = 0usize;
+                let mask_lo = _mm256_set1_epi32(0xF);
+                let sign_ext = _mm256_set1_epi32(8);
+                let shift0 = _mm256_set_epi32(28, 24, 20, 16, 12, 8, 4, 0);
+
+                while p + 1 < k_packed && p * 8 + 16 <= k {
+                    let w0 = weights.as_packed()[row_offset + p].0;
+                    let w1 = weights.as_packed()[row_offset + p + 1].0;
+                    let w0v = _mm256_set1_epi32(w0 as i32);
+                    let w1v = _mm256_set1_epi32(w1 as i32);
+                    let nib_lo0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift0), mask_lo);
+                    let nib_lo1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift0), mask_lo);
+                    let signed_lo0 = _mm256_sub_epi32(_mm256_xor_si256(nib_lo0, sign_ext), sign_ext);
+                    let signed_lo1 = _mm256_sub_epi32(_mm256_xor_si256(nib_lo1, sign_ext), sign_ext);
+                    let fl0 = _mm256_cvtepi32_ps(signed_lo0);
+                    let fl1 = _mm256_cvtepi32_ps(signed_lo1);
+
+                    let act_ptr = act_i8.as_ptr().add(act_base + p * 8);
+                    let act0_128 = _mm_loadl_epi64(act_ptr as *const __m128i);
+                    let act0_lo4 = _mm256_cvtepi8_epi32(act0_128);
+                    let act0_hi4 = _mm256_cvtepi8_epi32(_mm_bsrli_si128(act0_128, 4));
+                    let act_i32_0 = _mm256_insertf128_si256(act0_lo4, _mm256_castsi256_si128(act0_hi4), 1);
+                    let al0 = _mm256_cvtepi32_ps(act_i32_0);
+
+                    let act1_128 = _mm_loadl_epi64(act_ptr.add(8) as *const __m128i);
+                    let act1_lo4 = _mm256_cvtepi8_epi32(act1_128);
+                    let act1_hi4 = _mm256_cvtepi8_epi32(_mm_bsrli_si128(act1_128, 4));
+                    let act_i32_1 = _mm256_insertf128_si256(act1_lo4, _mm256_castsi256_si128(act1_hi4), 1);
+                    let al1 = _mm256_cvtepi32_ps(act_i32_1);
+
+                    acc0 = _mm256_fmadd_ps(fl0, al0, acc0);
+                    acc1 = _mm256_fmadd_ps(fl1, al1, acc1);
+
+                    act_sum_vec = _mm256_add_ps(act_sum_vec, al0);
+                    act_sum_vec = _mm256_add_ps(act_sum_vec, al1);
+
+                    p += 2;
+                }
+
+                let mut acc_tail = 0.0f32;
+                let mut act_sum_tail = 0.0f32;
+                while p < k_packed {
+                    let word = weights.as_packed()[row_offset + p].0;
+                    for lane in 0..U4x8::ITEMS {
+                        let idx = p * U4x8::ITEMS + lane;
+                        if idx < k {
+                            let nibble = (word >> (lane * 4)) & 0xF;
+                            let signed = if nibble & 0x8 != 0 {
+                                (nibble | 0xFFFFFFF0) as i32
+                            } else {
+                                nibble as i32
+                            };
+                            let q_a = act_i8[act_base + idx] as i8 as i32;
+                            acc_tail += signed as f32 * (q_a as f32);
+                            act_sum_tail += q_a as f32;
+                        }
+                    }
+                    p += 1;
+                }
+
+                let raw_acc = hsum256_ps(_mm256_add_ps(acc0, acc1)) + acc_tail;
+                let raw_q_sum = hsum256_ps(act_sum_vec) + act_sum_tail;
+                let dot = raw_acc * activation_affine.scale;
+                let input_sum = raw_q_sum * activation_affine.scale + (k as f32) * activation_affine.zero;
+                outputs[bi * n + row] = apply_affine_dot(dot, scale_w, zero_w, input_sum);
+            }
+        }
         }
         return;
     }
@@ -2496,12 +2645,18 @@ pub fn gemm_cpu_flat_i8_u4x8(
             let mut acc = 0.0f32;
             let mut q_activation_sum: i32 = 0;
             for p in 0..k_packed {
-                let unpacked = weights.as_packed()[row_offset + p].unpack_to_f32();
+                let word = weights.as_packed()[row_offset + p].0;
                 for lane in 0..U4x8::ITEMS {
                     let idx = p * U4x8::ITEMS + lane;
                     if idx < k {
+                        let nibble = (word >> (lane * 4)) & 0xF;
+                        let signed = if nibble & 0x8 != 0 {
+                            (nibble | 0xFFFFFFF0) as i32
+                        } else {
+                            nibble as i32
+                        };
                         let q_a = act_i8[bi * k + idx] as i8 as i32;
-                        acc += unpacked[lane] * (q_a as f32);
+                        acc += signed as f32 * (q_a as f32);
                         q_activation_sum += q_a;
                     }
                 }
@@ -5296,7 +5451,7 @@ extern "C" {
 
 #[cfg(feature = "openblas")]
 #[inline]
-fn openblas_conv_gemm_enabled() -> bool {
+pub fn openblas_conv_gemm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("FASTNN_DISABLE_OPENBLAS_CONV_GEMM")

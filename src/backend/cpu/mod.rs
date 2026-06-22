@@ -22,7 +22,10 @@ pub mod blas;
 pub mod flash_attn;
 pub mod im2col;
 pub mod microkernels;
+pub mod packed_conv;
+pub mod packed_gemm;
 pub mod reductions_fast;
+pub mod swar;
 pub mod telemetry;
 
 mod elementwise;
@@ -1019,6 +1022,74 @@ fn run_kernel_precopied(
                 );
             }
         }
+        // ── Conv2d Quantized (u4/u8) — SWAR packed kernels ───────
+        "conv2d_u4" | "conv2d_u4_i8" | "conv2d_u8" | "conv2d_u8_i8" => {
+            let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
+                return Err(BackendError::Dispatch(
+                    "conv2d_u4/u8: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
+                        .into(),
+                ));
+            };
+            if inputs.len() >= 2 {
+                let input_data: Vec<f32> = if kernel_name.ends_with("_i8") {
+                    matmul::dequantize_i8_activation(&inputs[0])
+                } else {
+                    bytemuck::cast_slice::<_, f32>(&inputs[0]).to_vec()
+                };
+                let raw = &inputs[1];
+                let mut packed_bytes: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
+                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
+                byte_slice[..raw.len()].copy_from_slice(raw);
+                let bias_data: Vec<f32> = if inputs.len() >= 3 {
+                    bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
+                } else {
+                    vec![]
+                };
+                let meta = weight_meta.clone().ok_or_else(|| {
+                    BackendError::Dispatch("conv2d_u4/u8: missing weight_meta".into())
+                })?;
+                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+                let flat_shape = if meta.shape.len() >= 4 {
+                    let oc = meta.shape[0];
+                    let inner: usize = meta.shape[1..].iter().product();
+                    vec![oc, inner]
+                } else {
+                    meta.shape.clone()
+                };
+                let n = input_data.len() / (c * h * w).max(1);
+                macro_rules! call_packed_conv_precopied {
+                    ($PackedType:ty, $fn:ident) => {{
+                        let packed_data: Vec<$PackedType> =
+                            bytemuck::cast_slice(&packed_bytes).to_vec();
+                        let pt = PackedTensor::from_raw(
+                            packed_data, flat_shape, meta.scales, meta.zero_points,
+                        );
+                        let bias_opt = if !bias_data.is_empty() {
+                            Some(&bias_data[..])
+                        } else {
+                            None
+                        };
+                        unsafe {
+                            packed_conv::$fn(
+                                &input_data,
+                                n, c, h, w,
+                                &pt,
+                                bias_opt,
+                                stride, padding, dilation, groups,
+                                kh, kw,
+                                None,
+                                out_f32,
+                            );
+                        }
+                    }};
+                }
+                if meta.bit_width == 4 {
+                    call_packed_conv_precopied!(U4x8, conv2d_packed_u4x8);
+                } else {
+                    call_packed_conv_precopied!(U8x4, conv2d_packed_u8x4);
+                }
+            }
+        }
         // ── Concat ─────────────────────────────────────────────
         "concat" => {
             if !inputs.is_empty() && params.len() >= 3 {
@@ -1525,13 +1596,13 @@ impl Backend for CpuBackend {
                         (_, false) => "matmul",
                         // Quantized: keep specialized kernels
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
                             "matmul_u4_i8"
                         }
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8))
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
                                 && !input_dtypes
                                     .iter()
@@ -1833,7 +1904,9 @@ impl Backend for CpuBackend {
                             8usize
                         };
 
-                        // Detect I8 activations from QuantizeActivations and append suffix
+                        // Detect signed INT8 activations from QuantizeActivations and append suffix.
+                        // Treat both IrDType::I8 and IrDType::U8 as i8-activation sources, because the
+                        // activation-quantization compiler pass currently emits U8 payloads.
                         let act_dtype = node
                             .inputs
                             .first()
@@ -1841,7 +1914,7 @@ impl Backend for CpuBackend {
                             .map(|an| an.output_type.dtype.clone());
                         if act_dtype
                             .as_ref()
-                            .is_some_and(|d| matches!(d, IrDType::I8))
+                            .is_some_and(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
                         {
                             kernel = format!("{}_i8", kernel);
                         }
@@ -3239,14 +3312,42 @@ impl Backend for CpuBackend {
                         .first()
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
-                    // Output buffer: [scale(f32)][zp(f32)][i8_data(numel bytes)]
+                    // Detect per-channel quantization from node attrs
+                    let mode = node.attrs.get("mode").map(|s| s.as_str());
+                    let is_per_channel = mode == Some("per_channel");
+                    let num_channels: usize = if is_per_channel {
+                        node.attrs
+                            .get("num_channels")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1)
+                    } else {
+                        0
+                    };
+                    let mut params = vec![numel, if is_per_channel { 1 } else { 0 }, num_channels];
+                    if is_per_channel {
+                        let scales_str = node.attrs.get("scales").cloned().unwrap_or_default();
+                        let zps_str = node.attrs.get("zero_points").cloned().unwrap_or_default();
+                        for s in scales_str.split(',') {
+                            if let Ok(v) = s.parse::<f32>() {
+                                params.push(v.to_bits() as usize);
+                            }
+                        }
+                        for zp in zps_str.split(',') {
+                            if let Ok(v) = zp.parse::<f32>() {
+                                params.push(v.to_bits() as usize);
+                            }
+                        }
+                    }
+                    // Output buffer:
+                    //   per-tensor: [scale(f32)][zp(f32)][i8_data(numel bytes)]
+                    //   per-channel: [num_channels(u32)][chunk_size(u32)][scale_1]...[scale_n][zp_1]...[zp_n][channel_data...]
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "quantize_activations".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![numel],
+                        params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -3256,13 +3357,44 @@ impl Backend for CpuBackend {
                         .first()
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
+                    // Read per-channel metadata from the QuantizeActivations
+                    // predecessor (if any) via the node's own dtype/metadata.
+                    let mut params = vec![numel];
+                    // Peek at predecessor node to detect per-channel format
+                    if let Some(&pred_id) = node.inputs.first() {
+                        if let Some(pred) = graph.get_node(pred_id) {
+                            if let Some(mode) = pred.attrs.get("mode") {
+                                if mode == "per_channel" {
+                                    let nc: usize = pred
+                                        .attrs
+                                        .get("num_channels")
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0);
+                                    params.push(1); // per_channel flag
+                                    params.push(nc);
+                                    let scales_str = pred.attrs.get("scales").cloned().unwrap_or_default();
+                                    let zps_str = pred.attrs.get("zero_points").cloned().unwrap_or_default();
+                                    for s in scales_str.split(',') {
+                                        if let Ok(v) = s.parse::<f32>() {
+                                            params.push(v.to_bits() as usize);
+                                        }
+                                    }
+                                    for zp in zps_str.split(',') {
+                                        if let Ok(v) = zp.parse::<f32>() {
+                                            params.push(v.to_bits() as usize);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "dequantize_activations".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![numel],
+                        params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -4523,12 +4655,10 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
-                        "conv2d_u4" | "conv2d_u8" => {
-                            // Quantized conv2d using im2col + packed GEMM
+                        "conv2d_u4" | "conv2d_u4_i8" | "conv2d_u8" | "conv2d_u8_i8" => {
+                            // Quantized conv2d using SWAR packed kernels.
                             // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
-                            // Approach: build im2col matrix [N*OH*OW, col_w], then call gemm_cpu per batch
-                            // where PackedTensor weights have shape [OC, col_w] and each GEMV produces OC outputs.
                             if let [a_slice, w_slice] = &input_slices[..] {
                                 let (input_data, packed_bytes) = {
                                     let d = arena.data_mut();
@@ -4546,7 +4676,6 @@ impl Backend for CpuBackend {
                                         {
                                             let raw =
                                                 &d[w_slice.offset..w_slice.offset + w_slice.size];
-                                            // Copy to u32-aligned buffer (arena may not be u32-aligned)
                                             let mut aligned: Vec<u32> =
                                                 vec![0u32; raw.len().div_ceil(4)];
                                             let byte_slice =
@@ -4571,6 +4700,11 @@ impl Backend for CpuBackend {
                                 else {
                                     return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
                                 };
+                                if groups == 0 {
+                                    return Err(BackendError::Dispatch(
+                                        "conv2d_u4/u8: groups=0".into(),
+                                    ));
+                                }
                                 let meta = weight_meta.clone().ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "conv2d_u4/u8: missing weight_meta".into(),
@@ -4580,8 +4714,6 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                // Flatten conv2d weight shape [OC, IC, KH, KW] → [OC, IC*KH*KW]
-                                // so the GEMM dispatch sees 2D weight with inner = IC*KH*KW.
                                 let flat_shape = if meta.shape.len() >= 4 {
                                     let oc = meta.shape[0];
                                     let inner: usize = meta.shape[1..].iter().product();
@@ -4589,145 +4721,40 @@ impl Backend for CpuBackend {
                                 } else {
                                     meta.shape.clone()
                                 };
-                                let oc = flat_shape.first().copied().unwrap_or(1);
-                                let c = input_c;
-                                let h = input_h;
-                                let w = input_w;
-                                if groups == 0 {
-                                    return Err(BackendError::Dispatch(
-                                        "conv2d_u4/u8: groups=0".into(),
-                                    ));
-                                }
-                                let c_per_g = c / groups;
-                                let dk_h = (kernel_h - 1) * dilation + 1;
-                                let dk_w = (kernel_w - 1) * dilation + 1;
-                                let n = input_data.len() / (c * h * w).max(1);
-                                let h_out = if h + 2 * padding >= dk_h {
-                                    (h + 2 * padding - dk_h) / stride + 1
+                                let n = input_data.len() / (input_c * input_h * input_w).max(1);
+                                let bias_opt = if !bias_data.is_empty() {
+                                    Some(&bias_data[..])
                                 } else {
-                                    0
+                                    None
                                 };
-                                let w_out = if w + 2 * padding >= dk_w {
-                                    (w + 2 * padding - dk_w) / stride + 1
-                                } else {
-                                    0
-                                };
-                                // Dispatch based on bit_width to handle different PackedTensor types
-                                // (PackedTensor<U4x8> and PackedTensor<U8x4> are different types)
-                                macro_rules! dispatch_conv2d_quant {
-                                    ($PackedType:ty, $byte_cast:expr) => {{
+                                macro_rules! dispatch_packed_conv {
+                                    ($PackedType:ty, $fn:ident) => {{
                                         let packed_data: Vec<$PackedType> =
                                             bytemuck::cast_slice(&packed_bytes).to_vec();
                                         let pt = PackedTensor::from_raw(
                                             packed_data,
-                                            flat_shape.clone(),
+                                            flat_shape,
                                             meta.scales,
                                             meta.zero_points,
                                         );
-                                        let col_w = c_per_g * kernel_h * kernel_w;
-                                        let has_bias = !bias_data.is_empty();
-                                        #[cfg(feature = "parallel")]
-                                        {
-                                            let out_f32_ref = out_f32;
-                                            let input_data_ref = input_data.as_slice();
-                                            rayon::scope(|_| {
-                                                for nn in 0..n {
-                                                    let num_pixels = h_out * w_out;
-                                                    let mut col_matrix = vec![0.0f32; num_pixels * col_w];
-                                                    unsafe {
-                                                        crate::backend::cpu::im2col::im2col_kernel_rect(
-                                                            &input_data_ref[nn * (c * h * w)..],
-                                                            c_per_g,
-                                                            h,
-                                                            w,
-                                                            kernel_h,
-                                                            kernel_w,
-                                                            stride,
-                                                            padding,
-                                                            dilation,
-                                                            &mut col_matrix,
-                                                        );
-                                                    }
-                                                    let mut temp_out = vec![0.0f32; num_pixels * oc];
-                                                    crate::backend::cpu::microkernels::gemm_cpu_flat(
-                                                        &pt,
-                                                        &col_matrix,
-                                                        &mut temp_out,
-                                                        num_pixels,
-                                                        col_w,
-                                                        oc,
-                                                    );
-                                                    for pixel in 0..num_pixels {
-                                                        for ff in 0..oc {
-                                                            let mut val = temp_out[pixel * oc + ff];
-                                                            if has_bias && ff < bias_data.len() {
-                                                                val += bias_data[ff];
-                                                            }
-                                                            let out_idx = nn * (oc * h_out * w_out)
-                                                                + ff * (h_out * w_out)
-                                                                + pixel;
-                                                            if out_idx < out_f32_ref.len() {
-                                                                unsafe {
-                                                                    *(out_f32_ref.as_ptr() as *mut f32).add(out_idx) = val;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-                                        #[cfg(not(feature = "parallel"))]
-                                        {
-                                            for nn in 0..n {
-                                                let num_pixels = h_out * w_out;
-                                                let mut col_matrix = vec![0.0f32; num_pixels * col_w];
-                                                unsafe {
-                                                    crate::backend::cpu::im2col::im2col_kernel_rect(
-                                                        &input_data[nn * (c * h * w)..],
-                                                        c_per_g,
-                                                        h,
-                                                        w,
-                                                        kernel_h,
-                                                        kernel_w,
-                                                        stride,
-                                                        padding,
-                                                        dilation,
-                                                        &mut col_matrix,
-                                                    );
-                                                }
-                                                // Use flat-buffer GEMM — avoids Vec<Vec> allocation storm
-                                                let mut temp_out = vec![0.0f32; num_pixels * oc];
-                                                crate::backend::cpu::microkernels::gemm_cpu_flat(
-                                                    &pt,
-                                                    &col_matrix,
-                                                    &mut temp_out,
-                                                    num_pixels,
-                                                    col_w,
-                                                    oc,
-                                                );
-                                                for pixel in 0..num_pixels {
-                                                    for ff in 0..oc {
-                                                        let mut val = temp_out[pixel * oc + ff];
-                                                        if !bias_data.is_empty() && ff < bias_data.len()
-                                                        {
-                                                            val += bias_data[ff];
-                                                        }
-                                                        let out_idx = nn * (oc * h_out * w_out)
-                                                            + ff * (h_out * w_out)
-                                                            + pixel;
-                                                        if out_idx < out_f32.len() {
-                                                            out_f32[out_idx] = val;
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                        unsafe {
+                                            packed_conv::$fn(
+                                                &input_data,
+                                                n, input_c, input_h, input_w,
+                                                &pt,
+                                                bias_opt,
+                                                stride, padding, dilation, groups,
+                                                kernel_h, kernel_w,
+                                                None,
+                                                out_f32,
+                                            );
                                         }
                                     }};
                                 }
                                 if meta.bit_width == 4 {
-                                    dispatch_conv2d_quant!(U4x8, 4);
+                                    dispatch_packed_conv!(U4x8, conv2d_packed_u4x8);
                                 } else {
-                                    dispatch_conv2d_quant!(U8x4, 8);
+                                    dispatch_packed_conv!(U8x4, conv2d_packed_u8x4);
                                 }
                             }
                         }
@@ -7294,7 +7321,9 @@ impl Backend for CpuBackend {
                             }
                         }
                         "quantize_activations" => {
-                            let numel = *params.first().unwrap_or(&0);
+                            let numel = params.first().copied().unwrap_or(0);
+                            let is_per_channel = params.get(1).copied().unwrap_or(0) == 1;
+                            let num_channels = params.get(2).copied().unwrap_or(0);
                             if let Some(input_slice) = input_slices.first() {
                                 let f32_data = {
                                     let d = arena.data_mut();
@@ -7304,61 +7333,142 @@ impl Backend for CpuBackend {
                                     )
                                     .to_vec()
                                 };
-                                // Symmetric INT8 quantization: scale = max_abs / 127
-                                let max_abs =
-                                    f32_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-                                let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
-                                let zp = 0.0f32;
-
                                 let out_bytes = {
                                     let d = arena.data_mut();
                                     &mut d[out_start..out_end]
                                 };
-                                // Write scale, zp, then quantized i8 data
-                                let header_size = 8; // scale + zp
-                                out_bytes[0..4].copy_from_slice(&scale.to_le_bytes());
-                                out_bytes[4..8].copy_from_slice(&zp.to_le_bytes());
-                                let max_out = (out_bytes.len() - header_size).min(numel);
-                                for i in 0..max_out {
-                                    let q =
-                                        (f32_data[i] / scale).round().clamp(-128.0, 127.0) as i8;
-                                    out_bytes[header_size + i] = q as u8;
+
+                                if is_per_channel && num_channels > 0 {
+                                    // Per-channel asymmetric quantization
+                                    let sc_idx = 3; // scales start at param index 3
+                                    let zp_idx = 3 + num_channels; // zero_points start after scales
+                                    let chunk_size = numel / num_channels;
+                                    // Write header: num_channels (u32), then chunk_size (u32), then per-channel scales/zps
+                                    let header_offset: usize = 4 + 4 + num_channels * 8;
+                                    let h32 = bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[..4]);
+                                    h32[0] = num_channels as u32;
+                                    let chunk32 = bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[4..8]);
+                                    chunk32[0] = chunk_size as u32;
+                                    let scale_start = 8;
+                                    let zp_start = 8 + num_channels * 4;
+                                    for ch in 0..num_channels {
+                                        let scale = f32::from_bits(params[sc_idx + ch] as u32);
+                                        let zp = f32::from_bits(params[zp_idx + ch] as u32);
+                                        out_bytes[scale_start + ch * 4..scale_start + (ch + 1) * 4]
+                                            .copy_from_slice(&scale.to_le_bytes());
+                                        out_bytes[zp_start + ch * 4..zp_start + (ch + 1) * 4]
+                                            .copy_from_slice(&zp.to_le_bytes());
+                                        // Quantize this channel's data
+                                        let ch_start = ch * chunk_size;
+                                        let ch_end = (ch_start + chunk_size).min(f32_data.len());
+                                        for i in ch_start..ch_end {
+                                            let local = i - ch_start;
+                                            if header_offset + local < out_bytes.len() {
+                                                let q = if scale == 0.0 {
+                                                    0i8
+                                                } else {
+                                                    ((f32_data[i] - zp) / scale)
+                                                        .round()
+                                                        .clamp(-128.0, 127.0) as i8
+                                                };
+                                                out_bytes[header_offset + local] = q as u8;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Per-tensor symmetric quantization (legacy path)
+                                    let max_abs =
+                                        f32_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                                    let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
+                                    let zp = 0.0f32;
+
+                                    let header_size = 8; // scale + zp
+                                    out_bytes[0..4].copy_from_slice(&scale.to_le_bytes());
+                                    out_bytes[4..8].copy_from_slice(&zp.to_le_bytes());
+                                    let max_out = (out_bytes.len() - header_size).min(numel);
+                                    for i in 0..max_out {
+                                        let q =
+                                            (f32_data[i] / scale).round().clamp(-128.0, 127.0) as i8;
+                                        out_bytes[header_size + i] = q as u8;
+                                    }
                                 }
                             }
                         }
                         "dequantize_activations" => {
-                            let numel = *params.first().unwrap_or(&0);
+                            let numel = params.first().copied().unwrap_or(0);
+                            let is_per_channel = params.get(1).copied().unwrap_or(0) == 1;
+                            let num_channels = if is_per_channel {
+                                params.get(2).copied().unwrap_or(0)
+                            } else {
+                                0
+                            };
                             if let Some(input_slice) = input_slices.first() {
                                 let in_data = {
                                     let d = arena.data_mut();
                                     d[input_slice.offset..input_slice.offset + input_slice.size]
                                         .to_vec()
                                 };
-                                let header_size = 8;
-                                let scale = if in_data.len() >= 4 {
-                                    f32::from_le_bytes(in_data[0..4].try_into().unwrap())
-                                } else {
-                                    1.0
-                                };
-                                let zp = if in_data.len() >= 8 {
-                                    f32::from_le_bytes(in_data[4..8].try_into().unwrap())
-                                } else {
-                                    0.0
-                                };
 
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let max_out = out_f32.len().min(numel);
-                                for i in 0..max_out {
-                                    let idx = header_size + i;
-                                    let q = if idx < in_data.len() {
-                                        in_data[idx] as i8
+
+                                if is_per_channel && num_channels > 0 {
+                                    // Per-channel format:
+                                    // header: [num_channels(u32)][chunk_size(u32)]
+                                    // then num_channels scale(zp) pairs
+                                    // then channel data blocks
+                                    let nc = u32::from_le_bytes(in_data[0..4].try_into().unwrap_or([0; 4])) as usize;
+                                    let chunk_size = u32::from_le_bytes(in_data[4..8].try_into().unwrap_or([0; 4])) as usize;
+                                    let pair_bytes = nc * 8; // scale + zp per channel
+                                    let data_start = 8 + pair_bytes;
+                                    for ch in 0..nc {
+                                        let scale = f32::from_le_bytes(
+                                            in_data[8 + ch * 4..8 + (ch + 1) * 4].try_into().unwrap_or([0; 4]),
+                                        );
+                                        let zp = f32::from_le_bytes(
+                                            in_data[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
+                                                .try_into()
+                                                .unwrap_or([0; 4]),
+                                        );
+                                        let ch_start = ch * chunk_size;
+                                        let ch_end = (ch_start + chunk_size).min(out_f32.len());
+                                        for i in ch_start..ch_end {
+                                            let local = i - ch_start;
+                                            let di = data_start + local;
+                                            let q = if di < in_data.len() {
+                                                in_data[di] as i8
+                                            } else {
+                                                0i8
+                                            };
+                                            out_f32[i] = (q as f32) * scale + zp;
+                                        }
+                                    }
+                                } else {
+                                    // Per-tensor symmetric (legacy path)
+                                    let header_size = 8;
+                                    let scale = if in_data.len() >= 4 {
+                                        f32::from_le_bytes(in_data[0..4].try_into().unwrap())
                                     } else {
-                                        0i8
+                                        1.0
                                     };
-                                    out_f32[i] = (q as f32) * scale + zp;
+                                    let zp = if in_data.len() >= 8 {
+                                        f32::from_le_bytes(in_data[4..8].try_into().unwrap())
+                                    } else {
+                                        0.0
+                                    };
+
+                                    let max_out = out_f32.len().min(numel);
+                                    for i in 0..max_out {
+                                        let idx = header_size + i;
+                                        let q = if idx < in_data.len() {
+                                            in_data[idx] as i8
+                                        } else {
+                                            0i8
+                                        };
+                                        out_f32[i] = (q as f32) * scale + zp;
+                                    }
                                 }
                             }
                         }
@@ -7643,8 +7753,9 @@ impl Backend for CpuBackend {
                 }
 
                 // Quantized MatMul family (u4, u8, and i8-activation
-                // variants).  Same persistent-view override logic as
-                // the fp32 path above.
+                // variants).  Fall back to the standard dispatch path
+                // — PersistentPreparedWeights currently stores only f32
+                // payloads, so a zero-copy quantized path isn't wired yet.
                 Instruction::CallKernel {
                     kernel_name,
                     input_slices,
@@ -7662,34 +7773,12 @@ impl Backend for CpuBackend {
                         | "matmul_u8_i8"
                 ) =>
                 {
-                    let has_override = input_slices
-                        .get(1)
-                        .map(|b| view.get(&(b.offset, b.size)).is_some())
-                        .unwrap_or(false)
-                        || input_slices
-                            .get(2)
-                            .map(|b| view.get(&(b.offset, b.size)).is_some())
-                            .unwrap_or(false);
-                    if has_override {
-                        dispatch_matmul_quantized_with_view(
-                            arena,
-                            shape_env,
-                            kernel_name,
-                            input_slices,
-                            *output_slice,
-                            params,
-                            param_dims,
-                            weight_meta,
-                            view,
-                        )?;
-                    } else {
-                        let single = ExecutablePlan {
-                            instructions: vec![instruction.clone()],
-                            arena_size: plan.arena_size,
-                            levels: vec![0],
-                        };
-                        self.dispatch(&single, arena, shape_env)?;
-                    }
+                    let single = ExecutablePlan {
+                        instructions: vec![instruction.clone()],
+                        arena_size: plan.arena_size,
+                        levels: vec![0],
+                    };
+                    self.dispatch(&single, arena, shape_env)?;
                 }
 
                 // Everything else: defer to the standard per-instruction
@@ -7919,139 +8008,7 @@ fn dispatch_matmul_fp32_with_view(
 }
 
 #[cfg(feature = "prepared-plan")]
-fn dispatch_matmul_quantized_with_view(
-    arena: &CpuBuffer,
-    shape_env: &ShapeEnv,
-    kernel_name: &str,
-    input_slices: &[BufferSlice],
-    output_slice: BufferSlice,
-    params: &[usize],
-    param_dims: &Option<Vec<DimExpr>>,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
-    view: &crate::backend::prepared::PersistentPreparedWeights,
-) -> Result<(), BackendError> {
-    if input_slices.len() < 2 {
-        return Err(BackendError::Dispatch(format!(
-            "matmul_quantized_persistent: expected ≥ 2 input slices, got {}",
-            input_slices.len()
-        )));
-    }
-    let a_slice = input_slices[0];
-    let b_slice = input_slices[1];
-    let bias_slice = input_slices.get(2).copied();
-
-    // Resolve the B (weight) raw bytes from the persistent view
-    // (no per-copy memcpy — we pass the payload directly to the
-    // typed microkernel).
-    let raw_weight: &[u8] = match view.get(&(b_slice.offset, b_slice.size)) {
-        Some(payload) => payload,
-        None => {
-            let d = arena.data_mut();
-            &d[b_slice.offset..b_slice.offset + b_slice.size]
-        }
-    };
-
-    let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-    let &[m, k, n] = matmul_params.as_slice() else {
-        return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: expected params [M,K,N]"
-        )));
-    };
-
-    let meta = weight_meta
-        .clone()
-        .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
-            bit_width: 8,
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-            shape: vec![m, k],
-        });
-
-    let out_f32: &mut [f32] = {
-        let d = arena.data_mut();
-        bytemuck::cast_slice_mut::<_, f32>(
-            &mut d[output_slice.offset..output_slice.offset + output_slice.size],
-        )
-    };
-
-    match kernel_name {
-        "matmul_u4" | "matmul_u4_i8" => {
-            let typed = pack_bytes_to_u4x8(raw_weight);
-            let pt = packed_tensor_from_meta(typed, meta, kernel_name)?;
-            if kernel_name == "matmul_u4_i8" {
-                let a_raw = {
-                    let d = arena.data_mut();
-                    &d[a_slice.offset..a_slice.offset + a_slice.size]
-                };
-                crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4(
-                    &pt, a_raw, out_f32, m, k, n,
-                );
-            } else {
-                let a_f32 = {
-                    let d = arena.data_mut();
-                    bytemuck::cast_slice::<_, f32>(
-                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                    )
-                };
-                crate::backend::cpu::microkernels::gemm_cpu_flat::<
-                    crate::backend::cpu::u4x8::U4x8,
-                >(&pt, a_f32, out_f32, m, k, n);
-            }
-        }
-        "matmul_u8" | "matmul_u8_i8" => {
-            let typed = pack_bytes_to_u8x4(raw_weight);
-            let pt = packed_tensor_from_meta(typed, meta, kernel_name)?;
-            if kernel_name == "matmul_u8_i8" {
-                let a_raw = {
-                    let d = arena.data_mut();
-                    &d[a_slice.offset..a_slice.offset + a_slice.size]
-                };
-                crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
-                    &pt, a_raw, out_f32, m, k, n,
-                );
-            } else {
-                let a_f32 = {
-                    let d = arena.data_mut();
-                    bytemuck::cast_slice::<_, f32>(
-                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                    )
-                };
-                crate::backend::cpu::microkernels::gemm_cpu_flat::<
-                    crate::backend::cpu::u4x8::U8x4,
-                >(&pt, a_f32, out_f32, m, k, n);
-            }
-        }
-        other => {
-            return Err(BackendError::Dispatch(format!(
-                "matmul_quantized_persistent: unsupported kernel '{other}'"
-            )));
-        }
-    }
-
-    // Apply optional bias (quantized matmul paths don't fuse activations
-    // at the kernel level today, but bias is still supported via the
-    // standard post-process path).
-    if let Some(b_slice) = bias_slice {
-        let bias_f32: Vec<f32> = match view.get(&(b_slice.offset, b_slice.size)) {
-            Some(payload) => payload.to_vec(),
-            None => {
-                let d = arena.data_mut();
-                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
-                    .to_vec()
-            }
-        };
-        for i in 0..out_f32.len() {
-            if i % n < bias_f32.len() {
-                out_f32[i] += bias_f32[i % n];
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "prepared-plan")]
-fn pack_bytes_to_u4x8(raw: &[u8]) -> Vec<crate::backend::cpu::u4x8::U4x8> {
+fn pack_bytes_to_u4x8(raw: &[u8]) -> Vec<U4x8> {
     let mut packed = vec![0u32; raw.len().div_ceil(4)];
     {
         let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
@@ -8061,7 +8018,7 @@ fn pack_bytes_to_u4x8(raw: &[u8]) -> Vec<crate::backend::cpu::u4x8::U4x8> {
 }
 
 #[cfg(feature = "prepared-plan")]
-fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<crate::backend::cpu::u4x8::U8x4> {
+fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<U8x4> {
     let mut packed = vec![0u32; raw.len().div_ceil(4)];
     {
         let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
@@ -8069,6 +8026,7 @@ fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<crate::backend::cpu::u4x8::U8x4> {
     }
     bytemuck::cast_slice(&packed).to_vec()
 }
+
 
 macro_rules! impl_simd_unary_wrapper {
     ($name:ident, $avx2:path, $scalar:path) => {
