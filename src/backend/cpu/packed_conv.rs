@@ -6,7 +6,8 @@
 //! product runs entirely in i32 via SWAR.
 
 use crate::backend::cpu::swar::{
-    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed_slice, u8x4_dot_packed_slice,
+    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed, u8x4_dot_packed,
+    u4x8_dot_packed_slice, u8x4_dot_packed_slice,
 };
 use crate::dtypes::{PackedWord, U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
@@ -292,6 +293,14 @@ pub fn gemm_packed_u4x8_fused(
             act_zp
         };
 
+        let qa_sum: i32 = a_row.iter().map(|&w| {
+            (0..8).map(|i| {
+                let nib = ((w >> (i * 4)) & 0xF) as i32;
+                if nib >= 8 { nib - 16 } else { nib }
+            }).sum::<i32>()
+        }).sum();
+        let k_f32 = (k_packed * 8) as f32;
+
         for col in 0..n {
             let w_row_start = col * k_packed;
             let w_row = &weight_data[w_row_start..w_row_start + k_packed];
@@ -304,15 +313,9 @@ pub fn gemm_packed_u4x8_fused(
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u4x8_dot_packed_slice(&[a_row[k]], &[w_row[k]]);
+                acc += u4x8_dot_packed(a_row[k], w_row[k]);
             }
 
-            let qa_sum: i32 = a_row.iter().map(|&w| {
-                (0..8).map(|i| {
-                    let nib = ((w >> (i * 4)) & 0xF) as i32;
-                    if nib >= 8 { nib - 16 } else { nib }
-                }).sum::<i32>()
-            }).sum();
             let qb_sum: i32 = w_row.iter().map(|&w| {
                 (0..8).map(|i| {
                     let nib = ((w >> (i * 4)) & 0xF) as i32;
@@ -320,7 +323,6 @@ pub fn gemm_packed_u4x8_fused(
                 }).sum::<i32>()
             }).sum();
 
-            let k_f32 = (k_packed * 8) as f32;
             let mut val = (acc as f32) * scale_ab
                 + w_zp_local * (act_scale * qa_sum as f32)
                 + a_zp_local * (w_scale * qb_sum as f32)
@@ -375,7 +377,7 @@ fn gemm_packed_u8x4_fused(
 
             let mut acc = 0i32;
             for k in 0..k_packed {
-                acc += u8x4_dot_packed_slice(&[act_row[k]], &[w_row[k]]);
+                acc += u8x4_dot_packed(act_row[k], w_row[k]);
             }
 
             let qa_sum: i32 = act_row.iter()
