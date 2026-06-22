@@ -486,10 +486,12 @@ pub fn activation_from_kernel_name(kernel_name: &str) -> PreparedActivation {
 /// packed variants; float kernels map to the current im2col/gemm path,
 /// with a 1x1 specialisation when kernel dimensions are both 1.
 pub fn kernel_kind_from_kernel_name(kernel_name: &str) -> PreparedConvKernelKind {
-    match kernel_name {
-        "conv2d_u4" => PreparedConvKernelKind::CurrentIm2colGemm,
-        "conv2d_u8" => PreparedConvKernelKind::CurrentIm2colGemm,
-        _ => PreparedConvKernelKind::CurrentIm2colGemm,
+    if kernel_name.starts_with("conv2d_u4") {
+        PreparedConvKernelKind::FuturePackedU4
+    } else if kernel_name.starts_with("conv2d_u8") {
+        PreparedConvKernelKind::FuturePackedI8
+    } else {
+        PreparedConvKernelKind::CurrentIm2colGemm
     }
 }
 
@@ -1714,11 +1716,19 @@ mod tests {
     fn kernel_kind_quantized() {
         assert_eq!(
             kernel_kind_from_kernel_name("conv2d_u4"),
-            PreparedConvKernelKind::CurrentIm2colGemm
+            PreparedConvKernelKind::FuturePackedU4
         );
         assert_eq!(
             kernel_kind_from_kernel_name("conv2d_u8"),
-            PreparedConvKernelKind::CurrentIm2colGemm
+            PreparedConvKernelKind::FuturePackedI8
+        );
+        assert_eq!(
+            kernel_kind_from_kernel_name("conv2d_u4_i8"),
+            PreparedConvKernelKind::FuturePackedU4
+        );
+        assert_eq!(
+            kernel_kind_from_kernel_name("conv2d_u8_i8"),
+            PreparedConvKernelKind::FuturePackedI8
         );
     }
 
@@ -1831,7 +1841,7 @@ mod tests {
         let result = try_prepare_conv2d(&inst, 0).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
-                assert_eq!(c.kernel, PreparedConvKernelKind::CurrentIm2colGemm);
+                assert_eq!(c.kernel, PreparedConvKernelKind::FuturePackedU4);
             }
             _ => panic!("expected Conv2d"),
         }
@@ -1849,7 +1859,7 @@ mod tests {
         let result = try_prepare_conv2d(&inst, 0).expect("should promote");
         match &result {
             PreparedInstruction::Conv2d(c) => {
-                assert_eq!(c.kernel, PreparedConvKernelKind::CurrentIm2colGemm);
+                assert_eq!(c.kernel, PreparedConvKernelKind::FuturePackedI8);
             }
             _ => panic!("expected Conv2d"),
         }
