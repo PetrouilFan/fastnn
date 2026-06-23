@@ -472,48 +472,51 @@ unsafe fn slice_packed<U: PackedWord>(
 
 // (Tile constants moved to per-GEMM scope below)
 
-pub fn gemm_packed_u8x4_fused(
-    act_packed: &PackedTensor<U8x4>,
-    weight_packed: &PackedTensor<U8x4>,
+/// Raw slice-based U8x4 packed GEMM with fused dequantize + bias + activation.
+/// Avoids PackedTensor wrapping overhead — takes slices and scalars directly.
+/// Activation scale/zp are per-tensor (scalar). Weight scales/zps can be
+/// per-channel (len == n) or per-tensor (len == 1, broadcast).
+pub fn gemm_packed_u8x4_fused_raw(
+    act_data: &[U8x4],
+    m: usize,
+    k: usize,
+    act_scale: f32,
+    act_zp: f32,
+    w_data: &[U8x4],
+    n: usize,
+    w_scales: &[f32],
+    w_zps: &[f32],
     bias: Option<&[f32]>,
     activation: Option<&str>,
     c: &mut [f32],
 ) {
-    let m = act_packed.shape()[0];
-    let k = act_packed.shape()[1];
     let k_packed = k.div_ceil(4);
-    let n = weight_packed.shape()[0];
-
-    assert_eq!(weight_packed.shape()[1].div_ceil(4), k_packed);
-    assert_eq!(c.len(), m * n);
-
-    let act_slice = act_packed.as_packed();
-    let w_slice = weight_packed.as_packed();
+    debug_assert_eq!(c.len(), m * n);
+    debug_assert!(w_scales.len() == 1 || w_scales.len() == n);
+    debug_assert!(w_zps.len() == 1 || w_zps.len() == n);
     let k_f32 = k as f32;
+    let per_channel_w = w_scales.len() > 1;
 
-    // Precompute qb_sum once per weight column (optimization)
+    // Precompute qb_sum once per weight column
     let qb_sum: Vec<i32> = (0..n)
         .map(|col| {
-            let w_row = &w_slice[col * k_packed..(col + 1) * k_packed];
+            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
             w_row.iter().map(|&w| sum_u8x4_packed(w.0)).sum::<i32>()
         })
         .collect();
 
     for row in 0..m {
         let act_row_start = row * k_packed;
-        let act_row = &act_slice[act_row_start..act_row_start + k_packed];
-
-        let act_scale = act_packed.scale_for_row(row);
-        let act_zp = act_packed.zero_for_row(row);
+        let act_row = &act_data[act_row_start..act_row_start + k_packed];
 
         let qa_sum: i32 = act_row.iter().map(|&w| sum_u8x4_packed(w.0)).sum();
 
         for col in 0..n {
             let w_row_start = col * k_packed;
-            let w_row = &w_slice[w_row_start..w_row_start + k_packed];
+            let w_row = &w_data[w_row_start..w_row_start + k_packed];
 
-            let w_scale = weight_packed.scale_for_row(col);
-            let w_zp = weight_packed.zero_for_row(col);
+            let w_scale = if per_channel_w { w_scales[col] } else { w_scales[0] };
+            let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
 
             let mut acc = 0i32;
             for kk in 0..k_packed {
@@ -541,50 +544,79 @@ pub fn gemm_packed_u8x4_fused(
     }
 }
 
-// ── GEMM: U4x8 with fused dequantize + bias + activation ────────
-
-pub fn gemm_packed_u4x8_fused(
-    act_packed: &PackedTensor<U4x8>,
-    weight_packed: &PackedTensor<U4x8>,
+/// PackedTensor-wrapping variant of `gemm_packed_u8x4_fused_raw`.
+/// Extracts shape/scales/zps from PackedTensor and delegates to the raw version.
+#[inline]
+pub fn gemm_packed_u8x4_fused(
+    act_packed: &PackedTensor<U8x4>,
+    weight_packed: &PackedTensor<U8x4>,
     bias: Option<&[f32]>,
     activation: Option<&str>,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
     let k = act_packed.shape()[1];
-    let k_packed = k.div_ceil(8);
     let n = weight_packed.shape()[0];
+    gemm_packed_u8x4_fused_raw(
+        act_packed.as_packed(),
+        m,
+        k,
+        act_packed.scale_for_row(0),
+        act_packed.zero_for_row(0),
+        weight_packed.as_packed(),
+        n,
+        &weight_packed.scales,
+        &weight_packed.zeros,
+        bias,
+        activation,
+        c,
+    );
+}
 
-    assert_eq!(weight_packed.shape()[1].div_ceil(8), k_packed);
-    assert_eq!(c.len(), m * n);
+// ── GEMM: U4x8 with fused dequantize + bias + activation ────────
 
-    let act_slice = act_packed.as_packed();
-    let w_slice = weight_packed.as_packed();
+/// Raw slice-based U4x8 packed GEMM with fused dequantize + bias + activation.
+pub fn gemm_packed_u4x8_fused_raw(
+    act_data: &[U4x8],
+    m: usize,
+    k: usize,
+    act_scale: f32,
+    act_zp: f32,
+    w_data: &[U4x8],
+    n: usize,
+    w_scales: &[f32],
+    w_zps: &[f32],
+    bias: Option<&[f32]>,
+    activation: Option<&str>,
+    c: &mut [f32],
+) {
+    let k_packed = k.div_ceil(8);
+    debug_assert_eq!(c.len(), m * n);
+    debug_assert!(w_scales.len() == 1 || w_scales.len() == n);
+    debug_assert!(w_zps.len() == 1 || w_zps.len() == n);
     let k_f32 = k as f32;
+    let per_channel_w = w_scales.len() > 1;
 
     // Precompute qb_sum per weight column
     let qb_sum: Vec<i32> = (0..n)
         .map(|col| {
-            let w_row = &w_slice[col * k_packed..(col + 1) * k_packed];
+            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
             w_row.iter().map(|&w| sum_u4x8_packed(w.0)).sum::<i32>()
         })
         .collect();
 
     for row in 0..m {
         let a_row_start = row * k_packed;
-        let a_row = &act_slice[a_row_start..a_row_start + k_packed];
-
-        let act_scale = act_packed.scale_for_row(row);
-        let act_zp = act_packed.zero_for_row(row);
+        let a_row = &act_data[a_row_start..a_row_start + k_packed];
 
         let qa_sum: i32 = a_row.iter().map(|&w| sum_u4x8_packed(w.0)).sum();
 
         for col in 0..n {
             let w_row_start = col * k_packed;
-            let w_row = &w_slice[w_row_start..w_row_start + k_packed];
+            let w_row = &w_data[w_row_start..w_row_start + k_packed];
 
-            let w_scale = weight_packed.scale_for_row(col);
-            let w_zp = weight_packed.zero_for_row(col);
+            let w_scale = if per_channel_w { w_scales[col] } else { w_scales[0] };
+            let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
 
             let mut acc = 0i32;
             for kk in 0..k_packed {
@@ -610,6 +642,34 @@ pub fn gemm_packed_u4x8_fused(
             c[row * n + col] = val;
         }
     }
+}
+
+/// PackedTensor-wrapping variant. Delegates to `gemm_packed_u4x8_fused_raw`.
+#[inline]
+pub fn gemm_packed_u4x8_fused(
+    act_packed: &PackedTensor<U4x8>,
+    weight_packed: &PackedTensor<U4x8>,
+    bias: Option<&[f32]>,
+    activation: Option<&str>,
+    c: &mut [f32],
+) {
+    let m = act_packed.shape()[0];
+    let k = act_packed.shape()[1];
+    let n = weight_packed.shape()[0];
+    gemm_packed_u4x8_fused_raw(
+        act_packed.as_packed(),
+        m,
+        k,
+        act_packed.scale_for_row(0),
+        act_packed.zero_for_row(0),
+        weight_packed.as_packed(),
+        n,
+        &weight_packed.scales,
+        &weight_packed.zeros,
+        bias,
+        activation,
+        c,
+    );
 }
 
 /// Pack flat i8 column-buffer data into U8x4 packed words.

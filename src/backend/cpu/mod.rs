@@ -337,7 +337,7 @@ fn quantized_matmul_dispatch_precopied_i8_u4(
 /// * `kernel_name` — identifies the kernel to run
 /// * `inputs` — pre-copied input data (each element is an owned byte vector)
 /// * `output` — mutable output byte buffer
-// ── Helper macros for run_kernel_precopied ──────────────────────────
+///
 /// Expands to the body of a unary match arm: cast input[0]→f32, cast output→f32, call fn
 macro_rules! precopied_unary_body {
     ($inputs:expr, $output:expr, $fn:ident) => {{
@@ -5012,6 +5012,11 @@ impl Backend for CpuBackend {
 
                                 let bit_width = meta.bit_width;
                                 let mut col_buf: Vec<i8> = vec![0i8; num_pixels * k];
+                                let inner: usize = meta.shape[1..].iter().product();
+                                // Pre-allocate reusable buffers across groups/batches
+                                let mut payload = Vec::with_capacity(8 + num_pixels * k);
+                                let mut packed_act = vec![U8x4(0); num_pixels * inner.div_ceil(4)];
+                                let mut temp = vec![0.0f32; num_pixels * oc_per_g];
 
                                 for nn in 0..n {
                                     let act_base = nn * input_c * input_h * input_w;
@@ -5035,14 +5040,13 @@ impl Backend for CpuBackend {
                                                 &mut col_buf,
                                             );
                                         }
-                                        let mut payload = Vec::with_capacity(8 + col_buf.len());
-                                        payload.extend_from_slice(&affine.scale.to_le_bytes());
-                                        payload.extend_from_slice(&affine.zero.to_le_bytes());
-                                        let col_u8: &[u8] = bytemuck::cast_slice(&col_buf);
-                                        payload.extend_from_slice(col_u8);
-
-                                        let inner: usize = meta.shape[1..].iter().product();
                                         if bit_width == 4 {
+                                            // U4 path: build flat-i8 payload into reusable buffer
+                                            payload.clear();
+                                            payload.extend_from_slice(&affine.scale.to_le_bytes());
+                                            payload.extend_from_slice(&affine.zero.to_le_bytes());
+                                            let col_u8: &[u8] = bytemuck::cast_slice(&col_buf);
+                                            payload.extend_from_slice(col_u8);
                                             let kp = inner.div_ceil(U4x8::ITEMS);
                                             let w_sl = aligned_packed_slice::<U4x8>(&raw);
                                             let w_slice =
@@ -5064,7 +5068,6 @@ impl Backend for CpuBackend {
                                                 local_scales,
                                                 local_zps,
                                             );
-                                            let mut temp = vec![0.0f32; num_pixels * oc_per_g];
                                             microkernels::gemm_cpu_flat_i8_u4x8(
                                                 &pt, &payload, &mut temp, num_pixels, k, oc_per_g,
                                             );
@@ -5087,47 +5090,52 @@ impl Backend for CpuBackend {
                                                 }
                                             }
                                         } else {
+                                            // U8 path: pack i8 → U8x4 (lossless), use fast packed SWAR GEMM
                                             let kp = inner.div_ceil(U8x4::ITEMS);
                                             let w_sl = aligned_packed_slice::<U8x4>(&raw);
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
-                                            let local_scales = if meta.scales.len() > 1 {
-                                                meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                                            let per_channel_w = meta.scales.len() > 1;
+                                            let per_channel_zp = meta.zero_points.len() > 1;
+                                            let w_scales = if per_channel_w {
+                                                &meta.scales[g_oc_off..g_oc_off + oc_per_g]
                                             } else {
-                                                meta.scales.clone()
+                                                &meta.scales
                                             };
-                                            let local_zps = if meta.zero_points.len() > 1 {
-                                                meta.zero_points[g_oc_off..g_oc_off + oc_per_g]
-                                                    .to_vec()
+                                            let w_zps = if per_channel_zp {
+                                                &meta.zero_points[g_oc_off..g_oc_off + oc_per_g]
                                             } else {
-                                                meta.zero_points.clone()
+                                                &meta.zero_points
                                             };
-                                            let pt = PackedTensor::from_raw(
-                                                w_slice.to_vec(),
-                                                vec![oc_per_g, inner],
-                                                local_scales,
-                                                local_zps,
+                                            // Pack i8 → U8x4 into reusable buffer
+                                            packed_conv::pack_i8_col_to_u8x4(
+                                                &col_buf, num_pixels, k, &mut packed_act,
                                             );
-                                            let mut temp = vec![0.0f32; num_pixels * oc_per_g];
-                                            microkernels::gemm_cpu_flat_i8_u8x4(
-                                                &pt, &payload, &mut temp, num_pixels, k, oc_per_g,
+                                            let bias_group = if g_oc_off < bias_data.len() {
+                                                Some(&bias_data[g_oc_off..g_oc_off + oc_per_g])
+                                            } else {
+                                                None
+                                            };
+                                            // Raw packed GEMM — no PackedTensor wrapping, no allocations
+                                            packed_conv::gemm_packed_u8x4_fused_raw(
+                                                &packed_act,
+                                                num_pixels,
+                                                k,
+                                                affine.scale,
+                                                affine.zero,
+                                                w_slice,
+                                                oc_per_g,
+                                                w_scales,
+                                                w_zps,
+                                                bias_group,
+                                                fused_act,
+                                                &mut temp,
                                             );
                                             for pixel in 0..num_pixels {
                                                 for f in 0..oc_per_g {
-                                                    let mut val = temp[pixel * oc_per_g + f];
-                                                    if g_oc_off + f < bias_data.len() {
-                                                        val += bias_data[g_oc_off + f];
-                                                    }
-                                                    if let Some(act) = fused_act {
-                                                        val = match act {
-                                                            "relu" => val.max(0.0),
-                                                            "silu" => val / (1.0 + (-val).exp()),
-                                                            _ => val,
-                                                        };
-                                                    }
                                                     out_f32[out_base
                                                         + (g_oc_off + f) * num_pixels
-                                                        + pixel] = val;
+                                                        + pixel] = temp[pixel * oc_per_g + f];
                                                 }
                                             }
                                         }
