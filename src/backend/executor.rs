@@ -22,7 +22,8 @@ use crate::backend::{
 };
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::passes::{
-    dead_code_elimination, memory_planning, operator_fusion, quantization, shape_inference,
+    activation_quantization, calibration, dead_code_elimination, memory_planning, operator_fusion,
+    quantization, shape_inference,
 };
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
@@ -77,17 +78,21 @@ impl<B: Backend> GraphExecutor<B> {
         &self,
         graph: &ComputeGraph,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        self.compile_with_plan_and_quantize(graph, None)
+        self.compile_with_plan_and_quantize(graph, None, None)
     }
 
-    /// Same as [`compile_with_plan`] but with optional weight quantization.
+    /// Same as [`compile_with_plan`] but with optional weight quantization and
+    /// optional calibration data for activation quantization.
     ///
     /// Pass `Some(4)` or `Some(8)` to quantize f32 weight constants to
-    /// packed 4-bit or 8-bit precision.
+    /// packed 4-bit or 8-bit precision. If `calib_data` is provided, it will
+    /// be used to compute per-tensor/per-channel activation scales for optimal
+    /// quantization accuracy.
     pub fn compile_with_plan_and_quantize(
         &self,
         graph: &ComputeGraph,
         quantize: Option<u8>,
+        calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph = graph.clone();
 
@@ -100,20 +105,39 @@ impl<B: Backend> GraphExecutor<B> {
             .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
-        if let Some(bit_width) = quantize {
-            if bit_width != 4 && bit_width != 8 {
-                return Err(BackendError::Compilation(format!(
-                    "unsupported quantization bit width: {} (expected 4 or 8)",
-                    bit_width
-                )));
+        // Handle three cases:
+        // 1. quantize=Some(bit_width): quantize weights + activations (with optional calib)
+        // 2. quantize=None, calib_data=Some(_): re-quantize activations only (weights already quantized)
+        // 3. quantize=None, calib_data=None: no quantization
+        let do_quantize = quantize.is_some() || calib_data.is_some();
+        if do_quantize {
+            // Quantize weights if requested (or if not already quantized)
+            if let Some(bit_width) = quantize {
+                if bit_width != 4 && bit_width != 8 {
+                    return Err(BackendError::Compilation(format!(
+                        "unsupported quantization bit width: {} (expected 4 or 8)",
+                        bit_width
+                    )));
+                }
+                quantization::quantize_weights(&mut graph, bit_width, None)
+                    .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
             }
-            quantization::quantize_weights(&mut graph, bit_width, None)
-                .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
 
             // After quantizing weights, wrap any optimizer ops that now have
             // quantized weight inputs with Dequantize/Quantize.
             quantization::wrap_quantized_optimizer(&mut graph)
                 .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
+
+            // Insert QuantizeActivations before MatMul/Conv2d activation inputs so
+            // the backend can dispatch to _i8 kernel variants for INT8 activation compute.
+            // Use calibration data if provided for optimal scales.
+            if let Some(calib) = calib_data {
+                activation_quantization::quantize_activations_with_calibration(&mut graph, &calib)
+                    .map_err(|e| BackendError::Compilation(format!("activation quantization: {e}")))?;
+            } else {
+                activation_quantization::quantize_activations(&mut graph)
+                    .map_err(|e| BackendError::Compilation(format!("activation quantization: {e}")))?;
+            }
         }
 
         // ── Phase 3: Dead code elimination ────────────────────────────────
@@ -125,6 +149,36 @@ impl<B: Backend> GraphExecutor<B> {
 
         // ── Phase 5: Backend compilation ──────────────────────────────────
         let plan = self.backend.compile(&graph, &memory_plan)?;
+
+        if std::env::var("FASTNN_DUMP_INSTRS").is_ok() {
+            eprintln!("FASTNN_DUMP_INSTRS: total instructions={}", plan.instructions.len());
+            let mut conv2d_quant_u4 = 0usize;
+            let mut conv2d_quant_u8 = 0usize;
+            let mut conv2d_fp32 = 0usize;
+            let mut other_kernels: Vec<(String, Option<String>)> = Vec::new();
+            for (i, instr) in plan.instructions.iter().enumerate() {
+                if let Instruction::CallKernel { kernel_name, weight_meta, .. } = instr {
+                    let meta_info = weight_meta.as_ref()
+                        .map(|m| format!("bw={} scales={}", m.bit_width, m.scales.len()))
+                        .unwrap_or_default();
+                    eprintln!("  INSTR[{}] kernel={} {}", i, kernel_name, meta_info);
+                    if kernel_name.starts_with("conv2d_u4") {
+                        conv2d_quant_u4 += 1;
+                    } else if kernel_name.starts_with("conv2d_u8") {
+                        conv2d_quant_u8 += 1;
+                    } else if kernel_name.starts_with("conv2d") {
+                        conv2d_fp32 += 1;
+                    } else {
+                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
+                    }
+                }
+            }
+            eprintln!("  SUMMARY: conv2d_u4={} conv2d_u8={} conv2d_fp32={} other={}",
+                conv2d_quant_u4, conv2d_quant_u8, conv2d_fp32, other_kernels.len());
+            for (name, meta) in &other_kernels {
+                eprintln!("    OTHER: {} {}", name, meta.as_deref().unwrap_or(""));
+            }
+        }
 
         if std::env::var("FASTNN_DUMP_GRAPH").is_ok() {
             use std::collections::BTreeMap;
@@ -801,7 +855,7 @@ impl<B: Backend> GraphExecutor<B> {
 
         // 6. Run the standard compiler pipeline
         let (plan, memory_plan, final_graph) =
-            self.compile_with_plan_and_quantize(&combined_graph, config.quantize)?;
+            self.compile_with_plan_and_quantize(&combined_graph, config.quantize, None)?;
 
         // 6b. Optionally tighten memory plan using concrete batch shapes.
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.

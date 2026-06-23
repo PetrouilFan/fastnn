@@ -531,7 +531,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (plan, _, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&gb.to_graph(), Some(4))
+            .compile_with_plan_and_quantize(&gb.to_graph(), Some(4), None)
             .expect("compile with quantization should succeed");
 
         // Verify that the compiled plan contains a matmul_u4 kernel.
@@ -617,7 +617,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (_plan, _memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4))
+            .compile_with_plan_and_quantize(&graph, Some(4), None)
             .expect("compile with quantization should succeed");
 
         // After compile:
@@ -734,7 +734,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (_plan, _memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4))
+            .compile_with_plan_and_quantize(&graph, Some(4), None)
             .expect("compile with quantization should succeed");
 
         // Verify wrapping for Adam
@@ -795,7 +795,7 @@ mod tests {
 
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4))
+            .compile_with_plan_and_quantize(&graph, Some(4), None)
             .expect("compile with quantization should succeed");
         // Debug: print output slot size for quantized weight
         let q_node = compiled_graph
