@@ -146,12 +146,8 @@ fn quantize_node_output(
     attrs.insert("scale".to_string(), scale.to_string());
     attrs.insert("zero_point".to_string(), zero_point.to_string());
 
-    let quant_id = graph.add_node_with_attrs(
-        Opcode::Quantize,
-        vec![node_id],
-        quant_output_type,
-        attrs,
-    );
+    let quant_id =
+        graph.add_node_with_attrs(Opcode::Quantize, vec![node_id], quant_output_type, attrs);
 
     // Rewire all consumers of node_id to point to quant_id
     // Collect consumers first to avoid borrow checker issues
@@ -228,8 +224,10 @@ pub fn fuse_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), String> {
                     let prev = graph.get_node(prev_id).unwrap();
                     if prev.opcode == Opcode::Quantize {
                         // Check bit_width matches
-                        let q_bit: Option<u8> = prev.attrs.get("bit_width").and_then(|s| s.parse().ok());
-                        let dq_bit: Option<u8> = node.attrs.get("bit_width").and_then(|s| s.parse().ok());
+                        let q_bit: Option<u8> =
+                            prev.attrs.get("bit_width").and_then(|s| s.parse().ok());
+                        let dq_bit: Option<u8> =
+                            node.attrs.get("bit_width").and_then(|s| s.parse().ok());
                         if q_bit == dq_bit {
                             // Rewire consumers of Dequantize to Quantize input
                             let consumers = graph.consumers(node_id).clone();
@@ -293,7 +291,7 @@ pub fn quantize_activations_with_scales(
 ) -> Result<(), String> {
     // The config.calib_data already contains the pre-computed scales in its stats
     // We need to use those directly instead of recomputing from min/max
-    
+
     // Process nodes in topological order
     let topo_order = graph.topological_sort();
 
