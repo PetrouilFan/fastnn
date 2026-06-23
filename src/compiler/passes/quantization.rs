@@ -138,7 +138,9 @@ pub fn quantize_weights(
         let (packed_bytes, new_dtype) = if bit_width == 4 {
             let pt = if let Some(gs) = group_size {
                 PackedTensor::<U4x8>::from_f32_per_channel_asymmetric_grouped(
-                    &quant_data, &quant_shape, gs,
+                    &quant_data,
+                    &quant_shape,
+                    gs,
                 )
             } else {
                 PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
@@ -154,7 +156,9 @@ pub fn quantize_weights(
         } else {
             let pt = if let Some(gs) = group_size {
                 PackedTensor::<U8x4>::from_f32_per_channel_asymmetric_grouped(
-                    &quant_data, &quant_shape, gs,
+                    &quant_data,
+                    &quant_shape,
+                    gs,
                 )
             } else {
                 PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
@@ -174,7 +178,10 @@ pub fn quantize_weights(
         // the actual packed layout (scales/zeros are per-output-channel,
         // which is dim 0 of the transposed [N, K] weight).
         let new_tensor_type = TensorType {
-            shape: quant_shape.iter().map(|&d| DimExpr::Known(d as u64)).collect(),
+            shape: quant_shape
+                .iter()
+                .map(|&d| DimExpr::Known(d as u64))
+                .collect(),
             dtype: new_dtype,
         };
 
@@ -303,8 +310,16 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
         let (orig_scales, orig_zeros) = graph
             .get_node(wrap.weight_id)
             .map(|wn| match &wn.output_type.dtype {
-                IrDType::U4 { scales, zero_points, .. } => (scales.clone(), zero_points.clone()),
-                IrDType::U8 { scales, zero_points, .. } => (scales.clone(), zero_points.clone()),
+                IrDType::U4 {
+                    scales,
+                    zero_points,
+                    ..
+                } => (scales.clone(), zero_points.clone()),
+                IrDType::U8 {
+                    scales,
+                    zero_points,
+                    ..
+                } => (scales.clone(), zero_points.clone()),
                 _ => (vec![], vec![]),
             })
             .unwrap_or_default();

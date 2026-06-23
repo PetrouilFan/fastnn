@@ -23,7 +23,8 @@ pub(super) fn dequantize_i8_activation(payload: &[u8]) -> Vec<f32> {
     let per_channel_detected = {
         if payload.len() >= 16 {
             let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0; 4])) as usize;
-            let chunk_size = u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0; 4])) as usize;
+            let chunk_size =
+                u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0; 4])) as usize;
             let expected = 8 + nc * 8 + nc * chunk_size;
             nc > 0 && chunk_size > 0 && payload.len() >= expected
         } else {
@@ -51,7 +52,11 @@ pub(super) fn dequantize_i8_activation(payload: &[u8]) -> Vec<f32> {
             let ch_start = ch * chunk_size;
             for j in 0..chunk_size {
                 let di = data_start + j;
-                let q = if di < payload.len() { payload[di] as i8 } else { 0i8 };
+                let q = if di < payload.len() {
+                    payload[di] as i8
+                } else {
+                    0i8
+                };
                 out.push((q as f32) * scale + zp);
             }
         }
@@ -177,8 +182,9 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     } else {
         1
     };
-    let valid_meta_len =
-        meta.scales.len() == 1 || meta.scales.len() == rows || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0);
+    let valid_meta_len = meta.scales.len() == 1
+        || meta.scales.len() == rows
+        || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0);
     if !valid_meta_len {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1, {}, or a divisor of {})",
@@ -207,12 +213,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
 
     Ok({
         let scales_len = meta.scales.len();
-        let mut pt = PackedTensor::from_raw(
-            data,
-            meta.shape,
-            meta.scales,
-            meta.zero_points,
-        );
+        let mut pt = PackedTensor::from_raw(data, meta.shape, meta.scales, meta.zero_points);
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;
         }

@@ -196,8 +196,12 @@ pub fn quantize_activations_with_calibration(
 
         // DEBUG: print calibration lookup
         if std::env::var("FASTNN_DEBUG_CALIB").is_ok() {
-            eprintln!("[CALIB_DEBUG] act_name='{}' conv_name='{}' avail_keys={:?}", 
-                act_name, conv_name, calib.stats.keys().collect::<Vec<_>>());
+            eprintln!(
+                "[CALIB_DEBUG] act_name='{}' conv_name='{}' avail_keys={:?}",
+                act_name,
+                conv_name,
+                calib.stats.keys().collect::<Vec<_>>()
+            );
         }
 
         // Helper to get calibration stats for either per-channel or per-tensor
@@ -209,54 +213,59 @@ pub fn quantize_activations_with_calibration(
             }
         };
 
-        let (input_channels, per_channel_scales, per_channel_zero_points, per_tensor_scale, per_tensor_zero_point) =
-            if matches!(node.opcode, Opcode::Conv2d) {
-                // Conv2d activation input channels is dim 1 of input shape (NCHW)
-                let c = act_shape.get(1).and_then(|d| d.evaluate()).unwrap_or(0) as usize;
-                if c > 0 {
-                    // Look up calibration stats for the activation tensor
-                    // Try activation node name first, then fall back to Conv node name
-                    let (scales, zps) = if !act_name.is_empty() {
-                        calib
-                            .stats
-                            .get(&act_name)
-                            .or_else(|| calib.stats.get(&conv_name))
-                            .map(|stats| stats.compute_scale_zp_per_channel(8))
-                            .unwrap_or_else(|| (vec![], vec![]))
-                    } else if !conv_name.is_empty() {
-                        calib
-                            .stats
-                            .get(&conv_name)
-                            .map(|stats| stats.compute_scale_zp_per_channel(8))
-                            .unwrap_or_else(|| (vec![], vec![]))
-                    } else {
-                        (vec![], vec![])
-                    };
-                    // Also get per-tensor stats for fallback
-                    let (pt_scale, pt_zp) = if !act_name.is_empty() {
-                        get_calib_stats(&act_name)
-                            .or_else(|| get_calib_stats(&conv_name))
-                            .map(|stats| stats.compute_scale_zp(8))
-                            .unwrap_or_else(|| (0.0, 0.0))
-                    } else if !conv_name.is_empty() {
-                        get_calib_stats(&conv_name)
-                            .map(|stats| stats.compute_scale_zp(8))
-                            .unwrap_or_else(|| (0.0, 0.0))
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    // Only use per-channel if we have exactly c scales
-                    if scales.len() == c {
-                        (c, scales, zps, Some(pt_scale), Some(pt_zp))
-                    } else {
-                        (0, vec![], vec![], Some(pt_scale), Some(pt_zp))
-                    }
+        let (
+            input_channels,
+            per_channel_scales,
+            per_channel_zero_points,
+            per_tensor_scale,
+            per_tensor_zero_point,
+        ) = if matches!(node.opcode, Opcode::Conv2d) {
+            // Conv2d activation input channels is dim 1 of input shape (NCHW)
+            let c = act_shape.get(1).and_then(|d| d.evaluate()).unwrap_or(0) as usize;
+            if c > 0 {
+                // Look up calibration stats for the activation tensor
+                // Try activation node name first, then fall back to Conv node name
+                let (scales, zps) = if !act_name.is_empty() {
+                    calib
+                        .stats
+                        .get(&act_name)
+                        .or_else(|| calib.stats.get(&conv_name))
+                        .map(|stats| stats.compute_scale_zp_per_channel(8))
+                        .unwrap_or_else(|| (vec![], vec![]))
+                } else if !conv_name.is_empty() {
+                    calib
+                        .stats
+                        .get(&conv_name)
+                        .map(|stats| stats.compute_scale_zp_per_channel(8))
+                        .unwrap_or_else(|| (vec![], vec![]))
                 } else {
-                    (0, vec![], vec![], None, None)
+                    (vec![], vec![])
+                };
+                // Also get per-tensor stats for fallback
+                let (pt_scale, pt_zp) = if !act_name.is_empty() {
+                    get_calib_stats(&act_name)
+                        .or_else(|| get_calib_stats(&conv_name))
+                        .map(|stats| stats.compute_scale_zp(8))
+                        .unwrap_or_else(|| (0.0, 0.0))
+                } else if !conv_name.is_empty() {
+                    get_calib_stats(&conv_name)
+                        .map(|stats| stats.compute_scale_zp(8))
+                        .unwrap_or_else(|| (0.0, 0.0))
+                } else {
+                    (0.0, 0.0)
+                };
+                // Only use per-channel if we have exactly c scales
+                if scales.len() == c {
+                    (c, scales, zps, Some(pt_scale), Some(pt_zp))
+                } else {
+                    (0, vec![], vec![], Some(pt_scale), Some(pt_zp))
                 }
             } else {
                 (0, vec![], vec![], None, None)
-            };
+            }
+        } else {
+            (0, vec![], vec![], None, None)
+        };
 
         rewrites.push(Rewrite {
             node_id,
@@ -355,7 +364,7 @@ mod tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
     use crate::backend::Backend;
-use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
+    use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
     use crate::compiler::passes::{memory_planning, shape_inference};
     use crate::ir::node::DimExpr;
 
@@ -789,7 +798,7 @@ use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
         let mut calib = CalibrationData::new();
         // The Relu activation has shape [1, 4, 4, 4] → 4 input channels, 16 spatial elements each
         let relu_name = "relu"; // must match the Relu node name (default is empty, so we set it)
-        // We need to name the relu node for calibration matching
+                                // We need to name the relu node for calibration matching
         {
             // Find and name the Relu node
             for node in graph.nodes.iter_mut() {
@@ -832,7 +841,10 @@ use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
             "should have per_channel mode"
         );
         assert_eq!(
-            qa_node.attrs.get("num_channels").and_then(|s| s.parse::<usize>().ok()),
+            qa_node
+                .attrs
+                .get("num_channels")
+                .and_then(|s| s.parse::<usize>().ok()),
             Some(4),
             "should have 4 channels"
         );
@@ -844,10 +856,7 @@ use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
         assert_eq!(scales.len(), 4, "should have 4 per-channel scales");
 
         let zps_str = qa_node.attrs.get("zero_points").unwrap();
-        let zps: Vec<f32> = zps_str
-            .split(',')
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let zps: Vec<f32> = zps_str.split(',').filter_map(|s| s.parse().ok()).collect();
         assert_eq!(zps.len(), 4, "should have 4 per-channel zero_points");
 
         // Verify scales are different per channel (different ranges)
