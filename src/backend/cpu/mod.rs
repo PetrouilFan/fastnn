@@ -3358,6 +3358,19 @@ impl Backend for CpuBackend {
                                 params.push(v.to_bits() as usize);
                             }
                         }
+                    } else {
+                        // Per-tensor: include calibration scale/zp from attrs if available
+                        if let (Some(scale_str), Some(zp_str)) = (
+                            node.attrs.get("scale"),
+                            node.attrs.get("zero_point"),
+                        ) {
+                            if let (Ok(scale), Ok(zp)) =
+                                (scale_str.parse::<f32>(), zp_str.parse::<f32>())
+                            {
+                                params.push(scale.to_bits() as usize); // params[3] = scale_bits
+                                params.push(zp.to_bits() as usize);    // params[4] = zero_point_bits
+                            }
+                        }
                     }
                     // Output buffer:
                     //   per-tensor: [scale(f32)][zp(f32)][i8_data(numel bytes)]
@@ -7411,19 +7424,26 @@ impl Backend for CpuBackend {
                                         }
                                     }
                                 } else {
-                                    // Per-tensor symmetric quantization (legacy path)
-                                    let max_abs =
-                                        f32_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-                                    let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
-                                    let zp = 0.0f32;
+                                    // Per-tensor quantization with optional calibration
+                                    // If params[3] and params[4] are present, use them as calibrated scale/zp
+                                    let (scale, zp) = if params.len() >= 5 {
+                                        (f32::from_bits(params[3] as u32), f32::from_bits(params[4] as u32))
+                                    } else {
+                                        // Legacy: compute scale dynamically from max_abs (symmetric)
+                                        let max_abs = f32_data.iter()
+                                            .map(|v| v.abs())
+                                            .fold(0.0f32, f32::max);
+                                        (if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 }, 0.0f32)
+                                    };
 
                                     let header_size = 8; // scale + zp
                                     out_bytes[0..4].copy_from_slice(&scale.to_le_bytes());
                                     out_bytes[4..8].copy_from_slice(&zp.to_le_bytes());
                                     let max_out = (out_bytes.len() - header_size).min(numel);
                                     for i in 0..max_out {
-                                        let q =
-                                            (f32_data[i] / scale).round().clamp(-128.0, 127.0) as i8;
+                                        let q = ((f32_data[i] - zp) / scale)
+                                            .round()
+                                            .clamp(-128.0, 127.0) as i8;
                                         out_bytes[header_size + i] = q as u8;
                                     }
                                 }

@@ -288,14 +288,22 @@ pub fn quantize_activations_with_calibration(
 
         let mut attrs: HashMap<String, String> = HashMap::new();
         if is_per_channel {
-            let scale_str = rw
+            // Convert per-channel zero_points from U8 range (0..255) to I8 range for the backend.
+            // Backend formula: q = round((x - zp) / scale), clamp to [-128, 127]
+            // For I8: zp_i8 = scale * (128 - zp_u8)
+            let per_channel_scales_i8 = rw.per_channel_scales.clone();
+            let per_channel_zps_i8: Vec<f32> = rw
                 .per_channel_scales
+                .iter()
+                .zip(rw.per_channel_zero_points.iter())
+                .map(|(s, zp_u8)| s * (128.0 - zp_u8))
+                .collect();
+            let scale_str = per_channel_scales_i8
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            let zp_str = rw
-                .per_channel_zero_points
+            let zp_str = per_channel_zps_i8
                 .iter()
                 .map(|z| z.to_string())
                 .collect::<Vec<_>>()
@@ -304,10 +312,16 @@ pub fn quantize_activations_with_calibration(
             attrs.insert("num_channels".to_string(), rw.input_channels.to_string());
             attrs.insert("scales".to_string(), scale_str);
             attrs.insert("zero_points".to_string(), zp_str);
-        } else if let (Some(scale), Some(zp)) = (rw.per_tensor_scale, rw.per_tensor_zero_point) {
-            // Use per-tensor calibration stats
+        } else if let (Some(scale), Some(zp_u8)) = (rw.per_tensor_scale, rw.per_tensor_zero_point) {
+            // Use per-tensor calibration stats.
+            // The zero_point from compute_scale_zp() is in U8 range (0..255).
+            // The backend formula is: q = round((x - zp) / scale), clamp to [-128, 127]
+            // For I8, we need: zp_i8 = min + 128 * scale
+            //   where min = -zp_u8 * scale
+            //   so: zp_i8 = -zp_u8 * scale + 128 * scale = scale * (128 - zp_u8)
+            let zp_i8 = scale * (128.0 - zp_u8);
             attrs.insert("scale".to_string(), scale.to_string());
-            attrs.insert("zero_point".to_string(), zp.to_string());
+            attrs.insert("zero_point".to_string(), zp_i8.to_string());
         }
 
         let quantize_id = if let Some(qa_id) = rw.existing_qa_id {
