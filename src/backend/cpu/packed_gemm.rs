@@ -3,12 +3,12 @@
 //! High-performance matrix multiplication directly on packed quantized tensors.
 //! Uses SWAR dot products for 4-8× arithmetic density.
 
-use crate::dtypes::{U4x8, U8x4};
-use crate::packed_tensor::PackedTensor;
 use crate::backend::cpu::swar::{
     quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed, u4x8_dot_packed_slice,
     u4x8_packed_to_tensor, u8x4_dot_packed, u8x4_dot_packed_slice, u8x4_packed_to_tensor,
 };
+use crate::dtypes::{U4x8, U8x4};
+use crate::packed_tensor::PackedTensor;
 
 /// Packed U8x4 GEMM: C = A × Bᵀ
 ///
@@ -28,11 +28,11 @@ pub fn gemm_packed_u8x4(
     let shape_b = b_packed.shape();
 
     let m = shape_a[0];
-    let k_packed = shape_a[1];
+    let k = shape_a[1];
     let n = shape_b[0];
-    let k_packed_b = shape_b[1];
+    let k_packed = k.div_ceil(4);
 
-    assert_eq!(k_packed, k_packed_b, "K dimension mismatch in packed GEMM");
+    assert_eq!(shape_b[1], k, "K dimension mismatch in packed GEMM");
     assert_eq!(c.len(), m * n, "Output buffer size mismatch");
 
     let a_packed_slice = a_packed.as_packed();
@@ -57,13 +57,14 @@ pub fn gemm_packed_u8x4(
                 acc += u8x4_dot_packed(a_row[k].0, b_row[k].0);
             }
 
-            let k_f32 = (k_packed * 4) as f32;
+            let k_f32 = k as f32;
 
             // Full dequantization with per-channel zero-point correction:
             // Σ (qA * scale_A + zp_A) * (qB * scale_B + zp_B)
             // = acc * scale_A * scale_B + zp_B * scale_A * ΣqA + zp_A * scale_B * ΣqB + zp_A * zp_B * K
             // Sum all 4 signed i8 values per packed word
-            let qa_sum: i32 = a_row.iter()
+            let qa_sum: i32 = a_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -72,7 +73,8 @@ pub fn gemm_packed_u8x4(
                     b0 + b1 + b2 + b3
                 })
                 .sum();
-            let qb_sum: i32 = b_row.iter()
+            let qb_sum: i32 = b_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -104,17 +106,17 @@ pub fn gemm_packed_u4x8(
     let shape_b = b_packed.shape();
 
     let m = shape_a[0];
-    let k_packed = shape_a[1];
+    let k = shape_a[1];
     let n = shape_b[0];
-    let k_packed_b = shape_b[1];
+    let k_packed = k.div_ceil(8);
 
-    assert_eq!(k_packed, k_packed_b);
+    assert_eq!(shape_b[1], k);
     assert_eq!(c.len(), m * n);
 
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    let k_f32 = (k_packed * 8) as f32;
+    let k_f32 = k as f32;
 
     for row in 0..m {
         let a_row_start = row * k_packed;
@@ -124,12 +126,21 @@ pub fn gemm_packed_u4x8(
         let a_zp = a_packed.zero_for_row(row);
 
         // Precompute activation row sum (ΣqA) for zero-point cross terms
-        let qa_sum: i32 = a_row.iter().map(|&w| {
-            (0..8).map(|i| {
-                let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                if nib >= 8 { nib - 16 } else { nib }
-            }).sum::<i32>()
-        }).sum();
+        let qa_sum: i32 = a_row
+            .iter()
+            .map(|&w| {
+                (0..8)
+                    .map(|i| {
+                        let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                        if nib >= 8 {
+                            nib - 16
+                        } else {
+                            nib
+                        }
+                    })
+                    .sum::<i32>()
+            })
+            .sum();
 
         for col in 0..n {
             let b_row_start = col * k_packed;
@@ -143,12 +154,21 @@ pub fn gemm_packed_u4x8(
                 acc += u4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
 
-            let qb_sum: i32 = b_row.iter().map(|&w| {
-                (0..8).map(|i| {
-                    let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                    if nib >= 8 { nib - 16 } else { nib }
-                }).sum::<i32>()
-            }).sum();
+            let qb_sum: i32 = b_row
+                .iter()
+                .map(|&w| {
+                    (0..8)
+                        .map(|i| {
+                            let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                            if nib >= 8 {
+                                nib - 16
+                            } else {
+                                nib
+                            }
+                        })
+                        .sum::<i32>()
+                })
+                .sum();
 
             let scale_ab = a_scale * b_scale;
             c[row * n + col] = (acc as f32) * scale_ab
@@ -209,7 +229,8 @@ pub fn gemm_packed_u8x4_fused(
             }
 
             // Sum all 4 signed i8 values per packed word for zero-point correction
-            let qa_sum: i32 = act_row.iter()
+            let qa_sum: i32 = act_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -218,7 +239,8 @@ pub fn gemm_packed_u8x4_fused(
                     b0 + b1 + b2 + b3
                 })
                 .sum();
-            let qb_sum: i32 = w_row.iter()
+            let qb_sum: i32 = w_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -227,7 +249,7 @@ pub fn gemm_packed_u8x4_fused(
                     b0 + b1 + b2 + b3
                 })
                 .sum();
-            let k_f32 = (k_packed * 4) as f32;
+            let k_f32 = act_packed.shape()[1] as f32;
 
             let scale_ab = act_scale * w_scale;
 
