@@ -92,6 +92,8 @@ pub fn gemm_packed_u8x4(
 }
 
 /// Packed U4x8 GEMM: C = A × Bᵀ
+///
+/// Full 4-term dequantization with per-channel scales for both matrices.
 #[inline]
 pub fn gemm_packed_u4x8(
     a_packed: &PackedTensor<U4x8>,
@@ -112,23 +114,47 @@ pub fn gemm_packed_u4x8(
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    let a_scale = a_packed.scale();
-    let b_scale = b_packed.scale();
-    let scale_ab = a_scale * b_scale;
+    let k_f32 = (k_packed * 8) as f32;
 
     for row in 0..m {
         let a_row_start = row * k_packed;
         let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
+        let a_scale = a_packed.scale_for_row(row);
+        let a_zp = a_packed.zero_for_row(row);
+
+        // Precompute activation row sum (ΣqA) for zero-point cross terms
+        let qa_sum: i32 = a_row.iter().map(|&w| {
+            (0..8).map(|i| {
+                let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                if nib >= 8 { nib - 16 } else { nib }
+            }).sum::<i32>()
+        }).sum();
+
         for col in 0..n {
             let b_row_start = col * k_packed;
             let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+
+            let b_scale = b_packed.scale_for_row(col);
+            let b_zp = b_packed.zero_for_row(col);
 
             let mut acc = 0i32;
             for k in 0..k_packed {
                 acc += u4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
-            c[row * n + col] = acc as f32 * scale_ab;
+
+            let qb_sum: i32 = b_row.iter().map(|&w| {
+                (0..8).map(|i| {
+                    let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                    if nib >= 8 { nib - 16 } else { nib }
+                }).sum::<i32>()
+            }).sum();
+
+            let scale_ab = a_scale * b_scale;
+            c[row * n + col] = (acc as f32) * scale_ab
+                + b_zp * (a_scale * qa_sum as f32)
+                + a_zp * (b_scale * qb_sum as f32)
+                + a_zp * b_zp * k_f32;
         }
     }
 }
