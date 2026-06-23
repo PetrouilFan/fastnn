@@ -7,9 +7,7 @@ fn bench_gemv<T: PackedWord>(m: usize, k: usize, iters: usize) -> (f64, usize) {
     let weight_data: Vec<f32> = (0..m * k)
         .map(|i| ((i as f32 * 0.01).sin()) * 2.0)
         .collect();
-    let activation: Vec<f32> = (0..k)
-        .map(|i| (i as f32 * 0.01).cos())
-        .collect();
+    let activation: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01).cos()).collect();
     let mut output = vec![0.0f32; m];
     let weights = PackedTensor::<T>::from_f32_auto(&weight_data, &[m, k]);
 

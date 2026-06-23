@@ -4,8 +4,8 @@
 //! running min/max/mean/std/histogram statistics. These are used to compute
 //! per-tensor or per-channel quantization scales and zero-points.
 
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::ir::builder::GraphBuilder;
+use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use std::collections::HashMap;
 
 /// Calibration statistics collected per tensor.
@@ -62,7 +62,8 @@ impl CalibrationStats {
 
                 if let Some(ref mut hist) = self.histogram {
                     if self.hist_max > self.hist_min {
-                        let idx = ((v - self.hist_min) / (self.hist_max - self.hist_min) * hist.len() as f32)
+                        let idx = ((v - self.hist_min) / (self.hist_max - self.hist_min)
+                            * hist.len() as f32)
                             .floor() as usize;
                         // Clamp to valid range to handle edge case v == hist_max
                         let idx = idx.min(hist.len() - 1);
@@ -141,14 +142,14 @@ impl CalibrationStats {
     pub fn compute_scale_zp(&self, bit_width: u8) -> (f32, f32) {
         let range = self.max - self.min;
         let levels = (1u32 << bit_width) as f32 - 1.0;
-        
+
         if range <= 0.0 || levels <= 0.0 {
             return (1.0, 0.0);
         }
 
         let scale = range / levels;
         let zero_point = -self.min / scale;
-        
+
         (scale, zero_point.round())
     }
 
@@ -174,7 +175,7 @@ impl CalibrationStats {
 
         // Normalize histogram
         let prob: Vec<f64> = hist.iter().map(|&c| c as f64 / total as f64).collect();
-        
+
         // Cumulative distribution
         let mut cumsum = vec![0.0; bins + 1];
         for i in 0..bins {
@@ -191,7 +192,7 @@ impl CalibrationStats {
         for clip_idx in (q_bins..bins).step_by(step) {
             // Quantized distribution: clip at clip_idx, then uniformly quantize
             let mut q_prob = vec![0.0; q_bins];
-            
+
             // Values below clip_idx are uniformly distributed into q_bins
             let clipped_mass = cumsum[clip_idx];
             if clipped_mass > 0.0 {
@@ -200,10 +201,10 @@ impl CalibrationStats {
                     q_prob[i] = mass_per_bin;
                 }
             }
-            
+
             // Add tail mass to last bin
             q_prob[q_bins - 1] += 1.0 - cumsum[clip_idx];
-            
+
             // Reference distribution (clipped original)
             let mut ref_prob = vec![0.0; q_bins];
             for i in 0..q_bins {
@@ -230,17 +231,18 @@ impl CalibrationStats {
         }
 
         // Compute scale from best threshold
-        let threshold = self.hist_min + (best_threshold_idx as f32 / bins as f32) * (self.hist_max - self.hist_min);
+        let threshold = self.hist_min
+            + (best_threshold_idx as f32 / bins as f32) * (self.hist_max - self.hist_min);
         let range = threshold - self.min;
         let levels = (1u32 << bit_width) as f32 - 1.0;
-        
+
         if range <= 0.0 {
             return Some((1.0, 0.0));
         }
 
         let scale = range / levels;
         let zero_point = -self.min / scale;
-        
+
         Some((scale, zero_point.round()))
     }
 }
@@ -304,39 +306,52 @@ impl CalibrationData {
     /// Generate quantization config JSON for all observed tensors.
     pub fn to_quant_config(&self, bit_width: u8, use_kl: bool) -> serde_json::Value {
         let mut config = serde_json::Map::new();
-        
+
         for (name, stats) in &self.stats {
             let (scale, zp) = if use_kl {
-                stats.compute_scale_zp_kl(bit_width).unwrap_or_else(|| stats.compute_scale_zp(bit_width))
+                stats
+                    .compute_scale_zp_kl(bit_width)
+                    .unwrap_or_else(|| stats.compute_scale_zp(bit_width))
             } else {
                 stats.compute_scale_zp(bit_width)
             };
 
             let mut entry = serde_json::Map::new();
-            entry.insert("min".to_string(), serde_json::Value::Number(
-                serde_json::Number::from_f64(stats.min as f64).unwrap()
-            ));
-            entry.insert("max".to_string(), serde_json::Value::Number(
-                serde_json::Number::from_f64(stats.max as f64).unwrap()
-            ));
-            entry.insert("mean".to_string(), serde_json::Value::Number(
-                serde_json::Number::from_f64(stats.mean() as f64).unwrap()
-            ));
-            entry.insert("std".to_string(), serde_json::Value::Number(
-                serde_json::Number::from_f64(stats.std() as f64).unwrap()
-            ));
-            entry.insert("scale".to_string(), serde_json::Value::Number(
-                serde_json::Number::from_f64(scale as f64).unwrap()
-            ));
-            entry.insert("zero_point".to_string(), serde_json::Value::Number(
-                serde_json::Number::from_f64(zp as f64).unwrap()
-            ));
-            entry.insert("bit_width".to_string(), serde_json::Value::Number(
-                serde_json::Number::from(bit_width)
-            ));
+            entry.insert(
+                "min".to_string(),
+                serde_json::Value::Number(serde_json::Number::from_f64(stats.min as f64).unwrap()),
+            );
+            entry.insert(
+                "max".to_string(),
+                serde_json::Value::Number(serde_json::Number::from_f64(stats.max as f64).unwrap()),
+            );
+            entry.insert(
+                "mean".to_string(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(stats.mean() as f64).unwrap(),
+                ),
+            );
+            entry.insert(
+                "std".to_string(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(stats.std() as f64).unwrap(),
+                ),
+            );
+            entry.insert(
+                "scale".to_string(),
+                serde_json::Value::Number(serde_json::Number::from_f64(scale as f64).unwrap()),
+            );
+            entry.insert(
+                "zero_point".to_string(),
+                serde_json::Value::Number(serde_json::Number::from_f64(zp as f64).unwrap()),
+            );
+            entry.insert(
+                "bit_width".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(bit_width)),
+            );
             config.insert(name.clone(), serde_json::Value::Object(entry));
         }
-        
+
         serde_json::Value::Object(config)
     }
 
@@ -344,18 +359,17 @@ impl CalibrationData {
     /// The JSON format: { "tensor_name": { "scale": f32, "zero_point": f32, "bit_width": u8, "min": f32, "max": f32, ... } }
     pub fn from_json(json: &str) -> Result<Self, String> {
         use serde_json::Value;
-        let data: Value = serde_json::from_str(json)
-            .map_err(|e| format!("invalid JSON: {}", e))?;
-        
-        let obj = data.as_object()
-            .ok_or("JSON root must be an object")?;
-        
+        let data: Value = serde_json::from_str(json).map_err(|e| format!("invalid JSON: {}", e))?;
+
+        let obj = data.as_object().ok_or("JSON root must be an object")?;
+
         let mut calib = CalibrationData::new();
-        
+
         for (name, entry) in obj {
-            let entry_obj = entry.as_object()
+            let entry_obj = entry
+                .as_object()
                 .ok_or_else(|| format!("entry for '{}' must be an object", name))?;
-            
+
             // Extract min/max from the entry (preferred) or derive from scale/zp
             let (min, max) = if let (Some(min_v), Some(max_v)) = (
                 entry_obj.get("min").and_then(|v| v.as_f64()),
@@ -377,7 +391,7 @@ impl CalibrationData {
             } else {
                 return Err(format!("entry for '{}' missing required fields (min/max or scale/zero_point/bit_width)", name));
             };
-            
+
             let mut stats = CalibrationStats::new();
             stats.min = min;
             stats.max = max;
@@ -385,10 +399,10 @@ impl CalibrationData {
             stats.count = 1;
             stats.sum = ((min + max) / 2.0) as f64;
             stats.sum_sq = (((min + max) / 2.0).powi(2)) as f64;
-            
+
             calib.stats.insert(name.clone(), stats);
         }
-        
+
         Ok(calib)
     }
 }
@@ -410,11 +424,19 @@ pub fn find_calibration_points(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
         // Observe after these quantizable operations
         let should_observe = matches!(
             node.opcode,
-            Opcode::Conv2d | Opcode::Conv1d | Opcode::Conv3d |
-            Opcode::MatMul |
-            Opcode::Add | Opcode::Mul | Opcode::Sub |
-            Opcode::Sigmoid | Opcode::Silu | Opcode::Relu |
-            Opcode::Softmax | Opcode::LayerNorm | Opcode::BatchNorm
+            Opcode::Conv2d
+                | Opcode::Conv1d
+                | Opcode::Conv3d
+                | Opcode::MatMul
+                | Opcode::Add
+                | Opcode::Mul
+                | Opcode::Sub
+                | Opcode::Sigmoid
+                | Opcode::Silu
+                | Opcode::Relu
+                | Opcode::Softmax
+                | Opcode::LayerNorm
+                | Opcode::BatchNorm
         );
 
         if should_observe {
@@ -432,7 +454,12 @@ pub fn find_calibration_points(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
 
 /// Runtime hook for collecting calibration data during inference.
 /// This would be called from the executor after each observed node.
-pub fn record_calibration(data: &mut CalibrationData, name: &str, output_ptr: *const f32, len: usize) {
+pub fn record_calibration(
+    data: &mut CalibrationData,
+    name: &str,
+    output_ptr: *const f32,
+    len: usize,
+) {
     if len == 0 {
         return;
     }
@@ -448,7 +475,7 @@ mod tests {
     fn test_calibration_stats_basic() {
         let mut stats = CalibrationStats::new();
         stats.observe(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-        
+
         assert_eq!(stats.min, 1.0);
         assert_eq!(stats.max, 5.0);
         assert!((stats.mean() - 3.0).abs() < 1e-6);
@@ -459,11 +486,11 @@ mod tests {
     fn test_scale_zp_asymmetric() {
         let mut stats = CalibrationStats::new();
         stats.observe(&[-10.0, 0.0, 10.0]);
-        
+
         let (scale, zp) = stats.compute_scale_zp(8);
         // range=20, levels=255, scale=20/255
         // zp = 10/scale = 10 * 255 / 20 = 127.5 -> 128
-        
+
         assert!((scale - 20.0 / 255.0).abs() < 0.001);
         // Use wider tolerance for floating point rounding
         assert!((zp - 128.0).abs() < 2.0, "zp={}, expected ~128", zp);
@@ -471,9 +498,8 @@ mod tests {
 
     #[test]
     fn test_kl_calibration() {
-        let mut stats = CalibrationStats::new()
-            .with_histogram(2048, -10.0, 10.0);
-        
+        let mut stats = CalibrationStats::new().with_histogram(2048, -10.0, 10.0);
+
         // Simulate activations: mostly in [-1, 1] with some outliers
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -486,10 +512,10 @@ mod tests {
             }
         }
         stats.observe(&values);
-        
+
         let kl_result = stats.compute_scale_zp_kl(8);
         assert!(kl_result.is_some());
-        
+
         let (scale, zp) = kl_result.unwrap();
         // Should be tighter than min/max
         let (scale_minmax, zp_minmax) = stats.compute_scale_zp(8);
@@ -502,13 +528,16 @@ mod tests {
         let mut cal = CalibrationData::new();
         cal.observe("conv1", &[1.0, 2.0, 3.0]);
         cal.observe("conv1", &[4.0, 5.0]); // Second batch
-        
+
         let stats = cal.get_stats("conv1").unwrap();
-        eprintln!("DEBUG: count={}, min={}, max={}, sum={}", stats.count, stats.min, stats.max, stats.sum);
+        eprintln!(
+            "DEBUG: count={}, min={}, max={}, sum={}",
+            stats.count, stats.min, stats.max, stats.sum
+        );
         assert_eq!(stats.count, 5);
         assert_eq!(stats.min, 1.0);
         assert_eq!(stats.max, 5.0);
-        
+
         let config = cal.to_quant_config(8, false);
         assert!(config.get("conv1").is_some());
     }

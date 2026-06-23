@@ -27,8 +27,8 @@ use crate::compiler::passes::{
 };
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::env;
+use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
@@ -133,10 +133,13 @@ impl<B: Backend> GraphExecutor<B> {
             // Use calibration data if provided for optimal scales.
             if let Some(calib) = calib_data {
                 activation_quantization::quantize_activations_with_calibration(&mut graph, &calib)
-                    .map_err(|e| BackendError::Compilation(format!("activation quantization: {e}")))?;
+                    .map_err(|e| {
+                        BackendError::Compilation(format!("activation quantization: {e}"))
+                    })?;
             } else {
-                activation_quantization::quantize_activations(&mut graph)
-                    .map_err(|e| BackendError::Compilation(format!("activation quantization: {e}")))?;
+                activation_quantization::quantize_activations(&mut graph).map_err(|e| {
+                    BackendError::Compilation(format!("activation quantization: {e}"))
+                })?;
             }
         }
 
@@ -151,14 +154,23 @@ impl<B: Backend> GraphExecutor<B> {
         let plan = self.backend.compile(&graph, &memory_plan)?;
 
         if std::env::var("FASTNN_DUMP_INSTRS").is_ok() {
-            eprintln!("FASTNN_DUMP_INSTRS: total instructions={}", plan.instructions.len());
+            eprintln!(
+                "FASTNN_DUMP_INSTRS: total instructions={}",
+                plan.instructions.len()
+            );
             let mut conv2d_quant_u4 = 0usize;
             let mut conv2d_quant_u8 = 0usize;
             let mut conv2d_fp32 = 0usize;
             let mut other_kernels: Vec<(String, Option<String>)> = Vec::new();
             for (i, instr) in plan.instructions.iter().enumerate() {
-                if let Instruction::CallKernel { kernel_name, weight_meta, .. } = instr {
-                    let meta_info = weight_meta.as_ref()
+                if let Instruction::CallKernel {
+                    kernel_name,
+                    weight_meta,
+                    ..
+                } = instr
+                {
+                    let meta_info = weight_meta
+                        .as_ref()
                         .map(|m| format!("bw={} scales={}", m.bit_width, m.scales.len()))
                         .unwrap_or_default();
                     eprintln!("  INSTR[{}] kernel={} {}", i, kernel_name, meta_info);
@@ -173,8 +185,13 @@ impl<B: Backend> GraphExecutor<B> {
                     }
                 }
             }
-            eprintln!("  SUMMARY: conv2d_u4={} conv2d_u8={} conv2d_fp32={} other={}",
-                conv2d_quant_u4, conv2d_quant_u8, conv2d_fp32, other_kernels.len());
+            eprintln!(
+                "  SUMMARY: conv2d_u4={} conv2d_u8={} conv2d_fp32={} other={}",
+                conv2d_quant_u4,
+                conv2d_quant_u8,
+                conv2d_fp32,
+                other_kernels.len()
+            );
             for (name, meta) in &other_kernels {
                 eprintln!("    OTHER: {} {}", name, meta.as_deref().unwrap_or(""));
             }
@@ -187,7 +204,9 @@ impl<B: Backend> GraphExecutor<B> {
             for n in &graph.nodes {
                 counts.entry(format!("{:?}", n.opcode)).or_default(); // just trigger
                 *counts.entry(format!("{:?}", n.opcode)).or_default() += 1;
-                *dtypes.entry(format!("{:?}", n.output_type.dtype)).or_default() += 1;
+                *dtypes
+                    .entry(format!("{:?}", n.output_type.dtype))
+                    .or_default() += 1;
             }
             eprintln!("FASTNN_DUMP: nodes={}", graph.nodes.len());
             for (k, v) in &counts {

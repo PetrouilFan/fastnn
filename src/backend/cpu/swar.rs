@@ -49,6 +49,27 @@ pub fn u8x4_dot_packed(a: u32, b: u32) -> i32 {
     u8x4_dot_packed_signed(a, b)
 }
 
+/// Sum all 4 signed i8 bytes in a U8x4 packed u32 word.
+#[inline(always)]
+pub fn sum_u8x4_packed(w: u32) -> i32 {
+    let b0 = (w & 0xFF) as i8 as i32;
+    let b1 = ((w >> 8) & 0xFF) as i8 as i32;
+    let b2 = ((w >> 16) & 0xFF) as i8 as i32;
+    let b3 = ((w >> 24) & 0xFF) as i8 as i32;
+    b0 + b1 + b2 + b3
+}
+
+/// Sum all 8 signed nibbles in a U4x8 packed u32 word.
+#[inline(always)]
+pub fn sum_u4x8_packed(w: u32) -> i32 {
+    let mut s = 0i32;
+    for i in 0..8 {
+        let nib = ((w >> (i * 4)) & 0xF) as i32;
+        s += if nib >= 8 { nib - 16 } else { nib };
+    }
+    s
+}
+
 /// Compute dot product of two U4x8-packed u32 words.
 ///
 /// Each u32 holds 8 × signed 4-bit values (nibbles, range [-8, 7]).
@@ -65,8 +86,16 @@ pub fn u4x8_dot_packed(a: u32, b: u32) -> i32 {
         // Extract signed 4-bit nibble: 0x0..0x7 = 0..7, 0x8..0xF = -8..-1
         let nibble_a = ((a >> shift) & 0xF) as i32;
         let nibble_b = ((b >> shift) & 0xF) as i32;
-        let aw = if nibble_a >= 8 { nibble_a - 16 } else { nibble_a };
-        let bw = if nibble_b >= 8 { nibble_b - 16 } else { nibble_b };
+        let aw = if nibble_a >= 8 {
+            nibble_a - 16
+        } else {
+            nibble_a
+        };
+        let bw = if nibble_b >= 8 {
+            nibble_b - 16
+        } else {
+            nibble_b
+        };
         sum += aw * bw;
     }
     sum
@@ -126,7 +155,10 @@ pub fn gemm_packed_u8x4(
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    let k_f32 = (k_packed * 4) as f32;
+    // shape[1] stores the logical K; the packed word count is ceil(K/4) for U8x4.
+    let k_logical = k_packed; // shape()[1] = logical K dimension
+    let k_packed = k_logical.div_ceil(4); // actual packed word count
+    let k_f32 = k_logical as f32;
 
     for row in 0..m {
         let a_row_start = row * k_packed;
@@ -136,7 +168,8 @@ pub fn gemm_packed_u8x4(
         let a_zp = a_packed.zero_for_row(row);
 
         // Precompute activation row sum (ΣqA)
-        let qa_sum: i32 = a_row.iter()
+        let qa_sum: i32 = a_row
+            .iter()
             .map(|&w| {
                 let b0 = (w.0 & 0xFF) as i8 as i32;
                 let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -160,7 +193,8 @@ pub fn gemm_packed_u8x4(
             }
 
             // Full dequantization with zero-point correction
-            let qb_sum: i32 = b_row.iter()
+            let qb_sum: i32 = b_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -192,17 +226,17 @@ pub fn gemm_packed_u4x8(
     let shape_b = b_packed.shape();
 
     let m = shape_a[0];
-    let k_packed = shape_a[1];
+    let k = shape_a[1];
     let n = shape_b[0];
-    let k_packed_b = shape_b[1];
+    let k_packed = k.div_ceil(8);
 
-    assert_eq!(k_packed, k_packed_b);
+    assert_eq!(shape_b[1], k);
     assert_eq!(c.len(), m * n);
 
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    let k_f32 = (k_packed * 8) as f32;
+    let k_f32 = k as f32;
 
     for row in 0..m {
         let a_row_start = row * k_packed;
@@ -212,12 +246,21 @@ pub fn gemm_packed_u4x8(
         let a_zp = a_packed.zero_for_row(row);
 
         // Precompute activation row sum (ΣqA)
-        let qa_sum: i32 = a_row.iter().map(|&w| {
-            (0..8).map(|i| {
-                let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                if nib >= 8 { nib - 16 } else { nib }
-            }).sum::<i32>()
-        }).sum();
+        let qa_sum: i32 = a_row
+            .iter()
+            .map(|&w| {
+                (0..8)
+                    .map(|i| {
+                        let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                        if nib >= 8 {
+                            nib - 16
+                        } else {
+                            nib
+                        }
+                    })
+                    .sum::<i32>()
+            })
+            .sum();
 
         for col in 0..n {
             let b_row_start = col * k_packed;
@@ -231,12 +274,21 @@ pub fn gemm_packed_u4x8(
                 acc += u4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
 
-            let qb_sum: i32 = b_row.iter().map(|&w| {
-                (0..8).map(|i| {
-                    let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                    if nib >= 8 { nib - 16 } else { nib }
-                }).sum::<i32>()
-            }).sum();
+            let qb_sum: i32 = b_row
+                .iter()
+                .map(|&w| {
+                    (0..8)
+                        .map(|i| {
+                            let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                            if nib >= 8 {
+                                nib - 16
+                            } else {
+                                nib
+                            }
+                        })
+                        .sum::<i32>()
+                })
+                .sum();
 
             let scale_ab = a_scale * b_scale;
             c[row * n + col] = (acc as f32) * scale_ab
@@ -269,10 +321,11 @@ pub fn gemm_packed_u8x4_fused(
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
-    let k_packed = act_packed.shape()[1];
+    let k_logical = act_packed.shape()[1];
+    let k_packed = k_logical.div_ceil(4);
     let n = weight_packed.shape()[0];
 
-    assert_eq!(weight_packed.shape()[1], k_packed);
+    assert_eq!(weight_packed.shape()[1], k_logical);
     assert_eq!(c.len(), m * n);
 
     let act_packed_slice = act_packed.as_packed();
@@ -297,7 +350,8 @@ pub fn gemm_packed_u8x4_fused(
                 acc += u8x4_dot_packed(act_row[k].0, w_row[k].0);
             }
 
-            let qa_sum: i32 = act_row.iter()
+            let qa_sum: i32 = act_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -306,7 +360,8 @@ pub fn gemm_packed_u8x4_fused(
                     b0 + b1 + b2 + b3
                 })
                 .sum();
-            let qb_sum: i32 = w_row.iter()
+            let qb_sum: i32 = w_row
+                .iter()
                 .map(|&w| {
                     let b0 = (w.0 & 0xFF) as i8 as i32;
                     let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
@@ -315,7 +370,7 @@ pub fn gemm_packed_u8x4_fused(
                     b0 + b1 + b2 + b3
                 })
                 .sum();
-            let k_f32 = (k_packed * 4) as f32;
+            let k_f32 = act_packed.shape()[1] as f32;
             let scale_ab = act_scale * w_scale;
 
             let mut val = (acc as f32) * scale_ab
@@ -356,7 +411,11 @@ pub fn quantize_f32_to_u8x4(data: &[f32]) -> (Vec<u32>, f32, f32) {
     let scale = if range > 0.0 { range / 255.0 } else { 1.0 };
     // Signed asymmetric: map min → -128, max → +127
     // zero_point = min + 128 * scale
-    let zero_point = if range > 0.0 { min + 128.0 * scale } else { 0.0 };
+    let zero_point = if range > 0.0 {
+        min + 128.0 * scale
+    } else {
+        0.0
+    };
 
     let mut packed = Vec::with_capacity(data.len().div_ceil(4));
     let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
@@ -364,7 +423,9 @@ pub fn quantize_f32_to_u8x4(data: &[f32]) -> (Vec<u32>, f32, f32) {
         let mut word = 0u32;
         for (i, &val) in chunk.iter().enumerate() {
             // Quantize to signed i8 range [-128, 127]
-            let q = ((val - zero_point) * inv_scale).round().clamp(-128.0, 127.0) as i8;
+            let q = ((val - zero_point) * inv_scale)
+                .round()
+                .clamp(-128.0, 127.0) as i8;
             word |= (q as u8 as u32) << (i * 8);
         }
         packed.push(word);
@@ -442,13 +503,23 @@ pub fn dequantize_u4x8_to_f32(packed: &[u32], scale: f32, zero_point: f32, out: 
 }
 
 /// Convert u32-packed data to PackedTensor<U8x4>
-pub fn u8x4_packed_to_tensor(packed: Vec<u32>, shape: Vec<usize>, scale: f32, zero_point: f32) -> PackedTensor<U8x4> {
+pub fn u8x4_packed_to_tensor(
+    packed: Vec<u32>,
+    shape: Vec<usize>,
+    scale: f32,
+    zero_point: f32,
+) -> PackedTensor<U8x4> {
     let data: Vec<U8x4> = packed.into_iter().map(|w| U8x4(w)).collect();
     PackedTensor::from_raw(data, shape, vec![scale], vec![zero_point])
 }
 
 /// Convert u32-packed data to PackedTensor<U4x8>
-pub fn u4x8_packed_to_tensor(packed: Vec<u32>, shape: Vec<usize>, scale: f32, zero_point: f32) -> PackedTensor<U4x8> {
+pub fn u4x8_packed_to_tensor(
+    packed: Vec<u32>,
+    shape: Vec<usize>,
+    scale: f32,
+    zero_point: f32,
+) -> PackedTensor<U4x8> {
     let data: Vec<U4x8> = packed.into_iter().map(|w| U4x8(w)).collect();
     PackedTensor::from_raw(data, shape, vec![scale], vec![zero_point])
 }
@@ -490,7 +561,7 @@ mod tests {
     fn test_u8x4_dot_packed_max() {
         let a = 0xFFFFFFFF; // [-1, -1, -1, -1] signed
         let b = 0xFFFFFFFF; // [-1, -1, -1, -1] signed
-        // (-1)*(-1) * 4 = 4
+                            // (-1)*(-1) * 4 = 4
         assert_eq!(u8x4_dot_packed(a, b), 4);
     }
 
@@ -508,7 +579,7 @@ mod tests {
     fn test_u4x8_dot_packed_basic() {
         // [1, 2, 3, 4, -1, -2, -3, -4]
         let a = 0x4321_FEDC_u32; // nibbles: C=12(-4), D=13(-3), E=14(-2), F=15(-1), 1,2,3,4
-        // [1, 1, 1, 1, 1, 1, 1, 1]
+                                 // [1, 1, 1, 1, 1, 1, 1, 1]
         let b = 0x1111_1111_u32;
         // Sum = 1+2+3+4 + (-1)+(-2)+(-3)+(-4) = 0
         assert_eq!(u4x8_dot_packed(a, b), 0);
@@ -522,7 +593,12 @@ mod tests {
         dequantize_u8x4_to_f32(&packed, scale, zp, &mut out);
 
         for (orig, recon) in data.iter().zip(out.iter()) {
-            assert!((orig - recon).abs() < 0.01, "orig={:.3}, recon={:.3}", orig, recon);
+            assert!(
+                (orig - recon).abs() < 0.01,
+                "orig={:.3}, recon={:.3}",
+                orig,
+                recon
+            );
         }
     }
 
@@ -535,7 +611,12 @@ mod tests {
 
         for (orig, recon) in data.iter().zip(out.iter()) {
             // U4x8 has only 16 quantization levels, quantization error ~0.1 is expected
-            assert!((orig - recon).abs() < 0.15, "orig={:.3}, recon={:.3}", orig, recon);
+            assert!(
+                (orig - recon).abs() < 0.15,
+                "orig={:.3}, recon={:.3}",
+                orig,
+                recon
+            );
         }
     }
 }
