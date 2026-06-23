@@ -4,8 +4,8 @@
 //! Uses SWAR dot products for 4-8× arithmetic density.
 
 use crate::backend::cpu::swar::{
-    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed, u4x8_dot_packed_slice,
-    u4x8_packed_to_tensor, u8x4_dot_packed, u8x4_dot_packed_slice, u8x4_packed_to_tensor,
+    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed,
+    u4x8_packed_to_tensor, u8x4_dot_packed, u8x4_packed_to_tensor,
 };
 use crate::dtypes::{U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
@@ -273,18 +273,6 @@ pub fn gemm_packed_u8x4_fused(
             c[row * n + col] = val;
         }
     }
-}
-
-/// Swar helper - extract u32 from U8x4
-#[inline(always)]
-fn u8x4_to_u32(w: U8x4) -> u32 {
-    w.0
-}
-
-/// Swar helper - extract u32 from U4x8
-#[inline(always)]
-fn u4x8_to_u32(w: U4x8) -> u32 {
-    w.0
 }
 
 /// Quantize FP32 activations to PackedTensor<U8x4>

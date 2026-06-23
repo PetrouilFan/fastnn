@@ -11,6 +11,9 @@
 //! - i8 direct pack path (no FP32 buffer)
 //! - AVX2 batch dequantization (per-tensor weights)
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use crate::backend::cpu::swar::{
     sum_u4x8_packed, sum_u8x4_packed, u4x8_dot_packed, u8x4_dot_packed,
 };
@@ -505,7 +508,12 @@ pub fn gemm_packed_u8x4_fused_raw(
         })
         .collect();
 
-    for row in 0..m {
+    // Determine row iteration strategy
+    #[cfg(feature = "parallel")]
+    let parallel = m >= 512;
+
+    // Row computation lambda
+    let compute_row = |row: usize, c_row: &mut [f32]| {
         let act_row_start = row * k_packed;
         let act_row = &act_data[act_row_start..act_row_start + k_packed];
 
@@ -539,8 +547,24 @@ pub fn gemm_packed_u8x4_fused_raw(
                     _ => val,
                 };
             }
-            c[row * n + col] = val;
+            c_row[col] = val;
         }
+    };
+
+    #[cfg(feature = "parallel")]
+    if parallel {
+        c.par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(row, c_row)| compute_row(row, c_row));
+    } else {
+        for (row, c_row) in c.chunks_mut(n).enumerate() {
+            compute_row(row, c_row);
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    for (row, c_row) in c.chunks_mut(n).enumerate() {
+        compute_row(row, c_row);
     }
 }
 
@@ -605,7 +629,7 @@ pub fn gemm_packed_u4x8_fused_raw(
         })
         .collect();
 
-    for row in 0..m {
+    let compute_row = |row: usize, c_row: &mut [f32]| {
         let a_row_start = row * k_packed;
         let a_row = &act_data[a_row_start..a_row_start + k_packed];
 
@@ -639,8 +663,24 @@ pub fn gemm_packed_u4x8_fused_raw(
                     _ => val,
                 };
             }
-            c[row * n + col] = val;
+            c_row[col] = val;
         }
+    };
+
+    #[cfg(feature = "parallel")]
+    if m >= 512 {
+        c.par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(row, c_row)| compute_row(row, c_row));
+    } else {
+        for (row, c_row) in c.chunks_mut(n).enumerate() {
+            compute_row(row, c_row);
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    for (row, c_row) in c.chunks_mut(n).enumerate() {
+        compute_row(row, c_row);
     }
 }
 
@@ -681,19 +721,30 @@ pub fn gemm_packed_u4x8_fused(
 #[inline]
 pub fn pack_i8_col_to_u8x4(col: &[i8], m: usize, k: usize, packed: &mut [U8x4]) {
     let k_packed = k.div_ceil(4);
+    let full_words = if k % 4 == 0 {
+        k_packed
+    } else {
+        k_packed - 1
+    };
     for row in 0..m {
         let row_start = row * k;
         let word_base = row * k_packed;
-        for w in 0..k_packed {
-            let mut word = 0u32;
+        // Fast path: read full u32 words via unaligned load (avoids byte loop)
+        for w in 0..full_words {
             let byte_base = row_start + w * 4;
-            for i in 0..4 {
-                let idx = byte_base + i;
-                if idx < row_start + k {
-                    word |= (col[idx] as u8 as u32) << (i * 8);
-                }
-            }
+            // SAFETY: aligned within the slice bounds, u32 has same repr as 4×i8
+            let word = unsafe { std::ptr::read_unaligned(col.as_ptr().add(byte_base) as *const u32) };
             packed[word_base + w] = U8x4(word);
+        }
+        // Tail: handle the last partial word when k is not a multiple of 4
+        if k % 4 != 0 {
+            let mut word = 0u32;
+            let byte_base = row_start + full_words * 4;
+            for i in 0..(k % 4) {
+                let idx = byte_base + i;
+                word |= (col[idx] as u8 as u32) << (i * 8);
+            }
+            packed[word_base + full_words] = U8x4(word);
         }
     }
 }

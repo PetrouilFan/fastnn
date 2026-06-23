@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 #[cfg(target_arch = "aarch64")]
 pub const MIN_BLAS_SIZE: usize = 32;
 
@@ -26,24 +24,6 @@ extern "C" {
         C: *mut f32,
         ldc: i32,
     );
-}
-
-pub fn matmul_blas(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    matmul_blas_with_transpose(a, b, m, k, n, false, false)
-}
-
-pub fn matmul_blas_with_transpose(
-    a: &[f32],
-    b: &[f32],
-    m: usize,
-    k: usize,
-    n: usize,
-    trans_a: bool,
-    trans_b: bool,
-) -> Vec<f32> {
-    let mut c = vec![0.0f32; m * n];
-    matmul_blas_with_transpose_into(a, b, &mut c, m, k, n, trans_a, trans_b);
-    c
 }
 
 pub fn matmul_blas_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, k: usize, n: usize) {
