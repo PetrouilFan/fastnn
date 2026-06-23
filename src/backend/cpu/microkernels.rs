@@ -186,7 +186,7 @@ macro_rules! get_conv_buf {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn hsum256_ps(v: __m256) -> f32 {
+pub(crate) unsafe fn hsum256_ps(v: __m256) -> f32 {
     let hi128 = _mm256_extractf128_ps(v, 1);
     let lo128 = _mm256_castps256_ps128(v);
     let sum128 = _mm_add_ps(lo128, hi128);
