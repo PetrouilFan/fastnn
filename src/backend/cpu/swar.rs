@@ -104,8 +104,8 @@ pub fn u4x8_dot_packed_slice(a: &[u32], b: &[u32]) -> i32 {
 /// C: [M, N] f32 output (row-major)
 ///
 /// Dequantization fused at output using per-tensor scales from PackedTensor.
-/// Handles signed asymmetric quantization:
-///   q = (x - zp) / scale  →  x = q * scale + zp
+/// Full 4-term dequantization with zero-point correction:
+///   output = acc * scaleA * scaleB + zpB * scaleA * ΣqA + zpA * scaleB * ΣqB + zpA * zpB * K
 #[inline]
 pub fn gemm_packed_u8x4(
     a_packed: &PackedTensor<U8x4>,
@@ -126,21 +126,32 @@ pub fn gemm_packed_u8x4(
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    // Get per-tensor scale and zero_point
-    let a_scale = a_packed.scale();
-    let a_zp = a_packed.zero();
-    let b_scale = b_packed.scale();
-    let b_zp = b_packed.zero();
-
-    let scale_ab = a_scale * b_scale;
+    let k_f32 = (k_packed * 4) as f32;
 
     for row in 0..m {
         let a_row_start = row * k_packed;
         let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
+        let a_scale = a_packed.scale_for_row(row);
+        let a_zp = a_packed.zero_for_row(row);
+
+        // Precompute activation row sum (ΣqA)
+        let qa_sum: i32 = a_row.iter()
+            .map(|&w| {
+                let b0 = (w.0 & 0xFF) as i8 as i32;
+                let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                b0 + b1 + b2 + b3
+            })
+            .sum();
+
         for col in 0..n {
             let b_row_start = col * k_packed;
             let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+
+            let b_scale = b_packed.scale_for_row(col);
+            let b_zp = b_packed.zero_for_row(col);
 
             // Accumulate in i32 (exact for K ≤ 8192 * 127²)
             let mut acc = 0i32;
@@ -148,22 +159,29 @@ pub fn gemm_packed_u8x4(
                 acc += u8x4_dot_packed(a_row[k].0, b_row[k].0);
             }
 
-            // Full dequantization with zero-point correction:
-            // Σ (qA * scale_A + zp_A) * (qB * scale_B + zp_B)
-            // = acc * scale_A * scale_B + zp_B * scale_A * ΣqA + zp_A * scale_B * ΣqB + zp_A * zp_B * K
-            // For now, use simplified version assuming symmetric (zp=0) or small zp
-            c[row * n + col] = if a_zp == 0.0 && b_zp == 0.0 {
-                acc as f32 * scale_ab
-            } else {
-                // Simplified: acc * scale_ab + zero_point correction
-                // Full correction requires ΣqA and ΣqB which we don't track
-                acc as f32 * scale_ab + a_zp * b_zp * (k_packed * 4) as f32
-            };
+            // Full dequantization with zero-point correction
+            let qb_sum: i32 = b_row.iter()
+                .map(|&w| {
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum();
+
+            let scale_ab = a_scale * b_scale;
+            c[row * n + col] = (acc as f32) * scale_ab
+                + b_zp * (a_scale * qa_sum as f32)
+                + a_zp * (b_scale * qb_sum as f32)
+                + a_zp * b_zp * k_f32;
         }
     }
 }
 
 /// Packed U4x8 GEMM: C = A × Bᵀ
+///
+/// Full 4-term dequantization with per-channel scales for both matrices.
 #[inline]
 pub fn gemm_packed_u4x8(
     a_packed: &PackedTensor<U4x8>,
@@ -184,23 +202,47 @@ pub fn gemm_packed_u4x8(
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    let a_scale = a_packed.scale();
-    let b_scale = b_packed.scale();
-    let scale_ab = a_scale * b_scale;
+    let k_f32 = (k_packed * 8) as f32;
 
     for row in 0..m {
         let a_row_start = row * k_packed;
         let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
+        let a_scale = a_packed.scale_for_row(row);
+        let a_zp = a_packed.zero_for_row(row);
+
+        // Precompute activation row sum (ΣqA)
+        let qa_sum: i32 = a_row.iter().map(|&w| {
+            (0..8).map(|i| {
+                let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                if nib >= 8 { nib - 16 } else { nib }
+            }).sum::<i32>()
+        }).sum();
+
         for col in 0..n {
             let b_row_start = col * k_packed;
             let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+
+            let b_scale = b_packed.scale_for_row(col);
+            let b_zp = b_packed.zero_for_row(col);
 
             let mut acc = 0i32;
             for k in 0..k_packed {
                 acc += u4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
-            c[row * n + col] = acc as f32 * scale_ab;
+
+            let qb_sum: i32 = b_row.iter().map(|&w| {
+                (0..8).map(|i| {
+                    let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                    if nib >= 8 { nib - 16 } else { nib }
+                }).sum::<i32>()
+            }).sum();
+
+            let scale_ab = a_scale * b_scale;
+            c[row * n + col] = (acc as f32) * scale_ab
+                + b_zp * (a_scale * qa_sum as f32)
+                + a_zp * (b_scale * qb_sum as f32)
+                + a_zp * b_zp * k_f32;
         }
     }
 }
@@ -235,13 +277,6 @@ pub fn gemm_packed_u8x4_fused(
 
     let act_packed_slice = act_packed.as_packed();
     let weight_packed_slice = weight_packed.as_packed();
-
-    let act_scale = act_packed.scale();
-    let act_zp = act_packed.zero();
-    let w_scale = weight_packed.scale();
-    let w_zp = weight_packed.zero();
-
-    let scale_ab = act_scale * w_scale;
 
     for row in 0..m {
         let act_row_start = row * k_packed;

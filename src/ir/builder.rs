@@ -2284,7 +2284,7 @@ impl GraphBuilder {
 
         let executor = GraphExecutor::new(backend);
         let (plan, memory_plan, compiled_graph) =
-            executor.compile_with_plan_and_quantize(&graph, quantize)?;
+            executor.compile_with_plan_and_quantize(&graph, quantize, None)?;
 
         Ok((plan, memory_plan, compiled_graph))
     }
@@ -2333,7 +2333,7 @@ impl GraphBuilder {
 
         let mut executor = GraphExecutor::new(backend);
         let (mut plan, memory_plan, compiled_graph) =
-            executor.compile_with_plan_and_quantize(&graph, quantize)?;
+            executor.compile_with_plan_and_quantize(&graph, quantize, None)?;
 
         // Cache the compiled plan (clone only what's needed for reuse)
         cache_plan(

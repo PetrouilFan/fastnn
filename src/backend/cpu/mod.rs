@@ -1069,6 +1069,16 @@ fn run_kernel_precopied(
                         } else {
                             None
                         };
+                        // Parse fused activation from kernel name suffix (e.g. "conv2d_u4_silu")
+                        let fused_act: Option<&str> = if kernel_name.contains("_relu") {
+                            Some("relu")
+                        } else if kernel_name.contains("_gelu") {
+                            Some("gelu")
+                        } else if kernel_name.contains("_silu") {
+                            Some("silu")
+                        } else {
+                            None
+                        };
                         unsafe {
                             packed_conv::$fn(
                                 &input_data,
@@ -1077,7 +1087,7 @@ fn run_kernel_precopied(
                                 bias_opt,
                                 stride, padding, dilation, groups,
                                 kh, kw,
-                                None,
+                                fused_act,
                                 out_f32,
                             );
                         }
@@ -1917,6 +1927,17 @@ impl Backend for CpuBackend {
                             .is_some_and(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
                         {
                             kernel = format!("{}_i8", kernel);
+                        }
+
+                        // Detect fused activation (SiLU/ReLU/GELU) from operator fusion
+                        // and append to kernel name so dispatch can apply it.
+                        if let Some(fused_op) = node.attrs.get("fused_op").map(|s| s.as_str()) {
+                            match fused_op {
+                                "OpRelu" => kernel = format!("{}_relu", kernel),
+                                "OpGelu" => kernel = format!("{}_gelu", kernel),
+                                "OpSilu" => kernel = format!("{}_silu", kernel),
+                                _ => {}
+                            }
                         }
 
                         let meta = node.inputs.get(1).and_then(|&w_id| {
@@ -4655,11 +4676,15 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
-                        "conv2d_u4" | "conv2d_u4_i8" | "conv2d_u8" | "conv2d_u8_i8" => {
+                        "conv2d_u4" | "conv2d_u4_i8" | "conv2d_u4_relu" | "conv2d_u4_i8_relu"
+                        | "conv2d_u4_gelu" | "conv2d_u4_i8_gelu" | "conv2d_u4_silu" | "conv2d_u4_i8_silu"
+                        | "conv2d_u8" | "conv2d_u8_i8" | "conv2d_u8_relu" | "conv2d_u8_i8_relu" | "conv2d_u8_gelu" | "conv2d_u8_i8_gelu" | "conv2d_u8_silu" | "conv2d_u8_i8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
                             // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
-                            if let [a_slice, w_slice] = &input_slices[..] {
+                            if input_slices.len() >= 2 {
+                                let a_slice = &input_slices[0];
+                                let w_slice = &input_slices[1];
                                 let (input_data, packed_bytes) = {
                                     let d = arena.data_mut();
                                     (
@@ -4737,6 +4762,16 @@ impl Backend for CpuBackend {
                                             meta.scales,
                                             meta.zero_points,
                                         );
+                                        // Parse fused activation from kernel name suffix
+                                        let fused_act: Option<&str> = if kernel_name.contains("_relu") {
+                                            Some("relu")
+                                        } else if kernel_name.contains("_gelu") {
+                                            Some("gelu")
+                                        } else if kernel_name.contains("_silu") {
+                                            Some("silu")
+                                        } else {
+                                            None
+                                        };
                                         unsafe {
                                             packed_conv::$fn(
                                                 &input_data,
@@ -4745,7 +4780,7 @@ impl Backend for CpuBackend {
                                                 bias_opt,
                                                 stride, padding, dilation, groups,
                                                 kernel_h, kernel_w,
-                                                None,
+                                                fused_act,
                                                 out_f32,
                                             );
                                         }

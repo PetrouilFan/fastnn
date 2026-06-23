@@ -334,11 +334,62 @@ impl CalibrationData {
             entry.insert("bit_width".to_string(), serde_json::Value::Number(
                 serde_json::Number::from(bit_width)
             ));
-
             config.insert(name.clone(), serde_json::Value::Object(entry));
         }
-
+        
         serde_json::Value::Object(config)
+    }
+
+    /// Load calibration data from JSON produced by `to_quant_config`.
+    /// The JSON format: { "tensor_name": { "scale": f32, "zero_point": f32, "bit_width": u8, "min": f32, "max": f32, ... } }
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        use serde_json::Value;
+        let data: Value = serde_json::from_str(json)
+            .map_err(|e| format!("invalid JSON: {}", e))?;
+        
+        let obj = data.as_object()
+            .ok_or("JSON root must be an object")?;
+        
+        let mut calib = CalibrationData::new();
+        
+        for (name, entry) in obj {
+            let entry_obj = entry.as_object()
+                .ok_or_else(|| format!("entry for '{}' must be an object", name))?;
+            
+            // Extract min/max from the entry (preferred) or derive from scale/zp
+            let (min, max) = if let (Some(min_v), Some(max_v)) = (
+                entry_obj.get("min").and_then(|v| v.as_f64()),
+                entry_obj.get("max").and_then(|v| v.as_f64()),
+            ) {
+                (min_v as f32, max_v as f32)
+            } else if let (Some(scale_v), Some(zp_v), Some(bw_v)) = (
+                entry_obj.get("scale").and_then(|v| v.as_f64()),
+                entry_obj.get("zero_point").and_then(|v| v.as_f64()),
+                entry_obj.get("bit_width").and_then(|v| v.as_u64()),
+            ) {
+                // Derive min/max from scale and zero_point for asymmetric quantization
+                let scale = scale_v as f32;
+                let zp = zp_v as f32;
+                let levels = ((1u32 << bw_v) as f32) - 1.0;
+                let min = -zp * scale;
+                let max = min + scale * levels;
+                (min, max)
+            } else {
+                return Err(format!("entry for '{}' missing required fields (min/max or scale/zero_point/bit_width)", name));
+            };
+            
+            let mut stats = CalibrationStats::new();
+            stats.min = min;
+            stats.max = max;
+            // Also set sum/count for mean/std computation (approximate)
+            stats.count = 1;
+            stats.sum = ((min + max) / 2.0) as f64;
+            stats.sum_sq = (((min + max) / 2.0).powi(2)) as f64;
+            
+            calib.stats.insert(name.clone(), stats);
+        }
+        
+        Ok(calib)
     }
 }
 
