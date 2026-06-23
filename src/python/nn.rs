@@ -1212,7 +1212,7 @@ impl AotExecutor {
 
         let executor = crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, quantize)
+            .compile_with_plan_and_quantize(&graph, quantize, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
@@ -1250,6 +1250,52 @@ impl AotExecutor {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.decode_outputs(output_data)
+    }
+
+    /// Apply calibration scales from a JSON file to recompile the model with
+    /// optimized activation quantization parameters.
+    ///
+    /// The JSON should be in the format produced by `calibrate_yolo.py` or
+    /// `CalibrationData::to_quant_config()`:
+    /// ```json
+    /// {
+    ///   "tensor_name": {
+    ///     "scale": 0.01,
+    ///     "zero_point": 128.0,
+    ///     "bit_width": 8,
+    ///     "min": -1.0,
+    ///     "max": 1.0
+    ///   },
+    ///   ...
+    /// }
+    /// ```
+    ///
+    /// This recompiles the entire model with the calibration data, so it may
+    /// take some time. The model must have been originally created with
+    /// `quantize=4` or `quantize=8`.
+    fn apply_calibration(
+        &mut self,
+        scales_json: String,
+    ) -> pyo3::PyResult<()> {
+        // Parse calibration data from JSON
+        eprintln!("[APPLY_CALIB] Parsing calibration JSON...");
+        let calib = crate::compiler::passes::calibration::CalibrationData::from_json(&scales_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        eprintln!("[APPLY_CALIB] Parsed {} calibration entries", calib.stats.len());
+
+        // Recompile with calibration data - the quantization pass will UPDATE
+        // existing QuantizeActivations nodes with new calibration attrs
+        eprintln!("[APPLY_CALIB] Recompiling with calibration...");
+        let (plan, memory_plan, graph) = self.executor
+            .compile_with_plan_and_quantize(&self.graph, None, Some(calib))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.plan = plan;
+        self.memory_plan = memory_plan;
+        self.graph = graph;
+
+        eprintln!("[APPLY_CALIB] Recompilation complete");
+        Ok(())
     }
 
     /// Opt-in prepared-execution fallback. Accepts the same input dict

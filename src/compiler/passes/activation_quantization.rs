@@ -12,7 +12,7 @@
 //! Run this pass **after** shape inference (so shapes are known) and **before**
 //! memory planning (so the planner allocates slots for the new nodes).
 
-use crate::compiler::passes::calibration::CalibrationData;
+use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
 
@@ -131,6 +131,11 @@ pub fn quantize_activations_with_calibration(
         input_channels: usize,
         per_channel_scales: Vec<f32>,
         per_channel_zero_points: Vec<f32>,
+        // Per-tensor fallback calibration stats
+        per_tensor_scale: Option<f32>,
+        per_tensor_zero_point: Option<f32>,
+        // If Some, update this existing QuantizeActivations node instead of creating new
+        existing_qa_id: Option<NodeId>,
     }
 
     let mut rewrites: Vec<Rewrite> = Vec::new();
@@ -148,11 +153,22 @@ pub fn quantize_activations_with_calibration(
 
         let node_shape = node.output_type.shape.clone();
 
-        if let Some(act_node) = graph_ref.get_node(act_id) {
+        // Check if activation already has QuantizeActivations
+        let existing_qa_id = if let Some(act_node) = graph_ref.get_node(act_id) {
             if act_node.opcode == Opcode::QuantizeActivations {
-                return Ok(());
+                Some(act_id)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        // Skip if already quantized AND no calibration data to update with
+        if existing_qa_id.is_some() && calib.stats.is_empty() {
+            return Ok(());
         }
+        // If we have calibration data and existing QA, we'll UPDATE it below
 
         if let Some(act_node) = graph_ref.get_node(act_id) {
             if matches!(act_node.opcode, Opcode::Input | Opcode::Constant(_)) {
@@ -175,33 +191,71 @@ pub fn quantize_activations_with_calibration(
             .map(|n| n.name.as_str())
             .unwrap_or("")
             .to_string();
+        // Also get the Conv node's name for fallback lookup
+        let conv_name = node.name.clone();
 
-        let (input_channels, per_channel_scales, per_channel_zero_points) =
+        // DEBUG: print calibration lookup
+        if std::env::var("FASTNN_DEBUG_CALIB").is_ok() {
+            eprintln!("[CALIB_DEBUG] act_name='{}' conv_name='{}' avail_keys={:?}", 
+                act_name, conv_name, calib.stats.keys().collect::<Vec<_>>());
+        }
+
+        // Helper to get calibration stats for either per-channel or per-tensor
+        let get_calib_stats = |name: &str| -> Option<&CalibrationStats> {
+            if name.is_empty() {
+                None
+            } else {
+                calib.stats.get(name)
+            }
+        };
+
+        let (input_channels, per_channel_scales, per_channel_zero_points, per_tensor_scale, per_tensor_zero_point) =
             if matches!(node.opcode, Opcode::Conv2d) {
                 // Conv2d activation input channels is dim 1 of input shape (NCHW)
                 let c = act_shape.get(1).and_then(|d| d.evaluate()).unwrap_or(0) as usize;
                 if c > 0 {
                     // Look up calibration stats for the activation tensor
+                    // Try activation node name first, then fall back to Conv node name
                     let (scales, zps) = if !act_name.is_empty() {
                         calib
                             .stats
                             .get(&act_name)
+                            .or_else(|| calib.stats.get(&conv_name))
+                            .map(|stats| stats.compute_scale_zp_per_channel(8))
+                            .unwrap_or_else(|| (vec![], vec![]))
+                    } else if !conv_name.is_empty() {
+                        calib
+                            .stats
+                            .get(&conv_name)
                             .map(|stats| stats.compute_scale_zp_per_channel(8))
                             .unwrap_or_else(|| (vec![], vec![]))
                     } else {
                         (vec![], vec![])
                     };
+                    // Also get per-tensor stats for fallback
+                    let (pt_scale, pt_zp) = if !act_name.is_empty() {
+                        get_calib_stats(&act_name)
+                            .or_else(|| get_calib_stats(&conv_name))
+                            .map(|stats| stats.compute_scale_zp(8))
+                            .unwrap_or_else(|| (0.0, 0.0))
+                    } else if !conv_name.is_empty() {
+                        get_calib_stats(&conv_name)
+                            .map(|stats| stats.compute_scale_zp(8))
+                            .unwrap_or_else(|| (0.0, 0.0))
+                    } else {
+                        (0.0, 0.0)
+                    };
                     // Only use per-channel if we have exactly c scales
                     if scales.len() == c {
-                        (c, scales, zps)
+                        (c, scales, zps, Some(pt_scale), Some(pt_zp))
                     } else {
-                        (0, vec![], vec![])
+                        (0, vec![], vec![], Some(pt_scale), Some(pt_zp))
                     }
                 } else {
-                    (0, vec![], vec![])
+                    (0, vec![], vec![], None, None)
                 }
             } else {
-                (0, vec![], vec![])
+                (0, vec![], vec![], None, None)
             };
 
         rewrites.push(Rewrite {
@@ -215,6 +269,9 @@ pub fn quantize_activations_with_calibration(
             input_channels,
             per_channel_scales,
             per_channel_zero_points,
+            per_tensor_scale,
+            per_tensor_zero_point,
+            existing_qa_id,
         });
 
         Ok(())
@@ -247,14 +304,28 @@ pub fn quantize_activations_with_calibration(
             attrs.insert("num_channels".to_string(), rw.input_channels.to_string());
             attrs.insert("scales".to_string(), scale_str);
             attrs.insert("zero_points".to_string(), zp_str);
+        } else if let (Some(scale), Some(zp)) = (rw.per_tensor_scale, rw.per_tensor_zero_point) {
+            // Use per-tensor calibration stats
+            attrs.insert("scale".to_string(), scale.to_string());
+            attrs.insert("zero_point".to_string(), zp.to_string());
         }
 
-        let quantize_id = graph.add_node_with_attrs(
-            Opcode::QuantizeActivations,
-            vec![rw.act_id],
-            quant_type,
-            attrs,
-        );
+        let quantize_id = if let Some(qa_id) = rw.existing_qa_id {
+            // UPDATE existing QuantizeActivations node with new calibration attrs
+            if let Some(qa_node) = graph.get_node_mut(qa_id) {
+                qa_node.attrs = attrs.clone();
+                qa_node.output_type = quant_type.clone();
+            }
+            qa_id
+        } else {
+            // Create new QuantizeActivations node
+            graph.add_node_with_attrs(
+                Opcode::QuantizeActivations,
+                vec![rw.act_id],
+                quant_type,
+                attrs,
+            )
+        };
 
         if let Some(target) = graph.get_node_mut(rw.node_id) {
             target.inputs[0] = quantize_id;
@@ -270,7 +341,7 @@ mod tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
     use crate::backend::Backend;
-    use crate::compiler::passes::calibration::CalibrationData;
+use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
     use crate::compiler::passes::{memory_planning, shape_inference};
     use crate::ir::node::DimExpr;
 
@@ -301,7 +372,7 @@ mod tests {
         // Run standard compile without activation quantization
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan_no_q, mem_no_q, _) = executor
-            .compile_with_plan_and_quantize(&graph, None)
+            .compile_with_plan_and_quantize(&graph, None, None)
             .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];
