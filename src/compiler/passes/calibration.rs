@@ -4,8 +4,7 @@
 //! running min/max/mean/std/histogram statistics. These are used to compute
 //! per-tensor or per-channel quantization scales and zero-points.
 
-use crate::ir::builder::GraphBuilder;
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode};
 use std::collections::HashMap;
 
 /// Calibration statistics collected per tensor.
@@ -405,66 +404,6 @@ impl CalibrationData {
 
         Ok(calib)
     }
-}
-
-/// IR node for observing activations during calibration.
-#[derive(Debug, Clone)]
-pub struct ObserveNode {
-    pub name: String,
-    pub input: NodeId,
-    pub stats: CalibrationStats,
-}
-
-/// Analysis pass that identifies which nodes need calibration.
-pub fn find_calibration_points(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
-    let mut points = Vec::new();
-
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        let node_id: NodeId = idx;
-        // Observe after these quantizable operations
-        let should_observe = matches!(
-            node.opcode,
-            Opcode::Conv2d
-                | Opcode::Conv1d
-                | Opcode::Conv3d
-                | Opcode::MatMul
-                | Opcode::Add
-                | Opcode::Mul
-                | Opcode::Sub
-                | Opcode::Sigmoid
-                | Opcode::Silu
-                | Opcode::Relu
-                | Opcode::Softmax
-                | Opcode::LayerNorm
-                | Opcode::BatchNorm
-        );
-
-        if should_observe {
-            let name = if node.name.is_empty() {
-                format!("{:?}_{}", node.opcode, node_id)
-            } else {
-                node.name.clone()
-            };
-            points.push((node_id, name));
-        }
-    }
-
-    points
-}
-
-/// Runtime hook for collecting calibration data during inference.
-/// This would be called from the executor after each observed node.
-pub fn record_calibration(
-    data: &mut CalibrationData,
-    name: &str,
-    output_ptr: *const f32,
-    len: usize,
-) {
-    if len == 0 {
-        return;
-    }
-    let slice = unsafe { std::slice::from_raw_parts(output_ptr, len) };
-    data.observe(name, slice);
 }
 
 #[cfg(test)]

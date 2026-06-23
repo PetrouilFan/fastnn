@@ -12,8 +12,7 @@ use crate::tensor::{dtype_to_ir, Tensor, TensorImpl};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-mod ste;
-pub use ste::{ste_backward, ste_dequantize_forward, ste_quantize_forward};
+
 
 // Thread-local gradient enable/disable (kept for backward compat).
 thread_local! {

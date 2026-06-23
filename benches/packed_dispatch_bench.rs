@@ -1,5 +1,5 @@
 /// Benchmarks comparing packed vs f32 dispatch for MatMul, Conv, and Embedding.
-use fastnn::backends::cpu;
+use fastnn::backend::cpu;
 use fastnn::dtypes::{U4x8, U8x4};
 use fastnn::packed_tensor::PackedTensor;
 use std::time::Instant;
