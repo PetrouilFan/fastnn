@@ -12,6 +12,9 @@ use crate::tensor::{dtype_to_ir, Tensor, TensorImpl};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
+mod ste;
+pub use ste::{ste_backward, ste_dequantize_forward, ste_quantize_forward};
+
 // Thread-local gradient enable/disable (kept for backward compat).
 thread_local! {
     static NO_GRAD_TLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -490,7 +493,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
 
                 let mut executor = GraphExecutor::new(CpuBackend);
                 if let Ok((mut plan, memory_plan, compiled_graph)) =
-                    executor.compile_with_plan_and_quantize(&grad_graph, None)
+                    executor.compile_with_plan_and_quantize(&grad_graph, None, None)
                 {
                     if let Ok(mut r) =
                         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
@@ -815,7 +818,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     let mut executor = GraphExecutor::new(CpuBackend);
     results = match (|| {
         let (mut plan, memory_plan, compiled_graph) =
-            executor.compile_with_plan_and_quantize(&combined, None)?;
+            executor.compile_with_plan_and_quantize(&combined, None, None)?;
         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
     })() {
         Ok(r) => r,

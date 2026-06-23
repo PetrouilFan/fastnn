@@ -5,10 +5,7 @@
 //! quantized to the same packed format as weights and the dot
 //! product runs entirely in i32 via SWAR.
 
-use crate::backend::cpu::swar::{
-    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed, u8x4_dot_packed,
-    u4x8_dot_packed_slice, u8x4_dot_packed_slice,
-};
+use crate::backend::cpu::swar::{u4x8_dot_packed, u8x4_dot_packed};
 use crate::dtypes::{PackedWord, U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
 
@@ -63,6 +60,11 @@ unsafe fn im2col_f32(
 }
 
 /// im2col → quantize to PackedTensor<U8x4> with shape [M, K].
+///
+/// Each row is packed independently (row-wise layout) so that the GEMM kernel
+/// can index into `row * ceil(K/4)` packed words. This is critical when K is
+/// not a multiple of 4 — flat packing would cross row boundaries and corrupt
+/// data.
 unsafe fn im2col_pack_u8x4(
     input_n: &[f32],
     c: usize,
@@ -78,20 +80,46 @@ unsafe fn im2col_pack_u8x4(
     let w_out = conv_out_size(w, kw, stride, padding, dilation);
     let m = h_out * w_out;
     let k = c * kh * kw;
+    let k_packed = k.div_ceil(4);
 
     let mut col = vec![0.0f32; m * k];
     im2col_f32(input_n, c, h, w, kh, kw, stride, padding, dilation, &mut col);
 
-    let (packed, scale, zp) = quantize_f32_to_u8x4(&col);
-    PackedTensor::from_raw(
-        packed.into_iter().map(|w| U8x4(w)).collect(),
-        vec![m, k],
-        vec![scale],
-        vec![zp],
-    )
+    // Per-tensor quantization from the full buffer
+    let min = col.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = col.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+    let scale = if range > 0.0 { range / 255.0 } else { 1.0 };
+    let zero_point = if range > 0.0 { min + 128.0 * scale } else { 0.0 };
+    let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
+
+    // Pack each row independently for correct row-wise alignment
+    let mut packed: Vec<U8x4> = Vec::with_capacity(m * k_packed);
+    for row in 0..m {
+        let row_start = row * k;
+        for word in 0..k_packed {
+            let mut w = 0u32;
+            for i in 0..4 {
+                let elem_idx = row_start + word * 4 + i;
+                if elem_idx < row_start + k && elem_idx < col.len() {
+                    let val = col[elem_idx];
+                    let q = ((val - zero_point) * inv_scale).round().clamp(-128.0, 127.0) as i8;
+                    w |= (q as u8 as u32) << (i * 8);
+                }
+            }
+            packed.push(U8x4(w));
+        }
+    }
+
+    PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![zero_point])
 }
 
 /// im2col → quantize to PackedTensor<U4x8> with shape [M, K].
+///
+/// Each row is packed independently (row-wise layout) so that the GEMM kernel
+/// can index into `row * ceil(K/8)` packed words. This is critical when K is
+/// not a multiple of 8 — flat packing would cross row boundaries and corrupt
+/// data.
 unsafe fn im2col_pack_u4x8(
     input_n: &[f32],
     c: usize,
@@ -107,17 +135,39 @@ unsafe fn im2col_pack_u4x8(
     let w_out = conv_out_size(w, kw, stride, padding, dilation);
     let m = h_out * w_out;
     let k = c * kh * kw;
+    let k_packed = k.div_ceil(8);
 
     let mut col = vec![0.0f32; m * k];
     im2col_f32(input_n, c, h, w, kh, kw, stride, padding, dilation, &mut col);
 
-    let (packed, scale, zp) = quantize_f32_to_u4x8(&col);
-    PackedTensor::from_raw(
-        packed.into_iter().map(|w| U4x8(w)).collect(),
-        vec![m, k],
-        vec![scale],
-        vec![zp],
-    )
+    // Per-tensor quantization from the full buffer
+    let min = col.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = col.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+    let scale = if range > 0.0 { range / 15.0 } else { 1.0 };
+    let zero_point = if range > 0.0 { min + 8.0 * scale } else { 0.0 };
+    let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
+
+    // Pack each row independently for correct row-wise alignment
+    let mut packed: Vec<U4x8> = Vec::with_capacity(m * k_packed);
+    for row in 0..m {
+        let row_start = row * k;
+        for word in 0..k_packed {
+            let mut w = 0u32;
+            for i in 0..8 {
+                let elem_idx = row_start + word * 8 + i;
+                if elem_idx < row_start + k && elem_idx < col.len() {
+                    let val = col[elem_idx];
+                    let q = ((val - zero_point) * inv_scale).round().clamp(-8.0, 7.0) as i32;
+                    let q_u = (q as u32) & 0xF;
+                    w |= q_u << (i * 4);
+                }
+            }
+            packed.push(U4x8(w));
+        }
+    }
+
+    PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![zero_point])
 }
 
 /// Extract a row-subset of a PackedTensor (copies data).
@@ -262,6 +312,9 @@ pub unsafe fn conv2d_packed_u4x8(
 }
 
 /// Fused U4x8 GEMM: C = A × Bᵀ with dequantize + bias + activation.
+///
+/// Full 4-term dequantization with per-channel scales for both activations and weights:
+///   output = acc * scaleA * scaleB + zpB * scaleA * ΣqA + zpA * scaleB * ΣqB + zpA * zpB * K
 #[inline]
 pub fn gemm_packed_u4x8_fused(
     act_packed: &PackedTensor<U4x8>,
@@ -280,22 +333,15 @@ pub fn gemm_packed_u4x8_fused(
     let act_packed_slice = act_packed.as_packed();
     let weight_packed_slice = weight_packed.as_packed();
 
-    let act_scale = act_packed.scale();
-    let act_zp = act_packed.zero();
-    let w_scale = weight_packed.scale();
-    let w_zp = weight_packed.zero();
-
-    let scale_ab = act_scale * w_scale;
+    let k_f32 = act_packed.shape()[1] as f32; // actual K, not padded K
 
     for row in 0..m {
         let a_row_start = row * k_packed;
         let a_row = &act_packed_slice[a_row_start..a_row_start + k_packed];
 
-        let a_zp_local = if act_packed.zeros.len() > row {
-            act_packed.zeros[row]
-        } else {
-            act_zp
-        };
+        // Per-channel activation scale/zero_point (falls back to per-tensor if only 1)
+        let act_scale = act_packed.scale_for_row(row);
+        let act_zp = act_packed.zero_for_row(row);
 
         let qa_sum: i32 = a_row.iter().map(|&w| {
             (0..8).map(|i| {
@@ -303,17 +349,14 @@ pub fn gemm_packed_u4x8_fused(
                 if nib >= 8 { nib - 16 } else { nib }
             }).sum::<i32>()
         }).sum();
-        let k_f32 = (k_packed * 8) as f32;
 
         for col in 0..n {
             let w_row_start = col * k_packed;
             let w_row = &weight_packed_slice[w_row_start..w_row_start + k_packed];
 
-            let w_zp_local = if weight_packed.zeros.len() > col {
-                weight_packed.zeros[col]
-            } else {
-                w_zp
-            };
+            // Per-channel weight scale/zero_point
+            let w_scale = weight_packed.scale_for_row(col);
+            let w_zp = weight_packed.zero_for_row(col);
 
             let mut acc = 0i32;
             for k in 0..k_packed {
@@ -327,10 +370,11 @@ pub fn gemm_packed_u4x8_fused(
                 }).sum::<i32>()
             }).sum();
 
+            let scale_ab = act_scale * w_scale;
             let mut val = (acc as f32) * scale_ab
-                + w_zp_local * (act_scale * qa_sum as f32)
-                + a_zp_local * (w_scale * qb_sum as f32)
-                + a_zp_local * w_zp_local * k_f32;
+                + w_zp * (act_scale * qa_sum as f32)
+                + act_zp * (w_scale * qb_sum as f32)
+                + act_zp * w_zp * k_f32;
 
             if let Some(b) = bias {
                 val += b[col];
@@ -402,7 +446,7 @@ fn gemm_packed_u8x4_fused(
                     b0 + b1 + b2 + b3
                 })
                 .sum();
-            let k_f32 = (k_packed * 4) as f32;
+            let k_f32 = act_packed.shape()[1] as f32; // actual K, not padded K
             let scale_ab = act_scale * w_scale;
 
             let mut val = (acc as f32) * scale_ab
@@ -466,5 +510,76 @@ mod tests {
         gemm_packed_u4x8_fused(&act, &weight, None, None, &mut c);
         assert_eq!(c.len(), 2);
         assert!(c[1] > 0.0, "expected second output positive, got {:?}", c);
+    }
+
+    /// Test conv2d U4 with K not a multiple of 8 (e.g. C=3, KH=3, KW=3 → K=27).
+    /// This is the real-world case for the first conv layer in YOLO and catches the
+    /// row-wise packing bug where flat packing would cross row boundaries.
+    #[test]
+    fn test_conv2d_packed_u4x8_non_multiple_k() {
+        // 3x3 conv: N=1, C=3, H=4, W=4, OC=2, KH=KW=3, stride=1, pad=1
+        // K = 3*3*3 = 27 (not a multiple of 8!)
+        let n = 1; let c = 3; let h = 4; let w = 4;
+        let kh = 3; let kw = 3;
+        let stride = 1; let padding = 1; let dilation = 1;
+        let oc = 2; let groups = 1;
+
+        let input: Vec<f32> = (0..(c * h * w)).map(|i| (i as f32 - 24.0) * 0.1).collect();
+        // Simple identity-ish weights (each output channel picks a specific input channel)
+        let k = c * kh * kw; // 27
+        let mut wdata = vec![0.0f32; oc * k];
+        // OC=0 picks first C elements with stride=kh*kw=9
+        for i in 0..c { wdata[i * kh * kw + kh * kw / 2] = 1.0; }
+        // OC=1 picks differently
+        for i in 0..c { wdata[k + i * kh * kw + kh * kw / 2] = 0.5; }
+
+        let weight = PackedTensor::<U4x8>::from_f32_per_channel(&wdata, &[oc, k]);
+        let h_out = h; // stride=1, pad=1, 4x4→4x4
+        let w_out = w;
+        let mut output = vec![0.0f32; oc * h_out * w_out];
+        unsafe {
+            conv2d_packed_u4x8(
+                &input, n, c, h, w, &weight, None,
+                stride, padding, dilation, groups, kh, kw, None, &mut output,
+            );
+        }
+        // Output should not contain NaN or Inf — verifies row packing alignment
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
+        // Output should be non-trivial (not all zeros)
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    /// Test conv2d U8 with K not a multiple of 4 (e.g. C=3, KH=3, KW=3 → K=27).
+    #[test]
+    fn test_conv2d_packed_u8x4_non_multiple_k() {
+        let n = 1; let c = 3; let h = 4; let w = 4;
+        let kh = 3; let kw = 3;
+        let stride = 1; let padding = 1; let dilation = 1;
+        let oc = 2; let groups = 1;
+
+        let input: Vec<f32> = (0..(c * h * w)).map(|i| (i as f32 - 24.0) * 0.1).collect();
+        let k = c * kh * kw; // 27
+        let mut wdata = vec![0.0f32; oc * k];
+        for i in 0..c { wdata[i * kh * kw + kh * kw / 2] = 1.0; }
+        for i in 0..c { wdata[k + i * kh * kw + kh * kw / 2] = 0.5; }
+
+        let weight = PackedTensor::<U8x4>::from_f32_per_channel(&wdata, &[oc, k]);
+        let h_out = h;
+        let w_out = w;
+        let mut output = vec![0.0f32; oc * h_out * w_out];
+        unsafe {
+            conv2d_packed_u8x4(
+                &input, n, c, h, w, &weight, None,
+                stride, padding, dilation, groups, kh, kw, None, &mut output,
+            );
+        }
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
     }
 }
