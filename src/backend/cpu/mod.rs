@@ -363,6 +363,223 @@ macro_rules! precopied_binary_body {
 /// * `weight_meta` — optional quantized weight metadata
 /// * `shape_env` — runtime shape environment for symbolic resolution
 #[allow(clippy::cognitive_complexity)]
+/// Align-packed-weight helper: cast raw bytes to &[PackedType] when the
+/// pointer is 4-byte aligned (the common case for arena-backed data),
+/// otherwise fall back to a u32-anchored copy.
+fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
+    if raw.as_ptr() as usize % 4 == 0 {
+        // SAFETY: bytemuck::cast_slice panics if misaligned; we checked alignment.
+        bytemuck::cast_slice::<u8, T>(raw).to_vec()
+    } else {
+        let n_words = raw.len().div_ceil(4);
+        let mut aligned = vec![0u32; n_words];
+        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
+        byte_slice[..raw.len()].copy_from_slice(raw);
+        bytemuck::cast_slice(&aligned).to_vec()
+    }
+}
+
+/// Pre-copied dispatch for I8 activation × U8x4 packed-weight Conv2d.
+///
+/// Activation is already quantized (I8 payload in `inputs[0]`).
+/// Re-arranges i8 data via im2col_i8 (no FP32 intermediate) then calls
+/// the AVX2-backed `gemm_cpu_flat_i8_u8x4` microkernel.
+fn quantized_conv2d_dispatch_precopied_i8(
+    inputs: &[Vec<u8>],
+    output: &mut [u8],
+    params: &[usize],
+    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
+        return Err(BackendError::Dispatch(
+            "conv2d_u4_i8/u8_i8: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
+                .into(),
+        ));
+    };
+    if inputs.len() < 2 {
+        return Ok(());
+    }
+    let activation_payload = &inputs[0];
+    let raw = &inputs[1];
+    let bias_data: Vec<f32> = if inputs.len() >= 3 {
+        bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
+    } else {
+        vec![]
+    };
+
+    let meta = weight_meta
+        .clone()
+        .ok_or_else(|| BackendError::Dispatch("conv2d_u4_i8/u8_i8: missing weight_meta".into()))?;
+
+    // Parse i8 activation header
+    let (affine, act_i8) = {
+        let scale = if activation_payload.len() >= 4 {
+            f32::from_le_bytes(activation_payload[0..4].try_into().unwrap())
+        } else {
+            1.0
+        };
+        let zp = if activation_payload.len() >= 8 {
+            f32::from_le_bytes(activation_payload[4..8].try_into().unwrap())
+        } else {
+            0.0
+        };
+        let payload = activation_payload.get(8..).unwrap_or(&[]);
+        let act_i8: &[i8] = bytemuck::cast_slice(payload);
+        (microkernels::I8ActivationAffine { scale, zero: zp }, act_i8)
+    };
+
+    // Pre-allocate im2col buffer and output payload
+    let oc = meta.shape[0];
+    let c_per_g = c / groups;
+    let oc_per_g = oc / groups;
+    let h_out = packed_conv::conv_out_size(h, kh, stride, padding, dilation);
+    let w_out = packed_conv::conv_out_size(w, kw, stride, padding, dilation);
+    let num_pixels = h_out * w_out;
+    let k = c_per_g * kh * kw;
+
+    let n = act_i8.len() / (c * h * w).max(1);
+    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
+
+    // Build a new payload buffer: [scale_f32][zp_f32][im2col_i8_data...]
+    // We reuse a single Vec across groups, writing the header once.
+    let mut col_buf: Vec<i8> = vec![0i8; num_pixels * k];
+
+    // Parse fused activation from kernel name
+    let fused_act: Option<&str> = if kernel_name.contains("_relu") {
+        Some("relu")
+    } else if kernel_name.contains("_gelu") {
+        Some("gelu")
+    } else if kernel_name.contains("_silu") {
+        Some("silu")
+    } else {
+        None
+    };
+
+    let inner: usize = meta.shape[1..].iter().product();
+
+    // ── Transpose helper: [pixel × oc] → [oc × pixel] layout ──
+    macro_rules! store_output {
+        ($temp:expr, $oc_per_g:expr, $out_base:expr, $g_oc_off:expr) => {
+            for pixel in 0..num_pixels {
+                for f in 0..$oc_per_g {
+                    out_f32[$out_base + ($g_oc_off + f) * num_pixels + pixel] =
+                        $temp[pixel * $oc_per_g + f];
+                }
+            }
+        };
+    }
+
+    // Shared bias slice helper
+    let bias_opt = if bias_data.is_empty() {
+        None
+    } else {
+        Some(&bias_data[..])
+    };
+
+    if meta.bit_width == 4 {
+        // U4 path: keep activations as full-precision i8 (NOT clamped to 4-bit).
+        // Pack into i8 payload for gemm_cpu_flat_i8_u4x8 which handles mixed
+        // i8 activations × U4x8 weights without losing activation precision.
+        let packed_data: Vec<U4x8> = aligned_packed_slice(raw);
+        let k_packed = inner.div_ceil(U4x8::ITEMS);
+        for nn in 0..n {
+            let act_base = nn * c * h * w;
+            let out_base = nn * oc * num_pixels;
+            for g in 0..groups {
+                let g_c_off = g * c_per_g;
+                let g_oc_off = g * oc_per_g;
+                let act_group = &act_i8[act_base + g_c_off * h * w..];
+                unsafe {
+                    packed_conv::im2col_i8(
+                        act_group, c_per_g, h, w, kh, kw, stride, padding, dilation, &mut col_buf,
+                    );
+                }
+                // Build i8 activation payload: [scale_f32][zp_f32][i8_data...]
+                let mut payload = Vec::with_capacity(8 + col_buf.len());
+                payload.extend_from_slice(&affine.scale.to_le_bytes());
+                payload.extend_from_slice(&affine.zero.to_le_bytes());
+                payload.extend_from_slice(bytemuck::cast_slice(&col_buf));
+                let w_slice = &packed_data[g_oc_off * k_packed..(g_oc_off + oc_per_g) * k_packed];
+                let w_scales = if meta.scales.len() > 1 {
+                    meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                } else {
+                    meta.scales.clone()
+                };
+                let w_zps = if meta.zero_points.len() > 1 {
+                    meta.zero_points[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                } else {
+                    meta.zero_points.clone()
+                };
+                let w_pt = PackedTensor::from_raw(
+                    w_slice.to_vec(),
+                    vec![oc_per_g, inner],
+                    w_scales,
+                    w_zps,
+                );
+                let mut temp = vec![0.0f32; num_pixels * oc_per_g];
+                microkernels::gemm_cpu_flat_i8_u4x8(
+                    &w_pt, &payload, &mut temp, num_pixels, k, oc_per_g,
+                );
+                store_output!(temp, oc_per_g, out_base, g_oc_off);
+            }
+        }
+    } else {
+        let packed_data: Vec<U8x4> = aligned_packed_slice(raw);
+        let k_packed = inner.div_ceil(U8x4::ITEMS);
+        // Pre-allocate packed activation buffer
+        let mut packed_act = vec![U8x4(0); num_pixels * k_packed];
+        for nn in 0..n {
+            let act_base = nn * c * h * w;
+            let out_base = nn * oc * num_pixels;
+            for g in 0..groups {
+                let g_c_off = g * c_per_g;
+                let g_oc_off = g * oc_per_g;
+                let act_group = &act_i8[act_base + g_c_off * h * w..];
+                unsafe {
+                    packed_conv::im2col_i8(
+                        act_group, c_per_g, h, w, kh, kw, stride, padding, dilation, &mut col_buf,
+                    );
+                }
+                // Pack flat i8 → U8x4 packed format, then run packed GEMM
+                packed_conv::pack_i8_col_to_u8x4(&col_buf, num_pixels, k, &mut packed_act);
+                let act_pt = PackedTensor::from_raw(
+                    packed_act.clone(),
+                    vec![num_pixels, k],
+                    vec![affine.scale],
+                    vec![affine.zero],
+                );
+                let w_slice = &packed_data[g_oc_off * k_packed..(g_oc_off + oc_per_g) * k_packed];
+                let w_scales = if meta.scales.len() > 1 {
+                    meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                } else {
+                    meta.scales.clone()
+                };
+                let w_zps = if meta.zero_points.len() > 1 {
+                    meta.zero_points[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                } else {
+                    meta.zero_points.clone()
+                };
+                let w_pt = PackedTensor::from_raw(
+                    w_slice.to_vec(),
+                    vec![oc_per_g, inner],
+                    w_scales,
+                    w_zps,
+                );
+                let bias_group = bias_opt
+                    .map(|b| &b[g_oc_off..g_oc_off + oc_per_g])
+                    .filter(|s| !s.is_empty());
+                let mut temp = vec![0.0f32; num_pixels * oc_per_g];
+                packed_conv::gemm_packed_u8x4_fused(
+                    &act_pt, &w_pt, bias_group, fused_act, &mut temp,
+                );
+                store_output!(temp, oc_per_g, out_base, g_oc_off);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_kernel_precopied(
     kernel_name: &str,
     inputs: &[Vec<u8>],
@@ -1022,8 +1239,20 @@ fn run_kernel_precopied(
                 );
             }
         }
-        // ── Conv2d Quantized (u4/u8) — SWAR packed kernels ───────
-        "conv2d_u4" | "conv2d_u4_i8" | "conv2d_u8" | "conv2d_u8_i8" => {
+        // ── Conv2d Quantized (u4/u8) — i8 activation path ───────
+        "conv2d_u4_i8" | "conv2d_u4_i8_relu" | "conv2d_u4_i8_gelu" | "conv2d_u4_i8_silu"
+        | "conv2d_u8_i8" | "conv2d_u8_i8_relu" | "conv2d_u8_i8_gelu" | "conv2d_u8_i8_silu" => {
+            return quantized_conv2d_dispatch_precopied_i8(
+                inputs,
+                output,
+                params,
+                weight_meta,
+                kernel_name,
+            );
+        }
+        // ── Conv2d Quantized (u4/u8) — FP32 activation path ───────
+        "conv2d_u4" | "conv2d_u4_relu" | "conv2d_u4_gelu" | "conv2d_u4_silu" | "conv2d_u8"
+        | "conv2d_u8_relu" | "conv2d_u8_gelu" | "conv2d_u8_silu" => {
             let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
                 return Err(BackendError::Dispatch(
                     "conv2d_u4/u8: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
@@ -1031,15 +1260,9 @@ fn run_kernel_precopied(
                 ));
             };
             if inputs.len() >= 2 {
-                let input_data: Vec<f32> = if kernel_name.ends_with("_i8") {
-                    matmul::dequantize_i8_activation(&inputs[0])
-                } else {
-                    bytemuck::cast_slice::<_, f32>(&inputs[0]).to_vec()
-                };
+                // No to_vec() copy — cast input slice directly
+                let input_data: &[f32] = bytemuck::cast_slice(&inputs[0]);
                 let raw = &inputs[1];
-                let mut packed_bytes: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
-                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
-                byte_slice[..raw.len()].copy_from_slice(raw);
                 let bias_data: Vec<f32> = if inputs.len() >= 3 {
                     bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
                 } else {
@@ -1059,17 +1282,19 @@ fn run_kernel_precopied(
                 let n = input_data.len() / (c * h * w).max(1);
                 macro_rules! call_packed_conv_precopied {
                     ($PackedType:ty, $fn:ident) => {{
-                        let packed_data: Vec<$PackedType> =
-                            bytemuck::cast_slice(&packed_bytes).to_vec();
+                        // Direct aligned cast instead of Vec<u32> intermediate
+                        let packed_data: Vec<$PackedType> = aligned_packed_slice(raw);
                         let pt = PackedTensor::from_raw(
-                            packed_data, flat_shape, meta.scales, meta.zero_points,
+                            packed_data,
+                            flat_shape,
+                            meta.scales,
+                            meta.zero_points,
                         );
                         let bias_opt = if !bias_data.is_empty() {
                             Some(&bias_data[..])
                         } else {
                             None
                         };
-                        // Parse fused activation from kernel name suffix (e.g. "conv2d_u4_silu")
                         let fused_act: Option<&str> = if kernel_name.contains("_relu") {
                             Some("relu")
                         } else if kernel_name.contains("_gelu") {
@@ -1081,14 +1306,8 @@ fn run_kernel_precopied(
                         };
                         unsafe {
                             packed_conv::$fn(
-                                &input_data,
-                                n, c, h, w,
-                                &pt,
-                                bias_opt,
-                                stride, padding, dilation, groups,
-                                kh, kw,
-                                fused_act,
-                                out_f32,
+                                input_data, n, c, h, w, &pt, bias_opt, stride, padding, dilation,
+                                groups, kh, kw, fused_act, out_f32,
                             );
                         }
                     }};
@@ -1589,9 +1808,9 @@ impl Backend for CpuBackend {
                     let has_bias = input_slices.len() >= 3;
                     let activation_type = match fused_type {
                         Some("MatMulAddRelu") | Some("OpRelu") => 1, // ReLU
-                        Some("MatMulAddGelu") | Some("OpGelu") => 2,  // GELU
-                        Some("MatMulAddSilu") | Some("OpSilu") => 3,  // SiLU
-                        _ => 0,                                        // No activation
+                        Some("MatMulAddGelu") | Some("OpGelu") => 2, // GELU
+                        Some("MatMulAddSilu") | Some("OpSilu") => 3, // SiLU
+                        _ => 0,                                      // No activation
                     };
                     let kernel_name = match (fused_type, is_quantized) {
                         // Non-quantized fused patterns: use specialized kernels for now
@@ -1606,13 +1825,17 @@ impl Backend for CpuBackend {
                         (_, false) => "matmul",
                         // Quantized: keep specialized kernels
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
+                            if input_dtypes
+                                .iter()
+                                .any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
                             "matmul_u4_i8"
                         }
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
+                            if input_dtypes
+                                .iter()
+                                .any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
                                 && !input_dtypes
                                     .iter()
@@ -1706,10 +1929,7 @@ impl Backend for CpuBackend {
                             ]),
                         )
                     } else {
-                        (
-                            vec![m, k, n],
-                            Some(vec![m_dim, k_dim, n_dim]),
-                        )
+                        (vec![m, k, n], Some(vec![m_dim, k_dim, n_dim]))
                     };
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -3218,10 +3438,16 @@ impl Backend for CpuBackend {
                         .first()
                         .and_then(|&input_id| graph.get_node(input_id))
                         .map(|n| match &n.output_type.dtype {
-                            IrDType::U4 { scales, zero_points, .. }
-                            | IrDType::U8 { scales, zero_points, .. } => {
-                                (scales.clone(), zero_points.clone())
+                            IrDType::U4 {
+                                scales,
+                                zero_points,
+                                ..
                             }
+                            | IrDType::U8 {
+                                scales,
+                                zero_points,
+                                ..
+                            } => (scales.clone(), zero_points.clone()),
                             _ => (vec![], vec![]),
                         })
                         .unwrap_or_default();
@@ -3360,15 +3586,14 @@ impl Backend for CpuBackend {
                         }
                     } else {
                         // Per-tensor: include calibration scale/zp from attrs if available
-                        if let (Some(scale_str), Some(zp_str)) = (
-                            node.attrs.get("scale"),
-                            node.attrs.get("zero_point"),
-                        ) {
+                        if let (Some(scale_str), Some(zp_str)) =
+                            (node.attrs.get("scale"), node.attrs.get("zero_point"))
+                        {
                             if let (Ok(scale), Ok(zp)) =
                                 (scale_str.parse::<f32>(), zp_str.parse::<f32>())
                             {
                                 params.push(scale.to_bits() as usize); // params[3] = scale_bits
-                                params.push(zp.to_bits() as usize);    // params[4] = zero_point_bits
+                                params.push(zp.to_bits() as usize); // params[4] = zero_point_bits
                             }
                         }
                     }
@@ -3406,8 +3631,10 @@ impl Backend for CpuBackend {
                                         .unwrap_or(0);
                                     params.push(1); // per_channel flag
                                     params.push(nc);
-                                    let scales_str = pred.attrs.get("scales").cloned().unwrap_or_default();
-                                    let zps_str = pred.attrs.get("zero_points").cloned().unwrap_or_default();
+                                    let scales_str =
+                                        pred.attrs.get("scales").cloned().unwrap_or_default();
+                                    let zps_str =
+                                        pred.attrs.get("zero_points").cloned().unwrap_or_default();
                                     for s in scales_str.split(',') {
                                         if let Ok(v) = s.parse::<f32>() {
                                             params.push(v.to_bits() as usize);
@@ -3855,7 +4082,8 @@ impl Backend for CpuBackend {
                                     resolve_params(params, param_dims, shape_env, 5)?;
                                 let &[m, _k, n, has_bias, activation] = &matmul_params[..] else {
                                     return Err(BackendError::Dispatch(
-                                        "matmul: expected params [M,K,N,has_bias,activation]".into(),
+                                        "matmul: expected params [M,K,N,has_bias,activation]"
+                                            .into(),
                                     ));
                                 };
                                 let has_bias = has_bias != 0;
@@ -3997,10 +4225,15 @@ impl Backend for CpuBackend {
                                                 b.as_ptr(),
                                                 out_f32.as_mut_ptr(),
                                                 row,
-                                                m, n, _k,
-                                                a_stride, _k, 1,
+                                                m,
+                                                n,
+                                                _k,
+                                                a_stride,
+                                                _k,
+                                                1,
                                                 b_batch_stride,
-                                                n, 1,
+                                                n,
+                                                1,
                                             );
                                         }
                                         if apply_fusion {
@@ -4223,7 +4456,9 @@ impl Backend for CpuBackend {
                                         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                         if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
                                             unsafe {
-                                                microkernels::transpose_f32_avx2(input, out_f32, m, n);
+                                                microkernels::transpose_f32_avx2(
+                                                    input, out_f32, m, n,
+                                                );
                                             }
                                         } else {
                                             #[cfg(not(feature = "parallel"))]
@@ -4296,7 +4531,8 @@ impl Backend for CpuBackend {
                                                     let mut in_idx = 0usize;
                                                     let mut remaining = out_idx;
                                                     for k in 0..rank {
-                                                        let coord = remaining / out_strides[perm[k]];
+                                                        let coord =
+                                                            remaining / out_strides[perm[k]];
                                                         remaining %= out_strides[perm[k]];
                                                         in_idx += coord * in_strides[perm[k]];
                                                     }
@@ -4689,49 +4925,243 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
-                        "conv2d_u4" | "conv2d_u4_i8" | "conv2d_u4_relu" | "conv2d_u4_i8_relu"
-                        | "conv2d_u4_gelu" | "conv2d_u4_i8_gelu" | "conv2d_u4_silu" | "conv2d_u4_i8_silu"
-                        | "conv2d_u8" | "conv2d_u8_i8" | "conv2d_u8_relu" | "conv2d_u8_i8_relu" | "conv2d_u8_gelu" | "conv2d_u8_i8_gelu" | "conv2d_u8_silu" | "conv2d_u8_i8_silu" => {
+                        // ── Conv2d Quantized (u4/u8) — i8 activation path (arena) ──
+                        "conv2d_u4_i8" | "conv2d_u4_i8_relu" | "conv2d_u4_i8_gelu"
+                        | "conv2d_u4_i8_silu" | "conv2d_u8_i8" | "conv2d_u8_i8_relu"
+                        | "conv2d_u8_i8_gelu" | "conv2d_u8_i8_silu" => {
+                            if input_slices.len() >= 2 {
+                                let a_slice = &input_slices[0];
+                                let w_slice = &input_slices[1];
+                                let (activation_payload, raw, bias_data) = {
+                                    let d = arena.data_mut();
+                                    (
+                                        d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(),
+                                        d[w_slice.offset..w_slice.offset + w_slice.size].to_vec(),
+                                        if input_slices.len() >= 3 {
+                                            let b = &input_slices[2];
+                                            bytemuck::cast_slice::<_, f32>(
+                                                &d[b.offset..b.offset + b.size],
+                                            )
+                                            .to_vec()
+                                        } else {
+                                            vec![]
+                                        },
+                                    )
+                                };
+                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
+                                    &params[..]
+                                else {
+                                    return Err(BackendError::Dispatch("conv2d_u4_i8/u8_i8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                                };
+                                let meta = weight_meta.clone().ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_u4_i8/u8_i8: missing weight_meta".into(),
+                                    )
+                                })?;
+                                let out_f32 = {
+                                    let d = arena.data_mut();
+                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                };
+
+                                // Parse i8 activation header
+                                let (affine, act_i8) = {
+                                    let scale = if activation_payload.len() >= 4 {
+                                        f32::from_le_bytes(
+                                            activation_payload[0..4].try_into().unwrap(),
+                                        )
+                                    } else {
+                                        1.0
+                                    };
+                                    let zp = if activation_payload.len() >= 8 {
+                                        f32::from_le_bytes(
+                                            activation_payload[4..8].try_into().unwrap(),
+                                        )
+                                    } else {
+                                        0.0
+                                    };
+                                    let payload = activation_payload.get(8..).unwrap_or(&[]);
+                                    let act_i8: &[i8] = bytemuck::cast_slice(payload);
+                                    (
+                                        microkernels::I8ActivationAffine { scale, zero: zp },
+                                        act_i8.to_vec(),
+                                    )
+                                };
+
+                                let oc = meta.shape[0];
+                                let c_per_g = input_c / groups;
+                                let oc_per_g = oc / groups;
+                                let h_out = packed_conv::conv_out_size(
+                                    input_h, kernel_h, stride, padding, dilation,
+                                );
+                                let w_out = packed_conv::conv_out_size(
+                                    input_w, kernel_w, stride, padding, dilation,
+                                );
+                                let num_pixels = h_out * w_out;
+                                let k = c_per_g * kernel_h * kernel_w;
+                                let n = act_i8.len() / (input_c * input_h * input_w).max(1);
+
+                                let fused_act: Option<&str> = if kernel_name.contains("_relu") {
+                                    Some("relu")
+                                } else if kernel_name.contains("_gelu") {
+                                    Some("gelu")
+                                } else if kernel_name.contains("_silu") {
+                                    Some("silu")
+                                } else {
+                                    None
+                                };
+
+                                let bit_width = meta.bit_width;
+                                let mut col_buf: Vec<i8> = vec![0i8; num_pixels * k];
+
+                                for nn in 0..n {
+                                    let act_base = nn * input_c * input_h * input_w;
+                                    let out_base = nn * oc * num_pixels;
+                                    for g in 0..groups {
+                                        let g_c_off = g * c_per_g;
+                                        let g_oc_off = g * oc_per_g;
+                                        let act_group =
+                                            &act_i8[act_base + g_c_off * input_h * input_w..];
+                                        unsafe {
+                                            packed_conv::im2col_i8(
+                                                act_group,
+                                                c_per_g,
+                                                input_h,
+                                                input_w,
+                                                kernel_h,
+                                                kernel_w,
+                                                stride,
+                                                padding,
+                                                dilation,
+                                                &mut col_buf,
+                                            );
+                                        }
+                                        let mut payload = Vec::with_capacity(8 + col_buf.len());
+                                        payload.extend_from_slice(&affine.scale.to_le_bytes());
+                                        payload.extend_from_slice(&affine.zero.to_le_bytes());
+                                        let col_u8: &[u8] = bytemuck::cast_slice(&col_buf);
+                                        payload.extend_from_slice(col_u8);
+
+                                        let inner: usize = meta.shape[1..].iter().product();
+                                        if bit_width == 4 {
+                                            let kp = inner.div_ceil(U4x8::ITEMS);
+                                            let w_sl = aligned_packed_slice::<U4x8>(&raw);
+                                            let w_slice =
+                                                &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
+                                            let local_scales = if meta.scales.len() > 1 {
+                                                meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                                            } else {
+                                                meta.scales.clone()
+                                            };
+                                            let local_zps = if meta.zero_points.len() > 1 {
+                                                meta.zero_points[g_oc_off..g_oc_off + oc_per_g]
+                                                    .to_vec()
+                                            } else {
+                                                meta.zero_points.clone()
+                                            };
+                                            let pt = PackedTensor::from_raw(
+                                                w_slice.to_vec(),
+                                                vec![oc_per_g, inner],
+                                                local_scales,
+                                                local_zps,
+                                            );
+                                            let mut temp = vec![0.0f32; num_pixels * oc_per_g];
+                                            microkernels::gemm_cpu_flat_i8_u4x8(
+                                                &pt, &payload, &mut temp, num_pixels, k, oc_per_g,
+                                            );
+                                            for pixel in 0..num_pixels {
+                                                for f in 0..oc_per_g {
+                                                    let mut val = temp[pixel * oc_per_g + f];
+                                                    if g_oc_off + f < bias_data.len() {
+                                                        val += bias_data[g_oc_off + f];
+                                                    }
+                                                    if let Some(act) = fused_act {
+                                                        val = match act {
+                                                            "relu" => val.max(0.0),
+                                                            "silu" => val / (1.0 + (-val).exp()),
+                                                            _ => val,
+                                                        };
+                                                    }
+                                                    out_f32[out_base
+                                                        + (g_oc_off + f) * num_pixels
+                                                        + pixel] = val;
+                                                }
+                                            }
+                                        } else {
+                                            let kp = inner.div_ceil(U8x4::ITEMS);
+                                            let w_sl = aligned_packed_slice::<U8x4>(&raw);
+                                            let w_slice =
+                                                &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
+                                            let local_scales = if meta.scales.len() > 1 {
+                                                meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
+                                            } else {
+                                                meta.scales.clone()
+                                            };
+                                            let local_zps = if meta.zero_points.len() > 1 {
+                                                meta.zero_points[g_oc_off..g_oc_off + oc_per_g]
+                                                    .to_vec()
+                                            } else {
+                                                meta.zero_points.clone()
+                                            };
+                                            let pt = PackedTensor::from_raw(
+                                                w_slice.to_vec(),
+                                                vec![oc_per_g, inner],
+                                                local_scales,
+                                                local_zps,
+                                            );
+                                            let mut temp = vec![0.0f32; num_pixels * oc_per_g];
+                                            microkernels::gemm_cpu_flat_i8_u8x4(
+                                                &pt, &payload, &mut temp, num_pixels, k, oc_per_g,
+                                            );
+                                            for pixel in 0..num_pixels {
+                                                for f in 0..oc_per_g {
+                                                    let mut val = temp[pixel * oc_per_g + f];
+                                                    if g_oc_off + f < bias_data.len() {
+                                                        val += bias_data[g_oc_off + f];
+                                                    }
+                                                    if let Some(act) = fused_act {
+                                                        val = match act {
+                                                            "relu" => val.max(0.0),
+                                                            "silu" => val / (1.0 + (-val).exp()),
+                                                            _ => val,
+                                                        };
+                                                    }
+                                                    out_f32[out_base
+                                                        + (g_oc_off + f) * num_pixels
+                                                        + pixel] = val;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // ── Conv2d Quantized (u4/u8) — FP32 activation path (arena) ──
+                        "conv2d_u4" | "conv2d_u4_relu" | "conv2d_u4_gelu" | "conv2d_u4_silu"
+                        | "conv2d_u8" | "conv2d_u8_relu" | "conv2d_u8_gelu" | "conv2d_u8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
                             // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
                             if input_slices.len() >= 2 {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];
-                                let (input_data, packed_bytes) = {
+                                let (input_data, raw, bias_data) = {
                                     let d = arena.data_mut();
                                     (
-                                        if kernel_name.ends_with("_i8") {
-                                            crate::backend::cpu::matmul::dequantize_i8_activation(
-                                                &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                            )
-                                        } else {
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                        )
+                                        .to_vec(),
+                                        d[w_slice.offset..w_slice.offset + w_slice.size].to_vec(),
+                                        if input_slices.len() >= 3 {
+                                            let b = &input_slices[2];
                                             bytemuck::cast_slice::<_, f32>(
-                                                &d[a_slice.offset..a_slice.offset + a_slice.size],
+                                                &d[b.offset..b.offset + b.size],
                                             )
                                             .to_vec()
-                                        },
-                                        {
-                                            let raw =
-                                                &d[w_slice.offset..w_slice.offset + w_slice.size];
-                                            let mut aligned: Vec<u32> =
-                                                vec![0u32; raw.len().div_ceil(4)];
-                                            let byte_slice =
-                                                bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                                            byte_slice[..raw.len()].copy_from_slice(raw);
-                                            aligned
+                                        } else {
+                                            vec![]
                                         },
                                     )
-                                };
-                                let bias_data: Vec<f32> = if input_slices.len() >= 3 {
-                                    let b_slice = &input_slices[2];
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec()
-                                } else {
-                                    vec![]
                                 };
                                 let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
@@ -4767,32 +5197,40 @@ impl Backend for CpuBackend {
                                 };
                                 macro_rules! dispatch_packed_conv {
                                     ($PackedType:ty, $fn:ident) => {{
+                                        // Direct aligned cast instead of Vec<u32> intermediate
                                         let packed_data: Vec<$PackedType> =
-                                            bytemuck::cast_slice(&packed_bytes).to_vec();
+                                            aligned_packed_slice(&raw);
                                         let pt = PackedTensor::from_raw(
                                             packed_data,
                                             flat_shape,
                                             meta.scales,
                                             meta.zero_points,
                                         );
-                                        // Parse fused activation from kernel name suffix
-                                        let fused_act: Option<&str> = if kernel_name.contains("_relu") {
-                                            Some("relu")
-                                        } else if kernel_name.contains("_gelu") {
-                                            Some("gelu")
-                                        } else if kernel_name.contains("_silu") {
-                                            Some("silu")
-                                        } else {
-                                            None
-                                        };
+                                        let fused_act: Option<&str> =
+                                            if kernel_name.contains("_relu") {
+                                                Some("relu")
+                                            } else if kernel_name.contains("_gelu") {
+                                                Some("gelu")
+                                            } else if kernel_name.contains("_silu") {
+                                                Some("silu")
+                                            } else {
+                                                None
+                                            };
                                         unsafe {
                                             packed_conv::$fn(
                                                 &input_data,
-                                                n, input_c, input_h, input_w,
+                                                n,
+                                                input_c,
+                                                input_h,
+                                                input_w,
                                                 &pt,
                                                 bias_opt,
-                                                stride, padding, dilation, groups,
-                                                kernel_h, kernel_w,
+                                                stride,
+                                                padding,
+                                                dilation,
+                                                groups,
+                                                kernel_h,
+                                                kernel_w,
                                                 fused_act,
                                                 out_f32,
                                             );
@@ -6011,38 +6449,45 @@ impl Backend for CpuBackend {
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let k = params.first().copied().unwrap_or(1);
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_slice| {
-                                    let mut indexed: Vec<(usize, f32)> =
-                                        input.iter().copied().enumerate().collect();
-                                    if input.len() > k {
-                                        indexed.select_nth_unstable_by(
-                                            input.len().saturating_sub(k),
-                                            |a, b| {
-                                                a.1.partial_cmp(&b.1)
-                                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                            },
-                                        );
-                                    }
-
-                                    // Write values (f32) to primary output
-                                    for i in 0..k.min(out_slice.len()) {
-                                        out_slice[i] = indexed[input.len().saturating_sub(k) + i].1;
-                                    }
-
-                                    // Write indices (i64) to secondary output
-                                    if let Some(sec_slice) = secondary_output_slice {
-                                        let d = arena.data_mut();
-                                        let sec_start = sec_slice.offset;
-                                        let sec_end = sec_slice.offset + sec_slice.size;
-                                        let idx_slice = bytemuck::cast_slice_mut::<_, u64>(
-                                            &mut d[sec_start..sec_end],
-                                        );
-                                        for i in 0..k.min(idx_slice.len()) {
-                                            idx_slice[i] =
-                                                indexed[input.len().saturating_sub(k) + i].0 as u64;
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_slice| {
+                                        let mut indexed: Vec<(usize, f32)> =
+                                            input.iter().copied().enumerate().collect();
+                                        if input.len() > k {
+                                            indexed.select_nth_unstable_by(
+                                                input.len().saturating_sub(k),
+                                                |a, b| {
+                                                    a.1.partial_cmp(&b.1)
+                                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                                },
+                                            );
                                         }
-                                    }
-                                });
+
+                                        // Write values (f32) to primary output
+                                        for i in 0..k.min(out_slice.len()) {
+                                            out_slice[i] =
+                                                indexed[input.len().saturating_sub(k) + i].1;
+                                        }
+
+                                        // Write indices (i64) to secondary output
+                                        if let Some(sec_slice) = secondary_output_slice {
+                                            let d = arena.data_mut();
+                                            let sec_start = sec_slice.offset;
+                                            let sec_end = sec_slice.offset + sec_slice.size;
+                                            let idx_slice = bytemuck::cast_slice_mut::<_, u64>(
+                                                &mut d[sec_start..sec_end],
+                                            );
+                                            for i in 0..k.min(idx_slice.len()) {
+                                                idx_slice[i] =
+                                                    indexed[input.len().saturating_sub(k) + i].0
+                                                        as u64;
+                                            }
+                                        }
+                                    },
+                                );
                             }
                         }
                         "topk_values" | "topk_indices" => {
@@ -6068,13 +6513,15 @@ impl Backend for CpuBackend {
                                             );
                                         }
                                         if is_values {
-                                            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(out_slice);
+                                            let out_f32 =
+                                                bytemuck::cast_slice_mut::<_, f32>(out_slice);
                                             for i in 0..k.min(out_f32.len()) {
                                                 out_f32[i] =
                                                     indexed[input.len().saturating_sub(k) + i].1;
                                             }
                                         } else {
-                                            let out_u64 = bytemuck::cast_slice_mut::<_, u64>(out_slice);
+                                            let out_u64 =
+                                                bytemuck::cast_slice_mut::<_, u64>(out_slice);
                                             for i in 0..k.min(out_u64.len()) {
                                                 out_u64[i] =
                                                     indexed[input.len().saturating_sub(k) + i].0
@@ -6093,32 +6540,37 @@ impl Backend for CpuBackend {
                                 let h_in = params.get(2).copied().unwrap_or(1);
                                 let w_in = params.get(3).copied().unwrap_or(1);
                                 let hw = h_in * w_in;
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    let in_len = input.len();
-                                    if scale_h > 0
-                                        && scale_w > 0
-                                        && hw > 0
-                                        && in_len > 0
-                                        && in_len % hw == 0
-                                    {
-                                        let nc = in_len / hw;
-                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let in_len = input.len();
+                                        if scale_h > 0
+                                            && scale_w > 0
+                                            && hw > 0
+                                            && in_len > 0
+                                            && in_len % hw == 0
                                         {
-                                            use crate::backend::cpu::microkernels::has_avx2;
-                                            if has_avx2() {
-                                                unsafe {
-                                                    crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
+                                            let nc = in_len / hw;
+                                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                            {
+                                                use crate::backend::cpu::microkernels::has_avx2;
+                                                if has_avx2() {
+                                                    unsafe {
+                                                        crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
                                                         input, out_f32, nc, h_in, w_in, scale_h, scale_w,
                                                     );
+                                                    }
+                                                    return;
                                                 }
-                                                return;
                                             }
-                                        }
-                                        crate::backend::cpu::microkernels::upsample_nearest2d_f32(
+                                            crate::backend::cpu::microkernels::upsample_nearest2d_f32(
                                             input, out_f32, nc, h_in, w_in, scale_h, scale_w,
                                         );
-                                    }
-                                });
+                                        }
+                                    },
+                                );
                             }
                         }
                         "upsample_bilinear2d" => {
@@ -6129,48 +6581,57 @@ impl Backend for CpuBackend {
                                 let h_in = params.get(2).copied().unwrap_or(1);
                                 let w_in = params.get(3).copied().unwrap_or(1);
                                 let hw = h_in * w_in;
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    let out_len = out_f32.len();
-                                    let in_len = input.len();
-                                    if scale_h > 0
-                                        && scale_w > 0
-                                        && hw > 0
-                                        && out_len == in_len * scale_h * scale_w
-                                        && in_len > 0
-                                        && in_len % hw == 0
-                                    {
-                                        let nc = in_len / hw;
-                                        for nci in 0..nc {
-                                            for hi in 0..h_in * scale_h {
-                                                for wi in 0..w_in * scale_w {
-                                                    let src_h = (hi as f64 / scale_h as f64)
-                                                        .min((h_in - 1) as f64);
-                                                    let src_w = (wi as f64 / scale_w as f64)
-                                                        .min((w_in - 1) as f64);
-                                                    let h0 = src_h.floor() as usize;
-                                                    let w0 = src_w.floor() as usize;
-                                                    let h1 = (h0 + 1).min(h_in - 1);
-                                                    let w1 = (w0 + 1).min(w_in - 1);
-                                                    let dh = src_h - h0 as f64;
-                                                    let dw = src_w - w0 as f64;
-                                                    let v00 = input[nci * hw + h0 * w_in + w0];
-                                                    let v01 = input[nci * hw + h0 * w_in + w1];
-                                                    let v10 = input[nci * hw + h1 * w_in + w0];
-                                                    let v11 = input[nci * hw + h1 * w_in + w1];
-                                                    let v0 = v00 * (1.0 - dw as f32) + v01 * dw as f32;
-                                                    let v1 = v10 * (1.0 - dw as f32) + v11 * dw as f32;
-                                                    let val = v0 * (1.0 - dh as f32) + v1 * dh as f32;
-                                                    let out_idx = nci * h_in * scale_h * w_in * scale_w
-                                                        + hi * w_in * scale_w
-                                                        + wi;
-                                                    if out_idx < out_len {
-                                                        out_f32[out_idx] = val;
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let out_len = out_f32.len();
+                                        let in_len = input.len();
+                                        if scale_h > 0
+                                            && scale_w > 0
+                                            && hw > 0
+                                            && out_len == in_len * scale_h * scale_w
+                                            && in_len > 0
+                                            && in_len % hw == 0
+                                        {
+                                            let nc = in_len / hw;
+                                            for nci in 0..nc {
+                                                for hi in 0..h_in * scale_h {
+                                                    for wi in 0..w_in * scale_w {
+                                                        let src_h = (hi as f64 / scale_h as f64)
+                                                            .min((h_in - 1) as f64);
+                                                        let src_w = (wi as f64 / scale_w as f64)
+                                                            .min((w_in - 1) as f64);
+                                                        let h0 = src_h.floor() as usize;
+                                                        let w0 = src_w.floor() as usize;
+                                                        let h1 = (h0 + 1).min(h_in - 1);
+                                                        let w1 = (w0 + 1).min(w_in - 1);
+                                                        let dh = src_h - h0 as f64;
+                                                        let dw = src_w - w0 as f64;
+                                                        let v00 = input[nci * hw + h0 * w_in + w0];
+                                                        let v01 = input[nci * hw + h0 * w_in + w1];
+                                                        let v10 = input[nci * hw + h1 * w_in + w0];
+                                                        let v11 = input[nci * hw + h1 * w_in + w1];
+                                                        let v0 = v00 * (1.0 - dw as f32)
+                                                            + v01 * dw as f32;
+                                                        let v1 = v10 * (1.0 - dw as f32)
+                                                            + v11 * dw as f32;
+                                                        let val =
+                                                            v0 * (1.0 - dh as f32) + v1 * dh as f32;
+                                                        let out_idx =
+                                                            nci * h_in * scale_h * w_in * scale_w
+                                                                + hi * w_in * scale_w
+                                                                + wi;
+                                                        if out_idx < out_len {
+                                                            out_f32[out_idx] = val;
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                });
+                                    },
+                                );
                             }
                         }
                         "adaptive_avg_pool2d" => {
@@ -6178,52 +6639,63 @@ impl Backend for CpuBackend {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let out_h = params.first().copied().unwrap_or(1);
                                 let out_w = params.get(1).copied().unwrap_or(1);
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    let out_len = out_f32.len();
-                                    if out_len > 0 {
-                                        let in_len = input.len();
-                                        let nc = if out_h > 0 && out_w > 0 {
-                                            out_len / (out_h * out_w)
-                                        } else {
-                                            0
-                                        };
-                                        if nc > 0 && in_len > 0 && in_len % nc == 0 {
-                                            let hw = in_len / nc;
-                                            let mut h = (hw as f64).sqrt() as usize;
-                                            while h > 0 && hw % h != 0 {
-                                                h -= 1;
-                                            }
-                                            let w = hw / h;
-                                            if h >= out_h && w >= out_w && h > 0 && w > 0 {
-                                                microkernels::adaptive_avg_pool2d_f32_scalar(
-                                                    input, out_f32, nc, h, w, out_h, out_w,
-                                                );
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let out_len = out_f32.len();
+                                        if out_len > 0 {
+                                            let in_len = input.len();
+                                            let nc = if out_h > 0 && out_w > 0 {
+                                                out_len / (out_h * out_w)
+                                            } else {
+                                                0
+                                            };
+                                            if nc > 0 && in_len > 0 && in_len % nc == 0 {
+                                                let hw = in_len / nc;
+                                                let mut h = (hw as f64).sqrt() as usize;
+                                                while h > 0 && hw % h != 0 {
+                                                    h -= 1;
+                                                }
+                                                let w = hw / h;
+                                                if h >= out_h && w >= out_w && h > 0 && w > 0 {
+                                                    microkernels::adaptive_avg_pool2d_f32_scalar(
+                                                        input, out_f32, nc, h, w, out_h, out_w,
+                                                    );
+                                                }
                                             }
                                         }
-                                    }
-                                });
+                                    },
+                                );
                             }
                         }
                         "repeat" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    let in_len = input.len();
-                                    let out_len = out_f32.len();
-                                    if in_len > 0 && out_len >= in_len && out_len % in_len == 0 {
-                                        let factor = out_len / in_len;
-                                        for i in 0..in_len {
-                                            let val = input[i];
-                                            for f in 0..factor {
-                                                out_f32[i * factor + f] = val;
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let in_len = input.len();
+                                        let out_len = out_f32.len();
+                                        if in_len > 0 && out_len >= in_len && out_len % in_len == 0
+                                        {
+                                            let factor = out_len / in_len;
+                                            for i in 0..in_len {
+                                                let val = input[i];
+                                                for f in 0..factor {
+                                                    out_f32[i * factor + f] = val;
+                                                }
+                                            }
+                                        } else if in_len > 0 {
+                                            for i in 0..out_len {
+                                                out_f32[i] = input[i % in_len];
                                             }
                                         }
-                                    } else if in_len > 0 {
-                                        for i in 0..out_len {
-                                            out_f32[i] = input[i % in_len];
-                                        }
-                                    }
-                                });
+                                    },
+                                );
                             }
                         }
                         "cumsum" => {
@@ -6231,43 +6703,56 @@ impl Backend for CpuBackend {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let exclusive = params.get(1).copied().unwrap_or(0);
                                 let rev = params.get(2).copied().unwrap_or(0);
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    let len = out_f32.len().min(input.len());
-                                    if rev == 0 {
-                                        let mut s = 0.0f32;
-                                        for i in 0..len {
-                                            s += input[i];
-                                            out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let len = out_f32.len().min(input.len());
+                                        if rev == 0 {
+                                            let mut s = 0.0f32;
+                                            for i in 0..len {
+                                                s += input[i];
+                                                out_f32[i] =
+                                                    if exclusive != 0 { s - input[i] } else { s };
+                                            }
+                                        } else {
+                                            let mut s = 0.0f32;
+                                            for i in (0..len).rev() {
+                                                s += input[i];
+                                                out_f32[i] =
+                                                    if exclusive != 0 { s - input[i] } else { s };
+                                            }
                                         }
-                                    } else {
-                                        let mut s = 0.0f32;
-                                        for i in (0..len).rev() {
-                                            s += input[i];
-                                            out_f32[i] = if exclusive != 0 { s - input[i] } else { s };
-                                        }
-                                    }
-                                });
+                                    },
+                                );
                             }
                         }
                         "erf_f32" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    for i in 0..out_f32.len().min(input.len()) {
-                                        let x = input[i];
-                                        let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-                                        #[allow(clippy::excessive_precision)]
-                                        let y = 1.0
-                                            - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741)
-                                                * t
-                                                - 0.284496736)
-                                                * t
-                                                + 0.254829592)
-                                                * t
-                                                * (-x * x).exp();
-                                        out_f32[i] = x.signum() * y;
-                                    }
-                                });
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        for i in 0..out_f32.len().min(input.len()) {
+                                            let x = input[i];
+                                            let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+                                            #[allow(clippy::excessive_precision)]
+                                            let y = 1.0
+                                                - (((((1.061405429 * t - 1.453152027) * t)
+                                                    + 1.421413741)
+                                                    * t
+                                                    - 0.284496736)
+                                                    * t
+                                                    + 0.254829592)
+                                                    * t
+                                                    * (-x * x).exp();
+                                            out_f32[i] = x.signum() * y;
+                                        }
+                                    },
+                                );
                             }
                         }
                         "flip" => {
@@ -6285,41 +6770,46 @@ impl Backend for CpuBackend {
                                     vec![]
                                 };
                                 let ndim = shape.len();
-                                arena::with_unary_f32_slices(arena, *input_slice, output_slice, |input, out_f32| {
-                                    let len = out_f32.len().min(input.len());
-                                    if params.is_empty() {
-                                        for i in 0..len {
-                                            out_f32[i] = input[len - 1 - i];
-                                        }
-                                    } else {
-                                        let mut indices = vec![0i64; ndim];
-                                        let mut strides = vec![0i64; ndim];
-                                        let mut stride = 1i64;
-                                        for d in (0..ndim).rev() {
-                                            strides[d] = stride;
-                                            stride *= shape[d] as i64;
-                                        }
-                                        for out_idx in 0..len {
-                                            let mut src_idx = 0i64;
-                                            for d in 0..ndim {
-                                                let idx = if flip_dims.contains(&d) {
-                                                    shape[d] as i64 - 1 - indices[d]
-                                                } else {
-                                                    indices[d]
-                                                };
-                                                src_idx += idx * strides[d];
+                                arena::with_unary_f32_slices(
+                                    arena,
+                                    *input_slice,
+                                    output_slice,
+                                    |input, out_f32| {
+                                        let len = out_f32.len().min(input.len());
+                                        if params.is_empty() {
+                                            for i in 0..len {
+                                                out_f32[i] = input[len - 1 - i];
                                             }
-                                            out_f32[out_idx] = input[src_idx as usize];
+                                        } else {
+                                            let mut indices = vec![0i64; ndim];
+                                            let mut strides = vec![0i64; ndim];
+                                            let mut stride = 1i64;
                                             for d in (0..ndim).rev() {
-                                                indices[d] += 1;
-                                                if indices[d] < shape[d] as i64 {
-                                                    break;
+                                                strides[d] = stride;
+                                                stride *= shape[d] as i64;
+                                            }
+                                            for out_idx in 0..len {
+                                                let mut src_idx = 0i64;
+                                                for d in 0..ndim {
+                                                    let idx = if flip_dims.contains(&d) {
+                                                        shape[d] as i64 - 1 - indices[d]
+                                                    } else {
+                                                        indices[d]
+                                                    };
+                                                    src_idx += idx * strides[d];
                                                 }
-                                                indices[d] = 0;
+                                                out_f32[out_idx] = input[src_idx as usize];
+                                                for d in (0..ndim).rev() {
+                                                    indices[d] += 1;
+                                                    if indices[d] < shape[d] as i64 {
+                                                        break;
+                                                    }
+                                                    indices[d] = 0;
+                                                }
                                             }
                                         }
-                                    }
-                                });
+                                    },
+                                );
                             }
                         }
                         "where_f32" => {
@@ -6338,7 +6828,8 @@ impl Backend for CpuBackend {
                                         let y = inputs[2];
                                         let len = out_f32.len();
                                         for i in 0..len {
-                                            let c = cond.get(i % cond.len()).copied().unwrap_or(0.0);
+                                            let c =
+                                                cond.get(i % cond.len()).copied().unwrap_or(0.0);
                                             out_f32[i] = if c != 0.0 {
                                                 x.get(i % x.len()).copied().unwrap_or(0.0)
                                             } else {
@@ -7088,7 +7579,8 @@ impl Backend for CpuBackend {
                                     // Pack using cached scales
                                     for ch in 0..num_channels {
                                         let start = ch * num_elems_per_channel;
-                                        let end = (start + num_elems_per_channel).min(f32_data.len());
+                                        let end =
+                                            (start + num_elems_per_channel).min(f32_data.len());
                                         let scale = scales[ch];
                                         let inv_s = if scale != 0.0 { 1.0 / scale } else { 0.0 };
                                         let zp = zero_points[ch];
@@ -7099,14 +7591,16 @@ impl Backend for CpuBackend {
                                                 as i32;
                                             let word_idx = j / items_per_word;
                                             let shift = (j % items_per_word) * bit_width;
-                                            packed[word_idx] |= ((q as u32) & ((1 << bit_width) - 1)) << shift;
+                                            packed[word_idx] |=
+                                                ((q as u32) & ((1 << bit_width) - 1)) << shift;
                                         }
                                     }
                                 } else {
                                     // Original path: recompute per-channel scales
                                     for ch in 0..num_channels {
                                         let start = ch * num_elems_per_channel;
-                                        let end = (start + num_elems_per_channel).min(f32_data.len());
+                                        let end =
+                                            (start + num_elems_per_channel).min(f32_data.len());
                                         let max_abs = f32_data[start..end]
                                             .iter()
                                             .map(|v| v.abs())
@@ -7393,9 +7887,11 @@ impl Backend for CpuBackend {
                                     let chunk_size = numel / num_channels;
                                     // Write header: num_channels (u32), then chunk_size (u32), then per-channel scales/zps
                                     let header_offset: usize = 4 + 4 + num_channels * 8;
-                                    let h32 = bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[..4]);
+                                    let h32 =
+                                        bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[..4]);
                                     h32[0] = num_channels as u32;
-                                    let chunk32 = bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[4..8]);
+                                    let chunk32 =
+                                        bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[4..8]);
                                     chunk32[0] = chunk_size as u32;
                                     let scale_start = 8;
                                     let zp_start = 8 + num_channels * 4;
@@ -7417,7 +7913,8 @@ impl Backend for CpuBackend {
                                                 } else {
                                                     ((f32_data[i] - zp) / scale)
                                                         .round()
-                                                        .clamp(-128.0, 127.0) as i8
+                                                        .clamp(-128.0, 127.0)
+                                                        as i8
                                                 };
                                                 out_bytes[header_offset + local] = q as u8;
                                             }
@@ -7427,12 +7924,14 @@ impl Backend for CpuBackend {
                                     // Per-tensor quantization with optional calibration
                                     // If params[3] and params[4] are present, use them as calibrated scale/zp
                                     let (scale, zp) = if params.len() >= 5 {
-                                        (f32::from_bits(params[3] as u32), f32::from_bits(params[4] as u32))
+                                        (
+                                            f32::from_bits(params[3] as u32),
+                                            f32::from_bits(params[4] as u32),
+                                        )
                                     } else {
                                         // Legacy: compute scale dynamically from max_abs (symmetric)
-                                        let max_abs = f32_data.iter()
-                                            .map(|v| v.abs())
-                                            .fold(0.0f32, f32::max);
+                                        let max_abs =
+                                            f32_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
                                         (if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 }, 0.0f32)
                                     };
 
@@ -7443,7 +7942,8 @@ impl Backend for CpuBackend {
                                     for i in 0..max_out {
                                         let q = ((f32_data[i] - zp) / scale)
                                             .round()
-                                            .clamp(-128.0, 127.0) as i8;
+                                            .clamp(-128.0, 127.0)
+                                            as i8;
                                         out_bytes[header_size + i] = q as u8;
                                     }
                                 }
@@ -7474,13 +7974,19 @@ impl Backend for CpuBackend {
                                     // header: [num_channels(u32)][chunk_size(u32)]
                                     // then num_channels scale(zp) pairs
                                     // then channel data blocks
-                                    let nc = u32::from_le_bytes(in_data[0..4].try_into().unwrap_or([0; 4])) as usize;
-                                    let chunk_size = u32::from_le_bytes(in_data[4..8].try_into().unwrap_or([0; 4])) as usize;
+                                    let nc = u32::from_le_bytes(
+                                        in_data[0..4].try_into().unwrap_or([0; 4]),
+                                    ) as usize;
+                                    let chunk_size = u32::from_le_bytes(
+                                        in_data[4..8].try_into().unwrap_or([0; 4]),
+                                    ) as usize;
                                     let pair_bytes = nc * 8; // scale + zp per channel
                                     let data_start = 8 + pair_bytes;
                                     for ch in 0..nc {
                                         let scale = f32::from_le_bytes(
-                                            in_data[8 + ch * 4..8 + (ch + 1) * 4].try_into().unwrap_or([0; 4]),
+                                            in_data[8 + ch * 4..8 + (ch + 1) * 4]
+                                                .try_into()
+                                                .unwrap_or([0; 4]),
                                         );
                                         let zp = f32::from_le_bytes(
                                             in_data[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
@@ -7822,10 +8328,7 @@ impl Backend for CpuBackend {
                     ..
                 } if matches!(
                     kernel_name.as_str(),
-                    "matmul_u4"
-                        | "matmul_u4_i8"
-                        | "matmul_u8"
-                        | "matmul_u8_i8"
+                    "matmul_u4" | "matmul_u4_i8" | "matmul_u8" | "matmul_u8_i8"
                 ) =>
                 {
                     let single = ExecutablePlan {
@@ -8081,7 +8584,6 @@ fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<U8x4> {
     }
     bytemuck::cast_slice(&packed).to_vec()
 }
-
 
 macro_rules! impl_simd_unary_wrapper {
     ($name:ident, $avx2:path, $scalar:path) => {
