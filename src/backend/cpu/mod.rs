@@ -163,10 +163,10 @@ fn matmul_activation_dispatch_precopied(
     if inputs.len() >= 2 {
         let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
         let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-        let bias = if inputs.len() >= 3 {
-            bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
+        let bias: &[f32] = if inputs.len() >= 3 {
+            bytemuck::cast_slice(&inputs[2])
         } else {
-            Vec::new()
+            &[]
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, _k, n] = &matmul_params[..] else {
@@ -1201,12 +1201,12 @@ fn run_kernel_precopied(
                     return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
                 };
                 let c_per_group = c / groups.max(1);
-                let input_data = bytemuck::cast_slice::<_, f32>(&inputs[0]).to_vec();
-                let weight_data = bytemuck::cast_slice::<_, f32>(&inputs[1]).to_vec();
-                let bias_data = if inputs.len() >= 3 {
-                    bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
+                let input_data: &[f32] = bytemuck::cast_slice(&inputs[0]);
+                let weight_data: &[f32] = bytemuck::cast_slice(&inputs[1]);
+                let bias_data: &[f32] = if inputs.len() >= 3 {
+                    bytemuck::cast_slice(&inputs[2])
                 } else {
-                    vec![]
+                    &[]
                 };
                 let n = input_data.len() / (c * h * w).max(1);
                 let f = weight_data.len() / (c_per_group * kh * kw).max(1);

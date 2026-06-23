@@ -1,5 +1,4 @@
 import os
-import numpy as np
 import fastnn as fnn
 import fastnn._core as _core
 from typing import Optional, Dict, Any, List, Union, Tuple

@@ -4,7 +4,7 @@
 //! across benchmark files (packed_bench.rs, wgpu_bench.rs, quantized_vs_pytorch.rs).
 #![allow(dead_code)]
 
-use fastnn::backends::cpu;
+use fastnn::backend::cpu;
 use fastnn::dtypes::PackedWord;
 use fastnn::packed_tensor::PackedTensor;
 use std::time::Instant;
@@ -105,13 +105,13 @@ pub fn bench_relu<T: PackedWord>(data: &[f32], shape: &[usize], iters: usize) ->
 
     // Warmup
     for _ in 0..5 {
-        fastnn::backends::cpu::relu_cpu(&mut tensor);
+        fastnn::backend::cpu::microkernels::gemv_cpu(&weights, activation, output);
         tensor = PackedTensor::<T>::from_f32_auto(data, shape); // reset
     }
 
     let start = Instant::now();
     for _ in 0..iters {
-        fastnn::backends::cpu::relu_cpu(&mut tensor);
+        fastnn::backend::cpu::microkernels::gemv_cpu(&weights, activation, output);
     }
     let elapsed = start.elapsed();
     elapsed.as_secs_f64() * 1000.0 / iters as f64
