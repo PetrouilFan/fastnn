@@ -100,9 +100,30 @@ impl<B: Backend> GraphExecutor<B> {
         shape_inference::infer_shapes(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
 
+        // ── Phase 1.5: Constant folding + arithmetic simplification ──────
+        // Evaluate fully-constant nodes (Shape, broadcast constants, etc.)
+        // and simplify trivial arithmetic (x*1.0, x+0.0, Neg(Neg(x)), etc.)
+        // before fusion to reduce the number of nodes the fusion pass sees.
+        {
+            use crate::compiler::passes::{arithmetic_simplify, constant_folding};
+            let folded = constant_folding::constant_fold(&mut graph);
+            let simplified = arithmetic_simplify::arithmetic_simplify(&mut graph);
+            if folded + simplified > 0 {
+                eprintln!(
+                    "[fastnn] pre-fusion optimization: folded {folded} constant nodes, simplified {simplified} arithmetic"
+                );
+            }
+        }
+
         // ── Phase 2: Operator fusion ──────────────────────────────────────
         operator_fusion::fuse_operators(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
+
+        // ── Phase 2.5: Dead code elimination after fusion ────────────────
+        // Fusion creates dead intermediate nodes (e.g. the original Add and
+        // Relu when fusing MatMul+Add+Relu). Eliminate them before
+        // quantization to avoid quantizing dead nodes.
+        dead_code_elimination::eliminate_dead_code(&mut graph);
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
         // Handle three cases:
