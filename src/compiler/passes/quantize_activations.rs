@@ -94,24 +94,7 @@ pub fn quantize_activations(
         quantize_node_output(graph, node_id, config.bit_width, scale, zero_point)?;
     }
 
-    // Second pass for Dequantize insertion is disabled — it causes cycles in complex graphs.
-    // Weight-only quantization with Quantize nodes is sufficient for the current inference path.
-    /*
-    let topo_order_2 = graph.topological_sort();
-    for node_id in topo_order_2 {
-        let node = graph.get_node(node_id).unwrap().clone();
 
-        for &input_id in &node.inputs {
-            let input_node = graph.get_node(input_id).unwrap();
-
-            if input_node.opcode == Opcode::Quantize {
-                insert_dequantize_before(graph, node_id, input_id, config.bit_width)?;
-            }
-        }
-    }
-    */
-
-    Ok(())
 }
 
 /// Quantize a node's output by inserting Quantize after it.
@@ -176,86 +159,7 @@ fn quantize_node_output(
     Ok(())
 }
 
-/// Insert Dequantize before a consumer of a Quantize node.
-fn insert_dequantize_before(
-    graph: &mut ComputeGraph,
-    consumer_id: NodeId,
-    quantized_input_id: NodeId,
-    _bit_width: u8,
-) -> Result<(), String> {
-    let quant_node = graph.get_node(quantized_input_id).unwrap().clone();
-    let input_type = quant_node.output_type.clone();
 
-    // Dequantize to FP32
-    let dequant_type = TensorType::new(input_type.shape.clone(), IrDType::F32);
-
-    let dequant_id = graph.add_node(Opcode::Dequantize, vec![quantized_input_id], dequant_type);
-
-    // Rewire consumer
-    let consumer = graph
-        .get_node_mut(consumer_id)
-        .ok_or("Consumer not found")?;
-    for input in &mut consumer.inputs {
-        if *input == quantized_input_id {
-            *input = dequant_id;
-        }
-    }
-
-    Ok(())
-}
-
-/// Fuses consecutive Q/DQ pairs that cancel out.
-pub fn fuse_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), String> {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        // NodeId is just the index into graph.nodes Vec
-        let nodes: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for node_id in nodes {
-            if node_id >= graph.nodes.len() {
-                continue; // Node may have been removed
-            }
-            let node = graph.get_node(node_id).unwrap().clone();
-
-            // Pattern: Quantize -> Dequantize (same bit_width) -> remove both
-            if node.opcode == Opcode::Dequantize {
-                if let Some(&prev_id) = node.inputs.first() {
-                    let prev = graph.get_node(prev_id).unwrap();
-                    if prev.opcode == Opcode::Quantize {
-                        // Check bit_width matches
-                        let q_bit: Option<u8> =
-                            prev.attrs.get("bit_width").and_then(|s| s.parse().ok());
-                        let dq_bit: Option<u8> =
-                            node.attrs.get("bit_width").and_then(|s| s.parse().ok());
-                        if q_bit == dq_bit {
-                            // Rewire consumers of Dequantize to Quantize input
-                            let consumers = graph.consumers(node_id).clone();
-                            for consumer_id in consumers {
-                                let consumer = graph
-                                    .get_node_mut(consumer_id)
-                                    .ok_or("Consumer not found")?;
-                                for input in &mut consumer.inputs {
-                                    if *input == node_id {
-                                        *input = prev_id;
-                                    }
-                                }
-                            }
-
-                            // Remove Dequantize node
-                            graph.remove_node(node_id);
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[test]
 fn test_quantize_node_output() {
     let builder = GraphBuilder::new();
     let input = builder.input(&[1, 4], IrDType::F32);
@@ -283,78 +187,4 @@ fn test_quantize_node_output() {
     assert!(has_quantize);
 }
 
-/// Variant of quantize_activations that uses pre-computed scales from calibration data
-/// instead of recomputing them. This is useful when scales are loaded from a JSON file.
-pub fn quantize_activations_with_scales(
-    graph: &mut ComputeGraph,
-    mut config: QuantizeActivationsConfig,
-) -> Result<(), String> {
-    // The config.calib_data already contains the pre-computed scales in its stats
-    // We need to use those directly instead of recomputing from min/max
 
-    // Process nodes in topological order
-    let topo_order = graph.topological_sort();
-
-    for node_id in topo_order {
-        let should_quantize = {
-            let node = graph.get_node(node_id).unwrap();
-            matches!(
-                node.opcode,
-                Opcode::Conv2d
-                    | Opcode::Conv1d
-                    | Opcode::Conv3d
-                    | Opcode::MatMul
-                    | Opcode::Add
-                    | Opcode::Mul
-                    | Opcode::Sub
-                    | Opcode::Sigmoid
-                    | Opcode::Silu
-                    | Opcode::Relu
-                    | Opcode::Softmax
-                    | Opcode::LayerNorm
-                    | Opcode::BatchNorm
-            ) && !config.skip_ops.iter().any(|kw| node.name.contains(kw))
-        };
-
-        if !should_quantize {
-            continue;
-        }
-
-        let node_name = graph.get_node(node_id).unwrap().name.clone();
-
-        // Get calibration scales for this node's output from pre-computed stats
-        let (scale, zero_point) = match config.calib_data.stats.get(&node_name) {
-            Some(stats) => {
-                // Use the pre-computed scale and zero_point from the stats
-                // We need to recompute scale from min/max to match the original calibration
-                stats.compute_scale_zp(config.bit_width)
-            }
-            None => {
-                // Fallback: use default scales
-                (1.0, 0.0)
-            }
-        };
-
-        // Quantize the node's output
-        quantize_node_output(graph, node_id, config.bit_width, scale, zero_point)?;
-    }
-
-    // Second pass for Dequantize insertion is disabled — it causes cycles in complex graphs.
-    // Weight-only quantization with Quantize nodes is sufficient for the current inference path.
-    /*
-    let topo_order_2 = graph.topological_sort();
-    for node_id in topo_order_2 {
-        let node = graph.get_node(node_id).unwrap().clone();
-
-        for &input_id in &node.inputs {
-            let input_node = graph.get_node(input_id).unwrap();
-
-            if input_node.opcode == Opcode::Quantize {
-                insert_dequantize_before(graph, node_id, input_id, config.bit_width)?;
-            }
-        }
-    }
-    */
-
-    Ok(())
-}
