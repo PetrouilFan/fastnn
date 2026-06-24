@@ -501,12 +501,11 @@ pub fn gemm_packed_u8x4_fused_raw(
     let per_channel_w = w_scales.len() > 1;
 
     // Precompute qb_sum once per weight column
-    let qb_sum: Vec<i32> = (0..n)
-        .map(|col| {
-            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-            w_row.iter().map(|&w| sum_u8x4_packed(w.0)).sum::<i32>()
-        })
-        .collect();
+    let mut qb_sum: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
+    for col in 0..n {
+        let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+        qb_sum.push(w_row.iter().map(|&w| sum_u8x4_packed(w.0)).sum::<i32>());
+    }
 
     // Determine row iteration strategy
     #[cfg(feature = "parallel")]
@@ -622,12 +621,11 @@ pub fn gemm_packed_u4x8_fused_raw(
     let per_channel_w = w_scales.len() > 1;
 
     // Precompute qb_sum per weight column
-    let qb_sum: Vec<i32> = (0..n)
-        .map(|col| {
-            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-            w_row.iter().map(|&w| sum_u4x8_packed(w.0)).sum::<i32>()
-        })
-        .collect();
+    let mut qb_sum: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
+    for col in 0..n {
+        let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+        qb_sum.push(w_row.iter().map(|&w| sum_u4x8_packed(w.0)).sum::<i32>());
+    }
 
     let compute_row = |row: usize, c_row: &mut [f32]| {
         let a_row_start = row * k_packed;

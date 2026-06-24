@@ -145,7 +145,7 @@ impl Backend for WgpuBackend {
                         kernel_name,
                         input_slices,
                         output_slice,
-                        secondary_output_slice: _,
+                        secondary_output_slice,
                         params,
                         param_dims,
                         weight_meta,
@@ -170,34 +170,82 @@ impl Backend for WgpuBackend {
                             shape_env,
                             weight_meta,
                         ) {
-                            // CPU fallback: copy affected slices to a temporary
-                            // CpuBuffer, run CpuBackend dispatch on this single
-                            // instruction, copy output back.
-                            let mut tmp = vec![0u8; plan.arena_size];
-                            for s in input_slices {
-                                let end = (s.offset + s.size).min(arena.data_mut().len());
-                                tmp[s.offset..end]
-                                    .copy_from_slice(&arena.data_mut()[s.offset..end]);
-                            }
-                            // Output slot may overlap with input; copy it too.
-                            let o_end = (out_start + output_slice.size).min(arena.data_mut().len());
-                            tmp[out_start..o_end]
-                                .copy_from_slice(&arena.data_mut()[out_start..o_end]);
+                            // CPU fallback: copy only the byte range touched
+                            // by this instruction to a temporary buffer, run
+                            // CPU dispatch, then copy output back.
+                            let arena_len = arena.data_mut().len();
+                            let o_end =
+                                (out_start + output_slice.size).min(arena_len);
 
-                            let cpu_buf = crate::backend::cpu::CpuBuffer::new(tmp);
+                            let mut min_offset = out_start;
+                            let mut max_end = o_end;
+                            for s in input_slices {
+                                let end =
+                                    (s.offset + s.size).min(arena_len);
+                                min_offset = min_offset.min(s.offset);
+                                max_end = max_end.max(end);
+                            }
+
+                            let range_len = max_end - min_offset;
+                            let mut tmp = vec![0u8; range_len];
+                            tmp.copy_from_slice(
+                                &arena.data_mut()[min_offset..max_end],
+                            );
+
+                            let cpu_buf =
+                                crate::backend::cpu::CpuBuffer::new(tmp);
                             let cpu = CpuBackend;
+
+                            // Adjust offsets into the temp buffer range.
+                            let adjusted_inputs: Vec<BufferSlice> =
+                                input_slices
+                                    .iter()
+                                    .map(|s| BufferSlice {
+                                        offset: s.offset - min_offset,
+                                        size: s.size,
+                                    })
+                                    .collect();
+                            let adjusted_output = BufferSlice {
+                                offset: output_slice.offset - min_offset,
+                                size: output_slice.size,
+                            };
+                            let adjusted_secondary =
+                                secondary_output_slice.as_ref().map(|s| {
+                                    BufferSlice {
+                                        offset: s.offset - min_offset,
+                                        size: s.size,
+                                    }
+                                });
+
                             let single_plan = ExecutablePlan {
-                                instructions: vec![instr.clone()],
-                                arena_size: plan.arena_size,
+                                instructions: vec![Instruction::CallKernel {
+                                    kernel_name: kernel_name.clone(),
+                                    input_slices: adjusted_inputs,
+                                    output_slice: adjusted_output,
+                                    secondary_output_slice: adjusted_secondary,
+                                    params: params.clone(),
+                                    param_dims: param_dims.clone(),
+                                    weight_meta: weight_meta.clone(),
+                                    node_id: node_id.clone(),
+                                }],
+                                arena_size: range_len,
                                 levels: vec![0],
                             };
-                            cpu.dispatch(&single_plan, &cpu_buf, shape_env)?;
+                            cpu.dispatch(
+                                &single_plan,
+                                &cpu_buf,
+                                shape_env,
+                            )?;
 
                             // Copy output back to real arena.
                             let cpu_data = cpu_buf.data_mut();
                             let wgpu_data = arena.data_mut();
-                            wgpu_data[out_start..o_end]
-                                .copy_from_slice(&cpu_data[out_start..o_end]);
+                            let adj_out_start =
+                                output_slice.offset - min_offset;
+                            let adj_out_end = o_end - min_offset;
+                            wgpu_data[out_start..o_end].copy_from_slice(
+                                &cpu_data[adj_out_start..adj_out_end],
+                            );
                         }
                     }
                     Instruction::MemCopy { dst, src } => {
