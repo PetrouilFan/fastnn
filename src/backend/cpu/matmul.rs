@@ -84,6 +84,71 @@ pub(super) fn dequantize_i8_activation(payload: &[u8]) -> Vec<f32> {
     }
 }
 
+/// Dequantize I8 activation payload into a pre-allocated output slice.
+pub(super) fn dequantize_i8_activation_into(payload: &[u8], out: &mut [f32]) {
+    let per_channel_detected = {
+        if payload.len() >= 16 {
+            let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0; 4])) as usize;
+            let chunk_size =
+                u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0; 4])) as usize;
+            let expected = 8 + nc * 8 + nc * chunk_size;
+            nc > 0 && chunk_size > 0 && payload.len() >= expected
+        } else {
+            false
+        }
+    };
+
+    if per_channel_detected {
+        let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+        let chunk_size = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+        let data_start = 8 + nc * 8;
+        let mut idx = 0;
+        for ch in 0..nc {
+            let scale = f32::from_le_bytes(
+                payload[8 + ch * 4..8 + (ch + 1) * 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            let zp = f32::from_le_bytes(
+                payload[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            for j in 0..chunk_size {
+                let di = data_start + j;
+                let q = if di < payload.len() {
+                    payload[di] as i8
+                } else {
+                    0i8
+                };
+                out[idx] = (q as f32) * scale + zp;
+                idx += 1;
+            }
+        }
+    } else {
+        let header_size = 8;
+        let scale = if payload.len() >= 4 {
+            f32::from_le_bytes(payload[0..4].try_into().unwrap())
+        } else {
+            1.0
+        };
+        let zp = if payload.len() >= 8 {
+            f32::from_le_bytes(payload[4..8].try_into().unwrap())
+        } else {
+            0.0
+        };
+        for i in 0..out.len() {
+            let pidx = header_size + i;
+            let q = if pidx < payload.len() {
+                payload[pidx] as i8
+            } else {
+                0i8
+            };
+            out[i] = (q as f32) * scale + zp;
+        }
+    }
+}
+
 // Runtime dispatch helpers intentionally take the IR/kernel call-site context
 // directly so they do not allocate wrapper structs on hot paths.
 
