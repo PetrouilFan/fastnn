@@ -279,7 +279,7 @@ fn try_gpu_dispatch(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
 ) -> Result<(), BackendError> {
     let out_start = output_slice.offset;
 

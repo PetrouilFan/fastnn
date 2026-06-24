@@ -198,7 +198,7 @@ fn quantized_matmul_dispatch_precopied<T: PackedWord>(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     bit_width: usize,
     kernel_name: &str,
     persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
@@ -206,9 +206,6 @@ fn quantized_matmul_dispatch_precopied<T: PackedWord>(
     if inputs.len() >= 2 {
         let activations = bytemuck::cast_slice::<_, f32>(&inputs[0]);
         let raw = &inputs[1];
-        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
-        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
-        byte_slice[..raw.len()].copy_from_slice(raw);
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
@@ -217,13 +214,13 @@ fn quantized_matmul_dispatch_precopied<T: PackedWord>(
         };
         let meta = weight_meta
             .clone()
-            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            });
-        let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
+            }));
+        let typed_data: Vec<T> = aligned_packed_slice(raw);
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
         crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
@@ -241,15 +238,12 @@ fn quantized_matmul_dispatch_precopied_i8_u8(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if inputs.len() >= 2 {
         let activation_payload = &inputs[0];
         let raw = &inputs[1];
-        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
-        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
-        byte_slice[..raw.len()].copy_from_slice(raw);
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
@@ -258,13 +252,13 @@ fn quantized_matmul_dispatch_precopied_i8_u8(
         };
         let meta = weight_meta
             .clone()
-            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 8,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            });
-        let typed_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
+            }));
+        let typed_data: Vec<U8x4> = aligned_packed_slice(raw);
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
         crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
@@ -289,15 +283,12 @@ fn quantized_matmul_dispatch_precopied_i8_u4(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if inputs.len() >= 2 {
         let activation_payload = &inputs[0];
         let raw = &inputs[1];
-        let mut packed_bytes = vec![0u32; raw.len().div_ceil(4)];
-        let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut packed_bytes);
-        byte_slice[..raw.len()].copy_from_slice(raw);
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
@@ -306,13 +297,13 @@ fn quantized_matmul_dispatch_precopied_i8_u4(
         };
         let meta = weight_meta
             .clone()
-            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 4,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            });
-        let typed_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
+            }));
+        let typed_data: Vec<U4x8> = aligned_packed_slice(raw);
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
         crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
@@ -367,15 +358,19 @@ macro_rules! precopied_binary_body {
 /// pointer is 4-byte aligned (the common case for arena-backed data),
 /// otherwise fall back to a u32-anchored copy.
 fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
-    if raw.as_ptr() as usize % 4 == 0 {
+    if raw.as_ptr() as usize % std::mem::align_of::<T>() == 0 {
         // SAFETY: bytemuck::cast_slice panics if misaligned; we checked alignment.
         bytemuck::cast_slice::<u8, T>(raw).to_vec()
     } else {
         let n_words = raw.len().div_ceil(4);
-        let mut aligned = vec![0u32; n_words];
+        let mut aligned: Vec<u32> = vec![0u32; n_words];
         let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
         byte_slice[..raw.len()].copy_from_slice(raw);
-        bytemuck::cast_slice(&aligned).to_vec()
+        // Zero-copy cast: Vec<u32> -> Vec<T>.
+        // SAFETY: T is repr(transparent) over u32, so size_of::<T>() == size_of::<u32>()
+        // and align_of::<T>() == align_of::<u32>(). The element counts are identical.
+        let mut v = std::mem::ManuallyDrop::new(aligned);
+        unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut T, v.len(), v.capacity()) }
     }
 }
 
@@ -388,7 +383,7 @@ fn quantized_conv2d_dispatch_precopied_i8(
     inputs: &[Vec<u8>],
     output: &mut [u8],
     params: &[usize],
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
@@ -587,7 +582,7 @@ fn run_kernel_precopied(
     _secondary_output: Option<&mut [u8]>,
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     shape_env: &ShapeEnv,
 ) -> Result<(), BackendError> {
     match kernel_name {
@@ -1287,8 +1282,8 @@ fn run_kernel_precopied(
                         let pt = PackedTensor::from_raw(
                             packed_data,
                             flat_shape,
-                            meta.scales,
-                            meta.zero_points,
+                            meta.scales.clone(),
+                            meta.zero_points.clone(),
                         );
                         let bias_opt = if !bias_data.is_empty() {
                             Some(&bias_data[..])
@@ -1474,7 +1469,7 @@ fn execute_parallel_level(
         secondary_output_size: Option<usize>,
         params: Vec<usize>,
         param_dims: Option<Vec<DimExpr>>,
-        weight_meta: Option<crate::backend::QuantizedWeightMeta>,
+        weight_meta: Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     }
 
     let mut ptasks: Vec<ParallelTask> = Vec::with_capacity(group.len());
@@ -1904,12 +1899,12 @@ impl Backend for CpuBackend {
                                 if w_shape.len() == 2 {
                                     w_shape.reverse();
                                 }
-                                crate::backend::QuantizedWeightMeta {
+                                std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width,
                                     scales,
                                     zero_points,
                                     shape: w_shape,
-                                }
+                                })
                             })
                         })
                     } else {
@@ -2179,12 +2174,12 @@ impl Backend for CpuBackend {
                                     .iter()
                                     .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
-                                crate::backend::QuantizedWeightMeta {
+                                std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width: bw,
                                     scales,
                                     zero_points,
                                     shape: w_shape,
-                                }
+                                })
                             })
                         });
                         (kernel.to_string(), meta)
@@ -5211,8 +5206,8 @@ impl Backend for CpuBackend {
                                         let pt = PackedTensor::from_raw(
                                             packed_data,
                                             flat_shape,
-                                            meta.scales,
-                                            meta.zero_points,
+                                            meta.scales.clone(),
+                                            meta.zero_points.clone(),
                                         );
                                         let fused_act: Option<&str> =
                                             if kernel_name.contains("_relu") {
