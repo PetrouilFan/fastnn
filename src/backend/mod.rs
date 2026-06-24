@@ -3,6 +3,7 @@
 use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum BackendError {
@@ -73,7 +74,7 @@ pub enum Instruction {
         /// that were not known at compile time.
         param_dims: Option<Vec<DimExpr>>,
         /// Optional weight metadata for quantized matmul kernels.
-        weight_meta: Option<QuantizedWeightMeta>,
+        weight_meta: Option<Arc<QuantizedWeightMeta>>,
     },
     MemCopy {
         dst: BufferSlice,
