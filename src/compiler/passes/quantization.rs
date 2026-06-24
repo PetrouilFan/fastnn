@@ -31,17 +31,28 @@ pub fn quantize_weights(
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
-        // Only quantize weights for MatMul-family and Conv-family ops.
-        let is_consumer = matches!(
+        // Quantize weights consumed by MatMul/Conv ops AND optimizer ops.
+        // For MatMul/Conv, the weight is input[1] (input[0] is activation).
+        // For optimizer ops (SgdUpdate, AdamUpdate, etc.), the weight is input[0].
+        let is_matmul_conv = matches!(
             node.opcode,
             Opcode::MatMul | Opcode::Conv1d | Opcode::Conv2d | Opcode::Conv3d
         );
-        if !is_consumer {
+        let is_optimizer = matches!(
+            node.opcode,
+            Opcode::SgdUpdate
+                | Opcode::AdamUpdate
+                | Opcode::AdamWUpdate
+                | Opcode::MuonUpdate
+                | Opcode::LionUpdate
+                | Opcode::RmspropUpdate
+        );
+        if !is_matmul_conv && !is_optimizer {
             return Ok(());
         }
 
-        // The weight is typically input[1] (input[0] is the activation).
-        if let Some(&weight_id) = node.inputs.get(1) {
+        let weight_idx = if is_optimizer { 0 } else { 1 };
+        if let Some(&weight_id) = node.inputs.get(weight_idx) {
             let weight_node = match graph_ref.get_node(weight_id) {
                 Some(n) => n,
                 None => return Ok(()),

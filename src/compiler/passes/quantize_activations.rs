@@ -94,7 +94,7 @@ pub fn quantize_activations(
         quantize_node_output(graph, node_id, config.bit_width, scale, zero_point)?;
     }
 
-
+    Ok(())
 }
 
 /// Quantize a node's output by inserting Quantize after it.
