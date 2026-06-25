@@ -310,7 +310,6 @@ def main() -> int:
             print(f"loaded calibration scales from {args.scales_json}")
         fx = fnn.tensor(x, list(x.shape))
         fy = executor.forward({fastnn_input: fx})[fastnn_output].numpy()
-        print("FASTNN_NAN_CHECK has_nan=", np.isnan(fy).any(), "has_inf=", np.isinf(fy).any(), "min=", float(fy.min()), "max=", float(fy.max()))
         results["fastnn_output_shape"] = list(fy.shape)
         results["fastnn_vs_pytorch"] = {
             "max_abs": float(np.max(np.abs(fy - y_torch))),
