@@ -127,7 +127,8 @@ impl<B: Backend> GraphExecutor<B> {
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
         // Handle three cases:
-        // 1. quantize=Some(bit_width): quantize weights + activations (with optional calib)
+        // 1. quantize=Some(bit_width): quantize weights only.
+        //    Activation quantization is only applied when calibration data is provided.
         // 2. quantize=None, calib_data=Some(_): re-quantize activations only (weights already quantized)
         // 3. quantize=None, calib_data=None: no quantization
         let do_quantize = quantize.is_some() || calib_data.is_some();
@@ -149,19 +150,22 @@ impl<B: Backend> GraphExecutor<B> {
             quantization::wrap_quantized_optimizer(&mut graph)
                 .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
 
-            // Insert QuantizeActivations before MatMul/Conv2d activation inputs so
-            // the backend can dispatch to _i8 kernel variants for INT8 activation compute.
-            // Use calibration data if provided for optimal scales.
+            // Insert QuantizeActivations before MatMul/Conv2d activation inputs only
+            // when explicit calibration data is provided. Without calibrated scales,
+            // activation quantization produces garbage outputs and adds unnecessary
+            // Q/DQ overhead that makes weight-only quantized inference slower than FP32.
             if let Some(calib) = calib_data {
                 activation_quantization::quantize_activations_with_calibration(&mut graph, &calib)
                     .map_err(|e| {
                         BackendError::Compilation(format!("activation quantization: {e}"))
                     })?;
-            } else {
-                activation_quantization::quantize_activations(&mut graph).map_err(|e| {
-                    BackendError::Compilation(format!("activation quantization: {e}"))
-                })?;
             }
+
+            // Remove redundant QuantizeActivations → DequantizeActivations round-trips
+            // that were inserted by activation quantization or the optimizer wrapper.
+            // This pass is dead-code in auto_cast.rs; wire it into the main pipeline.
+            crate::compiler::passes::prune_qdq_pairs::prune_qdq_pairs(&mut graph)
+                .map_err(|e| BackendError::Compilation(format!("prune qdq pairs: {e}")))?;
         }
 
         // ── Phase 3: Dead code elimination ────────────────────────────────
@@ -201,6 +205,8 @@ impl<B: Backend> GraphExecutor<B> {
                         conv2d_quant_u8 += 1;
                     } else if kernel_name.starts_with("conv2d") {
                         conv2d_fp32 += 1;
+                    } else if kernel_name.starts_with("quantize_activations") || kernel_name.starts_with("dequantize_activations") {
+                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     } else {
                         other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     }

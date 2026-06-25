@@ -259,12 +259,10 @@ unsafe fn im2col_pack_u8x4(
     let col_size = m * k;
 
     with_col_buf(col_size, |col| {
-        // Change 8: Use im2col_dispatch (AVX2 → parallel → scalar)
         crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
         );
 
-        // Change 9: Single-pass min/max
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
         for &v in col.iter() {
@@ -282,6 +280,48 @@ unsafe fn im2col_pack_u8x4(
 
         // Pack each row independently for correct row-wise alignment
         let mut packed: Vec<U8x4> = Vec::with_capacity(m * k_packed);
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            use std::arch::x86_64::*;
+            let zv = _mm256_set1_ps(zero_point);
+            let iv = _mm256_set1_ps(inv_scale);
+            let c_lo = _mm256_set1_ps(-128.0);
+            let c_hi = _mm256_set1_ps(127.0);
+            let mut row_packed = [0u8; 32];
+            for row in 0..m {
+                let row_start = row * k;
+                let mut wp = 0usize;
+                while wp + 7 < k_packed {
+                    let base = row_start + wp * 4;
+                    let v = _mm256_loadu_ps(&col[base]);
+                    let x = _mm256_round_ps(_mm256_mul_ps(_mm256_sub_ps(v, zv), iv), 0);
+                    let clamped = _mm256_min_ps(_mm256_max_ps(x, c_lo), c_hi);
+                    let i32v = _mm256_cvttps_epi32(clamped);
+                    let lo128 = _mm256_castsi256_si128(i32v);
+                    let hi128 = _mm256_extracti128_si256(i32v, 1);
+                    let lo16 = _mm_packs_epi32(lo128, _mm_setzero_si128());
+                    let hi16 = _mm_packs_epi32(hi128, _mm_setzero_si128());
+                    let bytes = _mm_packus_epi16(lo16, hi16);
+                    _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
+                    for j in 0..8 { packed[row * k_packed + wp + j] = U8x4(u32::from_le_bytes([row_packed[4*j], row_packed[4*j+1], row_packed[4*j+2], row_packed[4*j+3]])); }
+                    wp += 8;
+                }
+                while wp < k_packed {
+                    let base = row_start + wp * 4;
+                    let mut w = 0u32;
+                    for i in 0..4 {
+                        let ei = base + i;
+                        if ei < row_start + k {
+                            let q = ((col[ei] - zero_point) * inv_scale).round().clamp(-128.0, 127.0) as i8;
+                            w |= (q as u8 as u32) << (i * 8);
+                        }
+                    }
+                    packed.push(U8x4(w));
+                    wp += 1;
+                }
+            }
+        }
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         for row in 0..m {
             let row_start = row * k;
             for word in 0..k_packed {
@@ -340,6 +380,60 @@ unsafe fn im2col_pack_u4x8(
         let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
 
         let mut packed: Vec<U4x8> = Vec::with_capacity(m * k_packed);
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            use std::arch::x86_64::*;
+            let zv = _mm256_set1_ps(zero_point);
+            let iv = _mm256_set1_ps(inv_scale);
+            let mut row_packed = [0u8; 64];
+            for row in 0..m {
+                let row_start = row * k;
+                let mut wp = 0usize;
+                while wp + 7 < k_packed {
+                    let base = row_start + wp * 8;
+                    let v = _mm256_loadu_ps(&col[base]);
+                    let x = _mm256_round_ps(_mm256_mul_ps(_mm256_sub_ps(v, zv), iv), 0);
+                    let i32v = _mm256_cvttps_epi32(x);
+                    let lo128 = _mm256_castsi256_si128(i32v);
+                    let hi128 = _mm256_extracti128_si256(i32v, 1);
+                    let lo16 = _mm_packs_epi32(lo128, _mm_setzero_si128());
+                    let hi16 = _mm_packs_epi32(hi128, _mm_setzero_si128());
+                    let bytes = _mm_packus_epi16(lo16, hi16);
+                    _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
+                    _mm_storeu_si128(row_packed[16..32].as_mut_ptr() as *mut __m128i, _mm256_extracti128_si256(i32v, 1));
+                    // Unshuffle: _mm_packus_epi16 interleaves bytes from lo16/hi16
+                    // lo16 = [b0,b1,b2,...,b7] (8 x i16), hi16 = [b8,b9,...,b15]
+                    // bytes = _mm_packus_epi16(lo16, hi16) → [b0,b1,...,b7,b8,b9,...,b15]
+                    for j in 0..8 {
+                        packed[row * k_packed + wp + j] = U4x8(
+                            (row_packed[j] as u32)
+                                | ((row_packed[j + 8] as u32) << 4)
+                                | ((row_packed[j + 16] as u32) << 8)
+                                | ((row_packed[j + 24] as u32) << 12)
+                                | ((row_packed[j + 32] as u32) << 16)
+                                | ((row_packed[j + 40] as u32) << 20)
+                                | ((row_packed[j + 48] as u32) << 24)
+                                | ((row_packed[j + 56] as u32) << 28),
+                        );
+                    }
+                    wp += 8;
+                }
+                while wp < k_packed {
+                    let base = row_start + wp * 8;
+                    let mut w = 0u32;
+                    for i in 0..8 {
+                        let ei = base + i;
+                        if ei < row_start + k {
+                            let q = ((col[ei] - zero_point) * inv_scale).round().clamp(-8.0, 7.0) as i32;
+                            w |= ((q as u32) & 0xF) << (i * 4);
+                        }
+                    }
+                    packed.push(U4x8(w));
+                    wp += 1;
+                }
+            }
+        }
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         for row in 0..m {
             let row_start = row * k;
             for word in 0..k_packed {
@@ -525,28 +619,36 @@ pub fn gemm_packed_u8x4_fused_raw(
             let w_scale = if per_channel_w { w_scales[col] } else { w_scales[0] };
             let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
 
-            let mut acc = 0i32;
+            let scale_ab = act_scale * w_scale;
+            let bias_q = if let Some(b) = bias {
+                ((b[col] / scale_ab).round() as i32)
+            } else {
+                0
+            };
+
+            let mut acc = bias_q;
             for kk in 0..k_packed {
                 acc += u8x4_dot_packed(act_row[kk].0, w_row[kk].0);
             }
 
-            let scale_ab = act_scale * w_scale;
-            let mut val = (acc as f32) * scale_ab
-                + w_zp * (act_scale * qa_sum as f32)
-                + act_zp * (w_scale * qb_sum[col] as f32)
-                + act_zp * w_zp * k_f32;
-
-            if let Some(b) = bias {
-                val += b[col];
+            let qa = qa_sum as f32;
+            let qb = qb_sum[col] as f32;
+            let inner = (acc as f32) - act_zp * qb - w_zp * qa + act_zp * w_zp * k_f32;
+            let val = inner * scale_ab;
+            if !inner.is_finite() || !scale_ab.is_finite() || !val.is_finite() {
+                eprintln!("[FNN_DBG_DEQUANT] u8 col={} acc={} qa={} qb={} act_zp={} w_zp={} k={} scale_ab={} inner={} val={}", col, acc, qa, qb, act_zp, w_zp, k_f32, scale_ab, inner, val);
             }
+
             if let Some(act) = activation {
-                val = match act {
+                let activated = match act {
                     "relu" => val.max(0.0),
                     "silu" => val / (1.0 + (-val).exp()),
                     _ => val,
                 };
+                c_row[col] = activated;
+            } else {
+                c_row[col] = val;
             }
-            c_row[col] = val;
         }
     };
 
@@ -640,28 +742,36 @@ pub fn gemm_packed_u4x8_fused_raw(
             let w_scale = if per_channel_w { w_scales[col] } else { w_scales[0] };
             let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
 
-            let mut acc = 0i32;
+            let scale_ab = act_scale * w_scale;
+            let bias_q = if let Some(b) = bias {
+                ((b[col] / scale_ab).round() as i32)
+            } else {
+                0
+            };
+
+            let mut acc = bias_q;
             for kk in 0..k_packed {
                 acc += u4x8_dot_packed(a_row[kk].0, w_row[kk].0);
             }
 
-            let scale_ab = act_scale * w_scale;
-            let mut val = (acc as f32) * scale_ab
-                + w_zp * (act_scale * qa_sum as f32)
-                + act_zp * (w_scale * qb_sum[col] as f32)
-                + act_zp * w_zp * k_f32;
-
-            if let Some(b) = bias {
-                val += b[col];
+            let qa = qa_sum as f32;
+            let qb = qb_sum[col] as f32;
+            let inner = (acc as f32) - act_zp * qb - w_zp * qa + act_zp * w_zp * k_f32;
+            let val = inner * scale_ab;
+            if !inner.is_finite() || !scale_ab.is_finite() || !val.is_finite() {
+                eprintln!("[FNN_DBG_DEQUANT] u8 col={} acc={} qa={} qb={} act_zp={} w_zp={} k={} scale_ab={} inner={} val={}", col, acc, qa, qb, act_zp, w_zp, k_f32, scale_ab, inner, val);
             }
+
             if let Some(act) = activation {
-                val = match act {
+                let activated = match act {
                     "relu" => val.max(0.0),
                     "silu" => val / (1.0 + (-val).exp()),
                     _ => val,
                 };
+                c_row[col] = activated;
+            } else {
+                c_row[col] = val;
             }
-            c_row[col] = val;
         }
     };
 
@@ -825,7 +935,6 @@ pub unsafe fn conv2d_packed_u8x4(
             };
 
             let local_oc = w_slice.shape()[0];
-            let mut temp = vec![0.0f32; num_pixels * local_oc];
             let b = bias.map(|b| {
                 if groups > 1 {
                     &b[g_oc_off..g_oc_off + oc_per_g]
@@ -833,14 +942,22 @@ pub unsafe fn conv2d_packed_u8x4(
                     b
                 }
             });
-            gemm_packed_u8x4_fused(&act_packed, &w_slice, b, activation, &mut temp);
-
-            for pixel in 0..num_pixels {
-                for f in 0..local_oc {
-                    output[out_base + (g_oc_off + f) * num_pixels + pixel] =
-                        temp[pixel * local_oc + f];
+            let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
+                gemm_packed_u8x4_fused(&act_packed, &w_slice, b, activation, temp);
+                let mut found = false;
+                for pixel in 0..num_pixels {
+                    for f in 0..local_oc {
+                        let v = temp[pixel * local_oc + f];
+                        if v.is_nan() {
+                            found = true;
+                            eprintln!("[FNN_NAN] conv2d_u8 out_base={} g_oc_off={} f={} pixel={} v=nan temp_slice={:?}", out_base, g_oc_off, f, pixel, &temp[..10.min(temp.len())]);
+                        }
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                    }
                 }
-            }
+                found
+            });
+            if nan_found { panic!("NaN in u8 conv output"); }
         }
     }
 }
@@ -896,7 +1013,6 @@ pub unsafe fn conv2d_packed_u4x8(
             };
 
             let local_oc = w_slice.shape()[0];
-            let mut temp = vec![0.0f32; num_pixels * local_oc];
             let b = bias.map(|b| {
                 if groups > 1 {
                     &b[g_oc_off..g_oc_off + oc_per_g]
@@ -904,14 +1020,22 @@ pub unsafe fn conv2d_packed_u4x8(
                     b
                 }
             });
-            gemm_packed_u4x8_fused(&act_packed, &w_slice, b, activation, &mut temp);
-
-            for pixel in 0..num_pixels {
-                for f in 0..local_oc {
-                    output[out_base + (g_oc_off + f) * num_pixels + pixel] =
-                        temp[pixel * local_oc + f];
+            let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
+                gemm_packed_u4x8_fused(&act_packed, &w_slice, b, activation, temp);
+                let mut found = false;
+                for pixel in 0..num_pixels {
+                    for f in 0..local_oc {
+                        let v = temp[pixel * local_oc + f];
+                        if v.is_nan() {
+                            found = true;
+                            eprintln!("[FNN_NAN] conv2d_u8 out_base={} g_oc_off={} f={} pixel={} v=nan temp_slice={:?}", out_base, g_oc_off, f, pixel, &temp[..10.min(temp.len())]);
+                        }
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                    }
                 }
-            }
+                found
+            });
+            if nan_found { panic!("NaN in u8 conv output"); }
         }
     }
 }
@@ -955,11 +1079,15 @@ mod tests {
             );
         }
         assert_eq!(output.len(), 2);
-        assert!(
-            output[0] > 0.0,
-            "Expected positive output[0], got {}",
-            output[0]
-        );
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "Non-finite value at output[{}]: {}",
+                i, v
+            );
+        }
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
     }
 
     #[test]
