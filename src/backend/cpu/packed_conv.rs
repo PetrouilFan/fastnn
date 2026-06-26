@@ -259,7 +259,7 @@ unsafe fn im2col_pack_u8x4(
     let col_size = m * k;
 
     with_col_buf(col_size, |col| {
-        crate::backend::cpu::im2col::im2col_dispatch(
+        let (min, max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
         );
 
@@ -364,7 +364,7 @@ unsafe fn im2col_pack_u4x8(
     let col_size = m * k;
 
     with_col_buf(col_size, |col| {
-        crate::backend::cpu::im2col::im2col_dispatch(
+        let (min, max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
         );
 
@@ -631,12 +631,19 @@ pub fn gemm_packed_u8x4_fused_raw(
                 acc += u8x4_dot_packed(act_row[kk].0, w_row[kk].0);
             }
 
-            let qa = qa_sum as f32;
-            let qb = qb_sum[col] as f32;
-            let inner = (acc as f32) - act_zp * qb - w_zp * qa + act_zp * w_zp * k_f32;
-            let val = inner * scale_ab;
-            if !inner.is_finite() || !scale_ab.is_finite() || !val.is_finite() {
-                eprintln!("[FNN_DBG_DEQUANT] u8 col={} acc={} qa={} qb={} act_zp={} w_zp={} k={} scale_ab={} inner={} val={}", col, acc, qa, qb, act_zp, w_zp, k_f32, scale_ab, inner, val);
+            let r = act_scale * qa_sum as f32;
+            let w_term = w_scale * qb_sum[col] as f32;
+            let zp_prod = act_zp * w_zp;
+
+            let mut val = (acc as f32) * scale_ab
+                + w_zp * r
+                + act_zp * w_term
+                + zp_prod * k_f32;
+            if !val.is_finite() {
+                eprintln!(
+                    "[FNN_DBG_DEQUANT] u8 col={} acc={} qa={} qb={} act_zp={} w_zp={} k={} scale_ab={} val={}",
+                    col, acc, qa_sum, qb_sum[col], act_zp, w_zp, k_f32, scale_ab, val
+                );
             }
 
             if let Some(act) = activation {
