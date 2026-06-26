@@ -252,11 +252,14 @@ pub fn gemm_packed_u8x4_fused(
             let k_f32 = act_packed.shape()[1] as f32;
 
             let scale_ab = act_scale * w_scale;
+            let r = act_scale * qa_sum as f32;
+            let w_term = w_scale * qb_sum as f32;
+            let zp_prod = act_zp * w_zp;
 
             let mut val = (acc as f32) * scale_ab
-                + w_zp * (act_scale * qa_sum as f32)
-                + act_zp * (w_scale * qb_sum as f32)
-                + act_zp * w_zp * k_f32;
+                + w_zp * r
+                + act_zp * w_term
+                + zp_prod * k_f32;
 
             if let Some(b) = bias {
                 val += b[col];
