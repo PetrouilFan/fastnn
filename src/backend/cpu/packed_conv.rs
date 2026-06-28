@@ -43,18 +43,6 @@ fn with_col_buf<R>(size: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
     })
 }
 
-/// Helper: reuse a thread-local Vec<i8>, return an `&mut [i8]` of at least `size`.
-#[inline(always)]
-fn with_i8_buf<R>(size: usize, f: impl FnOnce(&mut [i8]) -> R) -> R {
-    PACKED_CONV_I8_BUF.with(|cell| {
-        let mut b = cell.borrow_mut();
-        if b.len() < size {
-            b.resize(size, 0i8);
-        }
-        f(&mut b[..size])
-    })
-}
-
 #[inline(always)]
 pub(crate) fn conv_out_size(
     input: usize,
@@ -74,6 +62,8 @@ pub(crate) fn conv_out_size(
 /// im2col for i8 data (rearrange i8 values without FP32 conversion).
 /// Used by the precopied i8 activation dispatch path in mod.rs.
 #[inline(always)]
+// SAFETY: Caller must ensure all pointer arguments are valid, non-overlapping,
+// and point to allocations of sufficient size for the convolution parameters.
 pub(crate) unsafe fn im2col_i8(
     input_n: &[i8],
     c: usize,
@@ -125,121 +115,11 @@ pub(crate) unsafe fn im2col_i8(
 // ── AVX2 dot-product helpers ─────────────────────────────────────
 // Change 1: AVX2 int8 dot products
 
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn hsum256_ps(v: std::arch::x86_64::__m256) -> f32 {
-    use std::arch::x86_64::*;
-    let hi128 = _mm256_extractf128_ps(v, 1);
-    let lo128 = _mm256_castps256_ps128(v);
-    let sum128 = _mm_add_ps(lo128, hi128);
-    let shuf = _mm_shuffle_ps(sum128, sum128, 0x0E);
-    let sums = _mm_add_ps(sum128, shuf);
-    let shuf2 = _mm_shuffle_ps(sums, sums, 0x01);
-    _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
-}
-
-/// AVX2 dot product over two U8x4-packed slices (2 words at a time → 8 int8 values).
-/// Returns f64-precise sum (accumulated in f32 via FMA).
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn dot_u8x4_slice_avx2(a: &[U8x4], b: &[U8x4], k_packed: usize, k: usize) -> f32 {
-    use std::arch::x86_64::*;
-    let mut acc_v = _mm256_setzero_ps();
-    let mut p = 0usize;
-    while p + 1 < k_packed && p * 4 + 8 <= k {
-        let a0 = a[p].0;
-        let a1 = a[p + 1].0;
-        let b0 = b[p].0;
-        let b1 = b[p + 1].0;
-        let a128 = _mm_set_epi32(0, 0, a1 as i32, a0 as i32);
-        let b128 = _mm_set_epi32(0, 0, b1 as i32, b0 as i32);
-        let a_f32 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a128));
-        let b_f32 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b128));
-        acc_v = _mm256_fmadd_ps(a_f32, b_f32, acc_v);
-        p += 2;
-    }
-    let mut acc = hsum256_ps(acc_v);
-    while p < k_packed {
-        let a_w = a[p].0;
-        let b_w = b[p].0;
-        let a0 = (a_w & 0xFF) as i8 as i32;
-        let a1 = ((a_w >> 8) & 0xFF) as i8 as i32;
-        let a2 = ((a_w >> 16) & 0xFF) as i8 as i32;
-        let a3 = ((a_w >> 24) & 0xFF) as i8 as i32;
-        let b0 = (b_w & 0xFF) as i8 as i32;
-        let b1 = ((b_w >> 8) & 0xFF) as i8 as i32;
-        let b2 = ((b_w >> 16) & 0xFF) as i8 as i32;
-        let b3 = ((b_w >> 24) & 0xFF) as i8 as i32;
-        acc += (a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3) as f32;
-        p += 1;
-    }
-    acc
-}
-
-/// AVX2 dot product over two U4x8-packed slices (2 words at a time → 16 nibbles).
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn dot_u4x8_slice_avx2(a: &[U4x8], b: &[U4x8], k_packed: usize, k: usize) -> f32 {
-    use std::arch::x86_64::*;
-    let shift = _mm256_set_epi32(28, 24, 20, 16, 12, 8, 4, 0);
-    let mask_lo = _mm256_set1_epi32(0xF);
-    let sign_ext = _mm256_set1_epi32(8);
-
-    let mut acc0 = _mm256_setzero_ps();
-    let mut acc1 = _mm256_setzero_ps();
-    let mut p = 0usize;
-    while p + 1 < k_packed && p * 8 + 16 <= k {
-        // Weight nibbles
-        let w0 = b[p].0;
-        let w1 = b[p + 1].0;
-        let w0v = _mm256_set1_epi32(w0 as i32);
-        let w1v = _mm256_set1_epi32(w1 as i32);
-        let nb_w0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift), mask_lo);
-        let nb_w1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift), mask_lo);
-        let s_w0 = _mm256_sub_epi32(_mm256_xor_si256(nb_w0, sign_ext), sign_ext);
-        let s_w1 = _mm256_sub_epi32(_mm256_xor_si256(nb_w1, sign_ext), sign_ext);
-        let w_f0 = _mm256_cvtepi32_ps(s_w0);
-        let w_f1 = _mm256_cvtepi32_ps(s_w1);
-
-        // Activation nibbles
-        let a0 = a[p].0;
-        let a1 = a[p + 1].0;
-        let a0v = _mm256_set1_epi32(a0 as i32);
-        let a1v = _mm256_set1_epi32(a1 as i32);
-        let nb_a0 = _mm256_and_si256(_mm256_srlv_epi32(a0v, shift), mask_lo);
-        let nb_a1 = _mm256_and_si256(_mm256_srlv_epi32(a1v, shift), mask_lo);
-        let s_a0 = _mm256_sub_epi32(_mm256_xor_si256(nb_a0, sign_ext), sign_ext);
-        let s_a1 = _mm256_sub_epi32(_mm256_xor_si256(nb_a1, sign_ext), sign_ext);
-        let a_f0 = _mm256_cvtepi32_ps(s_a0);
-        let a_f1 = _mm256_cvtepi32_ps(s_a1);
-
-        acc0 = _mm256_fmadd_ps(w_f0, a_f0, acc0);
-        acc1 = _mm256_fmadd_ps(w_f1, a_f1, acc1);
-        p += 2;
-    }
-
-    let mut acc = hsum256_ps(_mm256_add_ps(acc0, acc1));
-    while p < k_packed {
-        let a_w = a[p].0;
-        let b_w = b[p].0;
-        for lane in 0..8 {
-            let a_nib = ((a_w >> (lane * 4)) & 0xF) as i32;
-            let b_nib = ((b_w >> (lane * 4)) & 0xF) as i32;
-            let av = if a_nib >= 8 { a_nib - 16 } else { a_nib };
-            let bv = if b_nib >= 8 { b_nib - 16 } else { b_nib };
-            acc += (av * bv) as f32;
-        }
-        p += 1;
-    }
-    acc
-}
-
 // ── im2col + pack (FP32 input) ──────────────────────────────────
 // Changes 4, 8, 9: thread-local buf, im2col_dispatch, single-pass min/max
 
+// SAFETY: Caller must ensure `input_n` is valid for the full NCHW input range
+// and the returned PackedTensor is properly constructed.
 unsafe fn im2col_pack_u8x4(
     input_n: &[f32],
     c: usize,
@@ -259,20 +139,14 @@ unsafe fn im2col_pack_u8x4(
     let col_size = m * k;
 
     with_col_buf(col_size, |col| {
-        let (min, max) = crate::backend::cpu::im2col::im2col_dispatch(
+        let (global_min, global_max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
         );
 
-        let mut min = f32::INFINITY;
-        let mut max = f32::NEG_INFINITY;
-        for &v in col.iter() {
-            min = min.min(v);
-            max = max.max(v);
-        }
-        let range = max - min;
+        let range = global_max - global_min;
         let scale = if range > 0.0 { range / 255.0 } else { 1.0 };
         let zero_point = if range > 0.0 {
-            min + 128.0 * scale
+            global_min + 128.0 * scale
         } else {
             0.0
         };
@@ -303,7 +177,14 @@ unsafe fn im2col_pack_u8x4(
                     let hi16 = _mm_packs_epi32(hi128, _mm_setzero_si128());
                     let bytes = _mm_packus_epi16(lo16, hi16);
                     _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
-                    for j in 0..8 { packed[row * k_packed + wp + j] = U8x4(u32::from_le_bytes([row_packed[4*j], row_packed[4*j+1], row_packed[4*j+2], row_packed[4*j+3]])); }
+                    for j in 0..8 {
+                        packed[row * k_packed + wp + j] = U8x4(u32::from_le_bytes([
+                            row_packed[4 * j],
+                            row_packed[4 * j + 1],
+                            row_packed[4 * j + 2],
+                            row_packed[4 * j + 3],
+                        ]));
+                    }
                     wp += 8;
                 }
                 while wp < k_packed {
@@ -312,7 +193,9 @@ unsafe fn im2col_pack_u8x4(
                     for i in 0..4 {
                         let ei = base + i;
                         if ei < row_start + k {
-                            let q = ((col[ei] - zero_point) * inv_scale).round().clamp(-128.0, 127.0) as i8;
+                            let q = ((col[ei] - zero_point) * inv_scale)
+                                .round()
+                                .clamp(-128.0, 127.0) as i8;
                             w |= (q as u8 as u32) << (i * 8);
                         }
                     }
@@ -345,6 +228,8 @@ unsafe fn im2col_pack_u8x4(
     })
 }
 
+// SAFETY: Same as im2col_pack_u8x4 — caller must ensure `input_n` is valid
+// for the full NCHW input range.
 unsafe fn im2col_pack_u4x8(
     input_n: &[f32],
     c: usize,
@@ -364,19 +249,16 @@ unsafe fn im2col_pack_u4x8(
     let col_size = m * k;
 
     with_col_buf(col_size, |col| {
-        let (min, max) = crate::backend::cpu::im2col::im2col_dispatch(
+        let (global_min, global_max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
         );
-
-        let mut min = f32::INFINITY;
-        let mut max = f32::NEG_INFINITY;
-        for &v in col.iter() {
-            min = min.min(v);
-            max = max.max(v);
-        }
-        let range = max - min;
+        let range = global_max - global_min;
         let scale = if range > 0.0 { range / 15.0 } else { 1.0 };
-        let zero_point = if range > 0.0 { min + 8.0 * scale } else { 0.0 };
+        let zero_point = if range > 0.0 {
+            global_min + 8.0 * scale
+        } else {
+            0.0
+        };
         let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
 
         let mut packed: Vec<U4x8> = Vec::with_capacity(m * k_packed);
@@ -400,7 +282,10 @@ unsafe fn im2col_pack_u4x8(
                     let hi16 = _mm_packs_epi32(hi128, _mm_setzero_si128());
                     let bytes = _mm_packus_epi16(lo16, hi16);
                     _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
-                    _mm_storeu_si128(row_packed[16..32].as_mut_ptr() as *mut __m128i, _mm256_extracti128_si256(i32v, 1));
+                    _mm_storeu_si128(
+                        row_packed[16..32].as_mut_ptr() as *mut __m128i,
+                        _mm256_extracti128_si256(i32v, 1),
+                    );
                     // Unshuffle: _mm_packus_epi16 interleaves bytes from lo16/hi16
                     // lo16 = [b0,b1,b2,...,b7] (8 x i16), hi16 = [b8,b9,...,b15]
                     // bytes = _mm_packus_epi16(lo16, hi16) → [b0,b1,...,b7,b8,b9,...,b15]
@@ -424,7 +309,9 @@ unsafe fn im2col_pack_u4x8(
                     for i in 0..8 {
                         let ei = base + i;
                         if ei < row_start + k {
-                            let q = ((col[ei] - zero_point) * inv_scale).round().clamp(-8.0, 7.0) as i32;
+                            let q = ((col[ei] - zero_point) * inv_scale)
+                                .round()
+                                .clamp(-8.0, 7.0) as i32;
                             w |= ((q as u32) & 0xF) << (i * 4);
                         }
                     }
@@ -455,94 +342,11 @@ unsafe fn im2col_pack_u4x8(
     })
 }
 
-// ── Change 10: im2col + pack from i8 (no FP32 buffer) ──────────
-
-unsafe fn im2col_pack_u8x4_from_i8(
-    input_n: &[i8],
-    c: usize,
-    h: usize,
-    w: usize,
-    kh: usize,
-    kw: usize,
-    stride: usize,
-    padding: usize,
-    dilation: usize,
-) -> PackedTensor<U8x4> {
-    let h_out = conv_out_size(h, kh, stride, padding, dilation);
-    let w_out = conv_out_size(w, kw, stride, padding, dilation);
-    let m = h_out * w_out;
-    let k = c * kh * kw;
-    let k_packed = k.div_ceil(4);
-    let col_w = c * kh * kw;
-
-    // Use thread-local i8 buffer for im2col rearrangement
-    with_i8_buf(m * k, |col| {
-        for oh in 0..h_out {
-            for ow in 0..w_out {
-                let row = oh * w_out + ow;
-                for ic in 0..c {
-                    for kkh in 0..kh {
-                        for kkw in 0..kw {
-                            let ih = oh * stride + kkh * dilation;
-                            let iw = ow * stride + kkw * dilation;
-                            let dst = row * col_w + ic * kh * kw + kkh * kw + kkw;
-                            if ih < h + padding
-                                && iw < w + padding
-                                && ih >= padding
-                                && iw >= padding
-                            {
-                                let src = (ic * h + (ih - padding)) * w + (iw - padding);
-                                col[dst] = input_n[src];
-                            } else {
-                                col[dst] = 0i8;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Compute min/max on i8 data for scale/zp determination
-        let mut min_i8 = 127i8;
-        let mut max_i8 = -128i8;
-        for &v in col.iter() {
-            min_i8 = min_i8.min(v);
-            max_i8 = max_i8.max(v);
-        }
-        let min_f = min_i8 as f32;
-        let max_f = max_i8 as f32;
-        let range = max_f - min_f;
-        let scale = if range > 0.0 { range / 255.0 } else { 1.0 };
-        let zero_point = if range > 0.0 {
-            min_f + 128.0 * scale
-        } else {
-            0.0
-        };
-
-        // Pack i8 → U8x4
-        let mut packed: Vec<U8x4> = Vec::with_capacity(m * k_packed);
-        for row in 0..m {
-            let row_start = row * k;
-            for word in 0..k_packed {
-                let mut w = 0u32;
-                let base = row_start + word * 4;
-                for i in 0..4 {
-                    let elem_idx = base + i;
-                    if elem_idx < row_start + k {
-                        w |= (col[elem_idx] as u8 as u32) << (i * 8);
-                    }
-                }
-                packed.push(U8x4(w));
-            }
-        }
-
-        PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![zero_point])
-    })
-}
-
 // ── Slice helper ────────────────────────────────────────────────
 
 #[inline(always)]
+// SAFETY: Caller must ensure `row_start + row_count` does not exceed the number
+// of rows in the packed tensor, and the resulting tensor owns its data.
 unsafe fn slice_packed<U: PackedWord>(
     t: &PackedTensor<U>,
     row_start: usize,
@@ -616,12 +420,16 @@ pub fn gemm_packed_u8x4_fused_raw(
             let w_row_start = col * k_packed;
             let w_row = &w_data[w_row_start..w_row_start + k_packed];
 
-            let w_scale = if per_channel_w { w_scales[col] } else { w_scales[0] };
+            let w_scale = if per_channel_w {
+                w_scales[col]
+            } else {
+                w_scales[0]
+            };
             let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
 
             let scale_ab = act_scale * w_scale;
             let bias_q = if let Some(b) = bias {
-                ((b[col] / scale_ab).round() as i32)
+                (b[col] / scale_ab).round() as i32
             } else {
                 0
             };
@@ -635,10 +443,7 @@ pub fn gemm_packed_u8x4_fused_raw(
             let w_term = w_scale * qb_sum[col] as f32;
             let zp_prod = act_zp * w_zp;
 
-            let mut val = (acc as f32) * scale_ab
-                + w_zp * r
-                + act_zp * w_term
-                + zp_prod * k_f32;
+            let val = (acc as f32) * scale_ab + w_zp * r + act_zp * w_term + zp_prod * k_f32;
             if !val.is_finite() {
                 eprintln!(
                     "[FNN_DBG_DEQUANT] u8 col={} acc={} qa={} qb={} act_zp={} w_zp={} k={} scale_ab={} val={}",
@@ -746,12 +551,16 @@ pub fn gemm_packed_u4x8_fused_raw(
             let w_row_start = col * k_packed;
             let w_row = &w_data[w_row_start..w_row_start + k_packed];
 
-            let w_scale = if per_channel_w { w_scales[col] } else { w_scales[0] };
+            let w_scale = if per_channel_w {
+                w_scales[col]
+            } else {
+                w_scales[0]
+            };
             let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
 
             let scale_ab = act_scale * w_scale;
             let bias_q = if let Some(b) = bias {
-                ((b[col] / scale_ab).round() as i32)
+                (b[col] / scale_ab).round() as i32
             } else {
                 0
             };
@@ -836,11 +645,7 @@ pub fn gemm_packed_u4x8_fused(
 #[inline]
 pub fn pack_i8_col_to_u8x4(col: &[i8], m: usize, k: usize, packed: &mut [U8x4]) {
     let k_packed = k.div_ceil(4);
-    let full_words = if k % 4 == 0 {
-        k_packed
-    } else {
-        k_packed - 1
-    };
+    let full_words = if k % 4 == 0 { k_packed } else { k_packed - 1 };
     for row in 0..m {
         let row_start = row * k;
         let word_base = row * k_packed;
@@ -848,7 +653,8 @@ pub fn pack_i8_col_to_u8x4(col: &[i8], m: usize, k: usize, packed: &mut [U8x4]) 
         for w in 0..full_words {
             let byte_base = row_start + w * 4;
             // SAFETY: aligned within the slice bounds, u32 has same repr as 4×i8
-            let word = unsafe { std::ptr::read_unaligned(col.as_ptr().add(byte_base) as *const u32) };
+            let word =
+                unsafe { std::ptr::read_unaligned(col.as_ptr().add(byte_base) as *const u32) };
             packed[word_base + w] = U8x4(word);
         }
         // Tail: handle the last partial word when k is not a multiple of 4
@@ -891,6 +697,8 @@ pub fn pack_i8_col_to_u4x8(col: &[i8], m: usize, k: usize, packed: &mut [U4x8]) 
 
 // ── Public Conv2d entry points ──────────────────────────────────
 
+// SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
+// and sized according to the convolution parameters (n, c, h, w, oc, kh, kw, ...).
 pub unsafe fn conv2d_packed_u8x4(
     input: &[f32],
     n: usize,
@@ -964,11 +772,15 @@ pub unsafe fn conv2d_packed_u8x4(
                 }
                 found
             });
-            if nan_found { panic!("NaN in u8 conv output"); }
+            if nan_found {
+                panic!("NaN in u8 conv output");
+            }
         }
     }
 }
 
+// SAFETY: Same as conv2d_packed_u8x4 — caller ensures valid, non-overlapping
+// input/output buffers sized for the convolution parameters.
 pub unsafe fn conv2d_packed_u4x8(
     input: &[f32],
     n: usize,
@@ -1042,7 +854,9 @@ pub unsafe fn conv2d_packed_u4x8(
                 }
                 found
             });
-            if nan_found { panic!("NaN in u8 conv output"); }
+            if nan_found {
+                panic!("NaN in u8 conv output");
+            }
         }
     }
 }
@@ -1087,11 +901,7 @@ mod tests {
         }
         assert_eq!(output.len(), 2);
         for (i, &v) in output.iter().enumerate() {
-            assert!(
-                v.is_finite(),
-                "Non-finite value at output[{}]: {}",
-                i, v
-            );
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
         }
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);

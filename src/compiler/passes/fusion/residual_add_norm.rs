@@ -1,5 +1,6 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::FastnnError;
 use std::collections::{HashMap, HashSet};
 
 pub struct FusedResidualAddNorm;
@@ -9,12 +10,12 @@ impl FusionPass for FusedResidualAddNorm {
         "FusedResidualAddNorm"
     }
 
-    fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
+    fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
         apply_fused_residual_add_norm(graph)
     }
 }
 
-fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     let norm_ids: Vec<NodeId> = graph
         .nodes
         .iter()

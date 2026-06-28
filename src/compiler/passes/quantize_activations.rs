@@ -5,9 +5,12 @@
 //! quantizable operations, enabling full INT8 inference with packed kernels.
 
 use crate::compiler::passes::calibration::CalibrationData;
-use crate::ir::builder::GraphBuilder;
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::error::FastnnError;
+use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
+
+#[cfg(test)]
+use crate::{ir::DimExpr, GraphBuilder};
 
 /// Configuration for activation quantization.
 #[derive(Debug, Clone)]
@@ -42,7 +45,7 @@ impl Default for QuantizeActivationsConfig {
 pub fn quantize_activations(
     graph: &mut ComputeGraph,
     config: QuantizeActivationsConfig,
-) -> Result<(), String> {
+) -> Result<(), FastnnError> {
     let calibration_config = config
         .calib_data
         .to_quant_config(config.bit_width, config.use_kl_calibration);
@@ -104,7 +107,7 @@ fn quantize_node_output(
     bit_width: u8,
     scale: f32,
     zero_point: f32,
-) -> Result<(), String> {
+) -> Result<(), FastnnError> {
     let node = graph.get_node(node_id).unwrap().clone();
     let output_type = node.output_type.clone();
 
@@ -141,7 +144,7 @@ fn quantize_node_output(
     for consumer_id in consumers {
         let consumer = graph
             .get_node_mut(consumer_id)
-            .ok_or("Consumer not found")?;
+            .ok_or(FastnnError::compilation("Consumer not found"))?;
         for input in &mut consumer.inputs {
             if *input == node_id {
                 *input = quant_id;
@@ -159,7 +162,7 @@ fn quantize_node_output(
     Ok(())
 }
 
-
+#[cfg(test)]
 fn test_quantize_node_output() {
     let builder = GraphBuilder::new();
     let input = builder.input(&[1, 4], IrDType::F32);
@@ -186,5 +189,3 @@ fn test_quantize_node_output() {
     let has_quantize = graph.nodes.iter().any(|n| n.opcode == Opcode::Quantize);
     assert!(has_quantize);
 }
-
-

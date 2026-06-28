@@ -596,7 +596,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
 
         for row in 0..m {
-            let (scale_idx, inv_scale, zp) = if group_size > 1 {
+            let (_scale_idx, inv_scale, zp) = if group_size > 1 {
                 let gi = row / group_size;
                 let s = scales[gi];
                 (gi, if s != 0.0 { 1.0 / s } else { 0.0 }, zeros[gi])
