@@ -116,6 +116,8 @@ def validate_against_onnx(
         # Fallback: call as function
         try:
             fnn_results_dict = fnn_model(input_data)
+        except KeyboardInterrupt:
+            raise
         except Exception:
             # Wrap in dict
             result = fnn_model(input_data)
@@ -123,8 +125,6 @@ def validate_against_onnx(
                 fnn_results_dict = result
             else:
                 fnn_results_dict = {output_names[0]: result}
-        except KeyboardInterrupt:
-            raise
 
     # Build report
     report = ValidationReport()
