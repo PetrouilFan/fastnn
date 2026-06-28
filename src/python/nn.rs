@@ -1000,6 +1000,11 @@ impl Sequential {
         Sequential { layers, native_layers }
     }
 
+    #[getter]
+    fn layers<'py>(&self, py: Python<'py>) -> Vec<Py<PyAny>> {
+        self.layers.iter().map(|l| l.clone_ref(py)).collect()
+    }
+
     fn __call__(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
         if self.native_layers.len() == self.layers.len() {
             // Fast native path – zero Python C API calls per layer
