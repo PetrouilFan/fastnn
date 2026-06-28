@@ -264,19 +264,20 @@ impl Backend for CpuBackend {
                         (Some("OpSilu"), false) => "matmul_silu",
                         // Non-quantized non-fused: use unified "matmul" kernel
                         (_, false) => "matmul",
-                        // Quantized: keep specialized kernels
+                        // Quantized: I8 activation + U4 weight
                         (_, true)
                             if input_dtypes
-                                .iter()
-                                .any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
+                                .first()
+                                .map_or(false, |d| matches!(d, IrDType::I8))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
                             "matmul_u4_i8"
                         }
+                        // Quantized: I8 activation + U8 weight (no U4)
                         (_, true)
                             if input_dtypes
-                                .iter()
-                                .any(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
+                                .first()
+                                .map_or(false, |d| matches!(d, IrDType::I8))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
                                 && !input_dtypes
                                     .iter()
@@ -284,11 +285,13 @@ impl Backend for CpuBackend {
                         {
                             "matmul_u8_i8"
                         }
+                        // Quantized: F32 (or non-I8) activation + U4 weight
                         (_, true)
                             if input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
                             "matmul_u4"
                         }
+                        // Quantized: F32 (or non-I8) activation + U8 weight
                         (_, true) => "matmul_u8",
                     };
                     // Extract M, K, N from input shapes
