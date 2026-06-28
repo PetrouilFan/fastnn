@@ -185,4 +185,44 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_e5m2_subnormal() {
+        let val = e5m2_to_f32(0x01);
+        assert!(val > 0.0 && val < 2e-5, "E5M2 smallest subnormal, got {}", val);
+    }
+
+    #[test]
+    fn test_e5m2_roundtrip_extensive() {
+        let test_vals = [
+            0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0,
+            256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, -32768.0,
+            57344.0, -57344.0, 0.5, 0.25, 0.125, 3.0, 6.0, 12.0, 24.0, 48.0, 96.0,
+        ];
+        for &v in &test_vals {
+            let encoded = f32_to_e5m2(v);
+            let decoded = e5m2_to_f32(encoded);
+            let err = (decoded - v).abs();
+            assert!(
+                err < 0.5 * v.abs().max(1.0),
+                "E5M2 roundtrip err {} for input {}, encoded 0x{:02X}, decoded {}",
+                err,
+                v,
+                encoded,
+                decoded
+            );
+        }
+    }
+
+    #[test]
+    fn test_e5m2_inf_nan_values() {
+        assert!(e5m2_to_f32(0x7C).is_infinite());
+        assert!(e5m2_to_f32(0x7C) > 0.0);
+        assert!(e5m2_to_f32(0xFC).is_infinite());
+        assert!(e5m2_to_f32(0xFC) < 0.0);
+        assert!(e5m2_to_f32(0x7E).is_nan());
+        assert!(e5m2_to_f32(0x7F).is_nan());
+        assert!(e5m2_to_f32(0xFE).is_nan());
+        assert!(e5m2_to_f32(0xFF).is_nan());
+    }
 }
