@@ -19,7 +19,7 @@ unsafe impl bytemuck::Zeroable for F8x4R {}
 const E5M2_BIAS: i32 = 15;
 
 #[inline]
-fn e5m2_to_f32(byte: u8) -> f32 {
+pub fn e5m2_to_f32(byte: u8) -> f32 {
     let sign = if (byte & 0x80) == 0 { 1.0 } else { -1.0 };
     let biased_exp = (byte >> 2) & 0x1F;
     let mant = (byte & 0x03) as f32;
