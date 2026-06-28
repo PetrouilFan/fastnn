@@ -777,8 +777,7 @@ mod tests {
     use super::*;
     use crate::dtypes::F16x2;
     use crate::dtypes::F32x1;
-    use crate::dtypes::I4x8;
-    use crate::dtypes::I8x4;
+    use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4};
 
     #[test]
     fn test_packed_tensor_zeros() {
@@ -1000,5 +999,125 @@ mod tests {
                 rec
             );
         }
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4_roundtrip() {
+        let data: Vec<f32> = vec![1.0, -1.0, 128.0, -128.0];
+        let t = PackedTensor::<F8x4>::from_f32_auto(&data, &[4]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err < 0.5 * orig.abs().max(1.0),
+                "F8x4 mismatch at {}: orig={}, rec={}, err={}",
+                i,
+                orig,
+                rec,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4r_roundtrip() {
+        let data: Vec<f32> = vec![1.0, -1.0, 256.0, -256.0];
+        let t = PackedTensor::<F8x4R>::from_f32_auto(&data, &[4]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err < 0.5 * orig.abs().max(1.0),
+                "F8x4R mismatch at {}: orig={}, rec={}, err={}",
+                i,
+                orig,
+                rec,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_roundtrip() {
+        let data: Vec<f32> = vec![0.0, 1.0, -1.0, 2.0, -2.0, 4.0, -4.0, 6.0];
+        let t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err < 0.5 * orig.abs().max(1.0),
+                "F4x8 mismatch at {}: orig={}, rec={}, err={}",
+                i,
+                orig,
+                rec,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_single_word() {
+        let data: Vec<f32> = vec![0.0, 1.0, 2.0, 4.0, -0.0, -1.0, -2.0, -4.0];
+        let t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
+        assert_eq!(t.packed_len(), 17, "F4x8 packs 8 values into 1 u32 + 16 SIMD margin");
+        let recovered = t.to_f32_vec();
+        for i in 0..8 {
+            let err = (data[i] - recovered[i]).abs();
+            assert!(
+                err < 0.5 * data[i].abs().max(1.0),
+                "F4x8 single_word mismatch at {}: orig={}, rec={}",
+                i,
+                data[i],
+                recovered[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4_zeros() {
+        let t = PackedTensor::<F8x4>::zeros(&[4]);
+        assert_eq!(t.numel(), 4);
+        assert_eq!(t.packed_len(), 1);
+        let vals = t.to_f32_vec();
+        assert!(vals.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4r_zeros() {
+        let t = PackedTensor::<F8x4R>::zeros(&[4]);
+        assert_eq!(t.numel(), 4);
+        assert_eq!(t.packed_len(), 1);
+        let vals = t.to_f32_vec();
+        assert!(vals.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_zeros() {
+        let t = PackedTensor::<F4x8>::zeros(&[8]);
+        assert_eq!(t.numel(), 8);
+        assert_eq!(t.packed_len(), 1);
+        let vals = t.to_f32_vec();
+        assert!(vals.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_get_set() {
+        let data: Vec<f32> = vec![0.0, 1.0, -1.0, 2.0, 4.0, -4.0, 6.0, -6.0];
+        let mut t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
+        for i in 0..8 {
+            let v = t.get(i);
+            let err = (v - data[i]).abs();
+            assert!(
+                err < 0.5 * data[i].abs().max(1.0),
+                "F4x8 get({}) mismatch: got={}, expected={}",
+                i,
+                v,
+                data[i]
+            );
+        }
+        t.set(0, 3.0);
+        let v = t.get(0);
+        let err = (v - 3.0).abs();
+        assert!(err < 0.5 * 3.0f32.max(1.0), "F4x8 set(0, 3.0) got={}", v);
     }
 }

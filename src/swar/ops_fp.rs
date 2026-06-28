@@ -266,4 +266,60 @@ mod tests {
         assert_eq!(n[6], 0x0);
         assert_eq!(n[7], 0x0);
     }
+
+    #[test]
+    fn test_fp4_relu_backward() {
+        let grad = fp4_word(&[0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8]);
+        let pre = fp4_word(&[0x2, 0x9, 0x0, 0xF, 0x6, 0x8, 0xA, 0x1]);
+        let r = swar_relu_backward_fp4x8(grad, pre);
+        let n = fp4_nibbles(r);
+        assert_eq!(n[0], 0x1, "nibble 0: pre=0x2 pos, grad=0x1"); // 0x2 is positive → keep grad 0x1
+        assert_eq!(n[1], 0x0, "nibble 1: pre=0xF neg, grad=0x2"); // 0xF is negative → zero
+        assert_eq!(n[2], 0x3, "nibble 2: pre=0x0 zero, grad=0x3"); // 0x0 is zero → keep grad 0x3
+        assert_eq!(n[3], 0x0, "nibble 3: pre=0x9 neg, grad=0x4"); // 0x9 is negative → zero
+        assert_eq!(n[4], 0x5, "nibble 4: pre=0x6 pos, grad=0x5"); // 0x6 is positive → keep grad 0x5
+        assert_eq!(n[5], 0x0, "nibble 5: pre=0x8 neg, grad=0x6"); // 0x8 is negative → zero
+        assert_eq!(n[6], 0x0, "nibble 6: pre=0xA neg, grad=0x7"); // 0xA is negative → zero
+        assert_eq!(n[7], 0x8, "nibble 7: pre=0x1 pos, grad=0x8"); // 0x1 is positive → keep grad 0x8
+    }
+
+    #[test]
+    fn test_fp4_fused_relu() {
+        let pre = fp4_word(&[0x2, 0x9, 0x0, 0xF, 0x6, 0x8, 0xA, 0x1]);
+        let (out, mask) = swar_fused_relu_fp4x8(pre);
+        let out_n = fp4_nibbles(out);
+        let mask_n = fp4_nibbles(mask);
+        assert_eq!(out_n[0], 0x2);
+        assert_eq!(out_n[1], 0x0);
+        assert_eq!(out_n[2], 0x0);
+        assert_eq!(out_n[3], 0x0);
+        assert_eq!(out_n[4], 0x6);
+        assert_eq!(out_n[5], 0x0);
+        assert_eq!(out_n[6], 0x0);
+        assert_eq!(out_n[7], 0x1);
+        assert_eq!(mask_n[0], 0xF); // keep
+        assert_eq!(mask_n[1], 0x0); // mask out
+        assert_eq!(mask_n[2], 0xF); // keep
+        assert_eq!(mask_n[3], 0x0); // mask out
+        assert_eq!(mask_n[4], 0xF); // keep
+        assert_eq!(mask_n[5], 0x0); // mask out
+        assert_eq!(mask_n[6], 0x0); // mask out
+        assert_eq!(mask_n[7], 0xF); // keep
+    }
+
+    #[test]
+    fn test_fp8_fused_relu() {
+        let pre = fp8_word(&[0x3F, 0x80, 0x00, 0xFF]);
+        let (out, mask) = swar_fused_relu_fp8x4(pre);
+        let out_bytes = fp8_bytes(out);
+        let mask_bytes = fp8_bytes(mask);
+        assert_eq!(out_bytes[0], 0x3F); // positive → keep
+        assert_eq!(out_bytes[1], 0x00); // negative → 0
+        assert_eq!(out_bytes[2], 0x00); // zero → keep
+        assert_eq!(out_bytes[3], 0x00); // negative → 0
+        assert_eq!(mask_bytes[0], 0xFF); // keep grad
+        assert_eq!(mask_bytes[1], 0x00); // mask out
+        assert_eq!(mask_bytes[2], 0xFF); // keep grad
+        assert_eq!(mask_bytes[3], 0x00); // mask out
+    }
 }

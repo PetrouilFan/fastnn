@@ -9,7 +9,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{F4x8, PackedWord, I4x8, I8x4};
+use crate::dtypes::{F4x8, F8x4R, PackedWord, I4x8, I8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -2196,7 +2196,7 @@ impl Backend for CpuBackend {
                         });
                     }
                 }
-                Opcode::QuantizeGradient | Opcode::DequantizeGradient => {
+                Opcode::QuantizeGradient => {
                     if let Some(&_input_slice) = input_slices.first() {
                         let numel = input_shapes
                             .first()
@@ -2204,7 +2204,25 @@ impl Backend for CpuBackend {
                             .unwrap_or(1);
                         instructions.push(Instruction::CallKernel {
                             node_id: Some(node_id),
-                            kernel_name: "quantize_gradient".to_string(),
+                            kernel_name: "quantize_gradient_f32_to_f8x4r".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![numel],
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
+                }
+                Opcode::DequantizeGradient => {
+                    if let Some(&_input_slice) = input_slices.first() {
+                        let numel = input_shapes
+                            .first()
+                            .map(|s| s.iter().product::<u64>() as usize)
+                            .unwrap_or(1);
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "dequantize_gradient_f8x4r_to_f32".to_string(),
                             input_slices,
                             output_slice,
                             secondary_output_slice: None,
@@ -5351,13 +5369,63 @@ impl Backend for CpuBackend {
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
                         }
-                        "quantize_gradient" => {
+                        "quantize_gradient_f32_to_f8x4r" => {
                             if let Some(input_slice) = input_slices.first() {
+                                let numel = *params.first().unwrap_or(&0);
+                                let in_f32: Vec<f32> = {
+                                    let d = arena.data_mut();
+                                    let d_ref: &[u8] = &*d;
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slice.offset..input_slice.offset + input_slice.size],
+                                    )
+                                    .to_vec()
+                                };
                                 let d = arena.data_mut();
-                                let src = &d[input_slice.offset..input_slice.offset + input_slice.size].to_vec();
-                                let dst = &mut d[out_start..out_end];
-                                let copy_len = dst.len().min(src.len());
-                                dst[..copy_len].copy_from_slice(&src[..copy_len]);
+                                let out = &mut d[out_start..out_end];
+                                let out_len = out.len();
+                                let num_words = out_len / 4;
+                                for w in 0..num_words {
+                                    let base = w * 4;
+                                    let mut vals = [0.0f32; 4];
+                                    for j in 0..4 {
+                                        let idx = base + j;
+                                        vals[j] = in_f32.get(idx).copied().unwrap_or(0.0);
+                                    }
+                                    let packed = F8x4R::pack_from_f32(vals).0;
+                                    out[w * 4..w * 4 + 4].copy_from_slice(&packed.to_le_bytes());
+                                }
+                            }
+                        }
+                        "dequantize_gradient_f8x4r_to_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let numel = *params.first().unwrap_or(&0);
+                                let in_u32: Vec<u32> = {
+                                    let d = arena.data_mut();
+                                    let d_ref: &[u8] = &*d;
+                                    bytemuck::cast_slice::<_, u32>(
+                                        &d_ref[input_slice.offset..input_slice.offset + input_slice.size],
+                                    )
+                                    .to_vec()
+                                };
+                                let d = arena.data_mut();
+                                let out = &mut d[out_start..out_end];
+                                let num_words = numel.div_ceil(4);
+                                for w in 0..num_words {
+                                    let word = in_u32.get(w).copied().unwrap_or(0);
+                                    let word = F8x4R(word);
+                                    let vals = word.unpack_to_f32();
+                                    let base = w * 4;
+                                    for j in 0..4 {
+                                        let idx = base + j;
+                                        if idx < numel {
+                                            let bytes = vals[j].to_le_bytes();
+                                            let off = idx * 4;
+                                            if off + 4 <= out.len() {
+                                                out[off..off + 4].copy_from_slice(&bytes);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         "gradient_scale" => {
