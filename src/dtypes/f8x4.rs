@@ -102,7 +102,31 @@ impl PackedWord for F8x4 {
     }
 
     fn wgsl_unpack_body() -> &'static str {
-        "return vec4<f32>(unpack4xI8(packed));\n"
+        concat!(
+            "var result: vec4<f32>;\n",
+            "for (var i = 0u; i < 4u; i = i + 1u) {\n",
+            "  let byte = (packed >> (i * 8u)) & 0xFFu;\n",
+            "  let sign = byte & 0x80u;\n",
+            "  let exp = (byte >> 3u) & 0xFu;\n",
+            "  let mant = byte & 0x7u;\n",
+            "  if (exp == 0u && mant == 0u) {\n",
+            "    result[i] = select(0.0, -0.0, sign != 0u);\n",
+            "  } else if (exp == 0xFu) {\n",
+            "    if (mant == 0u) {\n",
+            "      result[i] = select(1.0 / 0.0, -1.0 / 0.0, sign != 0u);\n",
+            "    } else {\n",
+            "      result[i] = 0.0 / 0.0;\n",
+            "    }\n",
+            "  } else if (exp == 0u) {\n",
+            "    let v = 0.015625 * f32(mant) / 8.0;\n",
+            "    result[i] = select(v, -v, sign != 0u);\n",
+            "  } else {\n",
+            "    let v = exp2(f32(i32(exp) - 7)) * (1.0 + f32(mant) / 8.0);\n",
+            "    result[i] = select(v, -v, sign != 0u);\n",
+            "  }\n",
+            "}\n",
+            "return result;\n",
+        )
     }
 
     fn wgsl_return_type() -> &'static str {

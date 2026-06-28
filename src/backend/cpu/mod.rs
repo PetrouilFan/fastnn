@@ -9,7 +9,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{F4x8, F8x4R, PackedWord, I4x8, I8x4};
+use crate::dtypes::{F4x8, F8x4, F8x4R, PackedWord, I4x8, I8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -242,7 +242,8 @@ impl Backend for CpuBackend {
                         .collect();
                     let is_quantized = input_dtypes
                         .iter()
-                        .any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U8 { .. }));
+                        .any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U8 { .. }
+                                              | IrDType::F4 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. }));
 
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
                     // Determine fusion params for the unified "matmul" kernel
@@ -291,6 +292,24 @@ impl Backend for CpuBackend {
                         {
                             "matmul_i4"
                         }
+                        // Quantized: F32 activation + FP4 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F4 { .. })) =>
+                        {
+                            "matmul_f4"
+                        }
+                        // Quantized: F32 activation + FP8 E4M3 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F8 { .. })) =>
+                        {
+                            "matmul_f8"
+                        }
+                        // Quantized: F32 activation + FP8 E5M2 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F8R { .. })) =>
+                        {
+                            "matmul_f8r"
+                        }
                         // Quantized: F32 (or non-I8) activation + U8 weight
                         (_, true) => "matmul_i8",
                     };
@@ -335,6 +354,9 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (8usize, scales.clone(), zero_points.clone()),
+                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![0.0]),
+                                    IrDType::F8 { scales } => (8usize, scales.clone(), vec![0.0]),
+                                    IrDType::F8R { scales } => (8usize, scales.clone(), vec![0.0]),
                                     _ => (0usize, vec![], vec![]),
                                 };
                                 let mut w_shape: Vec<usize> = wn
@@ -2891,6 +2913,48 @@ impl Backend for CpuBackend {
                                 "matmul_i8",
                             )?;
                         }
+                        "matmul_f4" => {
+                            quantized_matmul_dispatch::<F4x8>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                4,
+                                "matmul_f4",
+                            )?;
+                        }
+                        "matmul_f8" => {
+                            quantized_matmul_dispatch::<F8x4>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_f8",
+                            )?;
+                        }
+                        "matmul_f8r" => {
+                            quantized_matmul_dispatch::<F8x4R>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_f8r",
+                            )?;
+                        }
                         "reduce_f32" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
@@ -5371,7 +5435,6 @@ impl Backend for CpuBackend {
                         }
                         "quantize_gradient_f32_to_f8x4r" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let numel = *params.first().unwrap_or(&0);
                                 let in_f32: Vec<f32> = {
                                     let d = arena.data_mut();
                                     let d_ref: &[u8] = &*d;
