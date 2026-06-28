@@ -2196,6 +2196,24 @@ impl Backend for CpuBackend {
                         });
                     }
                 }
+                Opcode::QuantizeGradient | Opcode::DequantizeGradient => {
+                    if let Some(&_input_slice) = input_slices.first() {
+                        let numel = input_shapes
+                            .first()
+                            .map(|s| s.iter().product::<u64>() as usize)
+                            .unwrap_or(1);
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "quantize_gradient".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![numel],
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
+                }
                 Opcode::Expand => {
                     // Expand broadcasts input[0] to the shape specified by input[1].
                     // Resolve input and output shapes at compile time and pack them
@@ -5332,6 +5350,15 @@ impl Backend for CpuBackend {
                                 .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
+                        }
+                        "quantize_gradient" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let d = arena.data_mut();
+                                let src = &d[input_slice.offset..input_slice.offset + input_slice.size].to_vec();
+                                let dst = &mut d[out_start..out_end];
+                                let copy_len = dst.len().min(src.len());
+                                dst[..copy_len].copy_from_slice(&src[..copy_len]);
+                            }
                         }
                         "gradient_scale" => {
                             if let Some(input_slice) = input_slices.first() {

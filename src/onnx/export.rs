@@ -57,6 +57,8 @@ const TRAINING_ONLY_OPCODES: &[fn(&Opcode) -> bool] = &[
     |op| matches!(op, Opcode::LionUpdate),
     |op| matches!(op, Opcode::RmspropUpdate),
     |op| matches!(op, Opcode::GradientScale),
+    |op| matches!(op, Opcode::QuantizeGradient),
+    |op| matches!(op, Opcode::DequantizeGradient),
 ];
 
 /// Detect training-only opcodes present in the graph.
@@ -616,6 +618,8 @@ pub fn export_to_onnx_json_with_config(
                                 | Opcode::LionUpdate
                                 | Opcode::RmspropUpdate
                                 | Opcode::GradientScale
+                                | Opcode::QuantizeGradient
+                                | Opcode::DequantizeGradient
                                 | Opcode::Quantize
                                 | Opcode::Dequantize
                                 | Opcode::QuantizeActivations

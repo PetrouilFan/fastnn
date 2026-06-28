@@ -1932,6 +1932,35 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
+    pub fn quantize_gradient(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F8R { scales: vec![scale] });
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("scale".to_string(), scale.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::QuantizeGradient,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Dequantize gradient F8x4R -> F32 for optimizer consumption.
+    pub fn dequantize_gradient(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::DequantizeGradient,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
 
     /// Detect if a tensor has a packed quantized dtype (U4 or U8).
