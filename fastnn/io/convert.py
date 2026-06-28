@@ -8,7 +8,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import struct
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def _requantize_per_channel(
@@ -83,14 +91,6 @@ def _requantize_per_channel(
 
     else:
         raise ValueError(f"Unsupported bit_width for repacking: {bit_width}")
-import logging
-import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
-
-logger = logging.getLogger(__name__)
 
 
 def convert_precision(

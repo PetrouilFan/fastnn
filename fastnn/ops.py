@@ -41,8 +41,10 @@ max = _core.max
 min = _core.min
 maximum = _core.maximum
 minimum = _core.minimum
+# _core.where_ is the functional (non-in-place) version — naming avoids
+# shadowing Python's built-in `where`. Both aliases produce a new tensor.
 where = _core.where_
-where_ = _core.where_
+where_ = _core.where_  # alias kept for explicit in-place-style naming
 repeat = _core.repeat
 expand = _core.expand
 fnn_slice = _core.slice

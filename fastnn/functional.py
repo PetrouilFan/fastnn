@@ -165,6 +165,10 @@ def adaptive_avg_pool2d(x: Tensor, output_size) -> Tensor:
     return pool(x)
 
 
+# --- Module cache for normalization / regularization ---
+
+_MODULE_CACHE: dict = {}
+
 # --- Normalization ---
 
 def batch_norm(x: Tensor, running_mean=None, running_var=None, weight=None, bias=None,
@@ -179,7 +183,11 @@ def batch_norm(x: Tensor, running_mean=None, running_var=None, weight=None, bias
         weight = fastnn.ones([channels])
     if bias is None:
         bias = fastnn.zeros([channels])
-    bn = fastnn.BatchNorm2d(channels, eps, momentum)
+    key = ("BatchNorm2d", channels, eps, momentum, training)
+    bn = _MODULE_CACHE.get(key)
+    if bn is None:
+        bn = fastnn.BatchNorm2d(channels, eps, momentum)
+        _MODULE_CACHE[key] = bn
     bn.set_weight(weight)
     bn.set_bias(bias)
     bn.set_running_mean(running_mean)
@@ -199,7 +207,11 @@ def layer_norm(x: Tensor, normalized_shape, weight=None, bias=None, eps=1e-5) ->
         weight = fastnn.ones(normalized_shape)
     if bias is None:
         bias = fastnn.zeros(normalized_shape)
-    ln = fastnn.LayerNorm(normalized_shape[-1], eps)
+    key = ("LayerNorm", normalized_shape[-1], eps)
+    ln = _MODULE_CACHE.get(key)
+    if ln is None:
+        ln = fastnn.LayerNorm(normalized_shape[-1], eps)
+        _MODULE_CACHE[key] = ln
     ln.set_weight(weight)
     ln.set_bias(bias)
     return ln(x)
@@ -231,7 +243,11 @@ def huber_loss(x: Tensor, target: Tensor) -> Tensor:
 
 def dropout(x: Tensor, p: float = 0.5, training: bool = True) -> Tensor:
     """Applies dropout during training."""
-    d = fastnn.Dropout(p)
+    key = ("Dropout", p, training)
+    d = _MODULE_CACHE.get(key)
+    if d is None:
+        d = fastnn.Dropout(p)
+        _MODULE_CACHE[key] = d
     if training:
         d.train()
     else:
