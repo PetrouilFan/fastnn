@@ -1,5 +1,6 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::FastnnError;
 use std::collections::HashSet;
 
 /// Fuses the ONNX SiLU decomposition pattern into a single Conv2d+SiLU op.
@@ -31,7 +32,7 @@ impl FusionPass for ConvSilu {
         "ConvSilu"
     }
 
-    fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
+    fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
         let mut fused = false;
         let mut to_remove: HashSet<NodeId> = HashSet::new();
         let conv_ids: Vec<NodeId> = graph

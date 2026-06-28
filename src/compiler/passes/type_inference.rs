@@ -20,6 +20,7 @@
 //! - Conversion ops (Cast, Quantize, Dequantize, ToF16, ToF32) accept their
 //!   natural input type.
 
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Returns the dtype that `opcode` expects for its `input_index`-th input
@@ -59,7 +60,7 @@ fn expected_input_dtype(opcode: &Opcode, _input_index: usize) -> Option<IrDType>
 /// a node's input dtype doesn't match what the node expects.
 ///
 /// This pass is idempotent.
-pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), String> {
+pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     // Collect (consumer_id, input_index, conversion_opcode, target_dtype) rewrites.
     struct Rewrite {
         consumer_id: NodeId,
@@ -102,7 +103,8 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), String> {
             });
         }
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     // Apply rewrites (insert conversion nodes and rewire).
     for rw in rewrites {

@@ -1,5 +1,6 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, NodeId, Opcode, TensorType};
+use crate::FastnnError;
 use std::collections::HashMap;
 
 /// Collect backward pattern info for a specific fused_op value.
@@ -15,7 +16,6 @@ struct BwdPattern {
     db_ty: TensorType,
     a_t_id: Option<NodeId>,
     b_t_id: Option<NodeId>,
-    has_bias: bool,
 }
 
 fn find_bwd_patterns(graph: &ComputeGraph, target_fused_op: &str) -> Vec<BwdPattern> {
@@ -54,8 +54,6 @@ fn find_bwd_patterns(graph: &ComputeGraph, target_fused_op: &str) -> Vec<BwdPatt
         }
         let a_id = fwd.inputs[0];
         let b_id = fwd.inputs[1];
-        let has_bias = fwd.inputs.len() > 2;
-
         let consumers: Vec<NodeId> = graph.consumers(drelu_id);
         let mut da_id = None;
         let mut db_id = None;
@@ -127,7 +125,6 @@ fn find_bwd_patterns(graph: &ComputeGraph, target_fused_op: &str) -> Vec<BwdPatt
             db_ty,
             a_t_id,
             b_t_id,
-            has_bias,
         });
     }
 
@@ -141,7 +138,7 @@ impl FusionPass for BackwardReluMatMul {
         "BackwardReluMatMul"
     }
 
-    fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
+    fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
         let patterns = find_bwd_patterns(graph, "OpRelu");
         if patterns.is_empty() {
             return Ok(false);
@@ -216,7 +213,7 @@ impl FusionPass for BackwardMatMulAddRelu {
         "BackwardMatMulAddRelu"
     }
 
-    fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
+    fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
         let mut fused = false;
 
         let fwd_ids: Vec<NodeId> = graph

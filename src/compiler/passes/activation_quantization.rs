@@ -13,6 +13,7 @@
 //! memory planning (so the planner allocates slots for the new nodes).
 
 use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
 
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 ///
 /// The pass is idempotent — it skips ops whose first input is already
 /// a `QuantizeActivations` output.
-pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
+pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     struct Rewrite {
         node_id: NodeId,
         act_id: NodeId,
@@ -79,7 +80,8 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
         });
 
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     for rw in rewrites {
         let quant_type = TensorType::new(rw.act_shape, IrDType::I8);
@@ -119,15 +121,11 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), String> {
 pub fn quantize_activations_with_calibration(
     graph: &mut ComputeGraph,
     calib: &CalibrationData,
-) -> Result<(), String> {
+) -> Result<(), FastnnError> {
     struct Rewrite {
         node_id: NodeId,
         act_id: NodeId,
-        node_shape: Vec<DimExpr>,
         act_shape: Vec<DimExpr>,
-        consumers: Vec<NodeId>,
-        is_graph_output: bool,
-        opcode: Opcode,
         input_channels: usize,
         per_channel_scales: Vec<f32>,
         per_channel_zero_points: Vec<f32>,
@@ -151,8 +149,6 @@ pub fn quantize_activations_with_calibration(
             None => return Ok(()),
         };
 
-        let node_shape = node.output_type.shape.clone();
-
         // Check if activation already has QuantizeActivations
         let existing_qa_id = if let Some(act_node) = graph_ref.get_node(act_id) {
             if act_node.opcode == Opcode::QuantizeActivations {
@@ -175,10 +171,6 @@ pub fn quantize_activations_with_calibration(
                 return Ok(());
             }
         }
-
-        let output_id = node_id;
-        let consumers: Vec<NodeId> = graph_ref.consumers(output_id);
-        let is_graph_output = graph_ref.outputs.contains(&output_id);
 
         let act_shape = graph_ref
             .get_node(act_id)
@@ -270,11 +262,7 @@ pub fn quantize_activations_with_calibration(
         rewrites.push(Rewrite {
             node_id,
             act_id,
-            node_shape,
             act_shape,
-            consumers,
-            is_graph_output,
-            opcode: node.opcode.clone(),
             input_channels,
             per_channel_scales,
             per_channel_zero_points,
@@ -284,7 +272,8 @@ pub fn quantize_activations_with_calibration(
         });
 
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     for rw in rewrites {
         let is_per_channel = !rw.per_channel_scales.is_empty();

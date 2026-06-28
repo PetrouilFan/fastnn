@@ -7,18 +7,6 @@
 use crate::dtypes::{U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
 
-/// Extract raw u32 from U8x4 packed word.
-#[inline(always)]
-fn u8x4_to_u32(w: U8x4) -> u32 {
-    w.0
-}
-
-/// Extract raw u32 from U4x8 packed word.
-#[inline(always)]
-fn u4x8_to_u32(w: U4x8) -> u32 {
-    w.0
-}
-
 /// Compute dot product of two U8x4-packed u32 words (signed).
 ///
 /// Each u32 holds 4 × signed i8 values (little-endian byte order, range [-128, 127]).

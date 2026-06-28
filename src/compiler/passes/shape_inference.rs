@@ -1,10 +1,9 @@
-#![allow(dead_code)]
-
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, DimExpr, IRNode, Opcode};
 use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
 use std::collections::HashMap;
 
-pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
+pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     let order = graph.topological_sort();
 
     for &node_id in &order {
@@ -29,7 +28,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                             &inputs[1].output_type.shape,
                         )
                         .map_err(|e| {
-                            format!(
+                            FastnnError::compilation(format!(
                                 "node {} ({:?} '{}') shapes {:?} vs {:?}: {}",
                                 node_id,
                                 node.opcode,
@@ -37,7 +36,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                                 inputs[0].output_type.shape,
                                 inputs[1].output_type.shape,
                                 e
-                            )
+                            ))
                         })?,
                     )
                 } else if inputs.len() == 1 {
@@ -74,14 +73,14 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
                             &inputs[1].output_type.shape,
                         )
                         .map_err(|e| {
-                            format!(
+                            FastnnError::compilation(format!(
                                 "node {} (MatMul '{}') shapes {:?} vs {:?}: {}",
                                 node_id,
                                 node.name,
                                 inputs[0].output_type.shape,
                                 inputs[1].output_type.shape,
                                 e
-                            )
+                            ))
                         })?,
                     )
                 } else {
@@ -550,7 +549,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), String> {
     Ok(())
 }
 
-fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String> {
+fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, FastnnError> {
     let max_len = a.len().max(b.len());
     let mut result = Vec::with_capacity(max_len);
 
@@ -571,7 +570,10 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String
             (other, DimExpr::Known(1)) => other.clone(),
             (DimExpr::Known(va), DimExpr::Known(vb)) if va == vb => DimExpr::Known(*va),
             (DimExpr::Known(va), DimExpr::Known(vb)) => {
-                return Err(format!("Cannot broadcast dimensions: {} vs {}", va, vb));
+                return Err(FastnnError::compilation(format!(
+                    "Cannot broadcast dimensions: {} vs {}",
+                    va, vb
+                )));
             }
             _ => {
                 let va = da.evaluate();
@@ -581,7 +583,10 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String
                     (_, Some(1)) => da.clone(),
                     _ if da == db => da.clone(),
                     _ => {
-                        return Err(format!("Cannot broadcast dimensions: {} vs {}", da, db));
+                        return Err(FastnnError::compilation(format!(
+                            "Cannot broadcast dimensions: {} vs {}",
+                            da, db
+                        )));
                     }
                 }
             }
@@ -593,18 +598,18 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String
     Ok(result)
 }
 
-fn matmul_output_shape(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, String> {
+fn matmul_output_shape(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, FastnnError> {
     if a.len() < 2 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "MatMul: first input must have at least 2 dimensions, got {}",
             a.len()
-        ));
+        )));
     }
     if b.len() < 2 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "MatMul: second input must have at least 2 dimensions, got {}",
             b.len()
-        ));
+        )));
     }
 
     let m = &a[a.len() - 2];
@@ -614,18 +619,18 @@ fn matmul_output_shape(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, Str
 
     match (k_a.evaluate(), k_b.evaluate()) {
         (Some(va), Some(vb)) if va != vb => {
-            return Err(format!(
+            return Err(FastnnError::compilation(format!(
                 "MatMul: inner dimensions must match, got {} vs {}",
                 va, vb
-            ));
+            )));
         }
         (Some(_), Some(_)) => {}
         _ => {
             if k_a != k_b {
-                return Err(format!(
+                return Err(FastnnError::compilation(format!(
                     "MatMul: inner dimensions must match, got {} vs {}",
                     k_a, k_b
-                ));
+                )));
             }
         }
     }
@@ -644,18 +649,18 @@ fn conv2d_output_shape(
     input_shape: &[DimExpr],
     weight_shape: &[DimExpr],
     attrs: &HashMap<String, String>,
-) -> Result<Vec<DimExpr>, String> {
+) -> Result<Vec<DimExpr>, FastnnError> {
     if input_shape.len() < 4 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "Conv2d: input must have at least 4 dimensions [N,C,H,W], got {}",
             input_shape.len()
-        ));
+        )));
     }
     if weight_shape.len() < 4 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "Conv2d: weight must have 4 dimensions [F,C,KH,KW], got {}",
             weight_shape.len()
-        ));
+        )));
     }
 
     let (stride, padding, dilation) = parse_conv_attrs(attrs);
@@ -663,8 +668,10 @@ fn conv2d_output_shape(
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
 
-    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
-    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
+    let h_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)
+        .map_err(FastnnError::compilation)?;
+    let w_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)
+        .map_err(FastnnError::compilation)?;
 
     Ok(vec![n, f, h_out, w_out])
 }
@@ -673,25 +680,26 @@ fn conv1d_output_shape(
     input_shape: &[DimExpr],
     weight_shape: &[DimExpr],
     attrs: &HashMap<String, String>,
-) -> Result<Vec<DimExpr>, String> {
+) -> Result<Vec<DimExpr>, FastnnError> {
     if input_shape.len() < 3 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "Conv1d: input must have 3 dimensions [N,C,W], got {}",
             input_shape.len()
-        ));
+        )));
     }
     if weight_shape.len() < 3 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "Conv1d: weight must have 3 dimensions [F,C,KW], got {}",
             weight_shape.len()
-        ));
+        )));
     }
 
     let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
+    let w_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)
+        .map_err(FastnnError::compilation)?;
 
     Ok(vec![n, f, w_out])
 }
@@ -700,27 +708,30 @@ fn conv3d_output_shape(
     input_shape: &[DimExpr],
     weight_shape: &[DimExpr],
     attrs: &HashMap<String, String>,
-) -> Result<Vec<DimExpr>, String> {
+) -> Result<Vec<DimExpr>, FastnnError> {
     if input_shape.len() < 5 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "Conv3d: input must have 5 dimensions [N,C,D,H,W], got {}",
             input_shape.len()
-        ));
+        )));
     }
     if weight_shape.len() < 5 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "Conv3d: weight must have 5 dimensions [F,C,KD,KH,KW], got {}",
             weight_shape.len()
-        ));
+        )));
     }
 
     let (stride, padding, dilation) = parse_conv_attrs(attrs);
 
     let n = input_shape[0].clone();
     let f = weight_shape[0].clone();
-    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)?;
-    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)?;
-    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding, dilation)?;
+    let d_out = spatial_output_dim(&input_shape[2], &weight_shape[2], stride, padding, dilation)
+        .map_err(FastnnError::compilation)?;
+    let h_out = spatial_output_dim(&input_shape[3], &weight_shape[3], stride, padding, dilation)
+        .map_err(FastnnError::compilation)?;
+    let w_out = spatial_output_dim(&input_shape[4], &weight_shape[4], stride, padding, dilation)
+        .map_err(FastnnError::compilation)?;
 
     Ok(vec![n, f, d_out, h_out, w_out])
 }
@@ -729,18 +740,18 @@ fn conv_transpose2d_output_shape(
     input_shape: &[DimExpr],
     weight_shape: &[DimExpr],
     attrs: &HashMap<String, String>,
-) -> Result<Vec<DimExpr>, String> {
+) -> Result<Vec<DimExpr>, FastnnError> {
     if input_shape.len() < 4 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "ConvTranspose2d: input must have 4 dimensions [N,C,H,W], got {}",
             input_shape.len()
-        ));
+        )));
     }
     if weight_shape.len() < 4 {
-        return Err(format!(
+        return Err(FastnnError::compilation(format!(
             "ConvTranspose2d: weight must have 4 dimensions [C,F,KH,KW], got {}",
             weight_shape.len()
-        ));
+        )));
     }
 
     let (stride, padding, dilation) = parse_conv_attrs(attrs);
@@ -762,7 +773,7 @@ fn conv_transpose_spatial_dim(
     stride: i64,
     padding: i64,
     dilation: i64,
-) -> Result<DimExpr, String> {
+) -> Result<DimExpr, FastnnError> {
     let result = |input: i64, kernel: i64| -> DimExpr {
         DimExpr::Known(((input - 1) * stride - 2 * padding + dilation * (kernel - 1) + 1) as u64)
     };
@@ -780,14 +791,6 @@ fn conv_transpose_spatial_dim(
             }
         }
     }
-}
-
-fn add_dim_exprs(a: DimExpr, b: DimExpr) -> DimExpr {
-    a.add(&b)
-}
-
-fn max_u64_for_symbol(_v: &u64) -> u64 {
-    u64::MAX
 }
 
 /// Parse a `keepdim` attribute string. The builder stores it as `"1"`
