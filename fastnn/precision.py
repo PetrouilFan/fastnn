@@ -229,6 +229,7 @@ class Quantizer:
             "precision": self.precision.name,
             "scheme": self.scheme,
             "block_size": self.block_size,
+            "asymmetric": self.asymmetric,
         }
 
     @staticmethod
@@ -237,11 +238,17 @@ class Quantizer:
             precision=Precision[d["precision"]],
             scheme=d.get("scheme", "per_channel"),
             block_size=d.get("block_size"),
+            asymmetric=d.get("asymmetric", False),
         )
 
     def __repr__(self) -> str:
-        return (f"Quantizer({self.precision.name}, "
-                f"scheme={self.scheme})")
+        parts = [f"Quantizer({self.precision.name}, scheme={self.scheme}"]
+        if self.asymmetric:
+            parts.append(f", asymmetric={self.asymmetric}")
+        if self.block_size is not None:
+            parts.append(f", block_size={self.block_size}")
+        parts.append(")")
+        return "".join(parts)
 
 
 class PrecisionConfig:
@@ -311,17 +318,25 @@ class PrecisionConfig:
         Example:
             {
                 "default": "u4",
+                "scheme": "per_channel",
                 "overrides": {"layer1.weight": "f32"},
                 "prefixes": {"head.": "u8"},
             }
         """
-        default = Quantizer(spec.get("default", "f32"))
+        scheme = spec.get("scheme", "per_channel")
+        default = Quantizer(spec.get("default", "f32"), scheme=scheme)
         overrides = {}
         for k, v in spec.get("overrides", {}).items():
-            overrides[k] = Quantizer(v)
+            if isinstance(v, str):
+                overrides[k] = Quantizer(v, scheme=scheme)
+            else:
+                overrides[k] = Quantizer(**v) if isinstance(v, dict) else Quantizer(v, scheme=scheme)
         prefixes = {}
         for k, v in spec.get("prefixes", {}).items():
-            prefixes[k] = Quantizer(v)
+            if isinstance(v, str):
+                prefixes[k] = Quantizer(v, scheme=scheme)
+            else:
+                prefixes[k] = Quantizer(**v) if isinstance(v, dict) else Quantizer(v, scheme=scheme)
         return PrecisionConfig(default=default, overrides=overrides, prefixes=prefixes)
 
     def __repr__(self) -> str:

@@ -6,7 +6,7 @@ use crate::dtypes::{PackedWord, U4x8, U8x4};
 use crate::ir::node::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
 
-use super::{resolve_params, CpuBuffer};
+use super::{aligned_packed_slice, resolve_params, CpuBuffer};
 
 // Runtime dispatch helpers intentionally take the IR/kernel call-site context
 // directly so they do not allocate wrapper structs on hot paths.
@@ -80,7 +80,7 @@ pub(super) fn matmul_activation_dispatch(
 /// Validate quantized weight metadata and build a packed tensor.
 pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     data: Vec<T>,
-    meta: crate::backend::QuantizedWeightMeta,
+    meta: std::sync::Arc<crate::backend::QuantizedWeightMeta>,
     kernel_name: &str,
 ) -> Result<PackedTensor<T>, BackendError> {
     if meta.scales.is_empty() {
@@ -106,12 +106,15 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     } else {
         1
     };
-    let valid_meta_len = meta.scales.len() == 1 || meta.scales.len() == rows;
+    let valid_meta_len = meta.scales.len() == 1
+        || meta.scales.len() == rows
+        || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0);
     if !valid_meta_len {
         return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1 or {})",
+            "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1, {}, or a divisor of {})",
             meta.scales.len(),
             meta.shape,
+            rows,
             rows
         )));
     }
@@ -132,12 +135,19 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
         )));
     }
 
-    Ok(PackedTensor::from_raw(
-        data,
-        meta.shape,
-        meta.scales,
-        meta.zero_points,
-    ))
+    Ok({
+        let scales_len = meta.scales.len();
+        let mut pt = PackedTensor::from_raw(
+            data,
+            meta.shape.clone(),
+            meta.scales.clone(),
+            meta.zero_points.clone(),
+        );
+        if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
+            pt.group_size = rows / scales_len;
+        }
+        pt
+    })
 }
 
 /// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
@@ -152,25 +162,21 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     out_start: usize,
     out_end: usize,
     bit_width: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
-        let (activations, packed_bytes) = {
+        let (activations, typed_data) = {
             let d = arena.data_mut();
             (
                 bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
                     .to_vec(),
                 {
                     let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                    // Copy to u32-aligned buffer (arena may not be u32-aligned)
-                    let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
-                    let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                    byte_slice[..raw.len()].copy_from_slice(raw);
-                    aligned
+                    aligned_packed_slice::<T>(raw)
                 },
             )
         };
@@ -180,15 +186,14 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            });
-        let typed_data: Vec<T> = bytemuck::cast_slice(&packed_bytes).to_vec();
+            })
+        });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();
@@ -211,20 +216,17 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     out_start: usize,
     out_end: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
-        let (activation_payload, packed_bytes) = {
+        let (activation_payload, typed_data) = {
             let d = arena.data_mut();
             (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
                 let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
-                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                byte_slice[..raw.len()].copy_from_slice(raw);
-                aligned
+                aligned_packed_slice::<U8x4>(raw)
             })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
@@ -233,15 +235,14 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 8,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            });
-        let typed_data: Vec<U8x4> = bytemuck::cast_slice(&packed_bytes).to_vec();
+            })
+        });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();
@@ -271,20 +272,17 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
     params: &[usize],
     param_dims: &Option<Vec<DimExpr>>,
     shape_env: &ShapeEnv,
-    weight_meta: &Option<crate::backend::QuantizedWeightMeta>,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
     out_start: usize,
     out_end: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
-        let (activation_payload, packed_bytes) = {
+        let (activation_payload, typed_data) = {
             let d = arena.data_mut();
             (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
                 let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                let mut aligned: Vec<u32> = vec![0u32; raw.len().div_ceil(4)];
-                let byte_slice = bytemuck::cast_slice_mut::<_, u8>(&mut aligned);
-                byte_slice[..raw.len()].copy_from_slice(raw);
-                aligned
+                aligned_packed_slice::<U4x8>(raw)
             })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
@@ -293,15 +291,14 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 4,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            });
-        let typed_data: Vec<U4x8> = bytemuck::cast_slice(&packed_bytes).to_vec();
+            })
+        });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();

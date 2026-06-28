@@ -137,7 +137,7 @@ models/
     yolo.py              # YOLO model wrapper
 src/
     ir/                  # ComputeGraph IR, GraphBuilder
-      node.rs            # Opcode (72 variants), IrDType, DimExpr, TensorType
+      node.rs            # Opcode (91 variants), IrDType, DimExpr, TensorType
       builder.rs         # GraphBuilder — fluent IR construction API
     compiler/passes/     # AOT compiler passes
       shape_inference.rs # Symbolic shape resolution

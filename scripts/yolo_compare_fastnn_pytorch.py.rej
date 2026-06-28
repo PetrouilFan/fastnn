@@ -1,0 +1,11 @@
+--- scripts/yolo_compare_fastnn_pytorch.py
++++ scripts/yolo_compare_fastnn_pytorch.py
+@@ -312,6 +312,8 @@ def main():
+     else:
+         fy = _run_fastnn(executor, x, input_name, output_name)
+         print("fastnn_out sample:", fy.flatten()[:5])
++        if np.isnan(fy).any():
++            print("WARNING: fastnn output contains NaN!")
+         results["fastnn_vs_pytorch"] = {
+             "max_abs": float(np.max(np.abs(fy - y_torch))),
+             "mean_abs": float(np.mean(np.abs(fy - y_torch))),

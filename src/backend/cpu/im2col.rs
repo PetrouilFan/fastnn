@@ -299,8 +299,10 @@ pub unsafe fn im2col_dispatch(
     padding: usize,
     dilation: usize,
     col: &mut [f32],
-) {
-    // Fastest: SIMD for stride=1, padding=1, 3×3
+) -> (f32, f32) {
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if stride == 1
         && padding == 1
@@ -309,11 +311,15 @@ pub unsafe fn im2col_dispatch(
         && kw == 3
         && crate::backend::cpu::microkernels::has_avx2()
     {
-        return im2col_kernel_rect_avx2(data, c, h, w, col);
+        im2col_kernel_rect_avx2(data, c, h, w, col);
+        for &v in col.iter() {
+            min = min.min(v);
+            max = max.max(v);
+        }
+        return (min, max);
     }
     let _ = (kh, kw, stride, padding, dilation); // suppress unused warnings
 
-    // Medium: parallel over spatial rows (only for large enough workloads)
     #[cfg(feature = "parallel")]
     {
         let dh = (kh - 1) * dilation + 1;
@@ -330,12 +336,21 @@ pub unsafe fn im2col_dispatch(
         };
         let col_elems = h_out * w_out * c * kh * kw;
         if col_elems > 4096 {
-            return im2col_parallel(data, c, h, w, kh, kw, stride, padding, dilation, col);
+            im2col_parallel(data, c, h, w, kh, kw, stride, padding, dilation, col);
+            for &v in col.iter() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+            return (min, max);
         }
     }
 
-    // Fallback: scalar reference
-    im2col_kernel_rect(data, c, h, w, kh, kw, stride, padding, dilation, col)
+    im2col_kernel_rect(data, c, h, w, kh, kw, stride, padding, dilation, col);
+    for &v in col.iter() {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    (min, max)
 }
 
 #[cfg(test)]

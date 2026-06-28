@@ -443,10 +443,11 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, self.graph.avg_pool2d(&ins[0], k, s, p));
             }
             "GlobalAveragePool" => {
-                // Reduce over dims 2 and 3 (spatial dims of NCHW)
-                // ONNX GlobalAveragePool always keeps spatial dimensions as size-1.
+                // Reduce over the two spatial dims (H, W) of an NCHW tensor.
+                // Each reduce uses keepdim=true so the output keeps the rank
+                // (4D) and the reduced dim becomes size 1.
                 let r1 = self.graph.reduce_mean(&ins[0], 2, true);
-                self.out(node, self.graph.reduce_mean(&r1, 2, true));
+                self.out(node, self.graph.reduce_mean(&r1, 3, true));
             }
 
             // ── Normalization ───────────────────────────────────────
@@ -825,22 +826,18 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Reduce ops (multi-axis with sorted descending) ──────
             "ReduceSum" => {
-                let axes_str = node.attrs.get("axes");
                 let keepdim: bool = node
                     .attrs
                     .get("keepdims")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(true); // ONNX default
-                if let Some(axes_str) = axes_str {
-                    let mut axes: Vec<usize> = axes_str
-                        .split(',')
-                        .filter_map(|v| v.trim().parse().ok())
-                        .collect();
+                if let Some(axes) = reduce_axes_from_attr_or_input(node, &ins, self.params) {
+                    let mut axes = axes;
                     // Sort descending so earlier reduce ops don't shift later axes
                     axes.sort_by(|a, b| b.cmp(a));
                     axes.dedup();
                     let mut out = ins[0].clone();
-                    for &axis in &axes {
+                    for axis in axes {
                         out = self.graph.reduce_sum(&out, axis, keepdim);
                     }
                     self.out(node, out);
@@ -849,21 +846,17 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
             "ReduceMean" => {
-                let axes_str = node.attrs.get("axes");
                 let keepdim: bool = node
                     .attrs
                     .get("keepdims")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(true);
-                if let Some(axes_str) = axes_str {
-                    let mut axes: Vec<usize> = axes_str
-                        .split(',')
-                        .filter_map(|v| v.trim().parse().ok())
-                        .collect();
+                if let Some(axes) = reduce_axes_from_attr_or_input(node, &ins, self.params) {
+                    let mut axes = axes;
                     axes.sort_by(|a, b| b.cmp(a));
                     axes.dedup();
                     let mut out = ins[0].clone();
-                    for &axis in &axes {
+                    for axis in axes {
                         out = self.graph.reduce_mean(&out, axis, keepdim);
                     }
                     self.out(node, out);
@@ -872,21 +865,17 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
             "ReduceMax" => {
-                let axes_str = node.attrs.get("axes");
                 let keepdim: bool = node
                     .attrs
                     .get("keepdims")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(true);
-                if let Some(axes_str) = axes_str {
-                    let mut axes: Vec<usize> = axes_str
-                        .split(',')
-                        .filter_map(|v| v.trim().parse().ok())
-                        .collect();
+                if let Some(axes) = reduce_axes_from_attr_or_input(node, &ins, self.params) {
+                    let mut axes = axes;
                     axes.sort_by(|a, b| b.cmp(a));
                     axes.dedup();
                     let mut out = ins[0].clone();
-                    for &axis in &axes {
+                    for axis in axes {
                         out = self.graph.reduce_max(&out, axis, keepdim);
                     }
                     self.out(node, out);
@@ -904,12 +893,15 @@ impl<'a> OnnxConverter<'a> {
                     .unwrap_or(1e-5);
                 let scale = ins.get(1).ok_or("IN needs scale")?;
                 let bias = ins.get(2).ok_or("IN needs bias")?;
-                let m1 = self.graph.reduce_mean(&ins[0], 2, true);
-                let mean = self.graph.reduce_mean(&m1, 2, true);
+                // Reduce over both spatial dims (H, W) so the result is [N, C, 1, 1].
+                let mean =
+                    self.graph
+                        .reduce_mean(&self.graph.reduce_mean(&ins[0], 2, true), 3, true);
                 let centered = self.graph.sub(&ins[0], &mean);
                 let sq = self.graph.pow(&centered, &self.scalar(2.0));
-                let v1 = self.graph.reduce_mean(&sq, 2, true);
-                let var = self.graph.reduce_mean(&v1, 2, true);
+                let var = self
+                    .graph
+                    .reduce_mean(&self.graph.reduce_mean(&sq, 2, true), 3, true);
                 let std = self
                     .graph
                     .sqrt(&self.graph.add(&var, &self.scalar(eps as f32)));
@@ -1542,6 +1534,71 @@ fn parse_ints_i64(attrs: &HashMap<String, String>, key: &str, default: &[i64]) -
         })
         .filter(|v: &Vec<i64>| !v.is_empty())
         .unwrap_or_else(|| default.to_vec())
+}
+
+/// Parse an ONNX axes attribute (CSV of i64) into a `Vec<usize>` of
+/// non-negative axis indices, normalizing negative axes against the rank
+/// of `input`. Returns `None` when the attribute is absent or empty so
+/// callers can fall back to a default (ONNX semantics: reduce over all
+/// axes when no explicit axes are provided).
+fn parse_onnx_axes(
+    attrs: &HashMap<String, String>,
+    key: &str,
+    input: &GraphTensor,
+) -> Option<Vec<usize>> {
+    let raw = attrs.get(key)?;
+    let parsed: Vec<i64> = raw
+        .split(',')
+        .filter_map(|v| v.trim().parse::<i64>().ok())
+        .collect();
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(normalize_axes(&parsed, input.shape().len()))
+}
+
+fn normalize_axes(parsed: &[i64], rank: usize) -> Vec<usize> {
+    let rank_i = rank as i64;
+    let mut out = Vec::with_capacity(parsed.len());
+    for &ax in parsed {
+        let normalized = if ax < 0 {
+            if rank_i <= 0 {
+                0
+            } else {
+                ((rank_i + ax % rank_i) % rank_i) as usize
+            }
+        } else {
+            ax as usize
+        };
+        out.push(normalized);
+    }
+    out
+}
+
+/// Resolve the ONNX reduce axes for `attrs["axes"]` falling back to
+/// the second input (opset 13+) when the axes were passed as a tensor
+/// initializer. Returns `None` when neither source provides axes (so
+/// the caller can fall back to the ONNX "reduce over all dims" default).
+fn reduce_axes_from_attr_or_input(
+    node: &OnnxNode,
+    ins: &[GraphTensor],
+    params: &HashMap<String, Tensor>,
+) -> Option<Vec<usize>> {
+    if let Some(axes) = parse_onnx_axes(&node.attrs, "axes", &ins[0]) {
+        return Some(axes);
+    }
+    // Opset 13+ Reduce{Mean,Sum,Max} take axes as the second input.
+    // We only honour it when the initializer is a known compile-time
+    // constant — dynamic axes still fall through to the default
+    // "reduce over all dims" semantics.
+    let axes_name = node.inputs.get(1)?;
+    let axes_tensor = params.get(axes_name)?;
+    let raw = axes_tensor.to_numpy();
+    let parsed: Vec<i64> = raw.iter().map(|&v| v as i64).collect();
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(normalize_axes(&parsed, ins[0].shape().len()))
 }
 
 fn parse_shape_attr(attrs: &HashMap<String, String>, key: &str) -> Option<Vec<DimExpr>> {

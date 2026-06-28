@@ -5,11 +5,12 @@ Validates that DLPackContext deleter handles aggressive Python garbage collectio
 without leaking memory or crashing.
 """
 
+import os
 import sys
 import gc
 import numpy as np
 
-sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fastnn
 
