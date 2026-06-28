@@ -1,42 +1,58 @@
 # Existing clippy diagnostics tracked by CI. Remove entries when you fix them.
-clippy::approx_constant|src/backend/cpu/microkernels.rs|approximate value of `f32::consts::LN_2` found
-clippy::approx_constant|src/backend/cpu/microkernels.rs|approximate value of `f32::consts::LOG2_E` found
+clippy::approx_constant|src/backend/cpu/microkernels/activations.rs|approximate value of `f32::consts::LN_2` found
+clippy::approx_constant|src/backend/cpu/microkernels/activations.rs|approximate value of `f32::consts::LOG2_E` found
 clippy::approx_constant|src/dtypes/f32x1.rs|approximate value of `f32::consts::PI` found
 clippy::approx_constant|src/ir/builder.rs|approximate value of `f{32, 64}::consts::E` found
 clippy::approx_constant|src/ir/builder.rs|approximate value of `f{32, 64}::consts::SQRT_2` found
 clippy::approx_constant|src/packed_tensor.rs|approximate value of `f{32, 64}::consts::PI` found
 clippy::approx_constant|src/tensor/mod.rs|approximate value of `f{32, 64}::consts::LN_2` found
-clippy::assign_op_pattern|src/backend/cpu/microkernels.rs|manual implementation of an assign operation
-clippy::doc_lazy_continuation|src/backend/cpu/mod.rs|doc list item without indentation
+clippy::assign_op_pattern|src/backend/cpu/microkernels/ops.rs|manual implementation of an assign operation
 clippy::excessive_precision|src/autograd.rs|float has excessive precision
-clippy::excessive_precision|src/backend/cpu/microkernels.rs|float has excessive precision
+clippy::excessive_precision|src/backend/cpu/microkernels/activations.rs|float has excessive precision
+clippy::excessive_precision|src/backend/cpu/microkernels/conv.rs|float has excessive precision
 clippy::excessive_precision|src/compiler/passes/constant_folding.rs|float has excessive precision
 clippy::excessive_precision|src/ir/builder.rs|float has excessive precision
-clippy::identity_op|src/backend/cpu/microkernels.rs|this operation has no effect
+clippy::identity_op|src/backend/cpu/microkernels/misc.rs|this operation has no effect
+clippy::identity_op|src/backend/cpu/microkernels/ops.rs|this operation has no effect
 clippy::identity_op|src/ir/builder.rs|this operation has no effect
+clippy::if_same_then_else|src/backend/executor.rs|this `if` has identical blocks
 clippy::items_after_test_module|src/tensor/mod.rs|items after a test module
+clippy::iter_cloned_collect|src/backend/prepared.rs|called `iter().copied().collect()` on a slice to create a `Vec`. Calling `to_vec()` is both faster and more readable
 clippy::iter_cloned_collect|src/tensor/ops.rs|called `iter().copied().collect()` on a slice to create a `Vec`. Calling `to_vec()` is both faster and more readable
 clippy::manual_is_multiple_of|src/autograd.rs|manual implementation of `.is_multiple_of()`
-clippy::manual_range_contains|src/backend/cpu/microkernels.rs|manual `RangeInclusive::contains` implementation
+clippy::manual_is_multiple_of|src/backend/cpu/mod.rs|manual implementation of `.is_multiple_of()`
+clippy::manual_is_multiple_of|src/backend/cpu/packed_conv.rs|manual implementation of `.is_multiple_of()`
+clippy::manual_range_contains|src/backend/cpu/microkernels/tests.rs|manual `RangeInclusive::contains` implementation
+clippy::manual_slice_size_calculation|src/backend/prepared.rs|manual slice size calculation
+clippy::match_like_matches_macro|src/compiler/passes/shape_inference.rs|match expression looks like `matches!` macro
+clippy::missing_safety_doc|src/backend/cpu/packed_conv.rs|unsafe function's docs are missing a `# Safety` section
 clippy::needless_borrow|src/autograd.rs|this expression creates a reference which is immediately dereferenced by the compiler
+clippy::needless_borrow|src/backend/executor.rs|this expression creates a reference which is immediately dereferenced by the compiler
 clippy::needless_borrow|src/ir/builder.rs|this expression creates a reference which is immediately dereferenced by the compiler
 clippy::needless_update|src/macros/optim.rs|struct update has no effect, all the fields in the struct have already been specified
-clippy::neg_multiply|src/backend/cpu/microkernels.rs|this multiplication by -1 can be written more succinctly
+clippy::neg_multiply|src/backend/cpu/microkernels/tests.rs|this multiplication by -1 can be written more succinctly
 clippy::redundant_closure_call|src/tensor/mod.rs|try not to call a closure in the expression where it is declared
 clippy::redundant_closure|src/backend/cpu/mod.rs|redundant closure
+clippy::redundant_closure|src/backend/cpu/swar.rs|redundant closure
+clippy::redundant_field_names|src/compiler/passes/activation_quantization.rs|redundant field names in struct initialization
+clippy::redundant_locals|src/backend/prepared.rs|redundant redefinition of a binding `arena`
+clippy::too_many_arguments|src/backend/cpu/dispatch_helpers.rs|this function has too many arguments (10/7)
+clippy::too_many_arguments|src/backend/cpu/dispatch_helpers.rs|this function has too many arguments (11/7)
 clippy::too_many_arguments|src/backend/cpu/im2col.rs|this function has too many arguments (10/7)
-clippy::too_many_arguments|src/backend/cpu/microkernels.rs|this function has too many arguments (10/7)
-clippy::too_many_arguments|src/backend/cpu/microkernels.rs|this function has too many arguments (11/7)
-clippy::too_many_arguments|src/backend/cpu/microkernels.rs|this function has too many arguments (12/7)
-clippy::too_many_arguments|src/backend/cpu/mod.rs|this function has too many arguments (10/7)
-clippy::too_many_arguments|src/backend/cpu/mod.rs|this function has too many arguments (11/7)
-clippy::too_many_arguments|src/backend/cpu/mod.rs|this function has too many arguments (8/7)
+clippy::too_many_arguments|src/backend/cpu/microkernels/conv.rs|this function has too many arguments (12/7)
+clippy::too_many_arguments|src/backend/cpu/microkernels/ops.rs|this function has too many arguments (10/7)
+clippy::too_many_arguments|src/backend/cpu/microkernels/ops.rs|this function has too many arguments (11/7)
+clippy::too_many_arguments|src/backend/cpu/microkernels/ops.rs|this function has too many arguments (12/7)
+clippy::too_many_arguments|src/backend/cpu/packed_conv.rs|this function has too many arguments (10/7)
+clippy::too_many_arguments|src/backend/cpu/packed_conv.rs|this function has too many arguments (12/7)
+clippy::too_many_arguments|src/backend/cpu/packed_conv.rs|this function has too many arguments (15/7)
+clippy::too_many_arguments|src/backend/cpu/packed_conv.rs|this function has too many arguments (9/7)
+clippy::too_many_arguments|src/backend/executor.rs|this function has too many arguments (8/7)
 clippy::too_many_arguments|src/ir/builder.rs|this function has too many arguments (8/7)
 clippy::too_many_arguments|src/tensor/ops.rs|this function has too many arguments (10/7)
 clippy::too_many_arguments|src/tensor/ops.rs|this function has too many arguments (9/7)
 clippy::type_complexity|src/autograd.rs|very complex type used. Consider factoring parts into `type` definitions
 clippy::type_complexity|src/ir/builder.rs|very complex type used. Consider factoring parts into `type` definitions
-clippy::uninit_vec|src/nn/dropout.rs|calling `set_len()` immediately after reserving a buffer creates uninitialized values
 clippy::unnecessary_cast|src/autograd.rs|casting raw pointers to the same type and constness is unnecessary (`*const f32` -> `*const f32`)
 clippy::unnecessary_cast|src/compiler/passes/memory_planning.rs|casting to the same type is unnecessary (`usize` -> `usize`)
 clippy::unnecessary_cast|src/nn/norm.rs|casting to the same type is unnecessary (`i64` -> `i64`)
@@ -47,29 +63,13 @@ clippy::unnecessary_map_or|src/backend/runtime.rs|this `map_or` can be simplifie
 clippy::unnecessary_map_or|src/compiler/passes/constant_folding.rs|this `map_or` can be simplified
 clippy::unnecessary_to_owned|src/autograd.rs|unnecessary use of `to_vec`
 clippy::unused_enumerate_index|src/backend/cpu/mod.rs|you seem to use `.enumerate()` and immediately discard the index
-non_snake_case|src/compiler/passes/quantization.rs|variable `W` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_bytes` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_data` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_id` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_large_bytes` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_large` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_zero_bytes` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW_zero` should have a snake case name
-non_snake_case|src/compiler/passes/quantization.rs|variable `dW` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `W2` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `W_data` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `W_init` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `W` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `dW2` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `dW_scaled` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `dW_vals` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `dW` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `updated_W2` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `updated_W_vals` should have a snake case name
-non_snake_case|src/ir/builder.rs|variable `updated_W` should have a snake case name
-unused_variables|src/autograd.rs|unused variable: `grad_b`
-unused_variables|src/compiler/passes/auto_cast.rs|unused variable: `mm2_weight_node`
-unused_variables|src/compiler/passes/quantization.rs|unused variable: `weight_id`
-unused_variables|src/ir/builder.rs|unused variable: `a_data`
-unused_variables|src/ir/builder.rs|unused variable: `bias_data`
-unused_variables|src/ir/builder.rs|unused variable: `w_data`
+clippy::unwrap_or_default|src/compiler/passes/calibration.rs|use of `or_insert_with` to construct default value
+clippy::useless_asref|src/backend/prepared.rs|this call to `as_ref` does nothing
+clippy::useless_vec|src/backend/prepared.rs|useless use of `vec!`
+dead_code|src/compiler/passes/quantize_activations.rs|function `test_quantize_node_output` is never used
+unused_assignments|src/compiler/passes/activation_quantization.rs|value assigned to `calib` is never read
+unused_imports|src/backend/cpu/swar.rs|unused import: `crate::dtypes::U8x4`
+unused_imports|src/compiler/passes/activation_quantization.rs|unused import: `CalibrationStats`
+unused_variables|src/compiler/passes/calibration.rs|unused variable: `zp_minmax`
+unused_variables|src/compiler/passes/calibration.rs|unused variable: `zp`
+unused_variables|src/compiler/passes/quantize_activations.rs|unused variable: `add`
