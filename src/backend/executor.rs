@@ -14,8 +14,6 @@
 //! let outputs = executor.run(&graph, &[input_bytes]).unwrap();
 //! ```
 
-#![allow(dead_code)]
-
 use crate::autograd::build_backward_graph;
 use crate::backend::{
     Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan, ProfileEntry,
@@ -27,7 +25,6 @@ use crate::compiler::passes::{
 };
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
-use std::env;
 use std::sync::atomic::Ordering;
 
 /// An ahead-of-time graph executor that compiles and dispatches
@@ -37,6 +34,46 @@ use std::sync::atomic::Ordering;
 pub struct GraphExecutor<B: Backend> {
     backend: B,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
+}
+
+/// Read output tensors from the arena using the tightened memory plan
+/// and runtime-resolved shapes.
+fn read_execution_outputs<B: Backend>(
+    graph: &ComputeGraph,
+    tightened_memory_plan: &MemoryPlan,
+    shape_env: &ShapeEnv,
+    backend: &B,
+    arena: &B::Buffer,
+) -> Result<Vec<Vec<u8>>, BackendError> {
+    let mut outputs = Vec::with_capacity(graph.outputs.len());
+    for &output_node_id in graph.outputs.iter() {
+        let slot = tightened_memory_plan
+            .slots
+            .get(&output_node_id)
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!("no memory slot for output node {}", output_node_id))
+            })?;
+        let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
+            let resolved_shape =
+                resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
+                    BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
+                })?;
+            let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
+            let computed = match &node.output_type.dtype {
+                IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                    node.output_type.dtype.packed_byte_size(actual_numel)
+                }
+                IrDType::I8 => actual_numel + 8,
+                _ => actual_numel * node.output_type.dtype.byte_size(),
+            };
+            (computed, resolved_shape)
+        } else {
+            (slot.size, vec![])
+        };
+        let data = backend.read_arena(arena, slot.offset, actual_size);
+        outputs.push(data);
+    }
+    Ok(outputs)
 }
 
 impl<B: Backend> GraphExecutor<B> {
@@ -205,7 +242,9 @@ impl<B: Backend> GraphExecutor<B> {
                         conv2d_quant_u8 += 1;
                     } else if kernel_name.starts_with("conv2d") {
                         conv2d_fp32 += 1;
-                    } else if kernel_name.starts_with("quantize_activations") || kernel_name.starts_with("dequantize_activations") {
+                    } else if kernel_name.starts_with("quantize_activations")
+                        || kernel_name.starts_with("dequantize_activations")
+                    {
                         other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     } else {
                         other_kernels.push((kernel_name.clone(), Some(meta_info)));
@@ -268,7 +307,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, false, None)
+        self.execute_internal(graph, plan, memory_plan, inputs, false, None, None)
             .map(|(outputs, _profile)| outputs)
     }
 
@@ -279,7 +318,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, true, None)
+        self.execute_internal(graph, plan, memory_plan, inputs, true, None, None)
     }
 
     /// Profile the opt-in prepared arena fallback path.
@@ -299,7 +338,7 @@ impl<B: Backend> GraphExecutor<B> {
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
-        self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared))
+        self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared), None)
     }
 
     /// Opt-in prepared-execution fallback path.
@@ -366,8 +405,16 @@ impl<B: Backend> GraphExecutor<B> {
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
         crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
-        self.execute_internal(graph, plan, memory_plan, inputs, false, Some(prepared))
-            .map(|(outputs, _profile)| outputs)
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            Some(prepared),
+            None,
+        )
+        .map(|(outputs, _profile)| outputs)
     }
 
     /// Opt-in **no-copy** prepared path.
@@ -457,21 +504,18 @@ impl<B: Backend> GraphExecutor<B> {
         profile: bool,
         #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
         prepared_preload: Option<&crate::backend::prepared::PreparedExecutablePlan>,
+        #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
+        persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        // Build runtime shape env from input sizes, validate shapes.
+        // ── Preamble: shape env, tighten, safety, arena, input write ──
         let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
             .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
         validate_shapes(graph, &shape_env)
             .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-        // Tighten memory plan using runtime-resolved shapes, then adjust
-        // the existing plan's slices and params in-place via tighten_slices.
-        // This avoids a full backend re-compilation while still shrinking
-        // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
         tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
-        // Safety check: every node's resolved output must fit in its slot.
         for (&node_id, slot) in &tightened_memory_plan.slots {
             if let Some(node) = graph.get_node(node_id) {
                 let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
@@ -496,7 +540,6 @@ impl<B: Backend> GraphExecutor<B> {
             }
         }
 
-        // Arena caching: reuse or replace
         let arena_size = plan.arena_size;
         let enough_capacity = self
             .cached_arena
@@ -506,17 +549,11 @@ impl<B: Backend> GraphExecutor<B> {
             self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
         }
         let arena = &self.cached_arena.as_ref().unwrap().1;
-        // No need to zero-fill the arena — every kernel writes its output
-        // slot before it can be read, so stale data from the previous
-        // execution does not affect correctness.  (The memory planner's
-        // live-range analysis guarantees non-overlapping intervals.)
 
-        // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
             let input_bytes = inputs.get(i).ok_or_else(|| {
                 BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
             })?;
-
             let slot = tightened_memory_plan
                 .slots
                 .get(&input_node_id)
@@ -526,10 +563,93 @@ impl<B: Backend> GraphExecutor<B> {
                         input_node_id
                     ))
                 })?;
-
             self.backend.write_arena(arena, slot.offset, input_bytes);
         }
 
+        // ── Dispatch: no-copy persistent view path vs standard path ──
+        #[cfg(feature = "prepared-plan")]
+        if let Some(view) = persistent_view {
+            let dispatch_plan: ExecutablePlan = if view.is_empty() {
+                plan.clone()
+            } else {
+                let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
+                let mut removed = 0usize;
+                for instr in &plan.instructions {
+                    let drop = matches!(
+                        instr,
+                        Instruction::WriteConst { dst, .. }
+                            if view.get(&(dst.offset, dst.size)).is_some()
+                    );
+                    if drop {
+                        removed += 1;
+                    } else {
+                        filtered.push(instr.clone());
+                    }
+                }
+                let _ = removed;
+                ExecutablePlan {
+                    instructions: filtered,
+                    arena_size: plan.arena_size,
+                    levels: plan.levels.clone(),
+                }
+            };
+
+            let profile_entries = if profile {
+                let mut entries = Vec::with_capacity(dispatch_plan.instructions.len());
+                for (instruction_index, instruction) in
+                    dispatch_plan.instructions.iter().cloned().enumerate()
+                {
+                    let (node_id, kernel_name) = match &instruction {
+                        Instruction::CallKernel {
+                            node_id,
+                            kernel_name,
+                            ..
+                        } => (*node_id, kernel_name.clone()),
+                        Instruction::MemCopy { .. } => (None, "memcopy".to_string()),
+                        Instruction::Fill { .. } => (None, "fill".to_string()),
+                        Instruction::WriteConst { .. } => (None, "write_const".to_string()),
+                    };
+                    let single = ExecutablePlan {
+                        instructions: vec![instruction],
+                        arena_size: dispatch_plan.arena_size,
+                        levels: vec![0],
+                    };
+                    let start = std::time::Instant::now();
+                    self.backend.dispatch_with_persistent_view(
+                        &single,
+                        arena,
+                        &shape_env,
+                        Some(view),
+                    )?;
+                    entries.push(crate::backend::ProfileEntry {
+                        instruction_index,
+                        node_id,
+                        kernel_name,
+                        elapsed_ns: start.elapsed().as_nanos(),
+                    });
+                }
+                entries
+            } else {
+                self.backend.dispatch_with_persistent_view(
+                    &dispatch_plan,
+                    arena,
+                    &shape_env,
+                    Some(view),
+                )?;
+                Vec::new()
+            };
+
+            let outputs = read_execution_outputs(
+                graph,
+                &tightened_memory_plan,
+                &shape_env,
+                &self.backend,
+                arena,
+            )?;
+            return Ok((outputs, profile_entries));
+        }
+
+        // ── Standard / prepared-preload path ──
         #[cfg(feature = "prepared-plan")]
         let arena_preloaded_plan = if let Some(prepared) = prepared_preload {
             Some(preload_prepared_constants_and_skip_redundant_writes(
@@ -547,7 +667,6 @@ impl<B: Backend> GraphExecutor<B> {
 
         let dispatch_plan = arena_preloaded_plan.as_ref().unwrap_or(plan);
 
-        // Dispatch the tightened plan
         let profile_entries = if profile {
             self.backend
                 .dispatch_profile(dispatch_plan, arena, &shape_env)?
@@ -556,55 +675,16 @@ impl<B: Backend> GraphExecutor<B> {
             Vec::new()
         };
 
-        // Read output data — compute actual sizes via shape_env
-        let mut outputs = Vec::with_capacity(graph.outputs.len());
-        for &output_node_id in graph.outputs.iter() {
-            let slot = tightened_memory_plan
-                .slots
-                .get(&output_node_id)
-                .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "no memory slot for output node {}",
-                        output_node_id
-                    ))
-                })?;
-
-            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id)
-            {
-                let resolved_shape =
-                    resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
-                        BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
-                    })?;
-                let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                let computed = match &node.output_type.dtype {
-                    IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                        node.output_type.dtype.packed_byte_size(actual_numel)
-                    }
-                    IrDType::I8 => actual_numel + 8,
-                    _ => actual_numel * node.output_type.dtype.byte_size(),
-                };
-                (computed, resolved_shape)
-            } else {
-                (slot.size, vec![])
-            };
-
-            let data = self.backend.read_arena(arena, slot.offset, actual_size);
-            outputs.push(data);
-        }
-
-        Ok((outputs, profile_entries))
+        read_execution_outputs(
+            graph,
+            &tightened_memory_plan,
+            &shape_env,
+            &self.backend,
+            arena,
+        )
+        .map(|outputs| (outputs, profile_entries))
     }
 
-    /// Internal execution entry point for the no-copy prepared path.
-    ///
-    /// Mirrors [`Self::execute_internal`] but, after writing the
-    /// inputs into the arena, builds a dispatch plan with the
-    /// persistent-view `WriteConst` slots filtered out and calls
-    /// [`Backend::dispatch_with_persistent_view`] with the prepared
-    /// view.  When `persistent_view` is `None` (or the prepared
-    /// plan was empty), the no-copy optimisation degrades to the
-    /// standard [`Backend::dispatch`] path and the plan is used as
-    /// is.
     #[cfg(feature = "prepared-plan")]
     fn execute_internal_with_persistent_view(
         &mut self,
@@ -615,199 +695,16 @@ impl<B: Backend> GraphExecutor<B> {
         profile: bool,
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        // Build runtime shape env from input sizes, validate shapes.
-        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
-            .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
-        validate_shapes(graph, &shape_env)
-            .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
-
-        // Tighten memory plan using runtime-resolved shapes, then adjust
-        // the existing plan's slices and params in-place via tighten_slices.
-        // This avoids a full backend re-compilation while still shrinking
-        // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
-        let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
-
-        // Safety check: every node's resolved output must fit in its slot.
-        for (&node_id, slot) in &tightened_memory_plan.slots {
-            if let Some(node) = graph.get_node(node_id) {
-                let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
-                    let numel: u64 = shape.iter().product();
-                    let raw = numel as usize * node.output_type.dtype.byte_size();
-                    match &node.output_type.dtype {
-                        IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                            node.output_type.dtype.packed_byte_size(numel as usize)
-                        }
-                        IrDType::I8 => numel as usize + 8,
-                        _ => raw,
-                    }
-                } else {
-                    continue;
-                };
-                if needed > slot.size {
-                    return Err(BackendError::Dispatch(format!(
-                        "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
-                        node_id, needed, slot.size, node.output_type.shape
-                    )));
-                }
-            }
-        }
-
-        // Arena caching: reuse or replace
-        let arena_size = plan.arena_size;
-        let enough_capacity = self
-            .cached_arena
-            .as_ref()
-            .map_or(false, |(cap, _)| *cap >= arena_size);
-        if !enough_capacity {
-            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
-        }
-        let arena = &self.cached_arena.as_ref().unwrap().1;
-        // No need to zero-fill the arena — every kernel writes its output
-        // slot before it can be read, so stale data from the previous
-        // execution does not affect correctness.  (The memory planner's
-        // live-range analysis guarantees non-overlapping intervals.)
-
-        // Write input data into the arena at tightened input slots
-        for (i, &input_node_id) in graph.inputs.iter().enumerate() {
-            let input_bytes = inputs.get(i).ok_or_else(|| {
-                BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
-            })?;
-
-            let slot = tightened_memory_plan
-                .slots
-                .get(&input_node_id)
-                .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "no memory slot for input node {}",
-                        input_node_id
-                    ))
-                })?;
-
-            self.backend.write_arena(arena, slot.offset, input_bytes);
-        }
-
-        // Build a "no-copy" dispatch plan: filter out the WriteConst
-        // instructions that the persistent view will satisfy directly.
-        // When the view is empty (e.g. the prepared plan had no
-        // fp32 weight/bias bindings) the filtered plan is identical
-        // to the original.
-        let dispatch_plan: ExecutablePlan = if let Some(view) = persistent_view {
-            if view.is_empty() {
-                plan.clone()
-            } else {
-                let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
-                let mut removed = 0usize;
-                for instr in &plan.instructions {
-                    let drop = matches!(
-                        instr,
-                        Instruction::WriteConst { dst, .. }
-                            if view.get(&(dst.offset, dst.size)).is_some()
-                    );
-                    if drop {
-                        removed += 1;
-                    } else {
-                        filtered.push(instr.clone());
-                    }
-                }
-                let _ = removed; // (intentionally unused — kept for future logging)
-                ExecutablePlan {
-                    instructions: filtered,
-                    arena_size: plan.arena_size,
-                    levels: plan.levels.clone(),
-                }
-            }
-        } else {
-            plan.clone()
-        };
-
-        // Dispatch the no-copy plan
-        let profile_entries = if profile {
-            // Profile each instruction in isolation. The persistent
-            // view is shared across calls; the per-instruction cost
-            // for a fully-overridden `CallKernel` reflects the
-            // smaller read traffic from the persistent payload.
-            let mut entries = Vec::with_capacity(dispatch_plan.instructions.len());
-            for (instruction_index, instruction) in
-                dispatch_plan.instructions.iter().cloned().enumerate()
-            {
-                let (node_id, kernel_name) = match &instruction {
-                    Instruction::CallKernel {
-                        node_id,
-                        kernel_name,
-                        ..
-                    } => (*node_id, kernel_name.clone()),
-                    Instruction::MemCopy { .. } => (None, "memcopy".to_string()),
-                    Instruction::Fill { .. } => (None, "fill".to_string()),
-                    Instruction::WriteConst { .. } => (None, "write_const".to_string()),
-                };
-                let single = ExecutablePlan {
-                    instructions: vec![instruction],
-                    arena_size: dispatch_plan.arena_size,
-                    levels: vec![0],
-                };
-                let start = std::time::Instant::now();
-                self.backend.dispatch_with_persistent_view(
-                    &single,
-                    arena,
-                    &shape_env,
-                    persistent_view,
-                )?;
-                entries.push(crate::backend::ProfileEntry {
-                    instruction_index,
-                    node_id,
-                    kernel_name,
-                    elapsed_ns: start.elapsed().as_nanos(),
-                });
-            }
-            entries
-        } else {
-            self.backend.dispatch_with_persistent_view(
-                &dispatch_plan,
-                arena,
-                &shape_env,
-                persistent_view,
-            )?;
-            Vec::new()
-        };
-
-        // Read output data — compute actual sizes via shape_env
-        let mut outputs = Vec::with_capacity(graph.outputs.len());
-        for &output_node_id in graph.outputs.iter() {
-            let slot = tightened_memory_plan
-                .slots
-                .get(&output_node_id)
-                .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "no memory slot for output node {}",
-                        output_node_id
-                    ))
-                })?;
-
-            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id)
-            {
-                let resolved_shape =
-                    resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
-                        BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
-                    })?;
-                let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                let computed = match &node.output_type.dtype {
-                    IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                        node.output_type.dtype.packed_byte_size(actual_numel)
-                    }
-                    IrDType::I8 => actual_numel + 8,
-                    _ => actual_numel * node.output_type.dtype.byte_size(),
-                };
-                (computed, resolved_shape)
-            } else {
-                (slot.size, vec![])
-            };
-
-            let data = self.backend.read_arena(arena, slot.offset, actual_size);
-            outputs.push(data);
-        }
-
-        Ok((outputs, profile_entries))
+        // ── Unified path: this function is now merged into execute_internal ──
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            profile,
+            None,
+            persistent_view,
+        )
     }
 
     /// Convenience: compile + execute in a single call.
