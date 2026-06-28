@@ -16,6 +16,7 @@
 //! so that subsequent passes (shape inference, memory planning, backend
 //! compile) see the quantized representation.
 
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Options for the auto-cast pass.
@@ -30,7 +31,10 @@ pub struct AutoCastOptions {
 /// Apply auto-cast transformations to the graph.
 ///
 /// Returns the number of nodes modified/inserted (for diagnostics).
-pub fn auto_cast(graph: &mut ComputeGraph, options: &AutoCastOptions) -> Result<usize, String> {
+pub fn auto_cast(
+    graph: &mut ComputeGraph,
+    options: &AutoCastOptions,
+) -> Result<usize, FastnnError> {
     let mut changes = 0usize;
 
     // ── Step 1: Quantize weight constants ─────────────────────────────
@@ -61,7 +65,10 @@ pub fn auto_cast(graph: &mut ComputeGraph, options: &AutoCastOptions) -> Result<
 ///
 /// This delegates to the existing `quantize_weights` pass in the quantization
 /// module, which handles the actual data packing and dtype update.
-fn quantize_weight_constants(graph: &mut ComputeGraph, bit_width: u8) -> Result<usize, String> {
+fn quantize_weight_constants(
+    graph: &mut ComputeGraph,
+    bit_width: u8,
+) -> Result<usize, FastnnError> {
     // The existing quantize_weights pass does exactly what we need:
     // it finds f32 Constants feeding MatMul/Conv and packs them.
     let count_before = graph.node_count();
@@ -89,7 +96,7 @@ fn quantize_weight_constants(graph: &mut ComputeGraph, bit_width: u8) -> Result<
 /// For example, if a quantized weight feeds both a MatMul (which supports
 /// quantized input) and a loss regularizer (which expects f32), we insert a
 /// Dequantize before the regularizer so it sees f32 data.
-fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, String> {
+fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, FastnnError> {
     let mut inserted = 0usize;
 
     // Collect rewrites first.
@@ -131,7 +138,8 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Stri
             }
         }
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     // Apply rewrites.
     for rw in rewrites {

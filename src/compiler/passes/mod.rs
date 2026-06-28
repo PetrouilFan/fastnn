@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 pub mod activation_quantization;
 pub mod arithmetic_simplify;
 pub mod auto_cast;

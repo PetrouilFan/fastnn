@@ -10,12 +10,13 @@
 //! This reduces quantization error and eliminates two kernel dispatches per chain.
 
 use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::FastnnError;
 use std::collections::HashSet;
 
 /// Remove redundant DequantizeActivations→QuantizeActivations pairs.
 ///
 /// Run this pass **after** `quantize_activations()` and **before** memory planning.
-pub fn prune_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), String> {
+pub fn prune_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     let mut to_remove: HashSet<NodeId> = HashSet::new();
     let mut rewires: Vec<(NodeId, NodeId)> = Vec::new(); // (consumer_id, new_activation_id)
 
