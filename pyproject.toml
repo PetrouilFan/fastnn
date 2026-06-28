@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "fastnn"
-version = "2.2.4"
-requires-python = ">=3.12"
+version = "2.3.0"
+requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.24",
 ]
@@ -18,6 +18,6 @@ torch = ["torch>=2.11.0"]
 fastnn-convert = "fastnn.io.convert:main"
 
 [tool.maturin]
-features = ["pyo3/extension-module", "simd", "parallel", "simd_avx512", "fusion-forward"]
+features = ["pyo3/extension-module", "simd", "parallel", "fusion-forward", "prepared-plan"]
 python-source = "."
 module-name = "fastnn._core"

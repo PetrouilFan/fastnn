@@ -120,7 +120,7 @@ def _format_attr_value(value: Any) -> str:
     return str(value)
 
 
-def _make_fastnn_executor(onnx_path: Path):
+def _make_fastnn_executor(onnx_path: Path, quantize: str | None = None):
     import onnx
     from onnx import numpy_helper
     import fastnn as fnn
@@ -247,7 +247,7 @@ def _make_fastnn_executor(onnx_path: Path):
                     item["scale_w"] = str(int(scales[3]))
         nodes.append(item)
 
-    return fnn.AotExecutor(nodes, params, input_names, output_names, input_shapes=input_shapes), input_names[0], output_names[0]
+    return fnn.AotExecutor(nodes, params, input_names, output_names, input_shapes=input_shapes, quantize=int(quantize) if quantize else None), input_names[0], output_names[0]
 
 
 def main() -> int:
@@ -260,6 +260,14 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--profile", action="store_true", help="Print fastnn per-kernel profile from one measured run")
     ap.add_argument("--profile-top", type=int, default=20)
+    ap.add_argument(
+        "--profile-json",
+        type=Path,
+        default=None,
+        help="Write machine-readable benchmark/profile results to this JSON path",
+    )
+    ap.add_argument("--quantize", type=str, default=None, choices=["4", "8"], help="Quantize weights to U4 or U8")
+    ap.add_argument("--scales-json", type=Path, default=None, help="Path to calibration scales JSON (from calibrate_yolo.py)")
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -295,9 +303,14 @@ def main() -> int:
 
     try:
         import fastnn as fnn
-        executor, fastnn_input, fastnn_output = _make_fastnn_executor(onnx_path)
+        executor, fastnn_input, fastnn_output = _make_fastnn_executor(onnx_path, quantize=args.quantize)
+        if args.scales_json and args.quantize:
+            scales_text = Path(args.scales_json).read_text()
+            executor.apply_calibration(scales_text)
+            print(f"loaded calibration scales from {args.scales_json}")
         fx = fnn.tensor(x, list(x.shape))
         fy = executor.forward({fastnn_input: fx})[fastnn_output].numpy()
+        print("FASTNN_NAN_CHECK has_nan=", np.isnan(fy).any(), "has_inf=", np.isinf(fy).any(), "min=", float(fy.min()), "max=", float(fy.max()))
         results["fastnn_output_shape"] = list(fy.shape)
         results["fastnn_vs_pytorch"] = {
             "max_abs": float(np.max(np.abs(fy - y_torch))),
@@ -314,7 +327,7 @@ def main() -> int:
                 bucket = profile_by_kernel.setdefault(kernel, {"count": 0.0, "total_ms": 0.0})
                 bucket["count"] += 1.0
                 bucket["total_ms"] += elapsed_ns / 1_000_000.0
-            profile_top = sorted(
+            profile_summary = sorted(
                 (
                     {
                         "kernel_name": k,
@@ -326,8 +339,11 @@ def main() -> int:
                 ),
                 key=lambda row: row["total_ms"],
                 reverse=True,
-            )[: args.profile_top]
+            )
+            profile_top = profile_summary[: args.profile_top]
             results["fastnn_profile_top"] = profile_top
+            results["fastnn_profile_summary"] = profile_summary
+            results["fastnn_profile_raw"] = profile_entries
             print("fastnn_profile_top", json.dumps(profile_top, sort_keys=True))
         print("fastnn", json.dumps({
             "shape": list(fy.shape),
@@ -337,6 +353,11 @@ def main() -> int:
     except Exception as exc:
         results["fastnn_error"] = f"{type(exc).__name__}: {exc}"
         print("fastnn_error", results["fastnn_error"])
+
+    if args.profile_json is not None:
+        args.profile_json.parent.mkdir(parents=True, exist_ok=True)
+        args.profile_json.write_text(json.dumps(results, indent=2, sort_keys=True))
+        print(f"profile_json {args.profile_json}")
 
     print("summary", json.dumps(results, sort_keys=True))
     return 0 if "fastnn_error" not in results else 2

@@ -1,7 +1,7 @@
 # fastnn
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
+[![Python: 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
 [![Rust: stable](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 
 fastnn is a Rust neural-network runtime and training library with Python
@@ -17,7 +17,7 @@ characteristics may change between minor versions.
 Prerequisites:
 
 - Rust stable
-- Python 3.12 or newer
+- Python 3.11 or newer
 - `uv` for Python environment management
 
 Build and install from source:
@@ -109,6 +109,14 @@ JSON export, and the performance-claim policy.
 | [ONNX Support](docs/onnx.md) | ONNX import and conversion paths. |
 | [Architecture](docs/architecture.md) | IR, compiler passes, memory planning, and backend internals. |
 | [Development](docs/development.md) | Repository layout, contribution workflow, and validation commands. |
+| [Models](docs/models.md) | Pre-built model architectures (MLP, Transformer, YOLO). |
+| [IO & Serialization](docs/io.md) | Save/load models, ONNX import, and serialization API. |
+| [API Reference](docs/api-reference.md) | Complete Python API reference. |
+| [ARM NEON](docs/arm-neon.md) | ARM NEON SIMD kernel documentation. |
+| [v2.3 Roadmap](docs/v2.3-roadmap.md) | Current development roadmap. |
+| [Performance Roadmap](docs/performance-roadmap.md) | GPU, fusion, optimizer, and packed precision roadmap. |
+| [ONNX Training Export](docs/onnx-training-export.md) | ONNX training export contract. |
+| [Release Process](docs/release-process.md) | Release workflow and checklist. |
 | [Benchmarks](BENCHMARKS.md) | Maintained benchmark suites and reporting policy. |
 
 ## Development

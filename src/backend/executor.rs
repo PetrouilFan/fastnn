@@ -14,15 +14,14 @@
 //! let outputs = executor.run(&graph, &[input_bytes]).unwrap();
 //! ```
 
-#![allow(dead_code)]
-
 use crate::autograd::build_backward_graph;
 use crate::backend::{
     Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan, ProfileEntry,
 };
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::passes::{
-    dead_code_elimination, memory_planning, operator_fusion, quantization, shape_inference,
+    activation_quantization, calibration, dead_code_elimination, memory_planning, operator_fusion,
+    quantization, shape_inference,
 };
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
@@ -35,6 +34,46 @@ use std::sync::atomic::Ordering;
 pub struct GraphExecutor<B: Backend> {
     backend: B,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
+}
+
+/// Read output tensors from the arena using the tightened memory plan
+/// and runtime-resolved shapes.
+fn read_execution_outputs<B: Backend>(
+    graph: &ComputeGraph,
+    tightened_memory_plan: &MemoryPlan,
+    shape_env: &ShapeEnv,
+    backend: &B,
+    arena: &B::Buffer,
+) -> Result<Vec<Vec<u8>>, BackendError> {
+    let mut outputs = Vec::with_capacity(graph.outputs.len());
+    for &output_node_id in graph.outputs.iter() {
+        let slot = tightened_memory_plan
+            .slots
+            .get(&output_node_id)
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!("no memory slot for output node {}", output_node_id))
+            })?;
+        let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
+            let resolved_shape =
+                resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
+                    BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
+                })?;
+            let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
+            let computed = match &node.output_type.dtype {
+                IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                    node.output_type.dtype.packed_byte_size(actual_numel)
+                }
+                IrDType::I8 => actual_numel + 8,
+                _ => actual_numel * node.output_type.dtype.byte_size(),
+            };
+            (computed, resolved_shape)
+        } else {
+            (slot.size, vec![])
+        };
+        let data = backend.read_arena(arena, slot.offset, actual_size);
+        outputs.push(data);
+    }
+    Ok(outputs)
 }
 
 impl<B: Backend> GraphExecutor<B> {
@@ -76,17 +115,21 @@ impl<B: Backend> GraphExecutor<B> {
         &self,
         graph: &ComputeGraph,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        self.compile_with_plan_and_quantize(graph, None)
+        self.compile_with_plan_and_quantize(graph, None, None)
     }
 
-    /// Same as [`compile_with_plan`] but with optional weight quantization.
+    /// Same as [`compile_with_plan`] but with optional weight quantization and
+    /// optional calibration data for activation quantization.
     ///
     /// Pass `Some(4)` or `Some(8)` to quantize f32 weight constants to
-    /// packed 4-bit or 8-bit precision.
+    /// packed 4-bit or 8-bit precision. If `calib_data` is provided, it will
+    /// be used to compute per-tensor/per-channel activation scales for optimal
+    /// quantization accuracy.
     pub fn compile_with_plan_and_quantize(
         &self,
         graph: &ComputeGraph,
         quantize: Option<u8>,
+        calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph = graph.clone();
 
@@ -94,25 +137,72 @@ impl<B: Backend> GraphExecutor<B> {
         shape_inference::infer_shapes(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
 
+        // ── Phase 1.5: Constant folding + arithmetic simplification ──────
+        // Evaluate fully-constant nodes (Shape, broadcast constants, etc.)
+        // and simplify trivial arithmetic (x*1.0, x+0.0, Neg(Neg(x)), etc.)
+        // before fusion to reduce the number of nodes the fusion pass sees.
+        {
+            use crate::compiler::passes::{arithmetic_simplify, constant_folding};
+            let folded = constant_folding::constant_fold(&mut graph);
+            let simplified = arithmetic_simplify::arithmetic_simplify(&mut graph);
+            if folded + simplified > 0 {
+                eprintln!(
+                    "[fastnn] pre-fusion optimization: folded {folded} constant nodes, simplified {simplified} arithmetic"
+                );
+            }
+        }
+
         // ── Phase 2: Operator fusion ──────────────────────────────────────
         operator_fusion::fuse_operators(&mut graph)
             .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
 
+        // ── Phase 2.5: Dead code elimination after fusion ────────────────
+        // Fusion creates dead intermediate nodes (e.g. the original Add and
+        // Relu when fusing MatMul+Add+Relu). Eliminate them before
+        // quantization to avoid quantizing dead nodes.
+        dead_code_elimination::eliminate_dead_code(&mut graph);
+
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
-        if let Some(bit_width) = quantize {
-            if bit_width != 4 && bit_width != 8 {
-                return Err(BackendError::Compilation(format!(
-                    "unsupported quantization bit width: {} (expected 4 or 8)",
-                    bit_width
-                )));
+        // Handle three cases:
+        // 1. quantize=Some(bit_width): quantize weights only.
+        //    Activation quantization is only applied when calibration data is provided.
+        // 2. quantize=None, calib_data=Some(_): re-quantize activations only (weights already quantized)
+        // 3. quantize=None, calib_data=None: no quantization
+        let do_quantize = quantize.is_some() || calib_data.is_some();
+        if do_quantize {
+            // Quantize weights if requested (or if not already quantized)
+            if let Some(bit_width) = quantize {
+                if bit_width != 4 && bit_width != 8 {
+                    return Err(BackendError::Compilation(format!(
+                        "unsupported quantization bit width: {} (expected 4 or 8)",
+                        bit_width
+                    )));
+                }
+                quantization::quantize_weights(&mut graph, bit_width, None)
+                    .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
             }
-            quantization::quantize_weights(&mut graph, bit_width)
-                .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
 
             // After quantizing weights, wrap any optimizer ops that now have
             // quantized weight inputs with Dequantize/Quantize.
             quantization::wrap_quantized_optimizer(&mut graph)
                 .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
+
+            // Insert QuantizeActivations before MatMul/Conv2d activation inputs only
+            // when explicit calibration data is provided. Without calibrated scales,
+            // activation quantization produces garbage outputs and adds unnecessary
+            // Q/DQ overhead that makes weight-only quantized inference slower than FP32.
+            if let Some(calib) = calib_data {
+                activation_quantization::quantize_activations_with_calibration(&mut graph, &calib)
+                    .map_err(|e| {
+                        BackendError::Compilation(format!("activation quantization: {e}"))
+                    })?;
+            }
+
+            // Remove redundant QuantizeActivations → DequantizeActivations round-trips
+            // that were inserted by activation quantization or the optimizer wrapper.
+            // This pass is dead-code in auto_cast.rs; wire it into the main pipeline.
+            crate::compiler::passes::prune_qdq_pairs::prune_qdq_pairs(&mut graph)
+                .map_err(|e| BackendError::Compilation(format!("prune qdq pairs: {e}")))?;
         }
 
         // ── Phase 3: Dead code elimination ────────────────────────────────
@@ -124,6 +214,78 @@ impl<B: Backend> GraphExecutor<B> {
 
         // ── Phase 5: Backend compilation ──────────────────────────────────
         let plan = self.backend.compile(&graph, &memory_plan)?;
+
+        if std::env::var("FASTNN_DUMP_INSTRS").is_ok() {
+            eprintln!(
+                "FASTNN_DUMP_INSTRS: total instructions={}",
+                plan.instructions.len()
+            );
+            let mut conv2d_quant_u4 = 0usize;
+            let mut conv2d_quant_u8 = 0usize;
+            let mut conv2d_fp32 = 0usize;
+            let mut other_kernels: Vec<(String, Option<String>)> = Vec::new();
+            for (i, instr) in plan.instructions.iter().enumerate() {
+                if let Instruction::CallKernel {
+                    kernel_name,
+                    weight_meta,
+                    ..
+                } = instr
+                {
+                    let meta_info = weight_meta
+                        .as_ref()
+                        .map(|m| format!("bw={} scales={}", m.bit_width, m.scales.len()))
+                        .unwrap_or_default();
+                    eprintln!("  INSTR[{}] kernel={} {}", i, kernel_name, meta_info);
+                    if kernel_name.starts_with("conv2d_u4") {
+                        conv2d_quant_u4 += 1;
+                    } else if kernel_name.starts_with("conv2d_u8") {
+                        conv2d_quant_u8 += 1;
+                    } else if kernel_name.starts_with("conv2d") {
+                        conv2d_fp32 += 1;
+                    } else if kernel_name.starts_with("quantize_activations")
+                        || kernel_name.starts_with("dequantize_activations")
+                    {
+                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
+                    } else {
+                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
+                    }
+                }
+            }
+            eprintln!(
+                "  SUMMARY: conv2d_u4={} conv2d_u8={} conv2d_fp32={} other={}",
+                conv2d_quant_u4,
+                conv2d_quant_u8,
+                conv2d_fp32,
+                other_kernels.len()
+            );
+            for (name, meta) in &other_kernels {
+                eprintln!("    OTHER: {} {}", name, meta.as_deref().unwrap_or(""));
+            }
+        }
+
+        if std::env::var("FASTNN_DUMP_GRAPH").is_ok() {
+            use std::collections::BTreeMap;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            let mut dtypes: BTreeMap<String, usize> = BTreeMap::new();
+            for n in &graph.nodes {
+                counts.entry(format!("{:?}", n.opcode)).or_default(); // just trigger
+                *counts.entry(format!("{:?}", n.opcode)).or_default() += 1;
+                *dtypes
+                    .entry(format!("{:?}", n.output_type.dtype))
+                    .or_default() += 1;
+            }
+            eprintln!("FASTNN_DUMP: nodes={}", graph.nodes.len());
+            for (k, v) in &counts {
+                if v > &0 {
+                    eprintln!("  OP {k}: {v}");
+                }
+            }
+            for (k, v) in &dtypes {
+                if v > &0 {
+                    eprintln!("  DT {k}: {v}");
+                }
+            }
+        }
 
         Ok((plan, memory_plan, graph))
     }
@@ -145,7 +307,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, false)
+        self.execute_internal(graph, plan, memory_plan, inputs, false, None, None)
             .map(|(outputs, _profile)| outputs)
     }
 
@@ -156,7 +318,181 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, true)
+        self.execute_internal(graph, plan, memory_plan, inputs, true, None, None)
+    }
+
+    /// Profile the opt-in prepared arena fallback path.
+    ///
+    /// This is a measurement hook for comparing the default plan with
+    /// the prepared-constant preload path. It uses the same dispatch
+    /// logic as [`Self::execute_prepared_arena_fallback`] but preserves
+    /// per-instruction [`ProfileEntry`] rows so callers can observe which
+    /// `WriteConst` instructions were removed from the temporary plan.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_profile_prepared_arena_fallback(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared), None)
+    }
+
+    /// Opt-in prepared-execution fallback path.
+    ///
+    /// This is a **behaviour-identical scaffold** for future prepared lanes:
+    /// the prepared plan is only consulted to validate that it stays in
+    /// lock-step with the original [`ExecutablePlan`] (same length,
+    /// same original instruction order). Runtime execution then goes
+    /// through the existing [`Self::execute`] path so the on-the-wire
+    /// behaviour is byte-identical to a direct `forward()` call.
+    ///
+    /// In particular this path:
+    /// - does **not** read from any [`PreparedConstantArena`],
+    /// - does **not** skip or remove [`Instruction::WriteConst`],
+    /// - does **not** substitute alternative kernels,
+    /// - and does **not** perform any per-instruction rewriting.
+    ///
+    /// It is a clearly named, opt-in entry point that future lanes can
+    /// extend (e.g. by replacing individual prepared instructions with
+    /// specialised kernels) while keeping the same fallback contract
+    /// — any code path that survives the validation check is guaranteed
+    /// to behave like the original `execute`.
+    ///
+    /// The method is gated on the `prepared-plan` cargo feature to
+    /// match the rest of the prepared-plan surface; callers that build
+    /// without that feature can keep using [`Self::execute`].
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_fallback(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        // Sanity-check the prepared plan against the live plan. The
+        // actual dispatch goes through the original plan, so any
+        // mismatch detected here would silently desynchronise prepared
+        // metadata from the live plan and must be reported loudly
+        // instead.
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        // Delegate to the existing execution path so we inherit every
+        // tightening / shape-env / arena-reuse behaviour of the
+        // default forward().
+        self.execute(graph, plan, memory_plan, inputs)
+    }
+
+    /// Opt-in prepared fallback that preloads fp32 Conv2d weights from
+    /// the [`PreparedConstantArena`] into their original runtime arena
+    /// slots, then dispatches a temporary plan with the matching exact
+    /// weight-slot [`Instruction::WriteConst`] operations removed.
+    ///
+    /// This remains opt-in and behaviour-equivalent: only exact fp32
+    /// Conv2d weight writes that were preloaded from prepared metadata
+    /// are skipped. Bias constants, non-Conv constants, dynamic weights,
+    /// and unsupported packed kinds stay on the original dispatch path.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_arena_fallback(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            Some(prepared),
+            None,
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
+    /// Opt-in **no-copy** prepared path.
+    ///
+    /// Like [`Self::execute_prepared_arena_fallback`], the prepared
+    /// plan is consulted to detect static fp32 weight/bias bindings
+    /// for `Conv2d` and `MatMul` consumers. The key difference is
+    /// that no per-forward copy happens: the prepared weights live
+    /// in a [`crate::backend::prepared::PersistentPreparedWeights`]
+    /// view that the dispatch loop borrows directly when reading
+    /// the weight/bias slot. The corresponding `WriteConst`
+    /// instructions are also filtered out of the dispatch plan, so
+    /// the total per-forward weight traffic is zero (down from the
+    /// full `O(weights_bytes)` of the existing fallback).
+    ///
+    /// This entry point is byte-identical to [`Self::forward`] and
+    /// to [`Self::execute_prepared_arena_fallback`] on every input.
+    /// It is gated on the `prepared-plan` cargo feature to match
+    /// the rest of the prepared-plan surface; callers that build
+    /// without that feature can keep using [`Self::execute`] and
+    /// [`Self::execute_prepared_arena_fallback`].
+    ///
+    /// The no-copy optimization is currently limited to:
+    ///
+    /// - fp32 `Conv2d` weights + (optional) biases,
+    /// - fp32 `MatMul` weights + (optional) biases (including
+    ///   `matmul*` and `fused_matmul_add_*` families).
+    ///
+    /// Packed transposed and quantized slots stay on the safe
+    /// fallback path because the current kernels do not consume
+    /// them. When the prepared plan has no `Conv2d` / `MatMul`
+    /// bindings the view is empty and the path degrades to the
+    /// standard dispatch.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_no_copy(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
+        self.execute_internal_with_persistent_view(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            Some(&view),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
+    /// Profile the no-copy prepared path. Mirrors
+    /// [`Self::execute_prepared_no_copy`] but preserves per-instruction
+    /// [`ProfileEntry`] rows so callers can quantify the saved
+    /// `WriteConst` traffic on the persistent arena path.
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_profile_prepared_no_copy(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
+        self.execute_internal_with_persistent_view(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            true,
+            Some(&view),
+        )
     }
 
     fn execute_internal(
@@ -166,21 +502,20 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
         profile: bool,
+        #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
+        prepared_preload: Option<&crate::backend::prepared::PreparedExecutablePlan>,
+        #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
+        persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        // Build runtime shape env from input sizes, validate shapes.
+        // ── Preamble: shape env, tighten, safety, arena, input write ──
         let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
             .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
         validate_shapes(graph, &shape_env)
             .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-        // Tighten memory plan using runtime-resolved shapes, then adjust
-        // the existing plan's slices and params in-place via tighten_slices.
-        // This avoids a full backend re-compilation while still shrinking
-        // the arena from SYMBOL_DIM_MAX worst-case to actual sizes.
         let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
         tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
-        // Safety check: every node's resolved output must fit in its slot.
         for (&node_id, slot) in &tightened_memory_plan.slots {
             if let Some(node) = graph.get_node(node_id) {
                 let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
@@ -205,7 +540,6 @@ impl<B: Backend> GraphExecutor<B> {
             }
         }
 
-        // Arena caching: reuse or replace
         let arena_size = plan.arena_size;
         let enough_capacity = self
             .cached_arena
@@ -215,17 +549,11 @@ impl<B: Backend> GraphExecutor<B> {
             self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
         }
         let arena = &self.cached_arena.as_ref().unwrap().1;
-        // No need to zero-fill the arena — every kernel writes its output
-        // slot before it can be read, so stale data from the previous
-        // execution does not affect correctness.  (The memory planner's
-        // live-range analysis guarantees non-overlapping intervals.)
 
-        // Write input data into the arena at tightened input slots
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
             let input_bytes = inputs.get(i).ok_or_else(|| {
                 BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
             })?;
-
             let slot = tightened_memory_plan
                 .slots
                 .get(&input_node_id)
@@ -235,55 +563,148 @@ impl<B: Backend> GraphExecutor<B> {
                         input_node_id
                     ))
                 })?;
-
             self.backend.write_arena(arena, slot.offset, input_bytes);
         }
 
-        // Dispatch the tightened plan
-        let profile_entries = if profile {
-            self.backend.dispatch_profile(plan, arena, &shape_env)?
+        // ── Dispatch: no-copy persistent view path vs standard path ──
+        #[cfg(feature = "prepared-plan")]
+        if let Some(view) = persistent_view {
+            let dispatch_plan: ExecutablePlan = if view.is_empty() {
+                plan.clone()
+            } else {
+                let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
+                let mut removed = 0usize;
+                for instr in &plan.instructions {
+                    let drop = matches!(
+                        instr,
+                        Instruction::WriteConst { dst, .. }
+                            if view.get(&(dst.offset, dst.size)).is_some()
+                    );
+                    if drop {
+                        removed += 1;
+                    } else {
+                        filtered.push(instr.clone());
+                    }
+                }
+                let _ = removed;
+                ExecutablePlan {
+                    instructions: filtered,
+                    arena_size: plan.arena_size,
+                    levels: plan.levels.clone(),
+                }
+            };
+
+            let profile_entries = if profile {
+                let mut entries = Vec::with_capacity(dispatch_plan.instructions.len());
+                for (instruction_index, instruction) in
+                    dispatch_plan.instructions.iter().cloned().enumerate()
+                {
+                    let (node_id, kernel_name) = match &instruction {
+                        Instruction::CallKernel {
+                            node_id,
+                            kernel_name,
+                            ..
+                        } => (*node_id, kernel_name.clone()),
+                        Instruction::MemCopy { .. } => (None, "memcopy".to_string()),
+                        Instruction::Fill { .. } => (None, "fill".to_string()),
+                        Instruction::WriteConst { .. } => (None, "write_const".to_string()),
+                    };
+                    let single = ExecutablePlan {
+                        instructions: vec![instruction],
+                        arena_size: dispatch_plan.arena_size,
+                        levels: vec![0],
+                    };
+                    let start = std::time::Instant::now();
+                    self.backend.dispatch_with_persistent_view(
+                        &single,
+                        arena,
+                        &shape_env,
+                        Some(view),
+                    )?;
+                    entries.push(crate::backend::ProfileEntry {
+                        instruction_index,
+                        node_id,
+                        kernel_name,
+                        elapsed_ns: start.elapsed().as_nanos(),
+                    });
+                }
+                entries
+            } else {
+                self.backend.dispatch_with_persistent_view(
+                    &dispatch_plan,
+                    arena,
+                    &shape_env,
+                    Some(view),
+                )?;
+                Vec::new()
+            };
+
+            let outputs = read_execution_outputs(
+                graph,
+                &tightened_memory_plan,
+                &shape_env,
+                &self.backend,
+                arena,
+            )?;
+            return Ok((outputs, profile_entries));
+        }
+
+        // ── Standard / prepared-preload path ──
+        #[cfg(feature = "prepared-plan")]
+        let arena_preloaded_plan = if let Some(prepared) = prepared_preload {
+            Some(preload_prepared_constants_and_skip_redundant_writes(
+                &self.backend,
+                arena,
+                plan,
+                prepared,
+            )?)
         } else {
-            self.backend.dispatch(plan, arena, &shape_env)?;
+            None
+        };
+
+        #[cfg(not(feature = "prepared-plan"))]
+        let arena_preloaded_plan: Option<ExecutablePlan> = None;
+
+        let dispatch_plan = arena_preloaded_plan.as_ref().unwrap_or(plan);
+
+        let profile_entries = if profile {
+            self.backend
+                .dispatch_profile(dispatch_plan, arena, &shape_env)?
+        } else {
+            self.backend.dispatch(dispatch_plan, arena, &shape_env)?;
             Vec::new()
         };
 
-        // Read output data — compute actual sizes via shape_env
-        let mut outputs = Vec::with_capacity(graph.outputs.len());
-        for &output_node_id in graph.outputs.iter() {
-            let slot = tightened_memory_plan
-                .slots
-                .get(&output_node_id)
-                .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "no memory slot for output node {}",
-                        output_node_id
-                    ))
-                })?;
+        read_execution_outputs(
+            graph,
+            &tightened_memory_plan,
+            &shape_env,
+            &self.backend,
+            arena,
+        )
+        .map(|outputs| (outputs, profile_entries))
+    }
 
-            let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id)
-            {
-                let resolved_shape =
-                    resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
-                        BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
-                    })?;
-                let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-                let computed = match &node.output_type.dtype {
-                    IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                        node.output_type.dtype.packed_byte_size(actual_numel)
-                    }
-                    IrDType::I8 => actual_numel + 8,
-                    _ => actual_numel * node.output_type.dtype.byte_size(),
-                };
-                (computed, resolved_shape)
-            } else {
-                (slot.size, vec![])
-            };
-
-            let data = self.backend.read_arena(arena, slot.offset, actual_size);
-            outputs.push(data);
-        }
-
-        Ok((outputs, profile_entries))
+    #[cfg(feature = "prepared-plan")]
+    fn execute_internal_with_persistent_view(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        profile: bool,
+        persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
+    ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        // ── Unified path: this function is now merged into execute_internal ──
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            profile,
+            None,
+            persistent_view,
+        )
     }
 
     /// Convenience: compile + execute in a single call.
@@ -377,7 +798,7 @@ impl<B: Backend> GraphExecutor<B> {
 
         // 6. Run the standard compiler pipeline
         let (plan, memory_plan, final_graph) =
-            self.compile_with_plan_and_quantize(&combined_graph, config.quantize)?;
+            self.compile_with_plan_and_quantize(&combined_graph, config.quantize, None)?;
 
         // 6b. Optionally tighten memory plan using concrete batch shapes.
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
@@ -1176,4 +1597,389 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+// ── tests for the opt-in prepared execution fallback ──────────────────
+
+#[cfg(feature = "prepared-plan")]
+fn preload_prepared_fp32_slot<B: Backend>(
+    backend: &B,
+    arena: &B::Buffer,
+    constant_arena: &crate::backend::prepared::PreparedConstantArena,
+    instruction_index: usize,
+    id: Option<crate::backend::prepared::PackedWeightId>,
+    slot: crate::backend::BufferSlice,
+    label: &str,
+    preloaded_slots: &mut std::collections::HashSet<(usize, usize)>,
+    plan_len: usize,
+) -> Result<(), BackendError> {
+    use crate::backend::prepared::PackedWeightKind;
+
+    let Some(id) = id else {
+        return Ok(());
+    };
+    if id.kind != PackedWeightKind::Fp32 {
+        return Ok(());
+    }
+    let Some(values) = constant_arena.get(id) else {
+        return Ok(());
+    };
+    let bytes = bytemuck::cast_slice(values);
+    if bytes.len() != slot.size {
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} byte length mismatch at instruction {instruction_index}: arena {} bytes, plan slot {} bytes",
+            bytes.len(),
+            slot.size
+        )));
+    }
+    if instruction_index >= plan_len {
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} instruction index {instruction_index} out of bounds for plan length {plan_len}"
+        )));
+    }
+    backend.write_arena(arena, slot.offset, bytes);
+    preloaded_slots.insert((slot.offset, slot.size));
+    Ok(())
+}
+
+#[cfg(feature = "prepared-plan")]
+fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
+    backend: &B,
+    arena: &B::Buffer,
+    plan: &ExecutablePlan,
+    prepared: &crate::backend::prepared::PreparedExecutablePlan,
+) -> Result<ExecutablePlan, BackendError> {
+    use crate::backend::prepared::PreparedInstruction;
+    use std::collections::HashSet;
+
+    let Some(constant_arena) = prepared.constant_arena() else {
+        return Ok(plan.clone());
+    };
+
+    let mut preloaded_slots = HashSet::new();
+    for prepared_instruction in &prepared.instructions {
+        match prepared_instruction {
+            PreparedInstruction::Conv2d(conv) => {
+                preload_prepared_fp32_slot(
+                    backend,
+                    arena,
+                    constant_arena,
+                    conv.instruction_index,
+                    conv.packed_weight,
+                    conv.weight,
+                    "conv weight",
+                    &mut preloaded_slots,
+                    plan.instructions.len(),
+                )?;
+                if let Some(bias) = conv.bias {
+                    preload_prepared_fp32_slot(
+                        backend,
+                        arena,
+                        constant_arena,
+                        conv.instruction_index,
+                        conv.packed_bias,
+                        bias,
+                        "conv bias",
+                        &mut preloaded_slots,
+                        plan.instructions.len(),
+                    )?;
+                }
+            }
+            PreparedInstruction::MatMul(matmul) => {
+                preload_prepared_fp32_slot(
+                    backend,
+                    arena,
+                    constant_arena,
+                    matmul.instruction_index,
+                    matmul.packed_weight,
+                    matmul.b,
+                    "matmul weight",
+                    &mut preloaded_slots,
+                    plan.instructions.len(),
+                )?;
+                if let Some(bias) = matmul.bias {
+                    preload_prepared_fp32_slot(
+                        backend,
+                        arena,
+                        constant_arena,
+                        matmul.instruction_index,
+                        matmul.packed_bias,
+                        bias,
+                        "matmul bias",
+                        &mut preloaded_slots,
+                        plan.instructions.len(),
+                    )?;
+                }
+            }
+            PreparedInstruction::Generic { .. } => {}
+        }
+    }
+
+    if preloaded_slots.is_empty() {
+        return Ok(plan.clone());
+    }
+
+    let instructions = plan
+        .instructions
+        .iter()
+        .filter(|instruction| match instruction {
+            Instruction::WriteConst { dst, .. } => {
+                !preloaded_slots.contains(&(dst.offset, dst.size))
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect();
+
+    Ok(ExecutablePlan {
+        instructions,
+        arena_size: plan.arena_size,
+        levels: plan.levels.clone(),
+    })
+}
+
+#[cfg(all(test, feature = "prepared-plan"))]
+mod prepared_fallback_tests {
+    //! End-to-end coverage of
+    //! [`GraphExecutor::execute_prepared_fallback`]. The plans we build
+    //! cover the three shapes that the order-mapping validation has to
+    //! accept: pure elementwise (no `WriteConst`), a single
+    //! `WriteConst` + `CallKernel` consumer, and a graph driven by a
+    //! constant bias input.
+    //!
+    //! All tests in this module require the `prepared-plan` cargo
+    //! feature to be enabled; the helper they exercise is gated on the
+    //! same feature.
+
+    use super::*;
+    use crate::backend::cpu::CpuBackend;
+    use crate::backend::prepared::{prepare_executable_plan, validate_prepared_against_plan};
+    use crate::ir::builder::GraphBuilder;
+    use crate::ir::node::{DimExpr, IrDType};
+
+    fn f32_data(values: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice(values).to_vec()
+    }
+
+    fn read_f32(bytes: &[u8]) -> Vec<f32> {
+        bytemuck::cast_slice(bytes).to_vec()
+    }
+
+    /// `execute_prepared_fallback` returns **byte-identical** output to
+    /// the regular `execute` path for a tiny graph whose compiled plan
+    /// includes a `WriteConst` producer + a `CallKernel` consumer (the
+    /// exact shape the order-mapping requirement is meant to cover).
+    #[test]
+    fn execute_prepared_fallback_matches_execute_on_add_with_constant() {
+        // y = relu(a + b) where b is a graph constant (=> WriteConst
+        // + CallKernel in the compiled plan). The plan is compiled
+        // with a non-zero constant so the prepared-detector will see
+        // a real WriteConst instruction.
+        let g = GraphBuilder::new();
+        let a = g.input(&[1, 4], IrDType::F32);
+        let b_tt = crate::ir::node::TensorType::new(
+            vec![DimExpr::Known(1), DimExpr::Known(4)],
+            IrDType::F32,
+        );
+        let b_bytes = f32_data(&[0.5, -0.5, 0.25, -0.25]);
+        let b = g.constant(&b_bytes, b_tt);
+        let s = g.add(&a, &b);
+        let y = g.relu(&s);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+        // The prepared plan must validate against the live plan before
+        // the executor will accept it.
+        validate_prepared_against_plan(&prepared, &plan)
+            .expect("prepared plan must be consistent with the live plan");
+
+        let input = f32_data(&[-1.0, 0.0, 2.0, 3.0]);
+
+        // Regular path — captured for comparison.
+        let regular = executor_run(
+            &mut GraphExecutor::new(CpuBackend),
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+        );
+
+        // Fallback path — should be byte-identical.
+        let fallback = executor_fallback(
+            &mut GraphExecutor::new(CpuBackend),
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+
+        assert_eq!(regular.len(), 1, "single output graph");
+        assert_eq!(fallback.len(), 1, "single output graph");
+        assert_eq!(
+            regular[0], fallback[0],
+            "fallback output bytes must match the regular path"
+        );
+        // y = relu([-1.0+0.5, 0.0-0.5, 2.0+0.25, 3.0-0.25])
+        //   = relu([-0.5, -0.5, 2.25, 2.75])
+        //   = [0, 0, 2.25, 2.75]
+        let out = read_f32(&fallback[0]);
+        assert_eq!(out, vec![0.0, 0.0, 2.25, 2.75]);
+    }
+
+    /// `execute_prepared_fallback` must be **re-runnable** — calling it
+    /// twice on the same executor must produce the same output without
+    /// any side-effect leakage between invocations.
+    #[test]
+    fn execute_prepared_fallback_is_repeatable() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+
+        let input = f32_data(&[-2.0, -1.0, 0.5, 1.5]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let first = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+        let second = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+        assert_eq!(first, second);
+    }
+
+    /// `execute_prepared_fallback` must surface validation errors
+    /// rather than silently desynchronising prepared metadata with the
+    /// live plan. We forge a prepared plan whose length does not match
+    /// the source plan, which `validate_prepared_against_plan` must
+    /// reject with a `Dispatch` error.
+    #[test]
+    fn execute_prepared_fallback_rejects_inconsistent_prepared_plan() {
+        use crate::backend::prepared::PreparedExecutablePlan;
+
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+
+        // Forge a prepared plan that is *empty* — guaranteed not to
+        // match the real plan's length. We copy the arena size from
+        // the live plan so the only mismatch is the empty instruction
+        // list. Default::default() leaves the private `constant_arena`
+        // field at `None`, which is exactly what we want.
+        let mut forged = PreparedExecutablePlan::default();
+        forged.arena_size = plan.arena_size;
+
+        let input = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let err = executor
+            .execute_prepared_fallback(&compiled_graph, &mut plan, &memory_plan, &[&input], &forged)
+            .expect_err("mismatched prepared plan must be rejected");
+        assert!(
+            matches!(err, BackendError::Dispatch(_)),
+            "expected Dispatch error, got {err:?}"
+        );
+    }
+
+    /// `execute_prepared_fallback` should also work on a graph that
+    /// has no `WriteConst` (e.g. a pure elementwise op) — the
+    /// order-mapping check should not depend on the presence of
+    /// static weights.
+    #[test]
+    fn execute_prepared_fallback_works_on_add_only_graph() {
+        let g = GraphBuilder::new();
+        let a = g.input(&[4], IrDType::F32);
+        let b = g.input(&[4], IrDType::F32);
+        let c = g.add(&a, &b);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&c], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+
+        let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let b_data = f32_data(&[10.0, 20.0, 30.0, 40.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let out = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+            &prepared,
+        );
+        assert_eq!(read_f32(&out[0]), vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    /// Smoke test: a graph with a symbolic batch dim still works
+    /// through the prepared fallback.
+    #[test]
+    fn execute_prepared_fallback_preserves_symbolic_shape_inputs() {
+        let g = GraphBuilder::new();
+        let batch = DimExpr::Symbol("N".into());
+        let x = g.input_with_dims(&[batch.clone(), DimExpr::Known(4)], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let prepared = prepare_executable_plan(&plan);
+
+        // N = 2 → input bytes = 2*4*4 = 32
+        let input = f32_data(&[-1.0, -2.0, -3.0, -4.0, 5.0, 6.0, 7.0, 8.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let out = executor_fallback(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+            &prepared,
+        );
+        assert_eq!(
+            read_f32(&out[0]),
+            vec![0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    // ── helpers ────────────────────────────────────────────────
+
+    fn executor_run(
+        executor: &mut GraphExecutor<CpuBackend>,
+        graph: &crate::ir::node::ComputeGraph,
+        plan: &mut crate::backend::ExecutablePlan,
+        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        inputs: &[&[u8]],
+    ) -> Vec<Vec<u8>> {
+        executor
+            .execute(graph, plan, memory_plan, inputs)
+            .expect("regular execute must succeed")
+    }
+
+    fn executor_fallback(
+        executor: &mut GraphExecutor<CpuBackend>,
+        graph: &crate::ir::node::ComputeGraph,
+        plan: &mut crate::backend::ExecutablePlan,
+        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+    ) -> Vec<Vec<u8>> {
+        executor
+            .execute_prepared_fallback(graph, plan, memory_plan, inputs, prepared)
+            .expect("prepared fallback execute must succeed")
+    }
 }

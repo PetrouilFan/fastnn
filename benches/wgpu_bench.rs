@@ -3,8 +3,7 @@
 mod bench_util;
 
 use bench_util::bench_gemv;
-use fastnn::backends::cpu;
-use fastnn::backends::wgpu::gemv_wgpu;
+use fastnn::backend::cpu;
 use fastnn::dtypes::{F32x1, PackedWord, U8x4};
 use fastnn::packed_layer::PackedLinear;
 use fastnn::packed_tensor::PackedTensor;
