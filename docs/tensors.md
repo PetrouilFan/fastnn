@@ -20,7 +20,7 @@ print(x.shape)  # [2, 2]
 import numpy as np
 
 arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-x = fnn.from_numpy(arr)          # Direct from numpy
+x = fnn.tensor_from_numpy(arr)   # Direct from numpy
 # or equivalently:
 x = fnn.tensor(arr.flatten().tolist(), list(arr.shape))
 ```
@@ -370,7 +370,7 @@ arr = x.numpy()
 # Numpy to tensor (recommended)
 import numpy as np
 arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-x = fnn.from_numpy(arr)
+x = fnn.tensor_from_numpy(arr)
 
 # Alternative: via flatten + shape
 x = fnn.tensor(arr.flatten().tolist(), list(arr.shape))
