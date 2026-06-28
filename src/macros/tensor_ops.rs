@@ -24,6 +24,9 @@ macro_rules! impl_scalar_op {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        // SAFETY: The pointer arithmetic is bounded by the loop index `i` which is verified
+                        // to be within `numel`. All pointers are derived from valid storage with sufficient
+                        // capacity, and the dtype-dependent element size is applied for correct stride.
                         unsafe {
                             let threshold_v = _mm256_set1_ps(threshold);
                             let one_v = _mm256_set1_ps(1.0);
@@ -40,6 +43,8 @@ macro_rules! impl_scalar_op {
                         }
                     } else {
                         for i in 0..numel {
+                            // SAFETY: Same as above — `i` is within `numel` and both `a_ptr`/`out_ptr` are
+                            // valid for `numel` elements.
                             unsafe {
                                 *out_ptr.add(i) = if *a_ptr.add(i) $rust_op threshold { 1.0 } else { 0.0 };
                             }
@@ -49,6 +54,8 @@ macro_rules! impl_scalar_op {
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for i in 0..numel {
+                        // SAFETY: Same as above — `i` is within `numel` and both `a_ptr`/`out_ptr` are
+                        // valid for `numel` elements.
                         unsafe { *out_ptr.add(i) = if *a_ptr.add(i) $rust_op threshold { 1.0 } else { 0.0 }; }
                     }
                 }
@@ -86,6 +93,9 @@ macro_rules! impl_cpu_fast_path {
                 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                 {
                     if is_x86_feature_detected!("avx2") && numel >= 8 {
+                        // SAFETY: The pointer arithmetic is bounded by the loop index `i` which is verified
+                        // to be within `numel`. All pointers are derived from valid storage with sufficient
+                        // capacity, and the dtype-dependent element size is applied for correct stride.
                         unsafe {
                             let scalar_v = _mm256_set1_ps(scalar);
                             let mut i = 0;
@@ -100,6 +110,8 @@ macro_rules! impl_cpu_fast_path {
                         }
                     } else {
                         for i in 0..numel {
+                            // SAFETY: Same as above — `i` is within `numel` and both `a_ptr`/`out_ptr` are
+                            // valid for `numel` elements.
                             unsafe {
                                 *out_ptr.add(i) = *a_ptr.add(i) $rust_op scalar;
                             }
@@ -109,6 +121,8 @@ macro_rules! impl_cpu_fast_path {
                 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                 {
                     for i in 0..numel {
+                        // SAFETY: Same as above — `i` is within `numel` and both `a_ptr`/`out_ptr` are
+                        // valid for `numel` elements.
                         unsafe {
                             *out_ptr.add(i) = *a_ptr.add(i) $rust_op scalar;
                         }
