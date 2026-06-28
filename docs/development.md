@@ -17,7 +17,7 @@ src/
   packed_tensor.rs        # PackedTensor<T> — packed precision tensor (used by AOT quantized dispatch)
   ir/
     mod.rs                # IR module root
-    node.rs               # ComputeGraph, IRNode, Opcode (90 variants), IrDType, DimExpr, TensorType, ShapeEnv
+    node.rs               # ComputeGraph, IRNode, Opcode (91 variants), IrDType, DimExpr, TensorType, ShapeEnv
     builder.rs            # GraphBuilder and GraphTensor — fluent IR construction API
   compiler/
     mod.rs                # Compiler module root
@@ -197,7 +197,7 @@ The IR is the core data structure for v2.0.0. Key types:
 |------|------|---------|
 | `ComputeGraph` | `ir/node.rs` | A DAG of `IRNode`s with named inputs and outputs |
 | `IRNode` | `ir/node.rs` | A single operation: opcode, inputs, outputs, metadata |
-| `Opcode` | `ir/node.rs` | Enum of 90 variants (MatMul, Conv2d, ReLU, optimizer updates, etc.) |
+| `Opcode` | `ir/node.rs` | Enum of 91 variants (MatMul, Conv2d, ReLU, optimizer updates, etc.) |
 | `IrDType` | `ir/node.rs` | Tensor dtype including `U4`, `U8` with per-channel `QuantizedWeightMeta` |
 | `DimExpr` | `ir/node.rs` | Symbolic dimension expressions for shape inference |
 | `TensorType` | `ir/node.rs` | Describes a tensor's shape and dtype |
@@ -399,7 +399,7 @@ To add a new fusion, extend `OperatorFusionPass` with the pattern, add the new `
 | Aspect | v1.x (removed) | v2.x (current) |
 |--------|------|--------|
 | Kernel dispatch | `kernels/` with runtime dispatch | `backend/` with AOT-compiled `ExecutablePlan` |
-| Graph representation | None (eager mode) | `ComputeGraph` IR (90 opcodes, `DimExpr`, `IrDType`) |
+| Graph representation | None (eager mode) | `ComputeGraph` IR (91 opcodes, `DimExpr`, `IrDType`) |
 | Shape handling | Runtime only | Symbolic `DimExpr` with `ShapeEnv` via `ShapeInferencePass` |
 | Memory management | Per-op allocation | Arena-based `MemoryPlan` with live-range aliasing |
 | Fusion | Fused layer types in `nn/fused.rs` | `OperatorFusionPass` in compiler pipeline |
