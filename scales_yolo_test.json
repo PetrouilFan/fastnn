@@ -1,0 +1,232 @@
+{
+  "/model.0/conv/Conv": {
+    "scale": 0.013283681124448776,
+    "zero_point": 159.0,
+    "bit_width": 8
+  },
+  "/model.1/conv/Conv": {
+    "scale": 0.02286604419350624,
+    "zero_point": 168.0,
+    "bit_width": 8
+  },
+  "/model.12/m.0/cv1/conv/Conv": {
+    "scale": 0.020395854488015175,
+    "zero_point": 14.0,
+    "bit_width": 8
+  },
+  "/model.12/m.0/cv2/conv/Conv": {
+    "scale": 0.015163122676312923,
+    "zero_point": 18.0,
+    "bit_width": 8
+  },
+  "/model.18/cv1/conv/Conv": {
+    "scale": 0.04453807696700096,
+    "zero_point": 19.0,
+    "bit_width": 8
+  },
+  "/model.18/m.0/cv2/conv/Conv": {
+    "scale": 0.016253160312771797,
+    "zero_point": 17.0,
+    "bit_width": 8
+  },
+  "/model.19/conv/Conv": {
+    "scale": 0.025594573467969894,
+    "zero_point": 11.0,
+    "bit_width": 8
+  },
+  "/model.2/cv1/conv/Conv": {
+    "scale": 0.0038554146885871887,
+    "zero_point": 131.0,
+    "bit_width": 8
+  },
+  "/model.2/cv2/conv/Conv": {
+    "scale": 0.021347299218177795,
+    "zero_point": 141.0,
+    "bit_width": 8
+  },
+  "/model.2/m.0/Add": {
+    "scale": 0.013072662986814976,
+    "zero_point": 108.0,
+    "bit_width": 8
+  },
+  "/model.2/m.0/cv1/conv/Conv": {
+    "scale": 0.011159375309944153,
+    "zero_point": 156.0,
+    "bit_width": 8
+  },
+  "/model.2/m.0/cv2/conv/Conv": {
+    "scale": 0.0063165719620883465,
+    "zero_point": 126.0,
+    "bit_width": 8
+  },
+  "/model.21/cv2/conv/Conv": {
+    "scale": 0.01711578667163849,
+    "zero_point": 33.0,
+    "bit_width": 8
+  },
+  "/model.21/m.0/cv1/conv/Conv": {
+    "scale": 0.01591922901570797,
+    "zero_point": 17.0,
+    "bit_width": 8
+  },
+  "/model.22/Add_2": {
+    "scale": 0.020706797018647194,
+    "zero_point": 13.0,
+    "bit_width": 8
+  },
+  "/model.22/Mul_2": {
+    "scale": 0.013788078911602497,
+    "zero_point": 20.0,
+    "bit_width": 8
+  },
+  "/model.22/Sub_1": {
+    "scale": 0.020598329603672028,
+    "zero_point": 12.0,
+    "bit_width": 8
+  },
+  "/model.22/cv2.0/cv2.0.2/Conv": {
+    "scale": 0.01711578667163849,
+    "zero_point": 33.0,
+    "bit_width": 8
+  },
+  "/model.22/cv2.1/cv2.1.2/Conv": {
+    "scale": 0.022117072716355324,
+    "zero_point": 38.0,
+    "bit_width": 8
+  },
+  "/model.22/cv2.2/cv2.2.1/conv/Conv": {
+    "scale": 0.022117072716355324,
+    "zero_point": 38.0,
+    "bit_width": 8
+  },
+  "/model.22/cv2.2/cv2.2.2/Conv": {
+    "scale": 0.02777695842087269,
+    "zero_point": 30.0,
+    "bit_width": 8
+  },
+  "/model.22/cv3.0/cv3.0.1/conv/Conv": {
+    "scale": 0.016044996678829193,
+    "zero_point": 17.0,
+    "bit_width": 8
+  },
+  "/model.22/cv3.1/cv3.1.0/conv/Conv": {
+    "scale": 0.03455949202179909,
+    "zero_point": 8.0,
+    "bit_width": 8
+  },
+  "/model.22/cv3.2/cv3.2.0/conv/Conv": {
+    "scale": 0.010786778293550014,
+    "zero_point": 26.0,
+    "bit_width": 8
+  },
+  "/model.22/cv3.2/cv3.2.1/conv/Conv": {
+    "scale": 0.012575140222907066,
+    "zero_point": 22.0,
+    "bit_width": 8
+  },
+  "/model.22/dfl/Softmax": {
+    "scale": 0.02070288546383381,
+    "zero_point": 27.0,
+    "bit_width": 8
+  },
+  "/model.22/dfl/conv/Conv": {
+    "scale": 0.013700820505619049,
+    "zero_point": 20.0,
+    "bit_width": 8
+  },
+  "/model.3/conv/Conv": {
+    "scale": 0.015192575752735138,
+    "zero_point": 95.0,
+    "bit_width": 8
+  },
+  "/model.4/cv1/conv/Conv": {
+    "scale": 0.020190048962831497,
+    "zero_point": 161.0,
+    "bit_width": 8
+  },
+  "/model.4/cv2/conv/Conv": {
+    "scale": 0.017637087032198906,
+    "zero_point": 4.0,
+    "bit_width": 8
+  },
+  "/model.4/m.0/Add": {
+    "scale": 0.0043795108795166016,
+    "zero_point": 111.0,
+    "bit_width": 8
+  },
+  "/model.4/m.0/cv1/conv/Conv": {
+    "scale": 0.011515656486153603,
+    "zero_point": 125.0,
+    "bit_width": 8
+  },
+  "/model.4/m.0/cv2/conv/Conv": {
+    "scale": 0.016307849436998367,
+    "zero_point": 131.0,
+    "bit_width": 8
+  },
+  "/model.4/m.1/Add": {
+    "scale": 0.03216080740094185,
+    "zero_point": 55.0,
+    "bit_width": 8
+  },
+  "/model.4/m.1/cv1/conv/Conv": {
+    "scale": 0.015605430118739605,
+    "zero_point": 154.0,
+    "bit_width": 8
+  },
+  "/model.4/m.1/cv2/conv/Conv": {
+    "scale": 0.006309829652309418,
+    "zero_point": 134.0,
+    "bit_width": 8
+  },
+  "/model.5/conv/Conv": {
+    "scale": 0.006651744712144136,
+    "zero_point": 159.0,
+    "bit_width": 8
+  },
+  "/model.6/cv1/conv/Conv": {
+    "scale": 0.05070625990629196,
+    "zero_point": 148.0,
+    "bit_width": 8
+  },
+  "/model.6/m.0/Add": {
+    "scale": 1.4284477233886719,
+    "zero_point": 0.0,
+    "bit_width": 8
+  },
+  "/model.6/m.1/Add": {
+    "scale": 0.3324710726737976,
+    "zero_point": 1.0,
+    "bit_width": 8
+  },
+  "/model.7/conv/Conv": {
+    "scale": 0.3324710726737976,
+    "zero_point": 1.0,
+    "bit_width": 8
+  },
+  "/model.8/cv1/conv/Conv": {
+    "scale": 0.1458044946193695,
+    "zero_point": 2.0,
+    "bit_width": 8
+  },
+  "/model.8/cv2/conv/Conv": {
+    "scale": 0.3634713292121887,
+    "zero_point": 2.0,
+    "bit_width": 8
+  },
+  "/model.8/m.0/cv2/conv/Conv": {
+    "scale": 0.3634713292121887,
+    "zero_point": 2.0,
+    "bit_width": 8
+  },
+  "/model.9/cv1/conv/Conv": {
+    "scale": 0.3634713292121887,
+    "zero_point": 2.0,
+    "bit_width": 8
+  },
+  "output": {
+    "scale": 1.3636195659637451,
+    "zero_point": -0.0,
+    "bit_width": 8
+  }
+}

@@ -148,36 +148,19 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                 # F32: data is numpy array
                 params[name] = fnn.tensor(data, list(data.shape))
             else:
-                # Packed: store BOTH f32 dequantized version (for DAG fallback)
-                # AND packed raw data for WeightStorage dispatch
+                # Packed types require Rust-side PackedTensor for dequantization,
+                # which is not exposed to Python yet.
                 dtype_map = {
                     DTYPE_U4: "u4",
                     DTYPE_U8: "u8",
                     DTYPE_F16: "f16",
                 }
                 dtype_str = dtype_map.get(dtype, "f32")
-                packed_cls = {
-                    "u4": fnn.PackedTensor4,
-                    "u8": fnn.PackedTensor8,
-                    "f16": fnn.PackedTensor16,
-                }[dtype_str]
-
-                # Reconstruct packed tensor to get shape info
-                packed = packed_cls.from_bytes(bytes(data), shape,
-                                                list(scales), list(zeros))
-                f32_data = packed.to_f32_vec()
-
-                # Store f32 tensor for DAG fallback
-                params[name] = fnn.tensor(f32_data, shape)
-
-                # Store packed raw data for WeightStorage native dispatch
-                packed_params_dict[name] = (
-                    bytes(data),         # raw packed bytes
-                    shape,               # shape list
-                    dtype,               # dtype tag (2=U8, 3=U4, 1=F16)
-                    list(scales),        # scales
-                    list(zeros),         # zeros
+                raise NotImplementedError(
+                    f"Loading packed dtype '{dtype_str}' from .fnn files is not yet "
+                    f"supported from Python. Use the Rust-side AotExecutor instead."
                 )
+
         else:
             # v2 format: value is already a numpy array
             params[name] = fnn.tensor(value, list(value.shape))

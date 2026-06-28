@@ -123,13 +123,31 @@ fn test_reduce_keepdim_shape_inference() {
     shape_inference::infer_shapes(&mut graph).unwrap();
 
     let sum_node = graph.get_node(sum.node_id()).unwrap();
-    // Note: shape inference for ReduceSum doesn't support keepdim yet —
-    // the axis is always removed. The builder pre-sets the output shape
-    // but shape inference overrides it. This test documents the current behavior.
-    // If keepdim support is added later, the expected shape would be [2,1,4].
     assert_eq!(
         sum_node.output_type.shape,
-        vec![DimExpr::Known(2), DimExpr::Known(4)]
+        vec![DimExpr::Known(2), DimExpr::Known(1), DimExpr::Known(4),]
+    );
+}
+
+#[test]
+fn test_reduce_mean_keepdim_shape_inference() {
+    let g = GraphBuilder::new();
+    let a = g.input(&[1, 1280, 7, 7], IrDType::F32);
+    let mean_h = g.reduce_mean(&a, 2, true);
+    let mean_hw = g.reduce_mean(&mean_h, 3, true);
+
+    let mut graph = g.to_graph();
+    shape_inference::infer_shapes(&mut graph).unwrap();
+
+    let mean_node = graph.get_node(mean_hw.node_id()).unwrap();
+    assert_eq!(
+        mean_node.output_type.shape,
+        vec![
+            DimExpr::Known(1),
+            DimExpr::Known(1280),
+            DimExpr::Known(1),
+            DimExpr::Known(1),
+        ]
     );
 }
 
@@ -270,7 +288,7 @@ fn test_broadcast_mismatch_error() {
     let g = GraphBuilder::new();
     let a = g.input(&[3, 4], IrDType::F32);
     let b = g.input(&[2, 4], IrDType::F32);
-    let add = g.add(&a, &b);
+    let _add = g.add(&a, &b);
 
     let mut graph = g.to_graph();
     let result = shape_inference::infer_shapes(&mut graph);
@@ -282,7 +300,7 @@ fn test_matmul_inner_dim_mismatch_error() {
     let g = GraphBuilder::new();
     let a = g.input(&[4, 8], IrDType::F32);
     let b = g.input(&[7, 16], IrDType::F32);
-    let mm = g.matmul(&a, &b);
+    let _mm = g.matmul(&a, &b);
 
     let mut graph = g.to_graph();
     let result = shape_inference::infer_shapes(&mut graph);

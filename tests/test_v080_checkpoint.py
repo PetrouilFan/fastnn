@@ -8,7 +8,7 @@ import sys
 import os
 import tempfile
 
-sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fastnn
 

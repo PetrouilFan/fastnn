@@ -1,0 +1,2740 @@
+{
+  "cache_dir": "/tmp/fastnn-zoo",
+  "iters": 5,
+  "models": {
+    "yolov8n": {
+      "bottleneck_class": "compute_or_unclassified",
+      "description": "YOLOv8n detection baseline (regression anchor)",
+      "export": {
+        "onnx_existed": true,
+        "onnx_path": "/tmp/fastnn-zoo/yolov8n.onnx",
+        "pt_path": "yolov8n.pt",
+        "source": "ultralytics"
+      },
+      "family": "yolo",
+      "fastnn": {
+        "accuracy_vs_pytorch": {
+          "max_abs": 0.0004730224609375,
+          "mean_abs": 1.5676719158363994e-06,
+          "ref_sum": 1032190.5,
+          "shape_mismatch": false
+        },
+        "aot_input_name": "images",
+        "aot_output_name": "output0",
+        "forward_speed": {
+          "iters": 5,
+          "max_ms": 370.6976869980281,
+          "mean_ms": 342.5295451983402,
+          "median_ms": 334.1504489981162,
+          "min_ms": 319.89467200037325,
+          "warmup": 3
+        },
+        "memory_stats_summary": {
+          "alias_groups": 11,
+          "aliased_nodes": 23,
+          "arena_size": 45052288,
+          "call_kernel_count": 120,
+          "estimated_static_traffic_bytes": 97320040,
+          "fill_bytes": 0,
+          "fill_count": 0,
+          "instructions": 259,
+          "kernel_read_bytes": 51648820,
+          "kernel_write_bytes": 31240800,
+          "logical_slot_bytes": 46900020,
+          "memcpy_bytes": 1780800,
+          "memcpy_count": 8,
+          "physical_slot_bytes": 45052020,
+          "slot_reuse_saved_bytes": 1848000,
+          "top_alias_groups": [
+            {
+              "nodes": [
+                381,
+                403
+              ],
+              "offset": 41372992,
+              "size": 672000
+            },
+            {
+              "nodes": [
+                171,
+                174
+              ],
+              "offset": 18384192,
+              "size": 409600
+            },
+            {
+              "nodes": [
+                190,
+                193
+              ],
+              "offset": 22275392,
+              "size": 204800
+            },
+            {
+              "nodes": [
+                197,
+                200
+              ],
+              "offset": 22684992,
+              "size": 204800
+            },
+            {
+              "nodes": [
+                216,
+                219
+              ],
+              "offset": 24835392,
+              "size": 102400
+            }
+          ],
+          "top_instructions_by_static_bytes": [
+            {
+              "input_node_ids": [
+                1,
+                31,
+                30
+              ],
+              "input_nodes": [
+                1,
+                31,
+                30
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  3,
+                  320,
+                  320
+                ],
+                [
+                  16,
+                  3,
+                  3,
+                  3
+                ],
+                [
+                  16
+                ]
+              ],
+              "instruction_index": 131,
+              "kernel_name": "conv2d_silu",
+              "kind": "call_kernel",
+              "node_id": 157,
+              "node_name": "/model.0/conv/Conv",
+              "op_type": "Conv2d",
+              "output_shape": [
+                1,
+                16,
+                160,
+                160
+              ],
+              "read_bytes": 1230592,
+              "static_bytes": 2868992,
+              "write_bytes": 1638400
+            },
+            {
+              "input_node_ids": [
+                157,
+                33,
+                32
+              ],
+              "input_nodes": [
+                157,
+                33,
+                32
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  16,
+                  160,
+                  160
+                ],
+                [
+                  32,
+                  16,
+                  3,
+                  3
+                ],
+                [
+                  32
+                ]
+              ],
+              "instruction_index": 132,
+              "kernel_name": "conv2d_silu",
+              "kind": "call_kernel",
+              "node_id": 160,
+              "node_name": "/model.1/conv/Conv",
+              "op_type": "Conv2d",
+              "output_shape": [
+                1,
+                32,
+                80,
+                80
+              ],
+              "read_bytes": 1656960,
+              "static_bytes": 2476160,
+              "write_bytes": 819200
+            },
+            {
+              "input_node_ids": [
+                166,
+                167,
+                174
+              ],
+              "input_nodes": [
+                166,
+                167,
+                174
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  16,
+                  80,
+                  80
+                ],
+                [
+                  1,
+                  16,
+                  80,
+                  80
+                ],
+                [
+                  1,
+                  16,
+                  80,
+                  80
+                ]
+              ],
+              "instruction_index": 139,
+              "kernel_name": "concat",
+              "kind": "call_kernel",
+              "node_id": 175,
+              "node_name": "/model.2/Concat",
+              "op_type": "Concat",
+              "output_shape": [
+                1,
+                48,
+                80,
+                80
+              ],
+              "read_bytes": 1228800,
+              "static_bytes": 2457600,
+              "write_bytes": 1228800
+            },
+            {
+              "input_node_ids": [
+                277,
+                202
+              ],
+              "input_nodes": [
+                277,
+                202
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  128,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  64,
+                  40,
+                  40
+                ]
+              ],
+              "instruction_index": 190,
+              "kernel_name": "concat",
+              "kind": "call_kernel",
+              "node_id": 278,
+              "node_name": "/model.14/Concat",
+              "op_type": "Concat",
+              "output_shape": [
+                1,
+                192,
+                40,
+                40
+              ],
+              "read_bytes": 1228800,
+              "static_bytes": 2457600,
+              "write_bytes": 1228800
+            },
+            {
+              "input_node_ids": [
+                175,
+                65,
+                64
+              ],
+              "input_nodes": [
+                175,
+                65,
+                64
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  48,
+                  80,
+                  80
+                ],
+                [
+                  32,
+                  48,
+                  1,
+                  1
+                ],
+                [
+                  32
+                ]
+              ],
+              "instruction_index": 140,
+              "kernel_name": "conv2d_silu",
+              "kind": "call_kernel",
+              "node_id": 176,
+              "node_name": "/model.2/cv2/conv/Conv",
+              "op_type": "Conv2d",
+              "output_shape": [
+                1,
+                32,
+                80,
+                80
+              ],
+              "read_bytes": 1235072,
+              "static_bytes": 2054272,
+              "write_bytes": 819200
+            },
+            {
+              "input_node_ids": [
+                278,
+                43,
+                42
+              ],
+              "input_nodes": [
+                278,
+                43,
+                42
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  192,
+                  40,
+                  40
+                ],
+                [
+                  64,
+                  192,
+                  1,
+                  1
+                ],
+                [
+                  64
+                ]
+              ],
+              "instruction_index": 191,
+              "kernel_name": "conv2d_silu",
+              "kind": "call_kernel",
+              "node_id": 279,
+              "node_name": "/model.15/cv1/conv/Conv",
+              "op_type": "Conv2d",
+              "output_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "read_bytes": 1278208,
+              "static_bytes": 1687808,
+              "write_bytes": 409600
+            },
+            {
+              "input_node_ids": [
+                160,
+                63,
+                62
+              ],
+              "input_nodes": [
+                160,
+                63,
+                62
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  32,
+                  80,
+                  80
+                ],
+                [
+                  32,
+                  32,
+                  1,
+                  1
+                ],
+                [
+                  32
+                ]
+              ],
+              "instruction_index": 133,
+              "kernel_name": "conv2d_silu",
+              "kind": "call_kernel",
+              "node_id": 163,
+              "node_name": "/model.2/cv1/conv/Conv",
+              "op_type": "Conv2d",
+              "output_shape": [
+                1,
+                32,
+                80,
+                80
+              ],
+              "read_bytes": 823424,
+              "static_bytes": 1642624,
+              "write_bytes": 819200
+            },
+            {
+              "input_node_ids": [
+                185,
+                186,
+                193,
+                200
+              ],
+              "input_nodes": [
+                185,
+                186,
+                193,
+                200
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ]
+              ],
+              "instruction_index": 151,
+              "kernel_name": "concat",
+              "kind": "call_kernel",
+              "node_id": 201,
+              "node_name": "/model.4/Concat",
+              "op_type": "Concat",
+              "output_shape": [
+                1,
+                128,
+                40,
+                40
+              ],
+              "read_bytes": 819200,
+              "static_bytes": 1638400,
+              "write_bytes": 819200
+            },
+            {
+              "input_node_ids": [
+                228,
+                144,
+                143
+              ],
+              "input_nodes": [
+                228,
+                144,
+                143
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  128,
+                  20,
+                  20
+                ],
+                [
+                  256,
+                  128,
+                  3,
+                  3
+                ],
+                [
+                  256
+                ]
+              ],
+              "instruction_index": 165,
+              "kernel_name": "conv2d_silu",
+              "kind": "call_kernel",
+              "node_id": 231,
+              "node_name": "/model.7/conv/Conv",
+              "op_type": "Conv2d",
+              "output_shape": [
+                1,
+                256,
+                10,
+                10
+              ],
+              "read_bytes": 1385472,
+              "static_bytes": 1487872,
+              "write_bytes": 102400
+            },
+            {
+              "input_node_ids": [
+                402,
+                403
+              ],
+              "input_nodes": [
+                402,
+                403
+              ],
+              "input_shapes": [
+                [
+                  1,
+                  4,
+                  2100
+                ],
+                [
+                  1,
+                  80,
+                  2100
+                ]
+              ],
+              "instruction_index": 258,
+              "kernel_name": "concat",
+              "kind": "call_kernel",
+              "node_id": 404,
+              "node_name": "/model.22/Concat_3",
+              "op_type": "Concat",
+              "output_shape": [
+                1,
+                84,
+                2100
+              ],
+              "read_bytes": 705600,
+              "static_bytes": 1411200,
+              "write_bytes": 705600
+            }
+          ],
+          "top_kernels_by_count": [
+            {
+              "count": 57,
+              "kernel": "conv2d_silu",
+              "read_bytes": 31251072,
+              "static_bytes": 45139072,
+              "write_bytes": 13888000
+            },
+            {
+              "count": 18,
+              "kernel": "slice_f32",
+              "read_bytes": 4982400,
+              "static_bytes": 7473600,
+              "write_bytes": 2491200
+            },
+            {
+              "count": 17,
+              "kernel": "concat",
+              "read_bytes": 8451200,
+              "static_bytes": 16902400,
+              "write_bytes": 8451200
+            },
+            {
+              "count": 8,
+              "kernel": "add_f32",
+              "read_bytes": 2217600,
+              "static_bytes": 3326400,
+              "write_bytes": 1108800
+            },
+            {
+              "count": 7,
+              "kernel": "conv2d",
+              "read_bytes": 1874944,
+              "static_bytes": 3118144,
+              "write_bytes": 1243200
+            },
+            {
+              "count": 3,
+              "kernel": "pool_f32",
+              "read_bytes": 153600,
+              "static_bytes": 614400,
+              "write_bytes": 460800
+            },
+            {
+              "count": 2,
+              "kernel": "sub_f32",
+              "read_bytes": 67200,
+              "static_bytes": 100800,
+              "write_bytes": 33600
+            },
+            {
+              "count": 2,
+              "kernel": "transpose_perm_f32",
+              "read_bytes": 1075200,
+              "static_bytes": 2150400,
+              "write_bytes": 1075200
+            },
+            {
+              "count": 2,
+              "kernel": "upsample_nearest2d",
+              "read_bytes": 307200,
+              "static_bytes": 1536000,
+              "write_bytes": 1228800
+            },
+            {
+              "count": 1,
+              "kernel": "div_f32",
+              "read_bytes": 16804,
+              "static_bytes": 33604,
+              "write_bytes": 16800
+            }
+          ],
+          "top_write_consts_by_size": [
+            {
+              "data_len": 1179648,
+              "dst_offset": 10203968,
+              "dst_size": 1179648,
+              "instruction_index": 118,
+              "prepared_constant_index": 40,
+              "prepared_constant_name": "conv_118_i1",
+              "prepared_consumer_instruction_index": 165,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 1179648
+            },
+            {
+              "data_len": 737280,
+              "dst_offset": 7853440,
+              "dst_size": 737280,
+              "instruction_index": 83,
+              "prepared_constant_index": 116,
+              "prepared_constant_name": "conv_83_i1",
+              "prepared_consumer_instruction_index": 233,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 737280
+            },
+            {
+              "data_len": 589824,
+              "dst_offset": 2672192,
+              "dst_size": 589824,
+              "instruction_index": 35,
+              "prepared_constant_index": 92,
+              "prepared_constant_name": "conv_35_i1",
+              "prepared_consumer_instruction_index": 215,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 589824
+            },
+            {
+              "data_len": 589824,
+              "dst_offset": 4080064,
+              "dst_size": 589824,
+              "instruction_index": 49,
+              "prepared_constant_index": 108,
+              "prepared_constant_name": "conv_49_i1",
+              "prepared_consumer_instruction_index": 228,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 589824
+            },
+            {
+              "data_len": 589824,
+              "dst_offset": 4670400,
+              "dst_size": 589824,
+              "instruction_index": 51,
+              "prepared_constant_index": 110,
+              "prepared_constant_name": "conv_51_i1",
+              "prepared_consumer_instruction_index": 229,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 589824
+            },
+            {
+              "data_len": 589824,
+              "dst_offset": 6032064,
+              "dst_size": 589824,
+              "instruction_index": 65,
+              "prepared_constant_index": 114,
+              "prepared_constant_name": "conv_65_i1",
+              "prepared_consumer_instruction_index": 232,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 589824
+            },
+            {
+              "data_len": 589824,
+              "dst_offset": 12041536,
+              "dst_size": 589824,
+              "instruction_index": 124,
+              "prepared_constant_index": 44,
+              "prepared_constant_name": "conv_124_i1",
+              "prepared_consumer_instruction_index": 169,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 589824
+            },
+            {
+              "data_len": 589824,
+              "dst_offset": 12631872,
+              "dst_size": 589824,
+              "instruction_index": 126,
+              "prepared_constant_index": 46,
+              "prepared_constant_name": "conv_126_i1",
+              "prepared_consumer_instruction_index": 170,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 589824
+            },
+            {
+              "data_len": 524288,
+              "dst_offset": 13354304,
+              "dst_size": 524288,
+              "instruction_index": 130,
+              "prepared_constant_index": 52,
+              "prepared_constant_name": "conv_130_i1",
+              "prepared_consumer_instruction_index": 179,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 524288
+            },
+            {
+              "data_len": 393216,
+              "dst_offset": 3292096,
+              "dst_size": 393216,
+              "instruction_index": 45,
+              "prepared_constant_index": 102,
+              "prepared_constant_name": "conv_45_i1",
+              "prepared_consumer_instruction_index": 221,
+              "prepared_input_index": 1,
+              "prepared_static_role": "conv_weight",
+              "write_bytes": 393216
+            }
+          ],
+          "write_const_bytes": 12649620,
+          "write_const_count": 131
+        },
+        "output_shape": [
+          1,
+          84,
+          2100
+        ],
+        "output_sum": 1032190.4375,
+        "profile_instruction_hotspots": [
+          {
+            "estimated_mean_ms": 4.656631157894737,
+            "instruction_index": 131,
+            "kernel_name": "conv2d_silu",
+            "kind": "call_kernel",
+            "node_id": 157,
+            "static_bytes": 2868992,
+            "suspected_memory_bound": false
+          },
+          {
+            "estimated_mean_ms": 4.656631157894737,
+            "instruction_index": 132,
+            "kernel_name": "conv2d_silu",
+            "kind": "call_kernel",
+            "node_id": 160,
+            "static_bytes": 2476160,
+            "suspected_memory_bound": false
+          },
+          {
+            "estimated_mean_ms": 0.8168245882352942,
+            "instruction_index": 139,
+            "kernel_name": "concat",
+            "kind": "call_kernel",
+            "node_id": 175,
+            "static_bytes": 2457600,
+            "suspected_memory_bound": true
+          },
+          {
+            "estimated_mean_ms": 0.8168245882352942,
+            "instruction_index": 190,
+            "kernel_name": "concat",
+            "kind": "call_kernel",
+            "node_id": 278,
+            "static_bytes": 2457600,
+            "suspected_memory_bound": true
+          },
+          {
+            "estimated_mean_ms": 4.656631157894737,
+            "instruction_index": 140,
+            "kernel_name": "conv2d_silu",
+            "kind": "call_kernel",
+            "node_id": 176,
+            "static_bytes": 2054272,
+            "suspected_memory_bound": false
+          },
+          {
+            "estimated_mean_ms": 4.656631157894737,
+            "instruction_index": 191,
+            "kernel_name": "conv2d_silu",
+            "kind": "call_kernel",
+            "node_id": 279,
+            "static_bytes": 1687808,
+            "suspected_memory_bound": false
+          },
+          {
+            "estimated_mean_ms": 4.656631157894737,
+            "instruction_index": 133,
+            "kernel_name": "conv2d_silu",
+            "kind": "call_kernel",
+            "node_id": 163,
+            "static_bytes": 1642624,
+            "suspected_memory_bound": false
+          },
+          {
+            "estimated_mean_ms": 0.8168245882352942,
+            "instruction_index": 151,
+            "kernel_name": "concat",
+            "kind": "call_kernel",
+            "node_id": 201,
+            "static_bytes": 1638400,
+            "suspected_memory_bound": true
+          },
+          {
+            "estimated_mean_ms": 4.656631157894737,
+            "instruction_index": 165,
+            "kernel_name": "conv2d_silu",
+            "kind": "call_kernel",
+            "node_id": 231,
+            "static_bytes": 1487872,
+            "suspected_memory_bound": false
+          },
+          {
+            "estimated_mean_ms": 0.8168245882352942,
+            "instruction_index": 258,
+            "kernel_name": "concat",
+            "kind": "call_kernel",
+            "node_id": 404,
+            "static_bytes": 1411200,
+            "suspected_memory_bound": true
+          }
+        ],
+        "profile_top_kernels": [
+          {
+            "count": 57,
+            "kernel_name": "conv2d_silu",
+            "mean_ms": 4.656631157894737,
+            "total_ms": 265.427976
+          },
+          {
+            "count": 2,
+            "kernel_name": "transpose_perm_f32",
+            "mean_ms": 7.3510435,
+            "total_ms": 14.702087
+          },
+          {
+            "count": 17,
+            "kernel_name": "concat",
+            "mean_ms": 0.8168245882352942,
+            "total_ms": 13.886018000000002
+          },
+          {
+            "count": 1,
+            "kernel_name": "sigmoid_f32",
+            "mean_ms": 9.069904,
+            "total_ms": 9.069904
+          },
+          {
+            "count": 3,
+            "kernel_name": "pool_f32",
+            "mean_ms": 1.5421006666666666,
+            "total_ms": 4.626302
+          },
+          {
+            "count": 1,
+            "kernel_name": "softmax",
+            "mean_ms": 4.012722,
+            "total_ms": 4.012722
+          },
+          {
+            "count": 8,
+            "kernel_name": "add_f32",
+            "mean_ms": 0.38715762499999995,
+            "total_ms": 3.0972609999999996
+          },
+          {
+            "count": 7,
+            "kernel_name": "conv2d",
+            "mean_ms": 0.4124758571428571,
+            "total_ms": 2.8873309999999996
+          },
+          {
+            "count": 2,
+            "kernel_name": "upsample_nearest2d",
+            "mean_ms": 1.3950955,
+            "total_ms": 2.790191
+          },
+          {
+            "count": 131,
+            "kernel_name": "write_const",
+            "mean_ms": 0.005891908396946565,
+            "total_ms": 0.7718400000000001
+          }
+        ],
+        "profile_total_ms": 322.254892
+      },
+      "imgsz": 320,
+      "key": "yolov8n",
+      "onnx_metadata": {
+        "concat_shape_summary": {
+          "by_axis": {
+            "-1": {
+              "count": 2,
+              "examples": [
+                {
+                  "axis": -1,
+                  "feeds_conv": false,
+                  "feeds_conv_node": null,
+                  "input_shapes": [
+                    [
+                      1,
+                      64,
+                      1600
+                    ],
+                    [
+                      1,
+                      64,
+                      400
+                    ],
+                    [
+                      1,
+                      64,
+                      100
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    409600,
+                    102400,
+                    25600
+                  ],
+                  "name": "/model.22/Concat",
+                  "node_index": 198,
+                  "num_inputs": 3,
+                  "output_shape": [
+                    1,
+                    64,
+                    2100
+                  ],
+                  "output_static_bytes": 537600
+                },
+                {
+                  "axis": -1,
+                  "feeds_conv": false,
+                  "feeds_conv_node": null,
+                  "input_shapes": [
+                    [
+                      1,
+                      80,
+                      1600
+                    ],
+                    [
+                      1,
+                      80,
+                      400
+                    ],
+                    [
+                      1,
+                      80,
+                      100
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    512000,
+                    128000,
+                    32000
+                  ],
+                  "name": "/model.22/Concat_1",
+                  "node_index": 226,
+                  "num_inputs": 3,
+                  "output_shape": [
+                    1,
+                    80,
+                    2100
+                  ],
+                  "output_static_bytes": 672000
+                }
+              ],
+              "total_static_bytes": 1209600
+            },
+            "1": {
+              "count": 15,
+              "examples": [
+                {
+                  "axis": 1,
+                  "feeds_conv": true,
+                  "feeds_conv_node": 18,
+                  "input_shapes": [
+                    [
+                      1,
+                      16,
+                      80,
+                      80
+                    ],
+                    [
+                      1,
+                      16,
+                      80,
+                      80
+                    ],
+                    [
+                      1,
+                      16,
+                      80,
+                      80
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    409600,
+                    409600,
+                    409600
+                  ],
+                  "name": "/model.2/Concat",
+                  "node_index": 17,
+                  "num_inputs": 3,
+                  "output_shape": [
+                    1,
+                    48,
+                    80,
+                    80
+                  ],
+                  "output_static_bytes": 1228800
+                },
+                {
+                  "axis": 1,
+                  "feeds_conv": true,
+                  "feeds_conv_node": 43,
+                  "input_shapes": [
+                    [
+                      1,
+                      32,
+                      40,
+                      40
+                    ],
+                    [
+                      1,
+                      32,
+                      40,
+                      40
+                    ],
+                    [
+                      1,
+                      32,
+                      40,
+                      40
+                    ],
+                    [
+                      1,
+                      32,
+                      40,
+                      40
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    204800,
+                    204800,
+                    204800,
+                    204800
+                  ],
+                  "name": "/model.4/Concat",
+                  "node_index": 42,
+                  "num_inputs": 4,
+                  "output_shape": [
+                    1,
+                    128,
+                    40,
+                    40
+                  ],
+                  "output_static_bytes": 819200
+                },
+                {
+                  "axis": 1,
+                  "feeds_conv": true,
+                  "feeds_conv_node": 68,
+                  "input_shapes": [
+                    [
+                      1,
+                      64,
+                      20,
+                      20
+                    ],
+                    [
+                      1,
+                      64,
+                      20,
+                      20
+                    ],
+                    [
+                      1,
+                      64,
+                      20,
+                      20
+                    ],
+                    [
+                      1,
+                      64,
+                      20,
+                      20
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    102400,
+                    102400,
+                    102400,
+                    102400
+                  ],
+                  "name": "/model.6/Concat",
+                  "node_index": 67,
+                  "num_inputs": 4,
+                  "output_shape": [
+                    1,
+                    256,
+                    20,
+                    20
+                  ],
+                  "output_static_bytes": 409600
+                },
+                {
+                  "axis": 1,
+                  "feeds_conv": true,
+                  "feeds_conv_node": 86,
+                  "input_shapes": [
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ],
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ],
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    51200,
+                    51200,
+                    51200
+                  ],
+                  "name": "/model.8/Concat",
+                  "node_index": 85,
+                  "num_inputs": 3,
+                  "output_shape": [
+                    1,
+                    384,
+                    10,
+                    10
+                  ],
+                  "output_static_bytes": 153600
+                },
+                {
+                  "axis": 1,
+                  "feeds_conv": true,
+                  "feeds_conv_node": 96,
+                  "input_shapes": [
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ],
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ],
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ],
+                    [
+                      1,
+                      128,
+                      10,
+                      10
+                    ]
+                  ],
+                  "input_static_bytes": [
+                    51200,
+                    51200,
+                    51200,
+                    51200
+                  ],
+                  "name": "/model.9/Concat",
+                  "node_index": 95,
+                  "num_inputs": 4,
+                  "output_shape": [
+                    1,
+                    512,
+                    10,
+                    10
+                  ],
+                  "output_static_bytes": 204800
+                }
+              ],
+              "total_static_bytes": 7208000
+            }
+          },
+          "channel_axis_concat_count": 15,
+          "channel_axis_feeds_conv_count": 13,
+          "concat_count": 17,
+          "large_channel_axis_concat_count": 14,
+          "large_channel_axis_concats": [
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 18,
+              "input_shapes": [
+                [
+                  1,
+                  16,
+                  80,
+                  80
+                ],
+                [
+                  1,
+                  16,
+                  80,
+                  80
+                ],
+                [
+                  1,
+                  16,
+                  80,
+                  80
+                ]
+              ],
+              "name": "/model.2/Concat",
+              "node_index": 17,
+              "num_inputs": 3,
+              "output_shape": [
+                1,
+                48,
+                80,
+                80
+              ],
+              "output_static_bytes": 1228800
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 121,
+              "input_shapes": [
+                [
+                  1,
+                  128,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  64,
+                  40,
+                  40
+                ]
+              ],
+              "name": "/model.14/Concat",
+              "node_index": 120,
+              "num_inputs": 2,
+              "output_shape": [
+                1,
+                192,
+                40,
+                40
+              ],
+              "output_static_bytes": 1228800
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 43,
+              "input_shapes": [
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ]
+              ],
+              "name": "/model.4/Concat",
+              "node_index": 42,
+              "num_inputs": 4,
+              "output_shape": [
+                1,
+                128,
+                40,
+                40
+              ],
+              "output_static_bytes": 819200
+            },
+            {
+              "axis": 1,
+              "feeds_conv": false,
+              "feeds_conv_node": null,
+              "input_shapes": [
+                [
+                  null,
+                  4,
+                  2100
+                ],
+                [
+                  1,
+                  80,
+                  2100
+                ]
+              ],
+              "name": "/model.22/Concat_3",
+              "node_index": 261,
+              "num_inputs": 2,
+              "output_shape": [
+                1,
+                84,
+                2100
+              ],
+              "output_static_bytes": 705600
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 103,
+              "input_shapes": [
+                [
+                  1,
+                  256,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  128,
+                  20,
+                  20
+                ]
+              ],
+              "name": "/model.11/Concat",
+              "node_index": 102,
+              "num_inputs": 2,
+              "output_shape": [
+                1,
+                384,
+                20,
+                20
+              ],
+              "output_static_bytes": 614400
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 132,
+              "input_shapes": [
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ],
+                [
+                  1,
+                  32,
+                  40,
+                  40
+                ]
+              ],
+              "name": "/model.15/Concat",
+              "node_index": 131,
+              "num_inputs": 3,
+              "output_shape": [
+                1,
+                96,
+                40,
+                40
+              ],
+              "output_static_bytes": 614400
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 68,
+              "input_shapes": [
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ]
+              ],
+              "name": "/model.6/Concat",
+              "node_index": 67,
+              "num_inputs": 4,
+              "output_shape": [
+                1,
+                256,
+                20,
+                20
+              ],
+              "output_static_bytes": 409600
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 114,
+              "input_shapes": [
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ]
+              ],
+              "name": "/model.12/Concat",
+              "node_index": 113,
+              "num_inputs": 3,
+              "output_shape": [
+                1,
+                192,
+                20,
+                20
+              ],
+              "output_static_bytes": 307200
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 139,
+              "input_shapes": [
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  128,
+                  20,
+                  20
+                ]
+              ],
+              "name": "/model.17/Concat",
+              "node_index": 138,
+              "num_inputs": 2,
+              "output_shape": [
+                1,
+                192,
+                20,
+                20
+              ],
+              "output_static_bytes": 307200
+            },
+            {
+              "axis": 1,
+              "feeds_conv": true,
+              "feeds_conv_node": 150,
+              "input_shapes": [
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ],
+                [
+                  1,
+                  64,
+                  20,
+                  20
+                ]
+              ],
+              "name": "/model.18/Concat",
+              "node_index": 149,
+              "num_inputs": 3,
+              "output_shape": [
+                1,
+                192,
+                20,
+                20
+              ],
+              "output_static_bytes": 307200
+            }
+          ]
+        },
+        "conv_shape_summary": {
+          "by_class": {
+            "pointwise": {
+              "count": 25,
+              "estimated_flops": 417907200.0,
+              "examples": [
+                {
+                  "class": "pointwise",
+                  "estimated_flops": 13107200.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    32,
+                    80,
+                    80
+                  ],
+                  "name": "/model.2/cv1/conv/Conv",
+                  "node_index": 6,
+                  "output_shape": [
+                    1,
+                    32,
+                    80,
+                    80
+                  ],
+                  "pads": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    32,
+                    32,
+                    1,
+                    1
+                  ]
+                },
+                {
+                  "class": "pointwise",
+                  "estimated_flops": 19660800.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    48,
+                    80,
+                    80
+                  ],
+                  "name": "/model.2/cv2/conv/Conv",
+                  "node_index": 18,
+                  "output_shape": [
+                    1,
+                    32,
+                    80,
+                    80
+                  ],
+                  "pads": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    32,
+                    48,
+                    1,
+                    1
+                  ]
+                },
+                {
+                  "class": "pointwise",
+                  "estimated_flops": 13107200.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    64,
+                    40,
+                    40
+                  ],
+                  "name": "/model.4/cv1/conv/Conv",
+                  "node_index": 24,
+                  "output_shape": [
+                    1,
+                    64,
+                    40,
+                    40
+                  ],
+                  "pads": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    64,
+                    64,
+                    1,
+                    1
+                  ]
+                },
+                {
+                  "class": "pointwise",
+                  "estimated_flops": 26214400.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    128,
+                    40,
+                    40
+                  ],
+                  "name": "/model.4/cv2/conv/Conv",
+                  "node_index": 43,
+                  "output_shape": [
+                    1,
+                    64,
+                    40,
+                    40
+                  ],
+                  "pads": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    64,
+                    128,
+                    1,
+                    1
+                  ]
+                },
+                {
+                  "class": "pointwise",
+                  "estimated_flops": 13107200.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    128,
+                    20,
+                    20
+                  ],
+                  "name": "/model.6/cv1/conv/Conv",
+                  "node_index": 49,
+                  "output_shape": [
+                    1,
+                    128,
+                    20,
+                    20
+                  ],
+                  "pads": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    128,
+                    128,
+                    1,
+                    1
+                  ]
+                }
+              ],
+              "flop_fraction": 0.19117466228678834
+            },
+            "standard": {
+              "count": 39,
+              "estimated_flops": 1768089600.0,
+              "examples": [
+                {
+                  "class": "standard",
+                  "estimated_flops": 22118400.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    3,
+                    320,
+                    320
+                  ],
+                  "name": "/model.0/conv/Conv",
+                  "node_index": 0,
+                  "output_shape": [
+                    1,
+                    16,
+                    160,
+                    160
+                  ],
+                  "pads": [
+                    1,
+                    1,
+                    1,
+                    1
+                  ],
+                  "strides": [
+                    2,
+                    2
+                  ],
+                  "weight_shape": [
+                    16,
+                    3,
+                    3,
+                    3
+                  ]
+                },
+                {
+                  "class": "standard",
+                  "estimated_flops": 58982400.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    16,
+                    160,
+                    160
+                  ],
+                  "name": "/model.1/conv/Conv",
+                  "node_index": 3,
+                  "output_shape": [
+                    1,
+                    32,
+                    80,
+                    80
+                  ],
+                  "pads": [
+                    1,
+                    1,
+                    1,
+                    1
+                  ],
+                  "strides": [
+                    2,
+                    2
+                  ],
+                  "weight_shape": [
+                    32,
+                    16,
+                    3,
+                    3
+                  ]
+                },
+                {
+                  "class": "standard",
+                  "estimated_flops": 29491200.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    16,
+                    80,
+                    80
+                  ],
+                  "name": "/model.2/m.0/cv1/conv/Conv",
+                  "node_index": 10,
+                  "output_shape": [
+                    1,
+                    16,
+                    80,
+                    80
+                  ],
+                  "pads": [
+                    1,
+                    1,
+                    1,
+                    1
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    16,
+                    16,
+                    3,
+                    3
+                  ]
+                },
+                {
+                  "class": "standard",
+                  "estimated_flops": 29491200.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    16,
+                    80,
+                    80
+                  ],
+                  "name": "/model.2/m.0/cv2/conv/Conv",
+                  "node_index": 13,
+                  "output_shape": [
+                    1,
+                    16,
+                    80,
+                    80
+                  ],
+                  "pads": [
+                    1,
+                    1,
+                    1,
+                    1
+                  ],
+                  "strides": [
+                    1,
+                    1
+                  ],
+                  "weight_shape": [
+                    16,
+                    16,
+                    3,
+                    3
+                  ]
+                },
+                {
+                  "class": "standard",
+                  "estimated_flops": 58982400.0,
+                  "groups": 1,
+                  "input_shape": [
+                    1,
+                    32,
+                    80,
+                    80
+                  ],
+                  "name": "/model.3/conv/Conv",
+                  "node_index": 21,
+                  "output_shape": [
+                    1,
+                    64,
+                    40,
+                    40
+                  ],
+                  "pads": [
+                    1,
+                    1,
+                    1,
+                    1
+                  ],
+                  "strides": [
+                    2,
+                    2
+                  ],
+                  "weight_shape": [
+                    64,
+                    32,
+                    3,
+                    3
+                  ]
+                }
+              ],
+              "flop_fraction": 0.8088253377132116
+            }
+          },
+          "conv_count": 64,
+          "estimated_flops": 2185996800.0,
+          "top_repeated_shapes": [
+            {
+              "class": "standard",
+              "count": 9,
+              "estimated_flops": 29491200.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                64,
+                20,
+                20
+              ],
+              "name": "/model.6/m.0/cv1/conv/Conv",
+              "node_index": 53,
+              "output_shape": [
+                1,
+                64,
+                20,
+                20
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 265420800.0,
+              "weight_shape": [
+                64,
+                64,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 2,
+              "estimated_flops": 117964800.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "name": "/model.22/cv2.0/cv2.0.0/conv/Conv",
+              "node_index": 171,
+              "output_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 235929600.0,
+              "weight_shape": [
+                64,
+                64,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 184320000.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                80,
+                40,
+                40
+              ],
+              "name": "/model.22/cv3.0/cv3.0.1/conv/Conv",
+              "node_index": 202,
+              "output_shape": [
+                1,
+                80,
+                40,
+                40
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 184320000.0,
+              "weight_shape": [
+                80,
+                80,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 6,
+              "estimated_flops": 29491200.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                32,
+                40,
+                40
+              ],
+              "name": "/model.4/m.0/cv1/conv/Conv",
+              "node_index": 28,
+              "output_shape": [
+                1,
+                32,
+                40,
+                40
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 176947200.0,
+              "weight_shape": [
+                32,
+                32,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 147456000.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "name": "/model.22/cv3.0/cv3.0.0/conv/Conv",
+              "node_index": 199,
+              "output_shape": [
+                1,
+                80,
+                40,
+                40
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 147456000.0,
+              "weight_shape": [
+                80,
+                64,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 4,
+              "estimated_flops": 29491200.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                128,
+                10,
+                10
+              ],
+              "name": "/model.8/m.0/cv1/conv/Conv",
+              "node_index": 78,
+              "output_shape": [
+                1,
+                128,
+                10,
+                10
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 117964800.0,
+              "weight_shape": [
+                128,
+                128,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 73728000.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                128,
+                20,
+                20
+              ],
+              "name": "/model.22/cv3.1/cv3.1.0/conv/Conv",
+              "node_index": 210,
+              "output_shape": [
+                1,
+                80,
+                20,
+                20
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 73728000.0,
+              "weight_shape": [
+                80,
+                128,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "pointwise",
+              "count": 3,
+              "estimated_flops": 19660800.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                384,
+                10,
+                10
+              ],
+              "name": "/model.8/cv2/conv/Conv",
+              "node_index": 86,
+              "output_shape": [
+                1,
+                256,
+                10,
+                10
+              ],
+              "pads": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                256,
+                384,
+                1,
+                1
+              ]
+            },
+            {
+              "class": "pointwise",
+              "count": 3,
+              "estimated_flops": 19660800.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                192,
+                20,
+                20
+              ],
+              "name": "/model.12/cv2/conv/Conv",
+              "node_index": 114,
+              "output_shape": [
+                1,
+                128,
+                20,
+                20
+              ],
+              "pads": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                128,
+                192,
+                1,
+                1
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 2,
+              "estimated_flops": 29491200.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                16,
+                80,
+                80
+              ],
+              "name": "/model.2/m.0/cv1/conv/Conv",
+              "node_index": 10,
+              "output_shape": [
+                1,
+                16,
+                80,
+                80
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                16,
+                16,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 58982400.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                16,
+                160,
+                160
+              ],
+              "name": "/model.1/conv/Conv",
+              "node_index": 3,
+              "output_shape": [
+                1,
+                32,
+                80,
+                80
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                2,
+                2
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                32,
+                16,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 58982400.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                32,
+                80,
+                80
+              ],
+              "name": "/model.3/conv/Conv",
+              "node_index": 21,
+              "output_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                2,
+                2
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                64,
+                32,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 58982400.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "name": "/model.5/conv/Conv",
+              "node_index": 46,
+              "output_shape": [
+                1,
+                128,
+                20,
+                20
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                2,
+                2
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                128,
+                64,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 58982400.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                128,
+                20,
+                20
+              ],
+              "name": "/model.7/conv/Conv",
+              "node_index": 71,
+              "output_shape": [
+                1,
+                256,
+                10,
+                10
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                2,
+                2
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                256,
+                128,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 58982400.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                128,
+                20,
+                20
+              ],
+              "name": "/model.22/cv2.1/cv2.1.0/conv/Conv",
+              "node_index": 182,
+              "output_shape": [
+                1,
+                64,
+                20,
+                20
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 58982400.0,
+              "weight_shape": [
+                64,
+                128,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 46080000.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                80,
+                20,
+                20
+              ],
+              "name": "/model.22/cv3.1/cv3.1.1/conv/Conv",
+              "node_index": 213,
+              "output_shape": [
+                1,
+                80,
+                20,
+                20
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 46080000.0,
+              "weight_shape": [
+                80,
+                80,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "pointwise",
+              "count": 1,
+              "estimated_flops": 39321600.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                384,
+                20,
+                20
+              ],
+              "name": "/model.12/cv1/conv/Conv",
+              "node_index": 103,
+              "output_shape": [
+                1,
+                128,
+                20,
+                20
+              ],
+              "pads": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 39321600.0,
+              "weight_shape": [
+                128,
+                384,
+                1,
+                1
+              ]
+            },
+            {
+              "class": "pointwise",
+              "count": 1,
+              "estimated_flops": 39321600.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                192,
+                40,
+                40
+              ],
+              "name": "/model.15/cv1/conv/Conv",
+              "node_index": 121,
+              "output_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "pads": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 39321600.0,
+              "weight_shape": [
+                64,
+                192,
+                1,
+                1
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 36864000.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                256,
+                10,
+                10
+              ],
+              "name": "/model.22/cv3.2/cv3.2.0/conv/Conv",
+              "node_index": 218,
+              "output_shape": [
+                1,
+                80,
+                10,
+                10
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                1,
+                1
+              ],
+              "total_estimated_flops": 36864000.0,
+              "weight_shape": [
+                80,
+                256,
+                3,
+                3
+              ]
+            },
+            {
+              "class": "standard",
+              "count": 1,
+              "estimated_flops": 29491200.0,
+              "groups": 1,
+              "input_shape": [
+                1,
+                64,
+                40,
+                40
+              ],
+              "name": "/model.16/conv/Conv",
+              "node_index": 135,
+              "output_shape": [
+                1,
+                64,
+                20,
+                20
+              ],
+              "pads": [
+                1,
+                1,
+                1,
+                1
+              ],
+              "strides": [
+                2,
+                2
+              ],
+              "total_estimated_flops": 29491200.0,
+              "weight_shape": [
+                64,
+                64,
+                3,
+                3
+              ]
+            }
+          ]
+        },
+        "inputs": [
+          {
+            "name": "images",
+            "shape": [
+              1,
+              3,
+              320,
+              320
+            ]
+          }
+        ],
+        "num_initializers": 127,
+        "num_nodes": 262,
+        "op_counts": {
+          "Add": 9,
+          "Concat": 17,
+          "Constant": 22,
+          "Conv": 64,
+          "Div": 2,
+          "Gather": 1,
+          "MaxPool": 3,
+          "Mul": 60,
+          "Reshape": 8,
+          "Resize": 2,
+          "Shape": 1,
+          "Sigmoid": 58,
+          "Slice": 2,
+          "Softmax": 1,
+          "Split": 8,
+          "Sub": 2,
+          "Transpose": 2
+        },
+        "outputs": [
+          {
+            "name": "output0",
+            "shape": [
+              1,
+              84,
+              2100
+            ]
+          }
+        ],
+        "path": "/tmp/fastnn-zoo/yolov8n.onnx",
+        "size_bytes": 12698048
+      },
+      "onnxruntime": {
+        "ort_input_name": "images",
+        "ort_output_name": "output0",
+        "ort_speed": {
+          "iters": 5,
+          "max_ms": 9.733443999721203,
+          "mean_ms": 9.279208599764388,
+          "median_ms": 9.211613996740198,
+          "min_ms": 9.102895000978606,
+          "warmup": 3
+        },
+        "output_shape": [
+          1,
+          84,
+          2100
+        ],
+        "output_sum": 1032190.4375
+      },
+      "pytorch": {
+        "output_shape": [
+          1,
+          84,
+          2100
+        ],
+        "output_sum": 1032190.5,
+        "pytorch_speed": {
+          "iters": 5,
+          "max_ms": 35.593737000453984,
+          "mean_ms": 34.678162400086876,
+          "median_ms": 34.60014699885505,
+          "min_ms": 33.67523599808919,
+          "warmup": 3
+        }
+      }
+    }
+  },
+  "seed": 0,
+  "warmup": 3
+}

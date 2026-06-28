@@ -6,7 +6,8 @@ use super::PackedWord;
 #[derive(Copy, Clone, Debug, Default)]
 pub struct U8x4(pub u32);
 
-// SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
+// SAFETY: U8x4 is a `repr(transparent)` struct over `u32`, so it is safe to
+// reinterpret cast from/to byte slices.
 unsafe impl bytemuck::Pod for U8x4 {}
 unsafe impl bytemuck::Zeroable for U8x4 {}
 

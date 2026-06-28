@@ -1,11 +1,9 @@
-#![allow(dead_code)]
-
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
 
 pub type NodeId = usize;
 
@@ -785,9 +783,9 @@ impl Clone for ComputeGraph {
             required_nodes: self.required_nodes.clone(),
             next_id: self.next_id,
             node_index: self.node_index.clone(),
-            consumers_map: Mutex::new(self.consumers_map.lock().unwrap().clone()),
+            consumers_map: Mutex::new(self.consumers_map.lock().clone()),
             consumers_map_dirty: AtomicBool::new(self.consumers_map_dirty.load(Ordering::Relaxed)),
-            sorted_nodes_cache: Mutex::new(self.sorted_nodes_cache.lock().unwrap().clone()),
+            sorted_nodes_cache: Mutex::new(self.sorted_nodes_cache.lock().clone()),
             sorted_nodes_gen: AtomicU64::new(self.sorted_nodes_gen.load(Ordering::Relaxed)),
             graph_gen: AtomicU64::new(self.graph_gen.load(Ordering::Relaxed)),
         }
@@ -967,7 +965,7 @@ impl ComputeGraph {
     pub fn topological_sort(&self) -> Vec<NodeId> {
         let gen = self.graph_gen.load(Ordering::Acquire);
         {
-            let cache = self.sorted_nodes_cache.lock().unwrap();
+            let cache = self.sorted_nodes_cache.lock();
             if let Some(cached) = cache.as_ref() {
                 if self.sorted_nodes_gen.load(Ordering::Acquire) == gen {
                     return cached.clone();
@@ -1026,7 +1024,7 @@ impl ComputeGraph {
             panic!("ComputeGraph::topological_sort: cycle detected in the computation graph");
         }
 
-        let mut cache = self.sorted_nodes_cache.lock().unwrap();
+        let mut cache = self.sorted_nodes_cache.lock();
         *cache = Some(sorted.clone());
         self.sorted_nodes_gen.store(gen, Ordering::Release);
         sorted
@@ -1040,12 +1038,12 @@ impl ComputeGraph {
                     map.entry(input_id).or_default().push(node.id);
                 }
             }
-            let mut consumers_map = self.consumers_map.lock().unwrap();
+            let mut consumers_map = self.consumers_map.lock();
             *consumers_map = map;
             self.consumers_map_dirty.store(false, Ordering::Release);
             consumers_map.get(&node_id).cloned().unwrap_or_default()
         } else {
-            let consumers_map = self.consumers_map.lock().unwrap();
+            let consumers_map = self.consumers_map.lock();
             consumers_map.get(&node_id).cloned().unwrap_or_default()
         }
     }

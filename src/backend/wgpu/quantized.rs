@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Quantized matmul and conv2d GPU dispatch for U4x8 / U8x4 packed types.
 //!
 //! Each GPU invocation computes one output element `(m, n)`:

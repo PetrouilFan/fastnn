@@ -84,7 +84,7 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     graph.set_outputs(vec![mm_id]);
 
     infer_shapes(&mut graph).unwrap();
-    quantize_weights(&mut graph, 8).unwrap();
+    quantize_weights(&mut graph, 8, None).unwrap();
     eliminate_dead_code(&mut graph);
 
     let matmul_node = graph.get_node(mm_id).unwrap().clone();

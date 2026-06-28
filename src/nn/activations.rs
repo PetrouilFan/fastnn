@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use crate::nn::Module;
 use crate::tensor::Tensor;
 
