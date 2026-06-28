@@ -340,8 +340,9 @@ impl Backend for CpuBackend {
                                     .iter()
                                     .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
-                                // The quantization pass transposes 2D weights from
-                                // [K, N] to [N, K] for gemm_packed_batched convention.
+                                // The quantization pass transposes 2D weight data from
+                                // [K, N] to [N, K] and records the logical shape ([K, N])
+                                // on the node; reverse to [N, K] for the packed-gemm meta.
                                 if w_shape.len() == 2 {
                                     w_shape.reverse();
                                 }

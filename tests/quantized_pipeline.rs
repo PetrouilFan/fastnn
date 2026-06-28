@@ -640,6 +640,7 @@ fn test_matmul_u4_i8_dispatch_path() {
         .iter()
         .map(|dim| dim.evaluate().unwrap() as usize)
         .collect();
+    // Weight node shape is logical [K, N]; data is packed in [N, K] layout.
     if packed_shape.len() == 2 {
         packed_shape.reverse();
     }
