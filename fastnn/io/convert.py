@@ -191,7 +191,7 @@ def convert_precision(
         # Reload existing .fnn and re-quantize
         from fastnn.io import read_fnn_header, read_fnn_parameters, MODEL_MAGIC, MODEL_VERSION
         from fastnn.io import write_fnn_file_v3, write_fnn_file
-        from fastnn.io import DTYPE_F32, DTYPE_I4, DTYPE_I8, DTYPE_F16
+        from fastnn.io import DTYPE_F32, DTYPE_I4, DTYPE_I8, DTYPE_F16, DTYPE_F8, DTYPE_F8R, DTYPE_F4
 
         with open(input_path, "rb") as f:
             magic, version, header, num_params = read_fnn_header(f)
