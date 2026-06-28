@@ -217,6 +217,8 @@ impl Storage {
         let len = nbytes;
         let cap = data.capacity() * std::mem::size_of::<T>();
         std::mem::forget(data);
+        // SAFETY: The pointer, length, and capacity were obtained from a prior `Vec` via `into_raw_parts`,
+        // ensuring they are consistent and the memory is valid for the original allocation.
         let byte_vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
         Storage::Cpu(CpuStorage {
             data: Arc::new(byte_vec),
