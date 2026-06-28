@@ -232,7 +232,7 @@ FutureI8 { original_shape: Vec<usize> },
 FutureU4 { original_shape: Vec<usize> },
 ```
 
-When these are eventually populated, the packed byte data will come from `PackedTensor<U8x4>` / `PackedTensor<U4x8>` plus `QuantizedWeightMeta` (scales, zero_points). The design intentionally defers this to Phase 7.
+When these are eventually populated, the packed byte data will come from `PackedTensor<I8x4>` / `PackedTensor<I4x8>` plus `QuantizedWeightMeta` (scales, zero_points). The design intentionally defers this to Phase 7.
 
 ---
 

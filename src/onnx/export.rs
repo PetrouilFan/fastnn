@@ -174,7 +174,7 @@ fn detect_qlinear_patterns(
 
         // Extract scales/zero_points from the packed weight's dtype.
         let (weight_scales, weight_zero_points) = match &packed_node.output_type.dtype {
-            IrDType::U4 {
+            IrDType::I4 {
                 scales,
                 zero_points,
             } => (scales.clone(), zero_points.clone()),
@@ -274,7 +274,7 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         None => return (1.0, 0),
     };
     match &q_node.output_type.dtype {
-        IrDType::U4 {
+        IrDType::I4 {
             scales,
             zero_points,
         } => {
@@ -529,7 +529,7 @@ pub fn export_to_onnx_json_with_config(
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
                         let is_packed =
-                            matches!(&tensor_type.dtype, IrDType::U4 { .. } | IrDType::U8 { .. });
+                            matches!(&tensor_type.dtype, IrDType::I4 { .. } | IrDType::U8 { .. });
                         if is_packed {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
@@ -545,7 +545,7 @@ pub fn export_to_onnx_json_with_config(
                                     data: serde_json::json!(data),
                                     shape,
                                     dtype: match &tensor_type.dtype {
-                                        IrDType::U4 { .. } => "u4".to_string(),
+                                        IrDType::I4 { .. } => "u4".to_string(),
                                         IrDType::U8 { .. } => "u8".to_string(),
                                         _ => unreachable!(),
                                     },

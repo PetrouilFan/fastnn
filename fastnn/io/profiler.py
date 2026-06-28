@@ -113,7 +113,7 @@ class PrecisionProfiler:
 
         sensitivities: Dict[str, float] = {}
         for param_name, weight_arr in weights.items():
-            deq, _scales, _zeros = self._quantize_weights(weight_arr, Precision.U4)
+            deq, _scales, _zeros = self._quantize_weights(weight_arr, Precision.I4)
             if hasattr(self.model, "params") and param_name in self.model.params:
                 self.model.params[param_name] = fnn.tensor(deq, list(deq.shape))
 

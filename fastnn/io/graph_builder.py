@@ -119,8 +119,8 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
     Args:
         header: The .fnn file header dict containing graph metadata.
         path: Path to the .fnn parameters file.
-        quantize: Optional quantization bit width. Pass 4 for U4x8
-            (4-bit packed) or 8 for U8x4 (8-bit packed) quantization.
+        quantize: Optional quantization bit width. Pass 4 for I4x8
+            (4-bit packed) or 8 for I8x4 (8-bit packed) quantization.
             None means no quantization (default f32).
     """
     import fastnn as fnn
@@ -131,7 +131,7 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
         raw_params = read_fnn_parameters(f, num_params, version=file_version)
 
     # Unpack v3 format if needed: convert (data, dtype, scales, zeros, shape) tuples -> tensors + packed_params
-    from fastnn.io import DTYPE_F32, DTYPE_U4, DTYPE_U8, DTYPE_F16
+    from fastnn.io import DTYPE_F32, DTYPE_I4, DTYPE_I8, DTYPE_F16
     params = {}
     packed_params_dict = {}
     for name, value in raw_params.items():
@@ -151,8 +151,8 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                 # Packed types require Rust-side PackedTensor for dequantization,
                 # which is not exposed to Python yet.
                 dtype_map = {
-                    DTYPE_U4: "u4",
-                    DTYPE_U8: "u8",
+                    DTYPE_I4: "u4",
+                    DTYPE_I8: "u8",
                     DTYPE_F16: "f16",
                 }
                 dtype_str = dtype_map.get(dtype, "f32")

@@ -269,8 +269,8 @@ When using the AOT path, call `build_backward_graph` on the forward `ComputeGrap
 
 | Type | File | Layout |
 |------|------|--------|
-| `U4x8` | `dtypes/u4x8.rs` | 8 × i4 per u32 word |
-| `U8x4` | `dtypes/u8x4.rs` | 4 × i8 per u32 word |
+| `I4x8` | `dtypes/u4x8.rs` | 8 × i4 per u32 word |
+| `I8x4` | `dtypes/u8x4.rs` | 4 × i8 per u32 word |
 | `F16x2` | `dtypes/f16x2.rs` | 2 × f16 per u32 word |
 | `F32x1` | `dtypes/f32x1.rs` | 1 × f32 per u32 word |
 

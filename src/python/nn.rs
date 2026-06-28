@@ -2150,7 +2150,7 @@ impl AotExecutor {
                 let ir_dtype = output_node.output_type.dtype.clone();
                 // Extract quantization metadata before ir_to_dtype strips it
                 let (q_scales, q_zero_points) = match &ir_dtype {
-                    crate::ir::node::IrDType::U4 { scales, zero_points }
+                    crate::ir::node::IrDType::I4 { scales, zero_points }
                     | crate::ir::node::IrDType::U8 { scales, zero_points } => {
                         (scales.clone(), zero_points.clone())
                     }
@@ -2211,7 +2211,7 @@ impl AotExecutor {
                     // In the normal pipeline, MatMul/Conv2d outputs remain F32 (dequant happens
                     // inside the SIMD kernel). This path is a safety net for ops whose IR output
                     // type is U4/U8.
-                    crate::storage::DType::U4 => {
+                    crate::storage::DType::I4 => {
                         let words: Vec<u32> = data.chunks_exact(4)
                             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                             .collect();
@@ -2254,6 +2254,12 @@ impl AotExecutor {
                             .collect();
                         let f32_vals: Vec<f32> = f64_vals.iter().map(|&v| v as f32).collect();
                         Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::F8 | crate::storage::DType::F8R => {
+                        panic!("FP8 tensor loading via Python not yet implemented. Use the IR quantize/dequantize pipeline.")
+                    }
+                    crate::storage::DType::F4 => {
+                        panic!("FP4 tensor loading via Python not yet implemented. Use FP4 quantization via the IR pipeline.")
                     }
                 };
                 result.insert(name.clone(), PyTensor::from_tensor(tensor));

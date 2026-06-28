@@ -1,4 +1,4 @@
-//! Quantized matmul and conv2d GPU dispatch for U4x8 / U8x4 packed types.
+//! Quantized matmul and conv2d GPU dispatch for I4x8 / I8x4 packed types.
 //!
 //! Each GPU invocation computes one output element `(m, n)`:
 //!   1. Reads the packed weight word for output channel `n`
@@ -424,7 +424,7 @@ fn dispatch_quantized_gemm_gpu(
 
 /// Build the quantized matmul WGSL shader with per-channel dequantization.
 ///
-/// `items` = 8 for U4x8, 4 for U8x4.
+/// `items` = 8 for I4x8, 4 for I8x4.
 ///
 /// Workgroup size 16×16 — each invocation computes one `(m, n)` output element.
 /// Bindings:
