@@ -623,3 +623,253 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         dequant_formula = dequant_formula,
     )
 }
+
+// ─============================================================================
+// Gradient quantization / dequantization shaders (F8x4R)
+// ─============================================================================
+
+/// Cached quantize-gradient WGSL shader: f32 → F8x4R (E5M2).
+fn cached_quantize_gradient_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    if let Some(s) = S.get() {
+        s
+    } else {
+        S.get_or_init(|| {
+            r#"
+struct GradQuantParams {
+    numel: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<storage, read>       input:  array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform>             params: GradQuantParams;
+
+fn f32_to_e5m2(val: f32) -> u32 {
+    if (val == 0.0) {
+        return select(0x00u, 0x80u, val < 0.0);
+    }
+    let abs_val = abs(val);
+    if (abs_val >= 57344.0) {
+        let inf_bits = 0x7Cu;
+        return select(inf_bits, inf_bits | 0x80u, val < 0.0);
+    }
+    let exp_raw = i32(log2(abs_val));
+    let exp_biased = exp_raw + 15;
+    if (exp_biased <= 0) {
+        let mant = u32(abs_val * 67108864.0);
+        return select(mant & 0x3u, (mant & 0x3u) | 0x80u, val < 0.0);
+    }
+    let mant_val = abs_val / exp2(f32(exp_biased - 15)) - 1.0;
+    let mant_bits = u32(mant_val * 4.0) & 0x3u;
+    let exp_bits = u32(exp_biased) & 0x1Fu;
+    let byte = (exp_bits << 2u) | mant_bits;
+    return select(byte, byte | 0x80u, val < 0.0);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x * 4u;
+    if (idx >= params.numel) { return; }
+    var v: array<f32, 4>;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let j = idx + i;
+        v[i] = select(0.0, input[j], j < params.numel);
+    }
+    var packed: u32 = 0u;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        packed = packed | (f32_to_e5m2(v[i]) << (i * 8u));
+    }
+    output[gid.x] = packed;
+}
+"#
+            .to_string()
+        })
+    }
+}
+
+/// Cached dequantize-gradient WGSL shader: F8x4R → f32.
+fn cached_dequantize_gradient_shader() -> &'static str {
+    static S: OnceLock<String> = OnceLock::new();
+    if let Some(s) = S.get() {
+        s
+    } else {
+        S.get_or_init(|| {
+            r#"
+struct GradQuantParams {
+    numel: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<storage, read>       input:  array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform>             params: GradQuantParams;
+
+fn e5m2_to_f32(byte: u32) -> f32 {
+    let sign = byte & 0x80u;
+    let exp = (byte >> 2u) & 0x1Fu;
+    let mant = byte & 0x3u;
+    if (exp == 0u && mant == 0u) {
+        return select(0.0, -0.0, sign != 0u);
+    }
+    if (exp == 0x1Fu) {
+        if (mant == 0u) {
+            return select(1.0 / 0.0, -1.0 / 0.0, sign != 0u);
+        }
+        return 0.0 / 0.0;
+    }
+    if (exp == 0u) {
+        let v = exp2(-14.0) * f32(mant) / 4.0;
+        return select(v, -v, sign != 0u);
+    }
+    let v = exp2(f32(i32(exp) - 15)) * (1.0 + f32(mant) / 4.0);
+    return select(v, -v, sign != 0u);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let word_idx = gid.x;
+    let word = input[word_idx];
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let byte = (word >> (i * 8u)) & 0xFFu;
+        let idx = word_idx * 4u + i;
+        if (idx < params.numel) {
+            output[idx] = e5m2_to_f32(byte);
+        }
+    }
+}
+"#
+            .to_string()
+        })
+    }
+}
+
+/// Dispatch F8x4R gradient quantization (f32 → packed) on GPU.
+pub(super) fn dispatch_quantize_gradient_gpu(
+    ctx: &mut super::WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<super::PendingRead>,
+    arena: &super::WgpuBuffer,
+    input_slice: crate::backend::BufferSlice,
+    output_slice: crate::backend::BufferSlice,
+    numel: usize,
+) -> Result<(), BackendError> {
+    let shader_src = cached_quantize_gradient_shader();
+    let short_key = "gradient_quantize_f8x4r";
+    super::pipeline::ensure_simple_compute_pipeline(ctx, short_key, shader_src)
+        .map_err(BackendError::Dispatch)?;
+    let pipeline_key = format!("wgpu_simple_{}", short_key);
+    let pipeline = &ctx.pipelines[&pipeline_key];
+
+    let buf_input = {
+        let d = arena.data_mut();
+        let data = &d[input_slice.offset..input_slice.offset + input_slice.size];
+        ctx.create_buffer(data, "gq_input")
+    };
+    let buf_output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gq_output"),
+        size: output_slice.size as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GradQuantParams {
+        numel: u32,
+        _pad: u32,
+    }
+    let qp = GradQuantParams { numel: numel as u32, _pad: 0 };
+    let buf_params = ctx.create_uniform_buffer(&qp, "gq_params");
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gq_bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: buf_input.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: buf_output.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: buf_params.as_entire_binding() },
+        ],
+    });
+
+    let num_workgroups = (numel.div_ceil(4) as u32).div_ceil(64);
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("gq_pass"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.dispatch_workgroups(num_workgroups.max(1), 1, 1);
+
+    pending_reads.push(super::PendingRead {
+        buffer: buf_output,
+        cpu_offset: output_slice.offset,
+        size: output_slice.size,
+    });
+    Ok(())
+}
+
+/// Dispatch F8x4R gradient dequantization (packed → f32) on GPU.
+pub(super) fn dispatch_dequantize_gradient_gpu(
+    ctx: &mut super::WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pending_reads: &mut Vec<super::PendingRead>,
+    arena: &super::WgpuBuffer,
+    input_slice: crate::backend::BufferSlice,
+    output_slice: crate::backend::BufferSlice,
+    numel: usize,
+) -> Result<(), BackendError> {
+    let shader_src = cached_dequantize_gradient_shader();
+    let short_key = "gradient_dequantize_f8x4r";
+    super::pipeline::ensure_simple_compute_pipeline(ctx, short_key, shader_src)
+        .map_err(BackendError::Dispatch)?;
+    let pipeline_key = format!("wgpu_simple_{}", short_key);
+    let pipeline = &ctx.pipelines[&pipeline_key];
+
+    let buf_input = {
+        let d = arena.data_mut();
+        let data = &d[input_slice.offset..input_slice.offset + input_slice.size];
+        ctx.create_buffer(data, "gdq_input")
+    };
+    let buf_output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gdq_output"),
+        size: output_slice.size as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GradQuantParams {
+        numel: u32,
+        _pad: u32,
+    }
+    let qp = GradQuantParams { numel: numel as u32, _pad: 0 };
+    let buf_params = ctx.create_uniform_buffer(&qp, "gdq_params");
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gdq_bg"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: buf_input.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: buf_output.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: buf_params.as_entire_binding() },
+        ],
+    });
+
+    let num_workgroups = (numel.div_ceil(4) as u32).div_ceil(64);
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("gdq_pass"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.dispatch_workgroups(num_workgroups.max(1), 1, 1);
+
+    pending_reads.push(super::PendingRead {
+        buffer: buf_output,
+        cpu_offset: output_slice.offset,
+        size: output_slice.size,
+    });
+    Ok(())
+}
