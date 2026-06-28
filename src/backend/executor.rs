@@ -769,6 +769,10 @@ impl<B: Backend> GraphExecutor<B> {
             inject_optimizer(&mut combined_graph, &params_with_grads, &config.optimizer)
                 .map_err(|e| BackendError::Compilation(format!("inject_optimizer: {e}")))?;
 
+        // 4b. Insert F8x4R gradient quantization around optimizer gradient inputs
+        use crate::compiler::passes::gradient_quantization;
+        gradient_quantization::quantize_gradients(&mut combined_graph);
+
         // 5. Set graph inputs and outputs
         combined_graph.outputs = vec![loss_node];
 
