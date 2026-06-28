@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::shadow_unrelated)]
 #![allow(clippy::let_and_return)]
 #![allow(clippy::collapsible_if)]
@@ -28,6 +27,9 @@ pub mod reductions_fast;
 pub mod swar;
 pub mod telemetry;
 
+mod dispatch_helpers;
+use dispatch_helpers::*;
+
 mod elementwise;
 use elementwise::fused_binary_activation_dispatch;
 mod scalar;
@@ -36,323 +38,10 @@ mod params;
 use params::resolve_params;
 mod matmul;
 use matmul::{
-    matmul_activation_dispatch, packed_tensor_from_meta, quantized_matmul_dispatch,
-    quantized_matmul_dispatch_i8_u4, quantized_matmul_dispatch_i8_u8,
+    matmul_activation_dispatch, quantized_matmul_dispatch, quantized_matmul_dispatch_i8_u4,
+    quantized_matmul_dispatch_i8_u8,
 };
 
-/// Minimum number of elements for a parallel dispatch loop to be beneficial.
-/// Below this threshold, sequential execution avoids rayon's task-spawning
-/// overhead without measurable throughput loss.
-#[cfg(feature = "parallel")]
-const PARALLEL_MIN_ELEMS: usize = 1024;
-
-// ============================================================
-// Pre-copied kernel dispatch helpers
-// ============================================================
-// These are variants of the arena-based dispatch helpers that work
-// with pre-copied input buffers (&[Vec<u8>]) and a single output
-// buffer (&mut [u8]), suitable for out-of-arena execution.
-
-/// Helper: extract two f32 slices from pre-copied inputs, broadcast-loop
-/// with a binary op and activation function, and write to output.
-#[inline]
-fn fused_binary_activation_dispatch_precopied(
-    kernel_name: &str,
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    op: impl Fn(f32, f32) -> f32 + Sync,
-    act: impl Fn(f32) -> f32 + Sync,
-) {
-    if inputs.len() >= 2 {
-        let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-        let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
-            let binary_dispatched = if kernel_name.starts_with("add_") {
-                add_f32(a, b, out_f32);
-                true
-            } else if kernel_name.starts_with("sub_") {
-                sub_f32(a, b, out_f32);
-                true
-            } else if kernel_name.starts_with("mul_") {
-                mul_f32(a, b, out_f32);
-                true
-            } else if kernel_name.starts_with("div_") {
-                div_f32(a, b, out_f32);
-                true
-            } else {
-                false
-            };
-
-            if binary_dispatched {
-                let len = out_f32.len();
-                let ptr = out_f32.as_mut_ptr();
-                if kernel_name.ends_with("relu_f32") {
-                    unsafe {
-                        let v = std::slice::from_raw_parts(ptr, len);
-                        microkernels::relu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
-                    }
-                } else if kernel_name.ends_with("gelu_f32") {
-                    unsafe {
-                        let v = std::slice::from_raw_parts(ptr, len);
-                        microkernels::gelu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
-                    }
-                } else if kernel_name.ends_with("silu_f32") {
-                    unsafe {
-                        let v = std::slice::from_raw_parts(ptr, len);
-                        microkernels::silu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
-                    }
-                }
-                return;
-            }
-        }
-
-        let out_len = out_f32.len();
-        let a_len = a.len();
-        let b_len = b.len();
-        #[cfg(not(feature = "parallel"))]
-        {
-            for i in 0..out_len {
-                let x = op(a[i % a_len], b[i % b_len]);
-                out_f32[i] = act(x);
-            }
-        }
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            out_f32[..out_len]
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, o)| {
-                    let x = op(a[i % a_len], b[i % b_len]);
-                    *o = act(x);
-                });
-        }
-    }
-}
-
-/// Helper: dispatch a scalar op (gt, lt, eq, add, mul, div) from pre-copied inputs.
-#[inline]
-fn scalar_op_dispatch_precopied(
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    op: impl Fn(&[f32], f32, &mut [f32]),
-) {
-    if inputs.len() >= 2 {
-        let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-        let scalar_data = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-        let s = scalar_data.first().copied().unwrap_or(0.0);
-        op(data, s, out_f32);
-    }
-}
-
-/// Helper: dispatch a fused matmul + bias + activation from pre-copied inputs.
-#[inline]
-fn matmul_activation_dispatch_precopied(
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    params: &[usize],
-    param_dims: &Option<Vec<DimExpr>>,
-    shape_env: &ShapeEnv,
-    kernel_name: &str,
-    act: impl Fn(f32) -> f32,
-) -> Result<(), BackendError> {
-    if inputs.len() >= 2 {
-        let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-        let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-        let bias: &[f32] = if inputs.len() >= 3 {
-            bytemuck::cast_slice(&inputs[2])
-        } else {
-            &[]
-        };
-        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, _k, n] = &matmul_params[..] else {
-            return Err(BackendError::Dispatch(format!(
-                "{kernel_name}: expected params [M,K,N]"
-            )));
-        };
-        let has_bias = !bias.is_empty();
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-        matmul_blas_into(a, b, out_f32, m, _k, n);
-        for i in 0..out_f32.len() {
-            let x = out_f32[i]
-                + if has_bias && i % n < bias.len() {
-                    bias[i % n]
-                } else {
-                    0.0
-                };
-            out_f32[i] = act(x);
-        }
-    }
-    Ok(())
-}
-
-/// Helper: dispatch a quantized matmul (u4 or u8) from pre-copied inputs.
-#[inline]
-fn quantized_matmul_dispatch_precopied<T: PackedWord>(
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    params: &[usize],
-    param_dims: &Option<Vec<DimExpr>>,
-    shape_env: &ShapeEnv,
-    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
-    bit_width: usize,
-    kernel_name: &str,
-    persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
-) -> Result<(), BackendError> {
-    if inputs.len() >= 2 {
-        let activations = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-        let raw = &inputs[1];
-        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = &matmul_params[..] else {
-            return Err(BackendError::Dispatch(format!(
-                "{kernel_name}: expected params [M,K,N]"
-            )));
-        };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                bit_width,
-                scales: vec![1.0],
-                zero_points: vec![0.0],
-                shape: vec![m, k],
-            }));
-        let typed_data: Vec<T> = aligned_packed_slice(raw);
-        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
-    }
-    Ok(())
-}
-
-/// Pre-copied dispatch for I8 activation × U8x4 packed-weight MatMul.
-///
-/// Reads activation as raw bytes (I8 payload format), weight as raw bytes,
-/// builds a `PackedTensor<U8x4>`, and calls the scalar I8×U8x4 microkernel.
-fn quantized_matmul_dispatch_precopied_i8_u8(
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    params: &[usize],
-    param_dims: &Option<Vec<DimExpr>>,
-    shape_env: &ShapeEnv,
-    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
-    kernel_name: &str,
-) -> Result<(), BackendError> {
-    if inputs.len() >= 2 {
-        let activation_payload = &inputs[0];
-        let raw = &inputs[1];
-        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = &matmul_params[..] else {
-            return Err(BackendError::Dispatch(format!(
-                "{kernel_name}: expected params [M,K,N]"
-            )));
-        };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                bit_width: 8,
-                scales: vec![1.0],
-                zero_points: vec![0.0],
-                shape: vec![m, k],
-            }));
-        let typed_data: Vec<U8x4> = aligned_packed_slice(raw);
-        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
-            &pt,
-            activation_payload,
-            out_f32,
-            m,
-            k,
-            n,
-        );
-    }
-    Ok(())
-}
-
-/// Pre-copied dispatch for I8 activation × U4x8 packed-weight MatMul.
-///
-/// Reads activation as raw bytes (I8 payload format), weight as raw bytes,
-/// builds a `PackedTensor<U4x8>`, and calls the scalar I8×U4x8 microkernel.
-fn quantized_matmul_dispatch_precopied_i8_u4(
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    params: &[usize],
-    param_dims: &Option<Vec<DimExpr>>,
-    shape_env: &ShapeEnv,
-    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
-    kernel_name: &str,
-) -> Result<(), BackendError> {
-    if inputs.len() >= 2 {
-        let activation_payload = &inputs[0];
-        let raw = &inputs[1];
-        let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = &matmul_params[..] else {
-            return Err(BackendError::Dispatch(format!(
-                "{kernel_name}: expected params [M,K,N]"
-            )));
-        };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                bit_width: 4,
-                scales: vec![1.0],
-                zero_points: vec![0.0],
-                shape: vec![m, k],
-            }));
-        let typed_data: Vec<U4x8> = aligned_packed_slice(raw);
-        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
-        let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
-            &pt,
-            activation_payload,
-            out_f32,
-            m,
-            k,
-            n,
-        );
-    }
-    Ok(())
-}
-
-/// Execute a kernel with pre-copied input buffers and an exclusive output buffer.
-///
-/// Transformed version of the `dispatch()` match arms — replaces arena-based
-/// I/O (`CpuBuffer` + `BufferSlice`) with direct slice access.
-///
-/// # Parameters
-///
-/// * `kernel_name` — identifies the kernel to run
-/// * `inputs` — pre-copied input data (each element is an owned byte vector)
-/// * `output` — mutable output byte buffer
-///
-/// Expands to the body of a unary match arm: cast input[0]→f32, cast output→f32, call fn
-macro_rules! precopied_unary_body {
-    ($inputs:expr, $output:expr, $fn:ident) => {{
-        if !$inputs.is_empty() {
-            let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
-            let out = bytemuck::cast_slice_mut::<_, f32>($output);
-            $fn(a, out);
-        }
-    }};
-}
-/// Expands to the body of a binary match arm: cast input[0], input[1], output, call fn
-macro_rules! precopied_binary_body {
-    ($inputs:expr, $output:expr, $fn:ident) => {{
-        let a = bytemuck::cast_slice::<_, f32>(&$inputs[0]);
-        let b = bytemuck::cast_slice::<_, f32>(&$inputs[1]);
-        let out = bytemuck::cast_slice_mut::<_, f32>($output);
-        $fn(a, b, out);
-    }};
-}
-
-/// * `params` — integer kernel parameters
-/// * `param_dims` — optional symbolic dimension expressions
-/// * `weight_meta` — optional quantized weight metadata
-/// * `shape_env` — runtime shape environment for symbolic resolution
 #[allow(clippy::cognitive_complexity)]
 /// Align-packed-weight helper: cast raw bytes to &[PackedType] when the
 /// pointer is 4-byte aligned (the common case for arena-backed data),
@@ -372,1252 +61,6 @@ fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
         let mut v = std::mem::ManuallyDrop::new(aligned);
         unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut T, v.len(), v.capacity()) }
     }
-}
-
-/// Pre-copied dispatch for I8 activation × U8x4 packed-weight Conv2d.
-///
-/// Activation is already quantized (I8 payload in `inputs[0]`).
-/// Re-arranges i8 data via im2col_i8 (no FP32 intermediate) then calls
-/// the AVX2-backed `gemm_cpu_flat_i8_u8x4` microkernel.
-fn quantized_conv2d_dispatch_precopied_i8(
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    params: &[usize],
-    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
-    kernel_name: &str,
-) -> Result<(), BackendError> {
-    let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
-        return Err(BackendError::Dispatch(
-            "conv2d_u4_i8/u8_i8: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
-                .into(),
-        ));
-    };
-    if inputs.len() < 2 {
-        return Ok(());
-    }
-    let activation_payload = &inputs[0];
-    let raw = &inputs[1];
-    let bias_data: Vec<f32> = if inputs.len() >= 3 {
-        bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
-    } else {
-        vec![]
-    };
-
-    let meta = weight_meta
-        .clone()
-        .ok_or_else(|| BackendError::Dispatch("conv2d_u4_i8/u8_i8: missing weight_meta".into()))?;
-
-    // Parse i8 activation header
-    let (affine, act_i8) = {
-        let scale = if activation_payload.len() >= 4 {
-            f32::from_le_bytes(activation_payload[0..4].try_into().unwrap())
-        } else {
-            1.0
-        };
-        let zp = if activation_payload.len() >= 8 {
-            f32::from_le_bytes(activation_payload[4..8].try_into().unwrap())
-        } else {
-            0.0
-        };
-        let payload = activation_payload.get(8..).unwrap_or(&[]);
-        let act_i8: &[i8] = bytemuck::cast_slice(payload);
-        (microkernels::I8ActivationAffine { scale, zero: zp }, act_i8)
-    };
-
-    // Pre-allocate im2col buffer and output payload
-    let oc = meta.shape[0];
-    let c_per_g = c / groups;
-    let oc_per_g = oc / groups;
-    let h_out = packed_conv::conv_out_size(h, kh, stride, padding, dilation);
-    let w_out = packed_conv::conv_out_size(w, kw, stride, padding, dilation);
-    let num_pixels = h_out * w_out;
-    let k = c_per_g * kh * kw;
-
-    let n = act_i8.len() / (c * h * w).max(1);
-    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-
-    // Build a new payload buffer: [scale_f32][zp_f32][im2col_i8_data...]
-    // We reuse a single Vec across groups, writing the header once.
-    let mut col_buf: Vec<i8> = vec![0i8; num_pixels * k];
-
-    // Parse fused activation from kernel name
-    let fused_act: Option<&str> = if kernel_name.contains("_relu") {
-        Some("relu")
-    } else if kernel_name.contains("_gelu") {
-        Some("gelu")
-    } else if kernel_name.contains("_silu") {
-        Some("silu")
-    } else {
-        None
-    };
-
-    let inner: usize = meta.shape[1..].iter().product();
-
-    // ── Transpose helper: [pixel × oc] → [oc × pixel] layout ──
-    macro_rules! store_output {
-        ($temp:expr, $oc_per_g:expr, $out_base:expr, $g_oc_off:expr) => {
-            for pixel in 0..num_pixels {
-                for f in 0..$oc_per_g {
-                    out_f32[$out_base + ($g_oc_off + f) * num_pixels + pixel] =
-                        $temp[pixel * $oc_per_g + f];
-                }
-            }
-        };
-    }
-
-    // Shared bias slice helper
-    let bias_opt = if bias_data.is_empty() {
-        None
-    } else {
-        Some(&bias_data[..])
-    };
-
-    if meta.bit_width == 4 {
-        // U4 path: keep activations as full-precision i8 (NOT clamped to 4-bit).
-        // Pack into i8 payload for gemm_cpu_flat_i8_u4x8 which handles mixed
-        // i8 activations × U4x8 weights without losing activation precision.
-        let packed_data: Vec<U4x8> = aligned_packed_slice(raw);
-        let k_packed = inner.div_ceil(U4x8::ITEMS);
-        for nn in 0..n {
-            let act_base = nn * c * h * w;
-            let out_base = nn * oc * num_pixels;
-            for g in 0..groups {
-                let g_c_off = g * c_per_g;
-                let g_oc_off = g * oc_per_g;
-                let act_group = &act_i8[act_base + g_c_off * h * w..];
-                unsafe {
-                    packed_conv::im2col_i8(
-                        act_group, c_per_g, h, w, kh, kw, stride, padding, dilation, &mut col_buf,
-                    );
-                }
-                // Build i8 activation payload: [scale_f32][zp_f32][i8_data...]
-                let mut payload = Vec::with_capacity(8 + col_buf.len());
-                payload.extend_from_slice(&affine.scale.to_le_bytes());
-                payload.extend_from_slice(&affine.zero.to_le_bytes());
-                payload.extend_from_slice(bytemuck::cast_slice(&col_buf));
-                let w_slice = &packed_data[g_oc_off * k_packed..(g_oc_off + oc_per_g) * k_packed];
-                let w_scales = if meta.scales.len() > 1 {
-                    meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
-                } else {
-                    meta.scales.clone()
-                };
-                let w_zps = if meta.zero_points.len() > 1 {
-                    meta.zero_points[g_oc_off..g_oc_off + oc_per_g].to_vec()
-                } else {
-                    meta.zero_points.clone()
-                };
-                let w_pt = PackedTensor::from_raw(
-                    w_slice.to_vec(),
-                    vec![oc_per_g, inner],
-                    w_scales,
-                    w_zps,
-                );
-                let mut temp = vec![0.0f32; num_pixels * oc_per_g];
-                microkernels::gemm_cpu_flat_i8_u4x8(
-                    &w_pt, &payload, &mut temp, num_pixels, k, oc_per_g,
-                );
-                store_output!(temp, oc_per_g, out_base, g_oc_off);
-            }
-        }
-    } else {
-        let packed_data: Vec<U8x4> = aligned_packed_slice(raw);
-        let k_packed = inner.div_ceil(U8x4::ITEMS);
-        // Pre-allocate packed activation buffer
-        let mut packed_act = vec![U8x4(0); num_pixels * k_packed];
-        for nn in 0..n {
-            let act_base = nn * c * h * w;
-            let out_base = nn * oc * num_pixels;
-            for g in 0..groups {
-                let g_c_off = g * c_per_g;
-                let g_oc_off = g * oc_per_g;
-                let act_group = &act_i8[act_base + g_c_off * h * w..];
-                unsafe {
-                    packed_conv::im2col_i8(
-                        act_group, c_per_g, h, w, kh, kw, stride, padding, dilation, &mut col_buf,
-                    );
-                }
-                // Pack flat i8 → U8x4 packed format, then run packed GEMM
-                packed_conv::pack_i8_col_to_u8x4(&col_buf, num_pixels, k, &mut packed_act);
-                let act_pt = PackedTensor::from_raw(
-                    packed_act.clone(),
-                    vec![num_pixels, k],
-                    vec![affine.scale],
-                    vec![affine.zero],
-                );
-                let w_slice = &packed_data[g_oc_off * k_packed..(g_oc_off + oc_per_g) * k_packed];
-                let w_scales = if meta.scales.len() > 1 {
-                    meta.scales[g_oc_off..g_oc_off + oc_per_g].to_vec()
-                } else {
-                    meta.scales.clone()
-                };
-                let w_zps = if meta.zero_points.len() > 1 {
-                    meta.zero_points[g_oc_off..g_oc_off + oc_per_g].to_vec()
-                } else {
-                    meta.zero_points.clone()
-                };
-                let w_pt = PackedTensor::from_raw(
-                    w_slice.to_vec(),
-                    vec![oc_per_g, inner],
-                    w_scales,
-                    w_zps,
-                );
-                let bias_group = bias_opt
-                    .map(|b| &b[g_oc_off..g_oc_off + oc_per_g])
-                    .filter(|s| !s.is_empty());
-                let mut temp = vec![0.0f32; num_pixels * oc_per_g];
-                packed_conv::gemm_packed_u8x4_fused(
-                    &act_pt, &w_pt, bias_group, fused_act, &mut temp,
-                );
-                store_output!(temp, oc_per_g, out_base, g_oc_off);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn run_kernel_precopied(
-    kernel_name: &str,
-    inputs: &[Vec<u8>],
-    output: &mut [u8],
-    _secondary_output: Option<&mut [u8]>,
-    params: &[usize],
-    param_dims: &Option<Vec<DimExpr>>,
-    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
-    shape_env: &ShapeEnv,
-) -> Result<(), BackendError> {
-    match kernel_name {
-        // ── Binary elementwise ────────────────────────────────
-        "add_f32" => precopied_binary_body!(inputs, output, add_f32),
-        "sub_f32" => precopied_binary_body!(inputs, output, sub_f32),
-        "mul_f32" => precopied_binary_body!(inputs, output, mul_f32),
-        "div_f32" => precopied_binary_body!(inputs, output, div_f32),
-        // ── Unary elementwise ────────────────────────────────
-        "relu_f32" => precopied_unary_body!(inputs, output, relu_f32),
-        "gelu_f32" => precopied_unary_body!(inputs, output, gelu_f32),
-        "silu_f32" => precopied_unary_body!(inputs, output, silu_f32),
-        "exp_f32" => precopied_unary_body!(inputs, output, exp_f32),
-        "log_f32" => precopied_unary_body!(inputs, output, log_f32),
-        "sqrt_f32" => precopied_unary_body!(inputs, output, sqrt_f32),
-        "neg_f32" => precopied_unary_body!(inputs, output, neg_f32),
-        "abs_f32" => precopied_unary_body!(inputs, output, abs_f32),
-        "sigmoid_f32" => precopied_unary_body!(inputs, output, sigmoid_f32),
-        "tanh_f32" => precopied_unary_body!(inputs, output, tanh_f32),
-        "elu_f32" => precopied_unary_body!(inputs, output, elu_f32),
-        "softplus_f32" => precopied_unary_body!(inputs, output, softplus_f32),
-        "hardswish_f32" => precopied_unary_body!(inputs, output, hardswish_f32),
-        "sign_f32" => precopied_unary_body!(inputs, output, sign_f32),
-        "round_f32" => precopied_unary_body!(inputs, output, round_f32),
-        "logical_not_f32" => precopied_unary_body!(inputs, output, logical_not_f32),
-        "log_softmax_f32" => precopied_unary_body!(inputs, output, log_softmax_f32),
-        "mish_f32" => precopied_unary_body!(inputs, output, mish_f32),
-        "max_f32" => precopied_binary_body!(inputs, output, max_f32),
-        "min_f32" => precopied_binary_body!(inputs, output, min_f32),
-        // ── Unary with scalar params ───────────────────────────
-        "leaky_relu_f32" => {
-            if !inputs.is_empty() {
-                let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let out = bytemuck::cast_slice_mut::<_, f32>(output);
-                let slope = if !params.is_empty() {
-                    f32::from_bits(params[0] as u32)
-                } else {
-                    0.01
-                };
-                leaky_relu_f32(a, out, slope);
-            }
-        }
-        "clamp_f32" => {
-            if !inputs.is_empty() {
-                let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let out = bytemuck::cast_slice_mut::<_, f32>(output);
-                let min_val = if !params.is_empty() {
-                    f32::from_bits(params[0] as u32)
-                } else {
-                    0.0
-                };
-                let max_val = if params.len() > 1 {
-                    f32::from_bits(params[1] as u32)
-                } else {
-                    1.0
-                };
-                clamp_f32(a, out, min_val, max_val);
-            }
-        }
-        // ── Matmul ────────────────────────────────────────────
-        "matmul" => {
-            if inputs.len() >= 2 {
-                let a = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let b = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-                let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-                let &[m, _k, n] = &matmul_params[..] else {
-                    return Err(BackendError::Dispatch(
-                        "matmul: expected params [M,K,N]".into(),
-                    ));
-                };
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let a_stride = m * _k;
-                let b_stride = _k * n;
-                let out_stride = m * n;
-                let batch_count = out_f32.len() / out_stride;
-                let b_batched = b.len() > b_stride;
-                let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
-                if use_blas {
-                    for batch in 0..batch_count {
-                        let a_s = batch * a_stride;
-                        let b_s = if b_batched { batch * b_stride } else { 0 };
-                        let out_s = batch * out_stride;
-                        matmul_blas_into(
-                            &a[a_s..a_s + a_stride],
-                            &b[b_s..b_s + b_stride],
-                            &mut out_f32[out_s..out_s + out_stride],
-                            m,
-                            _k,
-                            n,
-                        );
-                    }
-                } else {
-                    let total_rows = batch_count * m;
-                    let b_batch_stride = if b_batched { b_stride } else { 0 };
-                    #[cfg(feature = "parallel")]
-                    {
-                        use rayon::prelude::*;
-                        let a_raw = a.as_ptr() as usize;
-                        let b_raw = b.as_ptr() as usize;
-                        let out_raw = out_f32.as_mut_ptr() as usize;
-                        (0..total_rows).into_par_iter().for_each(move |row| {
-                            let a_ptr = a_raw as *const f32;
-                            let b_ptr = b_raw as *const f32;
-                            let out_ptr = out_raw as *mut f32;
-                            unsafe {
-                                crate::backend::cpu::microkernels::blocked_row_matmul(
-                                    a_ptr,
-                                    b_ptr,
-                                    out_ptr,
-                                    row,
-                                    m,
-                                    n,
-                                    _k,
-                                    a_stride,
-                                    _k,
-                                    1,
-                                    b_batch_stride,
-                                    n,
-                                    1,
-                                );
-                            }
-                        });
-                    }
-                    #[cfg(not(feature = "parallel"))]
-                    for row in 0..total_rows {
-                        unsafe {
-                            crate::backend::cpu::microkernels::blocked_row_matmul(
-                                a.as_ptr(),
-                                b.as_ptr(),
-                                out_f32.as_mut_ptr(),
-                                row,
-                                m,
-                                n,
-                                _k,
-                                a_stride,
-                                _k,
-                                1,
-                                b_batch_stride,
-                                n,
-                                1,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        // ── Fused matmul + activation ──────────────────────────
-        "fused_matmul_add_relu" => {
-            matmul_activation_dispatch_precopied(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                "fused_matmul_add_relu",
-                |x| x.max(0.0),
-            )?;
-        }
-        "fused_matmul_add_gelu" => {
-            matmul_activation_dispatch_precopied(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                "fused_matmul_add_gelu",
-                |x| {
-                    let x3 = x * x * x;
-                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                    let t = tanh_arg.tanh();
-                    0.5 * x * (1.0 + t)
-                },
-            )?;
-        }
-        "fused_matmul_add_silu" => {
-            matmul_activation_dispatch_precopied(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                "fused_matmul_add_silu",
-                |x| x / (1.0 + (-x).exp()),
-            )?;
-        }
-        "matmul_relu" => {
-            matmul_activation_dispatch_precopied(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                "matmul_relu",
-                |x| x.max(0.0),
-            )?;
-        }
-        "matmul_gelu" => {
-            matmul_activation_dispatch_precopied(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                "matmul_gelu",
-                |x| {
-                    let x3 = x * x * x;
-                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                    let t = tanh_arg.tanh();
-                    0.5 * x * (1.0 + t)
-                },
-            )?;
-        }
-        "matmul_silu" => {
-            matmul_activation_dispatch_precopied(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                "matmul_silu",
-                |x| x / (1.0 + (-x).exp()),
-            )?;
-        }
-        "matmul_u4" => {
-            quantized_matmul_dispatch_precopied::<U4x8>(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                weight_meta,
-                4,
-                "matmul_u4",
-                None,
-            )?;
-        }
-        "matmul_u4_i8" => {
-            quantized_matmul_dispatch_precopied_i8_u4(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                weight_meta,
-                "matmul_u4_i8",
-            )?;
-        }
-        "matmul_u8_i8" => {
-            quantized_matmul_dispatch_precopied_i8_u8(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                weight_meta,
-                "matmul_u8_i8",
-            )?;
-        }
-        "matmul_u8" => {
-            quantized_matmul_dispatch_precopied::<U8x4>(
-                inputs,
-                output,
-                params,
-                param_dims,
-                shape_env,
-                weight_meta,
-                8,
-                "matmul_u8",
-                None,
-            )?;
-        }
-        // ── Reduce ────────────────────────────────────────────
-        "reduce_f32" => {
-            let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-            let &[group_size, is_mean, is_max] = &params[..3] else {
-                return Err(BackendError::Dispatch(
-                    "reduce_f32: expected params [group_size, is_mean, is_max]".into(),
-                ));
-            };
-            let effective_group_size = match param_dims {
-                Some(dims) if !dims.is_empty() => dims[0]
-                    .evaluate_with_env(shape_env)
-                    .map_err(|e| BackendError::Dispatch(format!("reduce_f32: {e}")))?
-                    as usize,
-                _ => group_size,
-            };
-            reduce_f32(
-                input,
-                out_f32,
-                effective_group_size,
-                is_mean == 1,
-                is_max == 1,
-            );
-        }
-        // ── Transpose ──────────────────────────────────────────
-        "transpose_f32" => {
-            if !inputs.is_empty() {
-                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let transpose_params = resolve_params(params, param_dims, shape_env, 2)?;
-                let &[m, n] = &transpose_params[..] else {
-                    return Err(BackendError::Dispatch(
-                        "transpose_f32: expected params [M,N]".into(),
-                    ));
-                };
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
-                    unsafe {
-                        microkernels::transpose_f32_avx2(input, out_f32, m, n);
-                    }
-                } else {
-                    #[cfg(not(feature = "parallel"))]
-                    {
-                        for i in 0..m {
-                            for j in 0..n {
-                                out_f32[j * m + i] = input[i * n + j];
-                            }
-                        }
-                    }
-                    #[cfg(feature = "parallel")]
-                    {
-                        use rayon::prelude::*;
-                        out_f32.par_chunks_mut(m).enumerate().for_each(|(j, col)| {
-                            for i in 0..m {
-                                col[i] = input[i * n + j];
-                            }
-                        });
-                    }
-                }
-            }
-        }
-        "transpose_perm_f32" => {
-            if !inputs.is_empty() {
-                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let rank = params.first().copied().unwrap_or(2);
-                let nd_params = resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
-                let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
-                let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let mut in_strides = vec![1usize; rank];
-                let mut out_strides = vec![1usize; rank];
-                for i in (0..rank - 1).rev() {
-                    in_strides[i] = in_strides[i + 1] * dims[i + 1];
-                }
-                for i in (0..rank - 1).rev() {
-                    out_strides[perm[i]] = out_strides[perm[i + 1]] * dims[perm[i + 1]];
-                }
-                let _total = out_f32.len();
-                #[cfg(not(feature = "parallel"))]
-                {
-                    let total = _total;
-                    for out_idx in 0..total {
-                        let mut in_idx = 0usize;
-                        let mut remaining = out_idx;
-                        for k in 0..rank {
-                            let coord = remaining / out_strides[perm[k]];
-                            remaining %= out_strides[perm[k]];
-                            in_idx += coord * in_strides[perm[k]];
-                        }
-                        out_f32[out_idx] = input[in_idx];
-                    }
-                }
-                #[cfg(feature = "parallel")]
-                {
-                    use rayon::prelude::*;
-                    out_f32.par_iter_mut().enumerate().for_each(|(out_idx, v)| {
-                        let mut in_idx = 0usize;
-                        let mut remaining = out_idx;
-                        for k in 0..rank {
-                            let coord = remaining / out_strides[perm[k]];
-                            remaining %= out_strides[perm[k]];
-                            in_idx += coord * in_strides[perm[k]];
-                        }
-                        *v = input[in_idx];
-                    });
-                }
-            }
-        }
-        // ── Fused binary + activation ──────────────────────────
-        "add_relu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "add_relu_f32",
-                inputs,
-                output,
-                |a, b| a + b,
-                |x| x.max(0.0),
-            );
-        }
-        "sub_relu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "sub_relu_f32",
-                inputs,
-                output,
-                |a, b| a - b,
-                |x| x.max(0.0),
-            );
-        }
-        "mul_relu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "mul_relu_f32",
-                inputs,
-                output,
-                |a, b| a * b,
-                |x| x.max(0.0),
-            );
-        }
-        "div_relu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "div_relu_f32",
-                inputs,
-                output,
-                |a, b| a / b,
-                |x| x.max(0.0),
-            );
-        }
-        "add_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "add_gelu_f32",
-                inputs,
-                output,
-                |a, b| a + b,
-                |x| {
-                    let x3 = x * x * x;
-                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                    let t = tanh_arg.tanh();
-                    0.5 * x * (1.0 + t)
-                },
-            );
-        }
-        "sub_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "sub_gelu_f32",
-                inputs,
-                output,
-                |a, b| a - b,
-                |x| {
-                    let x3 = x * x * x;
-                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                    let t = tanh_arg.tanh();
-                    0.5 * x * (1.0 + t)
-                },
-            );
-        }
-        "mul_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "mul_gelu_f32",
-                inputs,
-                output,
-                |a, b| a * b,
-                |x| {
-                    let x3 = x * x * x;
-                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                    let t = tanh_arg.tanh();
-                    0.5 * x * (1.0 + t)
-                },
-            );
-        }
-        "div_gelu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "div_gelu_f32",
-                inputs,
-                output,
-                |a, b| a / b,
-                |x| {
-                    let x3 = x * x * x;
-                    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
-                    let t = tanh_arg.tanh();
-                    0.5 * x * (1.0 + t)
-                },
-            );
-        }
-        "add_silu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "add_silu_f32",
-                inputs,
-                output,
-                |a, b| a + b,
-                |x| x / (1.0 + (-x).exp()),
-            );
-        }
-        "sub_silu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "sub_silu_f32",
-                inputs,
-                output,
-                |a, b| a - b,
-                |x| x / (1.0 + (-x).exp()),
-            );
-        }
-        "mul_silu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "mul_silu_f32",
-                inputs,
-                output,
-                |a, b| a * b,
-                |x| x / (1.0 + (-x).exp()),
-            );
-        }
-        "div_silu_f32" => {
-            fused_binary_activation_dispatch_precopied(
-                "div_silu_f32",
-                inputs,
-                output,
-                |a, b| a / b,
-                |x| x / (1.0 + (-x).exp()),
-            );
-        }
-        // ── Softmax ────────────────────────────────────────────
-        "softmax" => {
-            if !inputs.is_empty() {
-                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let softmax_params = resolve_params(params, param_dims, shape_env, 2)
-                    .unwrap_or_else(|_| vec![input.len(), 1]);
-                let axis_dim_size = softmax_params[0].max(1);
-                let stride = softmax_params.get(1).copied().unwrap_or(1).max(1);
-                let num_rows = input.len() / axis_dim_size.max(1);
-                softmax_f32(input, out_f32, axis_dim_size, stride, num_rows);
-            }
-        }
-        // ── BiasAdd ────────────────────────────────────────────
-        "biasadd" => {
-            if inputs.len() >= 2 {
-                let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let bias = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let &[channel_stride] = params else {
-                    return Err(BackendError::Dispatch(
-                        "biasadd: expected params [channel_stride]".into(),
-                    ));
-                };
-                biasadd_f32(data, bias, out_f32, channel_stride);
-            }
-        }
-        // ── Normalization ──────────────────────────────────────
-        "norm_f32" => {
-            let &[eps_bits, is_batch_norm] = params else {
-                return Err(BackendError::Dispatch(
-                    "norm_f32: expected params [eps_bits, is_batch_norm]".into(),
-                ));
-            };
-            let eps = f32::from_bits(eps_bits as u32);
-            if is_batch_norm == 1 {
-                if inputs.len() >= 5 {
-                    let data = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                    let weight = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-                    let bias = bytemuck::cast_slice::<_, f32>(&inputs[2]);
-                    let running_mean = bytemuck::cast_slice::<_, f32>(&inputs[3]);
-                    let running_var = bytemuck::cast_slice::<_, f32>(&inputs[4]);
-                    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                    {
-                        use crate::backend::cpu::microkernels::has_avx2;
-                        if has_avx2() {
-                            unsafe {
-                                crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
-                                    data,
-                                    weight,
-                                    bias,
-                                    running_mean,
-                                    running_var,
-                                    out_f32,
-                                    eps,
-                                );
-                            }
-                        } else {
-                            crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                data,
-                                weight,
-                                bias,
-                                running_mean,
-                                running_var,
-                                out_f32,
-                                eps,
-                            );
-                        }
-                    }
-                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                    {
-                        crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                            data,
-                            weight,
-                            bias,
-                            running_mean,
-                            running_var,
-                            out_f32,
-                            eps,
-                        );
-                    }
-                }
-            } else {
-                if !inputs.is_empty() {
-                    let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                    let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                    let row_size = input.len() / out_f32.len().max(1);
-                    norm_layernorm_f32(input, out_f32, row_size, eps);
-                }
-            }
-        }
-        // ── Conv2d ─────────────────────────────────────────────
-        "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu" => {
-            let fused_act = match kernel_name {
-                "conv2d_relu" => Some("relu"),
-                "conv2d_gelu" => Some("gelu"),
-                "conv2d_silu" => Some("silu"),
-                _ => None,
-            };
-            if inputs.len() >= 2 {
-                let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
-                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
-                };
-                let c_per_group = c / groups.max(1);
-                let input_data: &[f32] = bytemuck::cast_slice(&inputs[0]);
-                let weight_data: &[f32] = bytemuck::cast_slice(&inputs[1]);
-                let bias_data: &[f32] = if inputs.len() >= 3 {
-                    bytemuck::cast_slice(&inputs[2])
-                } else {
-                    &[]
-                };
-                let n = input_data.len() / (c * h * w).max(1);
-                let f = weight_data.len() / (c_per_group * kh * kw).max(1);
-                let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
-                let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let conv_act = fused_act.map(|act| match act {
-                    "relu" => crate::backend::cpu::microkernels::ConvActivation::Relu,
-                    "gelu" => crate::backend::cpu::microkernels::ConvActivation::Gelu,
-                    "silu" => crate::backend::cpu::microkernels::ConvActivation::Silu,
-                    _ => unreachable!(),
-                });
-                crate::backend::cpu::microkernels::conv2d_f32_im2col_gemm(
-                    &input_data,
-                    &weight_data,
-                    &bias_data,
-                    out_f32,
-                    n,
-                    c,
-                    h,
-                    w,
-                    f,
-                    kh,
-                    kw,
-                    stride,
-                    padding,
-                    dilation,
-                    groups,
-                    conv_act,
-                );
-            }
-        }
-        // ── Conv2d Quantized (u4/u8) — i8 activation path ───────
-        "conv2d_u4_i8" | "conv2d_u4_i8_relu" | "conv2d_u4_i8_gelu" | "conv2d_u4_i8_silu"
-        | "conv2d_u8_i8" | "conv2d_u8_i8_relu" | "conv2d_u8_i8_gelu" | "conv2d_u8_i8_silu" => {
-            return quantized_conv2d_dispatch_precopied_i8(
-                inputs,
-                output,
-                params,
-                weight_meta,
-                kernel_name,
-            );
-        }
-        // ── Conv2d Quantized (u4/u8) — FP32 activation path ───────
-        "conv2d_u4" | "conv2d_u4_relu" | "conv2d_u4_gelu" | "conv2d_u4_silu" | "conv2d_u8"
-        | "conv2d_u8_relu" | "conv2d_u8_gelu" | "conv2d_u8_silu" => {
-            let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
-                return Err(BackendError::Dispatch(
-                    "conv2d_u4/u8: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
-                        .into(),
-                ));
-            };
-            if inputs.len() >= 2 {
-                // No to_vec() copy — cast input slice directly
-                let input_data: &[f32] = bytemuck::cast_slice(&inputs[0]);
-                let raw = &inputs[1];
-                let bias_data: Vec<f32> = if inputs.len() >= 3 {
-                    bytemuck::cast_slice::<_, f32>(&inputs[2]).to_vec()
-                } else {
-                    vec![]
-                };
-                let meta = weight_meta.clone().ok_or_else(|| {
-                    BackendError::Dispatch("conv2d_u4/u8: missing weight_meta".into())
-                })?;
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let flat_shape = if meta.shape.len() >= 4 {
-                    let oc = meta.shape[0];
-                    let inner: usize = meta.shape[1..].iter().product();
-                    vec![oc, inner]
-                } else {
-                    meta.shape.clone()
-                };
-                let n = input_data.len() / (c * h * w).max(1);
-                macro_rules! call_packed_conv_precopied {
-                    ($PackedType:ty, $fn:ident) => {{
-                        // Direct aligned cast instead of Vec<u32> intermediate
-                        let packed_data: Vec<$PackedType> = aligned_packed_slice(raw);
-                        let pt = PackedTensor::from_raw(
-                            packed_data,
-                            flat_shape,
-                            meta.scales.clone(),
-                            meta.zero_points.clone(),
-                        );
-                        let bias_opt = if !bias_data.is_empty() {
-                            Some(&bias_data[..])
-                        } else {
-                            None
-                        };
-                        let fused_act: Option<&str> = if kernel_name.contains("_relu") {
-                            Some("relu")
-                        } else if kernel_name.contains("_gelu") {
-                            Some("gelu")
-                        } else if kernel_name.contains("_silu") {
-                            Some("silu")
-                        } else {
-                            None
-                        };
-                        unsafe {
-                            packed_conv::$fn(
-                                input_data, n, c, h, w, &pt, bias_opt, stride, padding, dilation,
-                                groups, kh, kw, fused_act, out_f32,
-                            );
-                        }
-                    }};
-                }
-                if meta.bit_width == 4 {
-                    call_packed_conv_precopied!(U4x8, conv2d_packed_u4x8);
-                } else {
-                    call_packed_conv_precopied!(U8x4, conv2d_packed_u8x4);
-                }
-            }
-        }
-        // ── Concat ─────────────────────────────────────────────
-        "concat" => {
-            if !inputs.is_empty() && params.len() >= 3 {
-                let _axis = params[0];
-                let _inner_stride = params[1];
-                let outer_count = params[2];
-                let num_inputs = inputs.len();
-                let mut block_sizes: Vec<usize> = Vec::with_capacity(num_inputs);
-                for inp in inputs {
-                    let elems = inp.len() / std::mem::size_of::<f32>();
-                    block_sizes.push(elems / outer_count.max(1));
-                }
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let mut output_offset = 0;
-                for outer_pos in 0..outer_count {
-                    for (si, inp) in inputs.iter().enumerate() {
-                        let input_data = bytemuck::cast_slice::<_, f32>(inp);
-                        let block = block_sizes[si];
-                        let src_start = outer_pos * block;
-                        let src_end = (src_start + block).min(input_data.len());
-                        let dst_end = (output_offset + src_end - src_start).min(out_f32.len());
-                        out_f32[output_offset..dst_end]
-                            .copy_from_slice(&input_data[src_start..src_end]);
-                        output_offset += src_end - src_start;
-                    }
-                }
-            }
-        }
-        // ── Scalar ops ─────────────────────────────────────────
-        "gt_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
-            for i in 0..out.len() {
-                out[i] = if data[i % data.len()] > s { 1.0 } else { 0.0 };
-            }
-        }),
-        "lt_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
-            for i in 0..out.len() {
-                out[i] = if data[i % data.len()] < s { 1.0 } else { 0.0 };
-            }
-        }),
-        "eq_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
-            for i in 0..out.len() {
-                out[i] = if (data[i % data.len()] - s).abs() < 1e-6 {
-                    1.0
-                } else {
-                    0.0
-                };
-            }
-        }),
-        "add_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
-            for i in 0..out.len() {
-                out[i] = data[i % data.len()] + s;
-            }
-        }),
-        "mul_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
-            for i in 0..out.len() {
-                out[i] = data[i % data.len()] * s;
-            }
-        }),
-        "div_scalar_f32" => scalar_op_dispatch_precopied(inputs, output, |data, s, out| {
-            for i in 0..out.len() {
-                out[i] = data[i % data.len()] / s;
-            }
-        }),
-        "where_f32" => {
-            if inputs.len() >= 3 {
-                let cond = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let a = bytemuck::cast_slice::<_, f32>(&inputs[1]);
-                let b = bytemuck::cast_slice::<_, f32>(&inputs[2]);
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                for i in 0..out_f32.len() {
-                    out_f32[i] = if cond[i % cond.len()] != 0.0 {
-                        a[i % a.len()]
-                    } else {
-                        b[i % b.len()]
-                    };
-                }
-            }
-        }
-        "cast_f32_i64" => {
-            let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-            let out_i64 = bytemuck::cast_slice_mut::<_, i64>(output);
-            for i in 0..out_i64.len() {
-                out_i64[i] = input[i % input.len()] as i64;
-            }
-        }
-        "cast_i64_f32" => {
-            let input = bytemuck::cast_slice::<_, i64>(&inputs[0]);
-            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-            for i in 0..out_f32.len() {
-                out_f32[i] = input[i % input.len()] as f32;
-            }
-        }
-        "slice_f32" => {
-            if !inputs.is_empty() {
-                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let dst_len = out_f32.len();
-                let copy_len = dst_len.min(input.len());
-                out_f32[..copy_len].copy_from_slice(&input[..copy_len]);
-            }
-        }
-        "shape_f32" | "shape_i64" => {
-            if !inputs.is_empty() {
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                for (i, inp) in inputs.iter().enumerate().take(out_f32.len()) {
-                    let f = bytemuck::cast_slice::<_, f32>(inp);
-                    out_f32[i] = f.first().copied().unwrap_or(0.0);
-                }
-            }
-        }
-        "squeeze_f32" => {
-            if !inputs.is_empty() {
-                let input = bytemuck::cast_slice::<_, f32>(&inputs[0]);
-                let out_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
-                let copy_len = out_f32.len().min(input.len());
-                out_f32[..copy_len].copy_from_slice(&input[..copy_len]);
-            }
-        }
-        // ── Catch-all for any kernel not yet covered ───────────
-        other => {
-            return Err(BackendError::UnsupportedOp(format!(
-                "run_kernel_precopied: unsupported kernel '{}'",
-                other
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Execute a group of independent instructions, processing all inputs in
-/// parallel when the `parallel` feature is enabled.
-///
-/// All instructions in the group have the same topological level and no
-/// data dependencies between them. Inputs are pre-copied from the arena
-/// (serial phase), then each instruction is dispatched to its own kernel
-/// via [`run_kernel_precopied`] with an exclusive output slice.
-///
-/// When the `parallel` feature is disabled, instructions execute sequentially
-/// (still safe — just no overlap).
-fn execute_parallel_level(
-    group: &[usize],
-    plan: &ExecutablePlan,
-    arena: &CpuBuffer,
-    shape_env: &ShapeEnv,
-) -> Result<(), BackendError> {
-    // ── Phase 1: Pre-copy all inputs from the arena (serial) ──────
-    struct ParallelTask {
-        kernel_name: String,
-        inputs: Vec<Vec<u8>>,
-        output_offset: usize,
-        output_size: usize,
-        secondary_output_offset: Option<usize>,
-        secondary_output_size: Option<usize>,
-        params: Vec<usize>,
-        param_dims: Option<Vec<DimExpr>>,
-        weight_meta: Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
-    }
-
-    let mut ptasks: Vec<ParallelTask> = Vec::with_capacity(group.len());
-    for &instr_idx in group {
-        let instr = &plan.instructions[instr_idx];
-        match instr {
-            Instruction::CallKernel {
-                kernel_name,
-                input_slices,
-                output_slice,
-                secondary_output_slice,
-                params,
-                param_dims,
-                weight_meta,
-                ..
-            } => {
-                let d = arena.data_mut();
-                let inputs: Vec<Vec<u8>> = input_slices
-                    .iter()
-                    .map(|slice| {
-                        let start = slice.offset;
-                        let end = start + slice.size;
-                        d[start..end].to_vec()
-                    })
-                    .collect();
-                ptasks.push(ParallelTask {
-                    kernel_name: kernel_name.clone(),
-                    inputs,
-                    output_offset: output_slice.offset,
-                    output_size: output_slice.size,
-                    secondary_output_offset: secondary_output_slice.as_ref().map(|s| s.offset),
-                    secondary_output_size: secondary_output_slice.as_ref().map(|s| s.size),
-                    params: params.clone(),
-                    param_dims: param_dims.clone(),
-                    weight_meta: weight_meta.clone(),
-                });
-            }
-            // MemCopy / Fill / WriteConst are fast — execute inline (serial)
-            Instruction::MemCopy { dst, src } => {
-                let data = arena.data_mut();
-                let len = dst.size.min(src.size);
-                data.copy_within(src.offset..src.offset + len, dst.offset);
-            }
-            Instruction::Fill { dst, value } => {
-                let data = arena.data_mut();
-                let bytes = &mut data[dst.offset..dst.offset + dst.size];
-                let f32_slice = bytemuck::cast_slice_mut::<_, f32>(bytes);
-                f32_slice.fill(*value);
-            }
-            Instruction::WriteConst { dst, data } => {
-                let arena_data = arena.data_mut();
-                let end = (dst.offset + data.len()).min(arena_data.len());
-                arena_data[dst.offset..end].copy_from_slice(&data[..end - dst.offset]);
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    {
-        // ── Phase 2: Execute kernel tasks in parallel ────────────────
-        use rayon::prelude::*;
-        let arena_base = arena.data_mut().as_mut_ptr() as usize;
-        // SAFETY: ShapeEnv is read-only during dispatch; no concurrent writes occur.
-        // We pass it as a raw pointer (isize) to satisfy Send requirements.
-        let shape_env_ptr = shape_env as *const ShapeEnv as usize;
-
-        let errors: Vec<_> = ptasks
-            .into_par_iter()
-            .map(|task| {
-                // SAFETY: each task writes to a non-overlapping region of the arena
-                // (guaranteed by the memory planner — same-level instructions have
-                // distinct output regions).
-                let output = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        (arena_base + task.output_offset) as *mut u8,
-                        task.output_size,
-                    )
-                };
-                let secondary = task.secondary_output_offset.map(|off| unsafe {
-                    std::slice::from_raw_parts_mut(
-                        (arena_base + off) as *mut u8,
-                        task.secondary_output_size.unwrap_or(0),
-                    )
-                });
-                // SAFETY: ShapeEnv is read-only and lives for the duration of dispatch().
-                let se = unsafe { &*(shape_env_ptr as *const ShapeEnv) };
-                run_kernel_precopied(
-                    &task.kernel_name,
-                    &task.inputs,
-                    output,
-                    secondary,
-                    &task.params,
-                    &task.param_dims,
-                    &task.weight_meta,
-                    se,
-                )
-            })
-            .collect();
-
-        // Check for errors from parallel tasks
-        for result in errors {
-            result?;
-        }
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        // Fallback: execute sequentially using pre-copied inputs (same code path,
-        // just without the parallelism).
-        for task in &ptasks {
-            let output = {
-                let d = arena.data_mut();
-                &mut d[task.output_offset..task.output_offset + task.output_size]
-            };
-            let secondary = task.secondary_output_offset.map(|off| {
-                let d = arena.data_mut();
-                let sz = task.secondary_output_size.unwrap_or(0);
-                &mut d[off..off + sz]
-            });
-            run_kernel_precopied(
-                &task.kernel_name,
-                &task.inputs,
-                output,
-                secondary,
-                &task.params,
-                &task.param_dims,
-                &task.weight_meta,
-                shape_env,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Build level groups from the plan's topological levels.
-///
-/// Returns a `Vec<Vec<usize>>` where `groups[lvl]` contains the instruction
-/// indices at that level. Groups are in ascending level order. Levels with
-/// no instructions produce empty vectors.
-fn build_level_groups(levels: &[usize]) -> Vec<Vec<usize>> {
-    if levels.is_empty() {
-        return vec![];
-    }
-    let max_level = *levels.iter().max().unwrap_or(&0);
-    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
-    for (idx, &lvl) in levels.iter().enumerate() {
-        groups[lvl].push(idx);
-    }
-    groups
 }
 
 /// CPU memory arena with interior mutability for zero-allocation dispatch.
@@ -1645,16 +88,19 @@ impl CpuBuffer {
     ///
     /// The caller must ensure that no other `&mut [u8]` reference
     /// derived from this arena is live when this method is called.
-    /// This is satisfied by the sequential dispatch loop — each
+    /// This is satisfied by the sequential dispatch loop â€” each
     /// `data_mut` call's borrow ends before the next one begins.
     #[allow(clippy::mut_from_ref)]
     pub fn data_mut(&self) -> &mut [u8] {
+        // SAFETY: The `UnsafeCell` gives `&mut` to the inner `Vec<u8>`. This is safe because
+        // `data_mut()` returns a borrow that is never aliased â€” dispatch processes instructions
+        // sequentially and each borrow ends before the next begins.
         unsafe { &mut *self.0.get() }.as_mut_slice()
     }
 }
 
 // SAFETY: `Vec<u8>` is `Send + Sync`.  The arena is never accessed
-// concurrently — dispatch is single-threaded — so interior mutability
+// concurrently â€” dispatch is single-threaded â€” so interior mutability
 // via `UnsafeCell` does not introduce data races.
 unsafe impl Send for CpuBuffer {}
 unsafe impl Sync for CpuBuffer {}
@@ -1690,7 +136,7 @@ impl Backend for CpuBackend {
         let mut instructions = Vec::new();
         let order = graph.topological_sort();
 
-        // ── Pre‑compute topological levels for parallel dispatch ──────
+        // â”€â”€ Preâ€‘compute topological levels for parallel dispatch â”€â”€â”€â”€â”€â”€
         // level[node] = max(level[input]) + 1   (with input level = 0 for graph inputs)
         let mut node_level: std::collections::HashMap<NodeId, usize> =
             std::collections::HashMap::new();
@@ -2555,7 +1001,7 @@ impl Backend for CpuBackend {
                         _ => (0, 0), // ReduceSum
                     };
                     let group_size = group_size_dim.evaluate().unwrap_or_else(|| {
-                        // Symbolic dim — use SYMBOL_DIM_MAX as compile-time
+                        // Symbolic dim â€” use SYMBOL_DIM_MAX as compile-time
                         // estimate; runtime resolves via param_dims.
                         crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
                     }) as usize;
@@ -2589,7 +1035,7 @@ impl Backend for CpuBackend {
                         perm_str.split(',').filter_map(|s| s.parse().ok()).collect()
                     };
 
-                    // Simple 2D transpose [1,0] on a rank-2 tensor → use fast kernel
+                    // Simple 2D transpose [1,0] on a rank-2 tensor â†’ use fast kernel
                     if rank == 2 && perm.len() >= 2 && perm[0] == 1 && perm[1] == 0 {
                         let m = input_shape[0];
                         let n = input_shape[1];
@@ -2868,7 +1314,7 @@ impl Backend for CpuBackend {
                         output_slice,
                     ));
                 }
-                // Input nodes have no producer instruction — data is written
+                // Input nodes have no producer instruction â€” data is written
                 // by the executor before dispatch.
                 Opcode::Input => {
                     // No instruction needed.
@@ -3085,7 +1531,7 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                // ── Optimizer ops ──────────────────────────────────
+                // â”€â”€ Optimizer ops â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 Opcode::SgdUpdate => {
                     let lr: f32 = node
                         .attrs
@@ -3100,7 +1546,7 @@ impl Backend for CpuBackend {
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "sgd_update_f32".to_string(),
-                        input_slices, // [weight, grad] — weight must be same slot as output
+                        input_slices, // [weight, grad] â€” weight must be same slot as output
                         output_slice,
                         secondary_output_slice: None,
                         params: vec![lr.to_bits() as usize, wd.to_bits() as usize],
@@ -3342,7 +1788,7 @@ impl Backend for CpuBackend {
                     // write f32-le bytes.  Downstream ops (Gather, Concat, etc.)
                     // read from the arena as f32 slices and get correct values.
                     // Resolve input shape at compile time (known dims directly,
-                    // symbolic dims use SYMBOL_DIM_MAX — they'll be resolved
+                    // symbolic dims use SYMBOL_DIM_MAX â€” they'll be resolved
                     // at dispatch by param_dims).
                     use std::io::Write;
                     let in_shape = input_shapes.first().cloned().unwrap_or_default();
@@ -3427,7 +1873,7 @@ impl Backend for CpuBackend {
 
                     // If the predecessor node already carries calibrated scales/zeros
                     // (e.g. from wrap_quantized_optimizer re-quant path), forward
-                    // them through params so the kernel can skip the O(N×K) scan.
+                    // them through params so the kernel can skip the O(NÃ—K) scan.
                     let (cached_scales, cached_zeros) = node
                         .inputs
                         .first()
@@ -3795,7 +2241,7 @@ impl Backend for CpuBackend {
                     }
                 }
                 Opcode::Range => {
-                    // Range(start, limit, step) — produce 1D F32 tensor.
+                    // Range(start, limit, step) â€” produce 1D F32 tensor.
                     // All 3 inputs are scalars (4 bytes each).
                     let input_slices: Vec<BufferSlice> = node
                         .inputs
@@ -3823,7 +2269,7 @@ impl Backend for CpuBackend {
                                 src: BufferSlice::new(in_slot.offset, in_slot.size),
                             });
                         } else {
-                            // no input slot — user‑error / unexpected
+                            // no input slot â€” userâ€‘error / unexpected
                         }
                     }
                 }
@@ -3844,8 +2290,8 @@ impl Backend for CpuBackend {
         arena: &CpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
-        // ── Debug: collect MaxPool primary output ranges ──────────────
-        //     (only active with `debug_canary` feature — expensive)
+        // â”€â”€ Debug: collect MaxPool primary output ranges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        //     (only active with `debug_canary` feature â€” expensive)
         // ANCHOR: debug-canary-start
         #[cfg(feature = "debug_canary")]
         let maxpool_ranges: Vec<(usize, usize)> = {
@@ -4122,7 +2568,7 @@ impl Backend for CpuBackend {
                                 // or shared across all batches (2D weight matrix). Detect by comparing
                                 // total B elements against a single batch's K*N slice.
                                 let b_batched = b.len() > b_stride;
-                                // Skip BLAS for tiny matrices — dispatch overhead dominates.
+                                // Skip BLAS for tiny matrices â€” dispatch overhead dominates.
                                 let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
                                 let apply_fusion = has_bias || activation != 0;
                                 if use_blas {
@@ -4730,7 +3176,7 @@ impl Backend for CpuBackend {
                                 |x| x.max(0.0),
                             );
                         }
-                        // ── Fused elementwise + GELU ─────────────────────
+                        // â”€â”€ Fused elementwise + GELU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         "add_gelu_f32" => {
                             fused_binary_activation_dispatch(
                                 "add_gelu_f32",
@@ -4795,7 +3241,7 @@ impl Backend for CpuBackend {
                                 },
                             );
                         }
-                        // ── Fused elementwise + SiLU ─────────────────────
+                        // â”€â”€ Fused elementwise + SiLU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         "add_silu_f32" => {
                             fused_binary_activation_dispatch(
                                 "add_silu_f32",
@@ -4920,7 +3366,7 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
-                        // ── Conv2d Quantized (u4/u8) — i8 activation path (arena) ──
+                        // â”€â”€ Conv2d Quantized (u4/u8) â€” i8 activation path (arena) â”€â”€
                         "conv2d_u4_i8" | "conv2d_u4_i8_relu" | "conv2d_u4_i8_gelu"
                         | "conv2d_u4_i8_silu" | "conv2d_u8_i8" | "conv2d_u8_i8_relu"
                         | "conv2d_u8_i8_gelu" | "conv2d_u8_i8_silu" => {
@@ -5085,7 +3531,7 @@ impl Backend for CpuBackend {
                                                 }
                                             }
                                         } else {
-                                            // U8 path: pack i8 → U8x4 (lossless), use fast packed SWAR GEMM
+                                            // U8 path: pack i8 â†’ U8x4 (lossless), use fast packed SWAR GEMM
                                             let kp = inner.div_ceil(U8x4::ITEMS);
                                             let w_sl = aligned_packed_slice::<U8x4>(&raw);
                                             let w_slice =
@@ -5102,16 +3548,19 @@ impl Backend for CpuBackend {
                                             } else {
                                                 &meta.zero_points
                                             };
-                                            // Pack i8 → U8x4 into reusable buffer
+                                            // Pack i8 â†’ U8x4 into reusable buffer
                                             packed_conv::pack_i8_col_to_u8x4(
-                                                &col_buf, num_pixels, k, &mut packed_act,
+                                                &col_buf,
+                                                num_pixels,
+                                                k,
+                                                &mut packed_act,
                                             );
                                             let bias_group = if g_oc_off < bias_data.len() {
                                                 Some(&bias_data[g_oc_off..g_oc_off + oc_per_g])
                                             } else {
                                                 None
                                             };
-                                            // Raw packed GEMM — no PackedTensor wrapping, no allocations
+                                            // Raw packed GEMM â€” no PackedTensor wrapping, no allocations
                                             packed_conv::gemm_packed_u8x4_fused_raw(
                                                 &packed_act,
                                                 num_pixels,
@@ -5138,7 +3587,7 @@ impl Backend for CpuBackend {
                                 }
                             }
                         }
-                        // ── Conv2d Quantized (u4/u8) — FP32 activation path (arena) ──
+                        // â”€â”€ Conv2d Quantized (u4/u8) â€” FP32 activation path (arena) â”€â”€
                         "conv2d_u4" | "conv2d_u4_relu" | "conv2d_u4_gelu" | "conv2d_u4_silu"
                         | "conv2d_u8" | "conv2d_u8_relu" | "conv2d_u8_gelu" | "conv2d_u8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
@@ -5377,7 +3826,7 @@ impl Backend for CpuBackend {
                                 let w_out =
                                     (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let hw_out = h_out * w_out;
-                                // ── Sequential path ──────────────────────
+                                // â”€â”€ Sequential path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     if is_max == 1 {
@@ -5491,7 +3940,7 @@ impl Backend for CpuBackend {
                                         }
                                     }
                                 }
-                                // ── Parallel path (rayon) ────────────────
+                                // â”€â”€ Parallel path (rayon) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
@@ -6843,7 +5292,7 @@ impl Backend for CpuBackend {
                                 );
                             }
                         }
-                        // ── Optimizer kernels ───────────────────────
+                        // â”€â”€ Optimizer kernels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         "sgd_update_f32" => {
                             let w_new = {
                                 let d = arena.data_mut();
@@ -7131,7 +5580,7 @@ impl Backend for CpuBackend {
                             )
                             .copy_from_slice(&v_new);
                         }
-                        // ── F16 state optimizer kernels ──────────────
+                        // â”€â”€ F16 state optimizer kernels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         // m and v are stored as F16 (2 bytes/elem), w and grad are F32 (4 bytes/elem).
                         // Read F16 state, convert to f32 internally, apply update, write back as F16.
                         "adam_update_f16_state" => {
@@ -7352,7 +5801,7 @@ impl Backend for CpuBackend {
                                 let in_data =
                                     &d[input_slice.offset..input_slice.offset + input_slice.size];
                                 if in_byte_size == 4 && out_byte_size == 8 {
-                                    // F32/I32 → I64: widen
+                                    // F32/I32 â†’ I64: widen
                                     let in_f32 = bytemuck::cast_slice::<_, f32>(in_data).to_vec();
                                     let mut out_bytes = Vec::with_capacity(in_f32.len() * 8);
                                     for &v in &in_f32 {
@@ -7362,7 +5811,7 @@ impl Backend for CpuBackend {
                                     d[out_start..end]
                                         .copy_from_slice(&out_bytes[..end - out_start]);
                                 } else if in_byte_size == 8 && out_byte_size == 4 {
-                                    // I64 → F32/I32: narrow
+                                    // I64 â†’ F32/I32: narrow
                                     let in_i64 = bytemuck::cast_slice::<_, i64>(in_data).to_vec();
                                     let mut out_bytes = Vec::with_capacity(in_i64.len() * 4);
                                     for &v in &in_i64 {
@@ -7411,8 +5860,8 @@ impl Backend for CpuBackend {
                             // (in_dims, out_dims) are the source of truth.  The shape
                             // tensor (input[1]) is stored as F32 (4 bytes/elem) by the
                             // Shape/Gather/Concat pipeline, but the old code attempted to
-                            // read it as i64 (8 bytes/elem) — a latent bytemuck panic for
-                            // tensors with odd element counts (e.g. 3 dims → 12 bytes,
+                            // read it as i64 (8 bytes/elem) â€” a latent bytemuck panic for
+                            // tensors with odd element counts (e.g. 3 dims â†’ 12 bytes,
                             // not a multiple of 8).
 
                             // Read input data
@@ -8064,7 +6513,7 @@ impl Backend for CpuBackend {
                 }
             }
 
-            // ── Debug: per-instruction MaxPool canary check ──────────
+            // â”€â”€ Debug: per-instruction MaxPool canary check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             // After the current instruction has executed, check whether
             // any MaxPool primary slot has been overwritten.
             // Only active with `debug_canary` feature (expensive).
@@ -8088,7 +6537,7 @@ impl Backend for CpuBackend {
                 };
 
                 if let Some(mp_idx) = is_mp_and_idx {
-                    // This instruction just wrote MaxPool data → snapshot
+                    // This instruction just wrote MaxPool data â†’ snapshot
                     let (mp_off, mp_sz) = maxpool_ranges[mp_idx];
                     if mp_sz >= 4 && mp_off + 4 <= d.len() {
                         let bytes: [u8; 4] = d[mp_off..mp_off + 4].try_into().unwrap_or([0; 4]);
@@ -8112,7 +6561,7 @@ impl Backend for CpuBackend {
                         }
                     }
                 } else {
-                    // Not a MaxPool kernel — check if any MaxPool was corrupted
+                    // Not a MaxPool kernel â€” check if any MaxPool was corrupted
                     for (mp_idx, &(mp_off, mp_sz)) in maxpool_ranges.iter().enumerate() {
                         if !maxpool_seen[mp_idx] {
                             continue; // MaxPool hasn't executed yet
@@ -8318,7 +6767,7 @@ impl Backend for CpuBackend {
 
                 // Quantized MatMul family (u4, u8, and i8-activation
                 // variants).  Fall back to the standard dispatch path
-                // — PersistentPreparedWeights currently stores only f32
+                // â€” PersistentPreparedWeights currently stores only f32
                 // payloads, so a zero-copy quantized path isn't wired yet.
                 Instruction::CallKernel {
                     kernel_name,
@@ -8359,7 +6808,7 @@ impl Backend for CpuBackend {
     }
 }
 
-// ── Persistent-view dispatch helpers ────────────────────────
+// â”€â”€ Persistent-view dispatch helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // These helpers are private to the CpuBackend. They are intentionally
 // near-clones of the corresponding branches in `dispatch()` so the
@@ -8391,7 +6840,7 @@ fn dispatch_conv2d_fp32_with_view(
 
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
-            "conv2d_persistent: expected ≥ 2 input slices, got {}",
+            "conv2d_persistent: expected â‰¥ 2 input slices, got {}",
             input_slices.len()
         )));
     }
@@ -8415,7 +6864,7 @@ fn dispatch_conv2d_fp32_with_view(
     // Resolve the weight / bias f32 slices.  Persistent-view entries
     // are borrowed directly (no copy); non-overridden slots fall
     // back to a Vec copy of the arena bytes (these are rare in
-    // practice — the no-copy plan only filters WriteConst for
+    // practice â€” the no-copy plan only filters WriteConst for
     // overridden slots, so any non-overridden slot still has its
     // WriteConst running and the arena bytes are valid).
     let weight_f32: Vec<f32> = match view.get(&(weight_slice.offset, weight_slice.size)) {
@@ -8491,7 +6940,7 @@ fn dispatch_matmul_fp32_with_view(
 
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
-            "matmul_persistent: expected ≥ 2 input slices, got {}",
+            "matmul_persistent: expected â‰¥ 2 input slices, got {}",
             input_slices.len()
         )));
     }
@@ -8586,624 +7035,4 @@ fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<U8x4> {
         bytes[..raw.len()].copy_from_slice(raw);
     }
     bytemuck::cast_slice(&packed).to_vec()
-}
-
-macro_rules! impl_simd_unary_wrapper {
-    ($name:ident, $avx2:path, $scalar:path) => {
-        #[inline]
-        fn $name(input: &[f32], output: &mut [f32]) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if microkernels::simd_avx2_available() {
-                return unsafe { $avx2(input, output) };
-            }
-            let len = output.len().min(input.len());
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
-                    *o = $scalar(input[i]);
-                });
-            }
-            #[cfg(not(feature = "parallel"))]
-            for i in 0..len {
-                output[i] = $scalar(input[i]);
-            }
-        }
-    };
-}
-
-macro_rules! impl_simd_binary_wrapper {
-    ($name:ident, $avx2:path, $scalar:path, $op:expr) => {
-        #[inline]
-        fn $name(a: &[f32], b: &[f32], output: &mut [f32]) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if (a.len() == output.len() || b.len() == output.len())
-                && microkernels::simd_avx2_available()
-            {
-                return unsafe { $avx2(a, b, output) };
-            }
-            let len = output.len().min(a.len().max(b.len()));
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                let a_len = a.len();
-                let b_len = b.len();
-                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
-                    *o = $op(a[i % a_len], b[i % b_len]);
-                });
-            }
-            #[cfg(not(feature = "parallel"))]
-            $scalar(a, b, output);
-        }
-    };
-}
-
-macro_rules! impl_simd_scalar_wrapper {
-    ($name:ident, $avx2:path, $scalar:path, $op:expr) => {
-        #[inline]
-        fn $name(data: &[f32], s: f32, output: &mut [f32]) {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if microkernels::simd_avx2_available() {
-                return unsafe { $avx2(data, s, output) };
-            }
-            let len = output.len().min(data.len());
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
-                    *o = $op(data[i], s);
-                });
-            }
-            #[cfg(not(feature = "parallel"))]
-            $scalar(data, s, output);
-        }
-    };
-}
-
-// ============================================================
-// SIMD-aware elementwise dispatch wrappers
-// ============================================================
-// Each wrapper checks `simd_avx2_available()` at runtime and
-// delegates to the AVX2 microkernel when possible, falling back
-// to a scalar loop.  The scalar fallback is the same code that
-// was previously inlined in the big `dispatch()` match arms —
-// flattened to reduce duplication.
-
-impl_simd_unary_wrapper!(
-    relu_f32,
-    microkernels::relu_f32_avx2,
-    microkernels::relu_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    gelu_f32,
-    microkernels::gelu_f32_avx2,
-    microkernels::gelu_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    silu_f32,
-    microkernels::silu_f32_avx2,
-    microkernels::silu_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    sigmoid_f32,
-    microkernels::sigmoid_f32_avx2,
-    microkernels::sigmoid_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    tanh_f32,
-    microkernels::tanh_f32_avx2,
-    microkernels::tanh_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    exp_f32,
-    microkernels::exp_f32_avx2,
-    microkernels::exp_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    log_f32,
-    microkernels::log_f32_avx2,
-    microkernels::log_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    sqrt_f32,
-    microkernels::sqrt_f32_avx2,
-    microkernels::sqrt_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    neg_f32,
-    microkernels::neg_f32_avx2,
-    microkernels::neg_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    abs_f32,
-    microkernels::abs_f32_avx2,
-    microkernels::abs_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    elu_f32,
-    microkernels::elu_f32_avx2,
-    microkernels::elu_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    softplus_f32,
-    microkernels::softplus_f32_avx2,
-    microkernels::softplus_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    hardswish_f32,
-    microkernels::hardswish_f32_avx2,
-    microkernels::hardswish_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    sign_f32,
-    microkernels::sign_f32_avx2,
-    microkernels::sign_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    round_f32,
-    microkernels::round_f32_avx2,
-    microkernels::round_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    logical_not_f32,
-    microkernels::logical_not_f32_avx2,
-    microkernels::logical_not_f32_scalar
-);
-impl_simd_unary_wrapper!(
-    mish_f32,
-    microkernels::mish_f32_avx2,
-    microkernels::mish_f32_scalar
-);
-
-#[inline]
-fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) };
-    }
-    let len = output.len().min(input.len());
-    for i in 0..len {
-        output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope);
-    }
-}
-
-#[inline]
-fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) };
-    }
-    let len = output.len().min(input.len());
-    for i in 0..len {
-        output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val);
-    }
-}
-
-#[inline]
-fn log_softmax_f32(input: &[f32], output: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::log_softmax_f32_avx2(input, output) };
-    }
-    microkernels::log_softmax_f32_scalar_all(input, output);
-}
-
-// ── Binary ops ──────────────────────────────────────────────
-
-impl_simd_binary_wrapper!(
-    add_f32,
-    microkernels::add_f32_avx2_broadcast,
-    microkernels::add_f32_scalar_broadcast,
-    |a, b| a + b
-);
-impl_simd_binary_wrapper!(
-    sub_f32,
-    microkernels::sub_f32_avx2_broadcast,
-    microkernels::sub_f32_scalar_broadcast,
-    |a, b| a - b
-);
-impl_simd_binary_wrapper!(
-    mul_f32,
-    microkernels::mul_f32_avx2_broadcast,
-    microkernels::mul_f32_scalar_broadcast,
-    |a, b| a * b
-);
-impl_simd_binary_wrapper!(
-    div_f32,
-    microkernels::div_f32_avx2_broadcast,
-    microkernels::div_f32_scalar_broadcast,
-    |a, b| a / b
-);
-impl_simd_binary_wrapper!(
-    max_f32,
-    microkernels::max_f32_avx2_broadcast,
-    microkernels::max_f32_scalar_broadcast,
-    |a: f32, b: f32| a.max(b)
-);
-impl_simd_binary_wrapper!(
-    min_f32,
-    microkernels::min_f32_avx2_broadcast,
-    microkernels::min_f32_scalar_broadcast,
-    |a: f32, b: f32| a.min(b)
-);
-
-// ============================================================
-// New dispatch wrappers — Reductions
-// ============================================================
-
-#[inline]
-fn reduce_f32(input: &[f32], output: &mut [f32], group_size: usize, is_mean: bool, is_max: bool) {
-    if is_max {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if microkernels::simd_avx2_available() {
-            return unsafe { microkernels::reduce_max_f32_avx2(input, output, group_size) };
-        }
-        microkernels::reduce_max_f32_scalar(input, output, group_size);
-    } else {
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if microkernels::simd_avx2_available() {
-            return unsafe {
-                microkernels::reduce_sum_f32_avx2(input, output, group_size, is_mean)
-            };
-        }
-        microkernels::reduce_sum_f32_scalar(input, output, group_size, is_mean);
-    }
-}
-
-// ============================================================
-// New dispatch wrappers — Scalar arithmetic
-// ============================================================
-
-impl_simd_scalar_wrapper!(
-    add_scalar_f32,
-    microkernels::add_scalar_f32_avx2,
-    microkernels::add_scalar_f32_scalar,
-    |a, s| a + s
-);
-impl_simd_scalar_wrapper!(
-    mul_scalar_f32,
-    microkernels::mul_scalar_f32_avx2,
-    microkernels::mul_scalar_f32_scalar,
-    |a, s| a * s
-);
-impl_simd_scalar_wrapper!(
-    div_scalar_f32,
-    microkernels::div_scalar_f32_avx2,
-    microkernels::div_scalar_f32_scalar,
-    |a, s| a / s
-);
-
-// ============================================================
-// New dispatch wrappers — Scalar comparison
-// ============================================================
-
-impl_simd_scalar_wrapper!(
-    gt_scalar_f32,
-    microkernels::gt_scalar_f32_avx2,
-    microkernels::gt_scalar_f32_scalar,
-    |a, s| if a > s { 1.0 } else { 0.0 }
-);
-impl_simd_scalar_wrapper!(
-    lt_scalar_f32,
-    microkernels::lt_scalar_f32_avx2,
-    microkernels::lt_scalar_f32_scalar,
-    |a, s| if a < s { 1.0 } else { 0.0 }
-);
-impl_simd_scalar_wrapper!(
-    eq_scalar_f32,
-    microkernels::eq_scalar_f32_avx2,
-    microkernels::eq_scalar_f32_scalar,
-    |a, s| if a == s { 1.0 } else { 0.0 }
-);
-
-// ============================================================
-// New dispatch wrappers — BiasAdd, Norm, RMS Norm, Softmax
-// ============================================================
-
-#[inline]
-fn biasadd_f32(data: &[f32], bias: &[f32], output: &mut [f32], channel_stride: usize) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::biasadd_f32_avx2(data, bias, output, channel_stride) };
-    }
-    microkernels::biasadd_f32_scalar(data, bias, output, channel_stride);
-}
-
-#[inline]
-fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::norm_layernorm_f32_avx2(input, output, row_size, eps) };
-    }
-    microkernels::norm_layernorm_f32_scalar(input, output, row_size, eps);
-}
-
-#[inline]
-fn rms_norm_f32(input: &[f32], weight: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::rms_norm_f32_avx2(input, weight, output, row_size, eps) };
-    }
-    microkernels::rms_norm_f32_scalar(input, weight, output, row_size, eps);
-}
-
-#[inline]
-fn softmax_f32(
-    input: &[f32],
-    output: &mut [f32],
-    axis_dim_size: usize,
-    stride: usize,
-    num_rows: usize,
-) {
-    #[cfg(feature = "parallel")]
-    if num_rows > 1 && stride == 1 {
-        use rayon::prelude::*;
-        let has_avx2 = {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            {
-                microkernels::simd_avx2_available()
-            }
-            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-            {
-                false
-            }
-        };
-        // Build non-overlapping row slices before the parallel section
-        // to satisfy the borrow checker and rayon's Send requirements.
-        let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
-        for row in 0..num_rows {
-            let offset = row * axis_dim_size;
-            let inp = &input[offset..offset + axis_dim_size];
-            // SAFETY: Each row writes to a unique non-overlapping region of output.
-            let out = unsafe {
-                std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size)
-            };
-            row_slices.push((inp, out));
-        }
-        row_slices.par_iter_mut().for_each(|(inp, out)| {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if has_avx2 {
-                unsafe {
-                    microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1);
-                }
-                return;
-            }
-            microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
-        });
-        return;
-    }
-    // Single-threaded fallback
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe {
-            microkernels::softmax_f32_avx2_strided(input, output, axis_dim_size, stride, num_rows)
-        };
-    }
-    microkernels::softmax_f32_scalar_strided(input, output, axis_dim_size, stride, num_rows);
-}
-
-fn argmax_f32(input: &[f32], output: &mut [u64], axis: usize, dim_size: usize, inner: usize) {
-    if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
-        let max_idx = input
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u64)
-            .unwrap_or(0);
-        for v in output.iter_mut() {
-            *v = max_idx;
-        }
-    } else {
-        let outer = input.len() / (dim_size * inner);
-        for o in 0..outer {
-            for i in 0..inner {
-                let base = o * dim_size * inner + i;
-                let mut best_flat = base as u64;
-                let mut best_val = input[base];
-                for k in 1..dim_size {
-                    let flat_idx = base + k * inner;
-                    let val = input[flat_idx];
-                    if val > best_val {
-                        best_val = val;
-                        best_flat = flat_idx as u64;
-                    }
-                }
-                let out_idx = o * inner + i;
-                if out_idx < output.len() {
-                    output[out_idx] = best_flat;
-                }
-            }
-        }
-    }
-}
-
-// ============================================================
-// Optimizer update wrappers
-// ============================================================
-
-#[inline]
-fn sgd_update_f32(w: &[f32], g: &[f32], lr: f32, wd: f32) -> Vec<f32> {
-    let mut out = vec![0.0; w.len()];
-    sgd_update_f32_into(w, g, lr, wd, &mut out);
-    out
-}
-
-#[inline]
-fn sgd_update_f32_into(w: &[f32], g: &[f32], lr: f32, wd: f32, out: &mut [f32]) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        unsafe { microkernels::sgd_update_f32_avx2_into(w, g, lr, wd, out) };
-        return;
-    }
-    microkernels::sgd_update_f32_scalar_into(w, g, lr, wd, out);
-}
-
-#[inline]
-fn adam_update_f32(
-    w: &[f32],
-    g: &[f32],
-    m: &[f32],
-    v: &[f32],
-    lr: f32,
-    beta1: f32,
-    beta2: f32,
-    eps: f32,
-    bias_corr1: f32,
-    bias_corr2: f32,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe {
-            microkernels::adam_update_f32_avx2(
-                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2,
-            )
-        };
-    }
-    microkernels::adam_update_f32_scalar(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2)
-}
-
-#[inline]
-fn adamw_update_f32(
-    w: &[f32],
-    g: &[f32],
-    m: &[f32],
-    v: &[f32],
-    lr: f32,
-    beta1: f32,
-    beta2: f32,
-    eps: f32,
-    bias_corr1: f32,
-    bias_corr2: f32,
-    wd: f32,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut w_out = vec![0.0; w.len()];
-    let mut m_out = vec![0.0; m.len()];
-    let mut v_out = vec![0.0; v.len()];
-    adamw_update_f32_into(
-        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, &mut w_out, &mut m_out,
-        &mut v_out,
-    );
-    (w_out, m_out, v_out)
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn adamw_update_f32_into(
-    w: &[f32],
-    g: &[f32],
-    m: &[f32],
-    v: &[f32],
-    lr: f32,
-    beta1: f32,
-    beta2: f32,
-    eps: f32,
-    bias_corr1: f32,
-    bias_corr2: f32,
-    wd: f32,
-    w_out: &mut [f32],
-    m_out: &mut [f32],
-    v_out: &mut [f32],
-) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        unsafe {
-            microkernels::adamw_update_f32_avx2_into(
-                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, w_out, m_out, v_out,
-            )
-        };
-        return;
-    }
-    microkernels::adamw_update_f32_scalar_into(
-        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, wd, w_out, m_out, v_out,
-    );
-}
-
-#[inline]
-fn lion_update_f32(
-    w: &[f32],
-    g: &[f32],
-    m: &[f32],
-    lr: f32,
-    beta1: f32,
-    beta2: f32,
-    wd: f32,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut w_out = vec![0.0; w.len()];
-    let mut m_out = vec![0.0; m.len()];
-    lion_update_f32_into(w, g, m, lr, beta1, beta2, wd, &mut w_out, &mut m_out);
-    (w_out, m_out)
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn lion_update_f32_into(
-    w: &[f32],
-    g: &[f32],
-    m: &[f32],
-    lr: f32,
-    beta1: f32,
-    beta2: f32,
-    wd: f32,
-    w_out: &mut [f32],
-    m_out: &mut [f32],
-) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        unsafe {
-            microkernels::lion_update_f32_avx2_into(w, g, m, lr, beta1, beta2, wd, w_out, m_out)
-        };
-        return;
-    }
-    microkernels::lion_update_f32_scalar_into(w, g, m, lr, beta1, beta2, wd, w_out, m_out);
-}
-
-#[inline]
-fn rmsprop_update_f32(
-    w: &[f32],
-    g: &[f32],
-    v: &[f32],
-    lr: f32,
-    beta: f32,
-    eps: f32,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut w_out = vec![0.0; w.len()];
-    let mut v_out = vec![0.0; v.len()];
-    rmsprop_update_f32_into(w, g, v, lr, beta, eps, &mut w_out, &mut v_out);
-    (w_out, v_out)
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn rmsprop_update_f32_into(
-    w: &[f32],
-    g: &[f32],
-    v: &[f32],
-    lr: f32,
-    beta: f32,
-    eps: f32,
-    w_out: &mut [f32],
-    v_out: &mut [f32],
-) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        unsafe { microkernels::rmsprop_update_f32_avx2_into(w, g, v, lr, beta, eps, w_out, v_out) };
-        return;
-    }
-    microkernels::rmsprop_update_f32_scalar_into(w, g, v, lr, beta, eps, w_out, v_out);
-}
-
-#[inline]
-fn muon_update_f32(
-    w: &[f32],
-    g: &[f32],
-    m: &[f32],
-    lr: f32,
-    beta: f32,
-    wd: f32,
-) -> (Vec<f32>, Vec<f32>) {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if microkernels::simd_avx2_available() {
-        return unsafe { microkernels::muon_update_f32_avx2(w, g, m, lr, beta, wd) };
-    }
-    microkernels::muon_update_f32_scalar(w, g, m, lr, beta, wd)
 }

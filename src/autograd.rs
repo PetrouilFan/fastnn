@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // =============================================================================
 // Backward-compatibility stubs for v1.x code
 // These make the old nn/* and tensor/* modules compile during migration.
@@ -11,8 +9,6 @@ use crate::storage::{Device, Storage};
 use crate::tensor::{dtype_to_ir, Tensor, TensorImpl};
 use smallvec::SmallVec;
 use std::sync::Arc;
-
-
 
 // Thread-local gradient enable/disable (kept for backward compat).
 thread_local! {
@@ -179,9 +175,9 @@ struct CachedBackwardPlan {
 }
 
 static BACKWARD_GRAPH_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<(HashMap<u64, CachedBackwardPlan>, Vec<u64>)>,
+    parking_lot::Mutex<(HashMap<u64, CachedBackwardPlan>, Vec<u64>)>,
 > = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new((HashMap::with_capacity(32), Vec::with_capacity(32)))
+    parking_lot::Mutex::new((HashMap::with_capacity(32), Vec::with_capacity(32)))
 });
 
 /// Compute a cache key from the tape's op-name sequence and input shapes.
@@ -208,33 +204,6 @@ fn backward_cache_key(nodes: &[Arc<NodeInfo>], input_shapes: &[Vec<i64>]) -> u64
     hasher.finish()
 }
 
-/// BFS from root tensor to collect all backward nodes and build
-/// a grad_fn → forward_tensor map.
-///
-/// Returns (backward_nodes, grad_fn_id → forward_output_tensor).
-fn collect_backward_nodes(root: &Tensor) -> (Vec<Arc<NodeInfo>>, HashMap<usize, Tensor>) {
-    let mut visited: HashSet<usize> = HashSet::new();
-    let mut nodes: Vec<Arc<NodeInfo>> = Vec::new();
-    let mut grad_fn_to_tensor: HashMap<usize, Tensor> = HashMap::new();
-    let mut queue: Vec<Tensor> = vec![root.clone()];
-
-    while let Some(tensor) = queue.pop() {
-        if let Some(node) = tensor.grad_fn() {
-            let node_id = Arc::as_ptr(&node) as usize;
-            if visited.insert(node_id) {
-                grad_fn_to_tensor.insert(node_id, tensor.clone());
-                nodes.push(node.clone());
-
-                for input_tensor in &node.inputs {
-                    queue.push(input_tensor.clone());
-                }
-            }
-        }
-    }
-
-    (nodes, grad_fn_to_tensor)
-}
-
 /// From a set of backward nodes, find all leaf input tensors —
 /// those that require gradients and have no grad_fn of their own.
 fn collect_leaf_tensors(nodes: &[Arc<NodeInfo>]) -> Vec<Tensor> {
@@ -251,30 +220,6 @@ fn collect_leaf_tensors(nodes: &[Arc<NodeInfo>]) -> Vec<Tensor> {
     }
 
     leaf_tensors
-}
-
-/// Topological sort of backward nodes in **forward execution order** (predecessors first).
-///
-/// Uses DFS: edges point to predecessor backward nodes, so
-/// the DFS emits predecessors before their dependents.
-fn topological_order(nodes: &[Arc<NodeInfo>]) -> Vec<Arc<NodeInfo>> {
-    fn dfs(node: &Arc<NodeInfo>, visited: &mut HashSet<usize>, order: &mut Vec<Arc<NodeInfo>>) {
-        let ptr = Arc::as_ptr(node) as usize;
-        if !visited.insert(ptr) {
-            return;
-        }
-        for edge in node.edges() {
-            dfs(&edge.0, visited, order);
-        }
-        order.push(node.clone());
-    }
-
-    let mut visited: HashSet<usize> = HashSet::new();
-    let mut order: Vec<Arc<NodeInfo>> = Vec::new();
-    for node in nodes {
-        dfs(node, &mut visited, &mut order);
-    }
-    order
 }
 
 /// Extract the f32 scalar value from a 1-element CPU tensor.
@@ -455,10 +400,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     let mut results: Vec<Vec<u8>>;
 
     if grad_output.is_none() {
-        let cache_guard = match BACKWARD_GRAPH_CACHE.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let cache_guard = BACKWARD_GRAPH_CACHE.lock();
         if let Some(cached) = cache_guard.0.get(&cache_key) {
             // ── Cache HIT: use the cached combined graph directly ────────
             let mut grad_graph = cached.grad_graph.clone();
@@ -831,10 +773,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             grads,
             recorded_input_ids,
         };
-        let mut cache_guard = match BACKWARD_GRAPH_CACHE.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let mut cache_guard = BACKWARD_GRAPH_CACHE.lock();
         let (ref mut cache, ref mut order) = *cache_guard;
         if cache.len() >= 32 {
             if let Some(lru_key) = order.first().copied() {
@@ -900,21 +839,6 @@ mod tests {
             }
         }
         t
-    }
-
-    #[test]
-    fn test_collect_backward_nodes_simple() {
-        let a = seq_tensor(4).requires_grad_(true);
-        let b = seq_tensor(4).requires_grad_(true);
-        let c = a.add(&b);
-        let loss = c.mean(0, false);
-
-        let (nodes, map) = collect_backward_nodes(&loss);
-        assert!(!nodes.is_empty(), "should collect backward nodes");
-        assert!(
-            map.contains_key(&nodes[0].id()),
-            "forward tensor should be mapped"
-        );
     }
 
     #[test]

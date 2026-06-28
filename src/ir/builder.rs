@@ -24,13 +24,13 @@
 //! let result = g.compile_and_execute(&[&d], CpuBackend, &[&input_bytes_a, &input_bytes_b]);
 //! ```
 
+use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
 
 use crate::backend::executor::GraphExecutor;
 use crate::backend::{Backend, BackendError, ExecutablePlan};
@@ -80,17 +80,13 @@ fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]]) -> u64 {
 
 /// Insert a plan into the cache.
 fn cache_plan(key: u64, plan: ExecutablePlan, mp: MemoryPlan, graph: ComputeGraph) {
-    if let Ok(mut cache) = PLAN_CACHE.lock() {
-        cache.insert(key, (plan, mp, graph));
-    }
+    let mut cache = PLAN_CACHE.lock();
+    cache.insert(key, (plan, mp, graph));
 }
 
 /// Look up a plan in the cache.
 fn lookup_plan(key: u64) -> Option<(ExecutablePlan, MemoryPlan, ComputeGraph)> {
-    PLAN_CACHE
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&key).cloned())
+    PLAN_CACHE.lock().get(&key).cloned()
 }
 
 // =============================================================================
