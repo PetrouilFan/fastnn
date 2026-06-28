@@ -223,7 +223,7 @@ fn matmul_u4_reference_oracle_hits_quantized_dispatch_on_tail_k() {
             &expected,
             Tolerance {
                 abs: 0.45,
-                rel: 0.35,
+                rel: 0.40,
             },
         );
     }

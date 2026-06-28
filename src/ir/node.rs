@@ -740,6 +740,42 @@ impl TensorType {
                 // I8 activation payload includes 8-byte scale/zp header
                 numel + 8
             }
+            IrDType::F8 { .. } | IrDType::F8R { .. } => {
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 4,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
+                let words = rows * inner_dim.div_ceil(4) + 16;
+                words * 4
+            }
+            IrDType::F4 { .. } => {
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 8,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
+                let words = rows * inner_dim.div_ceil(8) + 16;
+                words * 4
+            }
             _ => numel * self.dtype.byte_size(),
         }
     }

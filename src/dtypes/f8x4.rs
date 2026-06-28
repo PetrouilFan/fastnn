@@ -174,4 +174,55 @@ mod tests {
         assert_eq!(encoded, 0x7F);
         assert!(e4m3_to_f32(0x7F).is_nan());
     }
+
+    #[test]
+    fn test_e4m3_subnormal() {
+        let val = e4m3_to_f32(0x01);
+        assert!(val > 0.0 && val < 0.1, "Smallest subnormal should be tiny, got {}", val);
+    }
+
+    #[test]
+    fn test_e4m3_neg_nan() {
+        assert!(e4m3_to_f32(0xFF).is_nan());
+    }
+
+    #[test]
+    fn test_e4m3_zero_nan_special_values() {
+        assert_eq!(e4m3_to_f32(0x00), 0.0);
+        assert_eq!(e4m3_to_f32(0x80), -0.0);
+        assert!(e4m3_to_f32(0x7F).is_nan());
+        assert!(e4m3_to_f32(0xFF).is_nan());
+    }
+
+    #[test]
+    fn test_e4m3_roundtrip_extensive() {
+        let test_vals = [
+            0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0,
+            -128.0, 240.0, -240.0, 0.25, 0.125, 1.5, 2.5, 3.5, 7.0, 15.0, 31.0, 63.0, 127.0,
+        ];
+        for &v in &test_vals {
+            let encoded = f32_to_e4m3(v);
+            let decoded = e4m3_to_f32(encoded);
+            let err = (decoded - v).abs();
+            assert!(
+                err < 0.5 * v.abs().max(1.0),
+                "E4M3 roundtrip err {} for input {}, encoded 0x{:02X}, decoded {}",
+                err,
+                v,
+                encoded,
+                decoded
+            );
+        }
+    }
+
+    #[test]
+    fn test_f8x4_pack_unpack_all_representable() {
+        let vals = [0.0, 240.0, -240.0, f32::NAN];
+        let packed = F8x4::pack_from_f32(vals);
+        let unpacked = packed.unpack_to_f32();
+        assert_eq!(unpacked[0], 0.0);
+        assert!((unpacked[1] - 240.0).abs() < 1.0);
+        assert!((unpacked[2] - (-240.0)).abs() < 1.0);
+        assert!(unpacked[3].is_nan());
+    }
 }

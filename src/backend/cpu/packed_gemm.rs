@@ -412,7 +412,7 @@ pub fn quantize_activations_to_f4x8(data: &[f32]) -> PackedTensor<F4x8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtypes::I8x4;
+    use crate::dtypes::{F4x8, I8x4};
     use crate::packed_tensor::PackedTensor;
 
     #[test]
@@ -433,5 +433,36 @@ mod tests {
 
         // Execute without panic - exact value depends on quantization scheme
         assert_eq!(c.len(), 16);
+    }
+
+    #[test]
+    fn test_gemm_packed_f4x8_simple() {
+        let a_data: Vec<f32> = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ];
+        let b_data: Vec<f32> = vec![
+            4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0,
+        ];
+        let a_packed = PackedTensor::<F4x8>::from_f32_per_channel(&a_data, &[2, 8]);
+        let b_packed = PackedTensor::<F4x8>::from_f32_per_channel(&b_data, &[2, 8]);
+        let mut c = vec![0.0f32; 4];
+        gemm_packed_f4x8(&a_packed, &b_packed, &mut c);
+        assert_eq!(c.len(), 4);
+        for &v in &c {
+            assert!(v.is_finite(), "Non-finite: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_gemm_packed_f4x8_zeros() {
+        let a_data = vec![0.0f32; 16];
+        let b_data = vec![0.0f32; 16];
+        let a_packed = PackedTensor::<F4x8>::from_f32_per_channel(&a_data, &[2, 8]);
+        let b_packed = PackedTensor::<F4x8>::from_f32_per_channel(&b_data, &[2, 8]);
+        let mut c = vec![0.0f32; 4];
+        gemm_packed_f4x8(&a_packed, &b_packed, &mut c);
+        assert!(c.iter().all(|v| *v == 0.0), "All-zero GEMM should give zeros: {:?}", c);
     }
 }
