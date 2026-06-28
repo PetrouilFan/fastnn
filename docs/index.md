@@ -7,7 +7,7 @@ A high-performance neural network library with a Rust core and Python bindings.
 FastNN provides:
 - **AOT compiler pipeline** — Compile computation graphs through shape inference, auto-cast, type inference, operator fusion, weight quantization, constant folding, dead code elimination, and memory planning before execution
 - **Native weight quantization** — 4-bit (U4x8) and 8-bit (U8x4) with per-channel scales, fused into GEMM/conv kernels
-- **IR-based execution** — `ComputeGraph` with 90 opcodes, `GraphBuilder` fluent API, `GraphExecutor` for compile+run
+- **IR-based execution** — `ComputeGraph` with 91 opcodes, `GraphBuilder` fluent API, `GraphExecutor` for compile+run
 - **Tensor operations** with full autograd support
 - **Neural network modules**: Linear, Conv1d/2d/3d, ConvTranspose2d, BatchNorm1d/2d, LayerNorm, RMSNorm, GroupNorm, Dropout, Dropout2d, Embedding, Upsample, activations, fused conv+bn layers
 - **Optimizers**: SGD, Adam, AdamW, Muon, Lion, RMSprop with learning rate schedulers
@@ -36,7 +36,7 @@ FastNN provides:
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.11+
 - numpy >= 1.24
 
 ## Quick Start
