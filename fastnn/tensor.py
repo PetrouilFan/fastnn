@@ -35,7 +35,7 @@ def _flatten(nested):
             stack.pop()
     return result
 
-def tensor(data, shape, device=None, dtype=None):
+def tensor(data, shape, device=None, dtype=None) -> "Tensor":
     if dtype is not None:
         raise ValueError("dtype not yet supported")
     if isinstance(data, np.ndarray):
@@ -58,51 +58,51 @@ def tensor(data, shape, device=None, dtype=None):
     return _core.tensor_from_data(flat_data, shape, device)
 
 
-def zeros(shape, dtype=None, device=None):
+def zeros(shape, dtype=None, device=None) -> "Tensor":
     return _core.zeros(shape, dtype=dtype, device=device)
 
 
-def ones(shape, dtype=None, device=None):
+def ones(shape, dtype=None, device=None) -> "Tensor":
     return _core.ones(shape, dtype=dtype, device=device)
 
 
-def full(shape, value: float, dtype=None, device=None):
+def full(shape, value: float, dtype=None, device=None) -> "Tensor":
     return _core.full(shape, value, dtype=dtype, device=device)
 
 
-def eye(n: int, device=None):
+def eye(n: int, device=None) -> "Tensor":
     return _core.eye(n, device=device)
 
 
-def arange(start: float, end: float, step: float = 1.0, device=None):
+def arange(start: float, end: float, step: float = 1.0, device=None) -> "Tensor":
     return _core.arange(start, end, step, device=device)
 
 
-def linspace(start: float, end: float, steps: int, device=None):
+def linspace(start: float, end: float, steps: int, device=None) -> "Tensor":
     return _core.linspace(start, end, steps, device=device)
 
 
-def rand(shape, device=None):
+def rand(shape, device=None) -> "Tensor":
     return _core.rand_uniform(shape, device=device)
 
 
-def randn(shape, device=None):
+def randn(shape, device=None) -> "Tensor":
     return _core.randn(shape, device=device)
 
 
-def randint(low: int, high: int, shape, device=None):
+def randint(low: int, high: int, shape, device=None) -> "Tensor":
     return _core.randint(shape, low, high, device=device)
 
 
-def zeros_like(tensor, device=None):
+def zeros_like(tensor, device=None) -> "Tensor":
     return _core.zeros_like(tensor, device=device)
 
 
-def ones_like(tensor, device=None):
+def ones_like(tensor, device=None) -> "Tensor":
     return _core.ones_like(tensor, device=device)
 
 
-def full_like(tensor, value: float, device=None):
+def full_like(tensor, value: float, device=None) -> "Tensor":
     return _core.full_like(tensor, value, device=device)
 
 
