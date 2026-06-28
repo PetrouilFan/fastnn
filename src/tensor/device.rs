@@ -51,12 +51,16 @@ impl TensorImpl {
                     DType::F16 => {
                         let src = data.as_ptr() as *const half::f16;
                         let offset = self.storage_offset as usize;
+                        // SAFETY: The `src` pointer is derived from a valid `Vec<u8>` storage and `offset + numel`
+                        // is within the bounds of that storage, verified by prior shape/offset validation.
                         let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
                         slice.iter().map(|&v| f32::from(v)).collect()
                     }
                     DType::BF16 => {
                         let src = data.as_ptr() as *const half::bf16;
                         let offset = self.storage_offset as usize;
+                        // SAFETY: The `src` pointer is derived from a valid `Vec<u8>` storage and `offset + numel`
+                        // is within the bounds of that storage, verified by prior shape/offset validation.
                         let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
                         slice.iter().map(|&v| f32::from(v)).collect()
                     }
@@ -100,6 +104,8 @@ impl TensorImpl {
                     DType::F16 => {
                         let dst = new_bytes.as_mut_ptr() as *mut half::f16;
                         for (i, &v) in f32_data.iter().enumerate() {
+                            // SAFETY: The `dst` pointer is derived from `new_bytes` which has been allocated
+                            // with `nbytes = numel * dtype.size()`, ensuring `dst.add(i)` is valid for all `i < numel`.
                             unsafe {
                                 *dst.add(i) = half::f16::from_f32(v);
                             }
@@ -108,6 +114,8 @@ impl TensorImpl {
                     DType::BF16 => {
                         let dst = new_bytes.as_mut_ptr() as *mut half::bf16;
                         for (i, &v) in f32_data.iter().enumerate() {
+                            // SAFETY: The `dst` pointer is derived from `new_bytes` which has been allocated
+                            // with `nbytes = numel * dtype.size()`, ensuring `dst.add(i)` is valid for all `i < numel`.
                             unsafe {
                                 *dst.add(i) = half::bf16::from_f32(v);
                             }

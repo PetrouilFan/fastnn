@@ -1,0 +1,332 @@
+"""Behavioural tests for `AotExecutor.forward_prepared_fallback()`.
+
+Mission 017 introduces an opt-in prepared-execution fallback path on
+`AotExecutor`. The contract is: the new method accepts the same input
+shape as `forward`, validates that the prepared plan is consistent
+with the underlying executable plan, then dispatches through the
+existing executor machinery. The result must be **byte-identical** to
+`forward` on the same inputs.
+
+These tests build tiny ONNX-style graphs with `AotExecutor`, run
+`forward` and `forward_prepared_fallback` side-by-side, and assert
+that both produce the same output tensor(s). They require the
+`prepared-plan` Rust feature to be enabled at build time.
+"""
+
+import numpy as np
+import pytest
+
+
+def _relu_graph():
+    """Single Relu graph: y = relu(x)."""
+    import fastnn as fnn
+
+    return fnn.AotExecutor(
+        [
+            {
+                "name": "relu1",
+                "op_type": "Relu",
+                "inputs": "x",
+                "outputs": "y",
+            }
+        ],
+        {},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+
+
+def test_forward_prepared_fallback_matches_forward_relu():
+    """Both paths produce identical Relu outputs on a 1x4 input."""
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    x = fnn.tensor(np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4])
+
+    expected = executor.forward({"x": x})
+    fallback = executor.forward_prepared_fallback({"x": x})
+
+    assert set(expected.keys()) == set(fallback.keys()) == {"y"}
+    np.testing.assert_array_equal(
+        expected["y"].numpy(), fallback["y"].numpy()
+    )
+    np.testing.assert_allclose(
+        fallback["y"].numpy(), [[0.0, 0.0, 2.0, 3.0]]
+    )
+
+
+def test_forward_prepared_fallback_is_repeatable():
+    """Repeated calls to the fallback must return identical outputs."""
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    x = fnn.tensor(np.asarray([[-2.0, -1.0, 0.5, 1.5]], dtype=np.float32), [1, 4])
+
+    first = executor.forward_prepared_fallback({"x": x})
+    second = executor.forward_prepared_fallback({"x": x})
+    np.testing.assert_array_equal(
+        first["y"].numpy(), second["y"].numpy()
+    )
+
+
+def test_forward_prepared_fallback_chain_relu_then_neg():
+    """Multi-instruction plan: y = relu(x) then z = neg(y).
+
+    Exercises the order-mapping check on a plan with two `CallKernel`
+    instructions and no `WriteConst` constant producer.
+    """
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "relu1",
+            "op_type": "Relu",
+            "inputs": "x",
+            "outputs": "y",
+        },
+        {
+            "name": "neg1",
+            "op_type": "Neg",
+            "inputs": "y",
+            "outputs": "z",
+        },
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {},
+        ["x"],
+        ["z"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, -3.0]], dtype=np.float32), [1, 4]
+    )
+
+    expected = executor.forward({"x": x})
+    fallback = executor.forward_prepared_fallback({"x": x})
+
+    np.testing.assert_array_equal(
+        expected["z"].numpy(), fallback["z"].numpy()
+    )
+    # relu([-1, 0, 2, -3]) = [0, 0, 2, 0]; neg = [0, 0, -2, 0]
+    np.testing.assert_allclose(
+        fallback["z"].numpy(), [[0.0, 0.0, -2.0, 0.0]]
+    )
+
+
+def test_forward_prepared_fallback_matches_forward_with_constant_input():
+    """Graph with a Constant input (=> WriteConst in the compiled plan)
+    must still match across the two paths. This is the exact plan
+    shape the order-mapping validation is meant to cover.
+    """
+    import fastnn as fnn
+
+    # y = relu(x + b) where b is a graph constant.
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {
+            "name": "add1",
+            "op_type": "Add",
+            "inputs": "x,b",
+            "outputs": "s",
+        },
+        {
+            "name": "relu1",
+            "op_type": "Relu",
+            "inputs": "s",
+            "outputs": "y",
+        },
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    expected = executor.forward({"x": x})
+    fallback = executor.forward_prepared_fallback({"x": x})
+
+    np.testing.assert_array_equal(
+        expected["y"].numpy(), fallback["y"].numpy()
+    )
+    # y = relu([-0.5, -0.5, 2.25, 2.75]) = [0, 0, 2.25, 2.75]
+    np.testing.assert_allclose(
+        fallback["y"].numpy(), [[0.0, 0.0, 2.25, 2.75]]
+    )
+
+
+def test_forward_prepared_fallback_method_exists():
+    """Smoke: the new method must be exposed on the AotExecutor pyclass.
+
+    Acts as a guard against accidental removal during a future refactor.
+    """
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    assert hasattr(executor, "forward_prepared_fallback")
+    assert callable(executor.forward_prepared_fallback)
+
+
+
+def test_forward_prepared_arena_fallback_matches_forward_with_constant_input():
+    """Arena-preload fallback is behaviour-identical on a WriteConst plan.
+
+    This graph does not contain Conv2d, but it verifies the Python entry
+    point and the shared prepared fallback plumbing. The YOLO smoke test
+    covers the Conv2d/static-weight case end-to-end.
+    """
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    expected = executor.forward({"x": x})
+    fallback = executor.forward_prepared_fallback({"x": x})
+    arena_fallback = executor.forward_prepared_arena_fallback({"x": x})
+
+    np.testing.assert_array_equal(expected["y"].numpy(), fallback["y"].numpy())
+    np.testing.assert_array_equal(expected["y"].numpy(), arena_fallback["y"].numpy())
+
+
+def test_forward_prepared_arena_fallback_method_exists():
+    """Smoke: arena-preload fallback is exposed on AotExecutor."""
+    executor = _relu_graph()
+    assert hasattr(executor, "forward_prepared_arena_fallback")
+    assert callable(executor.forward_prepared_arena_fallback)
+
+
+def test_profile_prepared_arena_fallback_matches_profile_shape():
+    """Prepared arena profiling exposes the same shape as profile().
+
+    This is the public measurement hook needed before comparing
+    WriteConst traffic on the arena-preload path against the default
+    dynamic profile.
+    """
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    x = fnn.tensor(np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4])
+
+    default_profile = executor.profile({"x": x})
+    prepared_profile = executor.profile_prepared_arena_fallback({"x": x})
+
+    assert set(default_profile.keys()) == {"outputs", "profile"}
+    assert set(prepared_profile.keys()) == {"outputs", "profile"}
+    np.testing.assert_array_equal(
+        default_profile["outputs"]["y"].numpy(), prepared_profile["outputs"]["y"].numpy()
+    )
+    assert prepared_profile["profile"]
+    assert {"instruction_index", "node_id", "kernel_name", "elapsed_ns", "node_name"}.issubset(
+        prepared_profile["profile"][0].keys()
+    )
+
+
+# ── forward_prepared_no_copy (persistent immutable view) ────────────
+
+
+def test_forward_prepared_no_copy_method_exists():
+    """The persistent no-copy entry point is exposed on AotExecutor."""
+    executor = _relu_graph()
+    assert hasattr(executor, "forward_prepared_no_copy")
+    assert callable(executor.forward_prepared_no_copy)
+
+
+def test_forward_prepared_no_copy_matches_forward_relu():
+    """Persistent no-copy path is bit-identical to forward on a pure Relu.
+
+    No Conv2d / MatMul with a packed Fp32 slot is present, so the
+    persistent view stays empty and the dispatch loop falls through to
+    the standard per-instruction path. This guards the entry point.
+    """
+    import fastnn as fnn
+
+    executor = _relu_graph()
+    x = fnn.tensor(np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4])
+
+    expected = executor.forward({"x": x})
+    no_copy = executor.forward_prepared_no_copy({"x": x})
+
+    assert set(no_copy.keys()) == {"y"}
+    np.testing.assert_array_equal(
+        expected["y"].numpy(), no_copy["y"].numpy()
+    )
+
+
+def test_forward_prepared_no_copy_matches_forward_with_constant_input():
+    """Persistent no-copy path is bit-identical on a WriteConst plan."""
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    expected = executor.forward({"x": x})
+    no_copy = executor.forward_prepared_no_copy({"x": x})
+
+    np.testing.assert_array_equal(expected["y"].numpy(), no_copy["y"].numpy())
+
+
+def test_forward_prepared_no_copy_is_repeatable():
+    """Repeated calls to the persistent no-copy path return identical outputs."""
+    import fastnn as fnn
+
+    bias = fnn.tensor(
+        np.asarray([0.5, -0.5, 0.25, -0.25], dtype=np.float32), [1, 4]
+    )
+    nodes = [
+        {"name": "add1", "op_type": "Add", "inputs": "x,b", "outputs": "s"},
+        {"name": "relu1", "op_type": "Relu", "inputs": "s", "outputs": "y"},
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {"b": bias},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [1, 4]},
+    )
+    x = fnn.tensor(
+        np.asarray([[-1.0, 0.0, 2.0, 3.0]], dtype=np.float32), [1, 4]
+    )
+
+    first = executor.forward_prepared_no_copy({"x": x})
+    second = executor.forward_prepared_no_copy({"x": x})
+
+    np.testing.assert_array_equal(first["y"].numpy(), second["y"].numpy())
+

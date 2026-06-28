@@ -30,13 +30,9 @@ impl Module for Dropout {
             let numel = x_data.len();
 
             let mut rng = rand::thread_rng();
-            // SAFETY: We immediately fill all numel elements in the branches below.
-            let mut mask_data: Vec<f32> = Vec::with_capacity(numel);
-            unsafe {
-                mask_data.set_len(numel);
-            }
 
-            if numel > 100_000 {
+            let mask_data: Vec<f32> = if numel > 100_000 {
+                let mut data = Vec::with_capacity(numel);
                 let chunk_size = 4096;
                 for chunk_start in (0..numel).step_by(chunk_size) {
                     let chunk_end = std::cmp::min(chunk_start + chunk_size, numel);
@@ -46,19 +42,22 @@ impl Module for Dropout {
                     rng.fill(&mut rand_vals[..]);
 
                     for i in 0..chunk_len {
-                        mask_data[chunk_start + i] = if rand_vals[i] < keep_prob as f32 {
+                        data.push(if rand_vals[i] < keep_prob as f32 {
                             scale
                         } else {
                             0.0
-                        };
+                        });
                     }
                 }
+                data
             } else {
-                rng.fill(&mut mask_data[..]);
-                for val in mask_data.iter_mut() {
+                let mut data = vec![0.0f32; numel];
+                rng.fill(&mut data[..]);
+                for val in data.iter_mut() {
                     *val = if *val < keep_prob as f32 { scale } else { 0.0 };
                 }
-            }
+                data
+            };
 
             let shape = x.shape_ref();
             let mask = Tensor::from_vec(mask_data, shape.to_vec());
@@ -108,21 +107,12 @@ impl Module for Dropout2d {
             // Generate mask: [N, C, 1, 1] that will broadcast
             let mut rng = rand::thread_rng();
             let num_masks = batch * channels;
-            // Avoid zero-initialization
-            let mut channel_mask_data: Vec<f32> = Vec::with_capacity(num_masks);
-            // SAFETY: We immediately fill all num_masks elements below.
-            unsafe {
-                channel_mask_data.set_len(num_masks);
-            }
             let mut rand_vals = vec![0.0f32; num_masks];
             rng.fill(&mut rand_vals[..]);
-            for i in 0..num_masks {
-                channel_mask_data[i] = if rand_vals[i] < keep_prob as f32 {
-                    scale
-                } else {
-                    0.0
-                };
-            }
+            let channel_mask_data: Vec<f32> = rand_vals
+                .iter()
+                .map(|&v| if v < keep_prob as f32 { scale } else { 0.0 })
+                .collect();
 
             let channel_mask =
                 Tensor::from_vec(channel_mask_data, vec![batch as i64, channels as i64, 1, 1]);

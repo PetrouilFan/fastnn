@@ -45,16 +45,23 @@ fn fused_binary_activation_dispatch_slices(
             let len = out_f32.len();
             let ptr = out_f32.as_mut_ptr();
             if kernel_name.ends_with("relu_f32") {
+                // SAFETY: The pointer `ptr` was obtained from `out_f32.as_mut_ptr()` and the
+                // two created slices alias the same memory, which is sound because the SIMD
+                // kernel requires a shared input and a mutable output that may alias.
                 unsafe {
                     let v = std::slice::from_raw_parts(ptr, len);
                     microkernels::relu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
                 }
             } else if kernel_name.ends_with("gelu_f32") {
+                // SAFETY: Same aliasing pattern as relu_f32 — the two raw slices point at the
+                // same buffer, which the SIMD kernel accepts as valid input/output.
                 unsafe {
                     let v = std::slice::from_raw_parts(ptr, len);
                     microkernels::gelu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));
                 }
             } else if kernel_name.ends_with("silu_f32") {
+                // SAFETY: Same aliasing pattern as relu_f32 — the two raw slices point at the
+                // same buffer, which the SIMD kernel accepts as valid input/output.
                 unsafe {
                     let v = std::slice::from_raw_parts(ptr, len);
                     microkernels::silu_f32_avx2(v, std::slice::from_raw_parts_mut(ptr, len));

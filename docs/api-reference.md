@@ -28,7 +28,7 @@ loss = fnn.mse_loss(pred, target)
 | Function | Description |
 |----------|-------------|
 | `fnn.tensor(data, shape, device=None)` | Create tensor from flat Python list + shape |
-| `fnn.from_numpy(arr, device=None)` | Create tensor from numpy array |
+| `fnn.tensor_from_numpy(arr, device=None)` | Create tensor from numpy array |
 | `fnn.zeros(shape, dtype=None, device=None)` | Create tensor of zeros |
 | `fnn.ones(shape, dtype=None, device=None)` | Create tensor of ones |
 | `fnn.full(shape, value, dtype=None, device=None)` | Create tensor filled with value |
@@ -239,14 +239,6 @@ fnn.io.convert_from_pytorch(torch_model, "model.fnn")
 info = fnn.io.convert_from_onnx("model.onnx", "model.fnn")
 ```
 
-## AOT Compiler Pipeline
-
-```python
-import fastnn as fnn
-
-# Compile a model to an AOT execution plan
-# (all models use the AOT path automatically)
-
 ## YOLO & NMS Utilities
 
 ```python
@@ -281,7 +273,7 @@ fnn.batched_mlp_forward()  # Batched MLP inference
 fnn.clear_storage_pool()   # Clear storage pool cache
 fnn.import_onnx(onnx_path, fnn_path)  # Import ONNX model
 fnn.load_state_dict(model, state_dict)  # Load state dict
-fnn.from_numpy(arr)        # Create tensor from numpy array
+fnn.tensor_from_numpy(arr)  # Create tensor from numpy array
 ```
 
 ## Parallel Training

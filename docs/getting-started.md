@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Python 3.12 or higher
+- Python 3.11 or higher
 - numpy >= 1.24
 
 ### Build from Source

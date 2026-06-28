@@ -6,6 +6,7 @@
 //! it sees `IrDType::U4/U8` on the weight input.
 
 use crate::dtypes::{U4x8, U8x4};
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
 
@@ -20,24 +21,39 @@ use crate::packed_tensor::PackedTensor;
 /// (scale, zero_point) pair per output channel (row).  The scales and
 /// zero_points are stored directly on the `IrDType::U4/U8` variant so
 /// the CPU backend can feed them into `PackedTensor::from_raw(…)`.
-pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), String> {
+pub fn quantize_weights(
+    graph: &mut ComputeGraph,
+    bit_width: u8,
+    group_size: Option<usize>,
+) -> Result<(), FastnnError> {
     // ---- Phase 1: collect (constant_id, consumer_id) pairs to quantize ----
     // We collect first, then mutate, to avoid borrow-checker issues.
     let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
-        // Only quantize weights for MatMul-family and Conv-family ops.
-        let is_consumer = matches!(
+        // Quantize weights consumed by MatMul/Conv ops AND optimizer ops.
+        // For MatMul/Conv, the weight is input[1] (input[0] is activation).
+        // For optimizer ops (SgdUpdate, AdamUpdate, etc.), the weight is input[0].
+        let is_matmul_conv = matches!(
             node.opcode,
             Opcode::MatMul | Opcode::Conv1d | Opcode::Conv2d | Opcode::Conv3d
         );
-        if !is_consumer {
+        let is_optimizer = matches!(
+            node.opcode,
+            Opcode::SgdUpdate
+                | Opcode::AdamUpdate
+                | Opcode::AdamWUpdate
+                | Opcode::MuonUpdate
+                | Opcode::LionUpdate
+                | Opcode::RmspropUpdate
+        );
+        if !is_matmul_conv && !is_optimizer {
             return Ok(());
         }
 
-        // The weight is typically input[1] (input[0] is the activation).
-        if let Some(&weight_id) = node.inputs.get(1) {
+        let weight_idx = if is_optimizer { 0 } else { 1 };
+        if let Some(&weight_id) = node.inputs.get(weight_idx) {
             let weight_node = match graph_ref.get_node(weight_id) {
                 Some(n) => n,
                 None => return Ok(()),
@@ -57,7 +73,8 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
             }
         }
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     if to_quantize.is_empty() {
         return Ok(());
@@ -116,7 +133,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
             }
             (transposed, vec![cols, rows])
         } else {
-            (f32_data, orig_shape)
+            (f32_data, orig_shape.clone())
         };
 
         // Determine inner dimension for the weight tensor.
@@ -132,7 +149,15 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
         let (packed_bytes, new_dtype) = if bit_width == 4 {
-            let pt = PackedTensor::<U4x8>::from_f32_per_channel(&quant_data, &quant_shape);
+            let pt = if let Some(gs) = group_size {
+                PackedTensor::<U4x8>::from_f32_per_channel_asymmetric_grouped(
+                    &quant_data,
+                    &quant_shape,
+                    gs,
+                )
+            } else {
+                PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
+            };
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
@@ -142,7 +167,15 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
                 },
             )
         } else {
-            let pt = PackedTensor::<U8x4>::from_f32_per_channel(&quant_data, &quant_shape);
+            let pt = if let Some(gs) = group_size {
+                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric_grouped(
+                    &quant_data,
+                    &quant_shape,
+                    gs,
+                )
+            } else {
+                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
+            };
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
@@ -154,8 +187,15 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
         };
 
         // Build the new TensorType with packed dtype.
+        // Keep the logical shape as the original [K, N] — the packed data
+        // layout is [N, K] (transposed in Phase 2 above) but validate_shapes
+        // and memory planning rely on the logical [K, N] convention. The
+        // backend compile step reverses to [N, K] for the gemm meta.
         let new_tensor_type = TensorType {
-            shape: const_node.output_type.shape.clone(),
+            shape: orig_shape
+                .iter()
+                .map(|&d| DimExpr::Known(d as u64))
+                .collect(),
             dtype: new_dtype,
         };
 
@@ -188,9 +228,7 @@ pub fn quantize_weights(graph: &mut ComputeGraph, bit_width: u8) -> Result<(), S
 ///
 /// The pass also updates `graph.outputs` so that any output pointing at the
 /// optimizer node is redirected to the Quantize node.
-pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> {
-    use std::collections::HashMap;
-
+pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     // Collect optimizer nodes that need wrapping, along with their
     // weight input ID and the bit_width to requantize to.
     #[derive(Clone)]
@@ -199,7 +237,6 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
         weight_id: NodeId,
         bit_width: usize,
         opt_inputs: Vec<NodeId>, // remaining inputs (grad, m, v, etc.)
-        opt_attrs: HashMap<String, String>,
     }
 
     let mut to_wrap: Vec<OptimizerWrap> = Vec::new();
@@ -244,10 +281,10 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
             weight_id,
             bit_width,
             opt_inputs: remaining_inputs,
-            opt_attrs: node.attrs.clone(),
         });
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     if to_wrap.is_empty() {
         return Ok(());
@@ -279,18 +316,42 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
         }
 
         // 3. Create Quantize node after the optimizer: updated_f32 → updated_u4
+        // Carry through the original calibrated scales/zeros so the runtime
+        // can skip the O(N×K) per-channel abs-max scan on every optimizer step.
+        let (orig_scales, orig_zeros) = graph
+            .get_node(wrap.weight_id)
+            .map(|wn| match &wn.output_type.dtype {
+                IrDType::U4 {
+                    scales,
+                    zero_points,
+                    ..
+                } => (scales.clone(), zero_points.clone()),
+                IrDType::U8 {
+                    scales,
+                    zero_points,
+                    ..
+                } => (scales.clone(), zero_points.clone()),
+                _ => (vec![], vec![]),
+            })
+            .unwrap_or_default();
+
         let u_type = TensorType::new(
             weight_type.shape.clone(),
             match wrap.bit_width {
                 4 => IrDType::U4 {
-                    scales: vec![],
-                    zero_points: vec![],
+                    scales: orig_scales,
+                    zero_points: orig_zeros,
                 },
                 8 => IrDType::U8 {
-                    scales: vec![],
-                    zero_points: vec![],
+                    scales: orig_scales,
+                    zero_points: orig_zeros,
                 },
-                _ => return Err(format!("unsupported bit_width: {}", wrap.bit_width)),
+                _ => {
+                    return Err(FastnnError::compilation(format!(
+                        "unsupported bit_width: {}",
+                        wrap.bit_width
+                    )))
+                }
             },
         );
         let mut q_attrs = std::collections::HashMap::new();
@@ -370,7 +431,7 @@ mod tests {
         );
 
         // Quantize to U4.
-        quantize_weights(&mut graph, 4).expect("quantization should succeed");
+        quantize_weights(&mut graph, 4, None).expect("quantization should succeed");
 
         // Verify the weight node dtype is now U4.
         let has_u4_const = graph.nodes.iter().any(|n| {
@@ -418,7 +479,7 @@ mod tests {
         ];
         let mut graph = build_matmul_graph(&weight_data, &[2, 8]);
 
-        quantize_weights(&mut graph, 8).expect("quantization should succeed");
+        quantize_weights(&mut graph, 8, None).expect("quantization should succeed");
 
         let has_u8_const = graph.nodes.iter().any(|n| {
             matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::U8 { .. }))
@@ -463,7 +524,7 @@ mod tests {
         let mut graph = gb.to_graph();
 
         // Quantize should be a no-op (already U4).
-        quantize_weights(&mut graph, 4).expect("quantization should succeed");
+        quantize_weights(&mut graph, 4, None).expect("quantization should succeed");
 
         // The weight should still be U4 (unchanged).
         let node = graph
@@ -484,7 +545,7 @@ mod tests {
         let _output = gb.relu(&input);
         let mut graph = gb.to_graph();
 
-        quantize_weights(&mut graph, 4).expect("quantization should succeed on empty graph");
+        quantize_weights(&mut graph, 4, None).expect("quantization should succeed on empty graph");
     }
 
     #[test]
@@ -501,7 +562,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (plan, _, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&gb.to_graph(), Some(4))
+            .compile_with_plan_and_quantize(&gb.to_graph(), Some(4), None)
             .expect("compile with quantization should succeed");
 
         // Verify that the compiled plan contains a matmul_u4 kernel.
@@ -530,7 +591,7 @@ mod tests {
     // ── Phase 3a: Dequantize-then-update optimizer tests ─────────────
 
     /// Helper: create a graph with a Constant weight that feeds both MatMul
-    /// and an SgdUpdate optimizer op. Returns (graph, input_id, dW_id, weight_id).
+    /// and an SgdUpdate optimizer op. Returns (graph, input_id, d_w_id, weight_id).
     ///
     /// MatMul: [1, K] @ [K, N] = [1, N], where K = w_shape[0], N = w_shape[1].
     fn build_training_graph_with_constant_weight(
@@ -552,30 +613,30 @@ mod tests {
         let weight_id = weight.node_id;
         let _mm = gb.matmul(&input, &weight);
         // Gradient for the weight
-        let dW = gb.input_with_dims(
+        let d_w = gb.input_with_dims(
             &w_shape
                 .iter()
                 .map(|&d| DimExpr::Known(d as u64))
                 .collect::<Vec<_>>(),
             IrDType::F32,
         );
-        let dW_id = dW.node_id;
+        let d_w_id = d_w.node_id;
         // Optimizer step: weight -= 0.01 * (grad + 0.0 * weight)
-        let _updated = gb.apply_sgd(&weight, &dW, 0.01, 0.0);
+        let _updated = gb.apply_sgd(&weight, &d_w, 0.01, 0.0);
         let input_id = input.node_id;
-        (gb, input_id, dW_id, weight_id)
+        (gb, input_id, d_w_id, weight_id)
     }
 
     #[test]
     fn test_wrap_quantized_optimizer_sgd() {
         let weight_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let w_shape: Vec<usize> = vec![4, 2];
-        let (gb, input_id, dW_id, weight_id) =
+        let (gb, input_id, d_w_id, weight_id) =
             build_training_graph_with_constant_weight(&weight_data, &w_shape);
 
         // Clone the graph and run the full pipeline with quantization
         let mut graph = gb.to_graph();
-        graph.inputs = vec![input_id, dW_id];
+        graph.inputs = vec![input_id, d_w_id];
         // Set outputs to include the SgdUpdate output (which is the last node)
         let sgd_id = graph
             .nodes
@@ -587,7 +648,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (_plan, _memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4))
+            .compile_with_plan_and_quantize(&graph, Some(4), None)
             .expect("compile with quantization should succeed");
 
         // After compile:
@@ -664,14 +725,14 @@ mod tests {
         let _mm = gb.matmul(&input, &weight);
 
         // Gradient and state tensors
-        let dW = gb.input_with_dims(
+        let d_w = gb.input_with_dims(
             &w_shape
                 .iter()
                 .map(|&d| DimExpr::Known(d as u64))
                 .collect::<Vec<_>>(),
             IrDType::F32,
         );
-        let dW_id = dW.node_id;
+        let d_w_id = d_w.node_id;
         let m = gb.input_with_dims(
             &w_shape
                 .iter()
@@ -689,11 +750,11 @@ mod tests {
         );
         let v_id = v.node_id;
 
-        let _updated = gb.apply_adam(&weight, &dW, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
+        let _updated = gb.apply_adam(&weight, &d_w, &m, &v, 0.01, 0.9, 0.999, 1e-8, 1);
 
         let mut graph = gb.to_graph();
-        // All inputs: input, dW, m, v (weight is a Constant, not an input)
-        graph.inputs = vec![input.node_id, dW_id, m_id, v_id];
+        // All inputs: input, d_w, m, v (weight is a Constant, not an input)
+        graph.inputs = vec![input.node_id, d_w_id, m_id, v_id];
         let adam_id = graph
             .nodes
             .iter()
@@ -704,7 +765,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (_plan, _memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4))
+            .compile_with_plan_and_quantize(&graph, Some(4), None)
             .expect("compile with quantization should succeed");
 
         // Verify wrapping for Adam
@@ -743,18 +804,18 @@ mod tests {
     fn test_quantized_training_sgd_end_to_end() {
         let weight_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let w_shape: Vec<usize> = vec![4, 2];
-        let (gb, input_id, dW_id, _weight_id) =
+        let (gb, input_id, d_w_id, _weight_id) =
             build_training_graph_with_constant_weight(&weight_data, &w_shape);
 
         // x = [[1.0, 1.0, 1.0, 1.0]] (1x4) for [1,4] @ [4,2] → [1,2]
         let x_data: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0];
         let x_bytes: Vec<u8> = bytemuck::cast_slice(&x_data).to_vec();
-        let dW_data: Vec<f32> = vec![0.1; 8]; // [4, 2]
-        let dW_bytes: Vec<u8> = bytemuck::cast_slice(&dW_data).to_vec();
+        let d_w_data: Vec<f32> = vec![0.1; 8]; // [4, 2]
+        let d_w_bytes: Vec<u8> = bytemuck::cast_slice(&d_w_data).to_vec();
 
         // Build graph and compile+execute with quantization
         let mut graph = gb.to_graph();
-        graph.inputs = vec![input_id, dW_id];
+        graph.inputs = vec![input_id, d_w_id];
         let sgd_id = graph
             .nodes
             .iter()
@@ -765,7 +826,7 @@ mod tests {
 
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4))
+            .compile_with_plan_and_quantize(&graph, Some(4), None)
             .expect("compile with quantization should succeed");
         // Debug: print output slot size for quantized weight
         let q_node = compiled_graph
@@ -784,7 +845,7 @@ mod tests {
                 &compiled_graph,
                 &mut plan,
                 &memory_plan,
-                &[&x_bytes, &dW_bytes],
+                &[&x_bytes, &d_w_bytes],
             )
             .expect("quantized training execution should succeed");
 
@@ -796,26 +857,26 @@ mod tests {
 
         // Execute with zero gradient — the updated weight should equal the original
         // (within quantization precision), since update = 0 * lr = 0.
-        let dW_zero: Vec<f32> = vec![0.0; 8];
-        let dW_zero_bytes: Vec<u8> = bytemuck::cast_slice(&dW_zero).to_vec();
+        let d_w_zero: Vec<f32> = vec![0.0; 8];
+        let d_w_zero_bytes: Vec<u8> = bytemuck::cast_slice(&d_w_zero).to_vec();
         let results_zero = executor
             .execute(
                 &compiled_graph,
                 &mut plan,
                 &memory_plan,
-                &[&x_bytes, &dW_zero_bytes],
+                &[&x_bytes, &d_w_zero_bytes],
             )
             .expect("execution with zero grad should succeed");
 
         // Execute with a large gradient — should differ from zero-grad result
-        let dW_large: Vec<f32> = vec![100.0; 8];
-        let dW_large_bytes: Vec<u8> = bytemuck::cast_slice(&dW_large).to_vec();
+        let d_w_large: Vec<f32> = vec![100.0; 8];
+        let d_w_large_bytes: Vec<u8> = bytemuck::cast_slice(&d_w_large).to_vec();
         let results_large = executor
             .execute(
                 &compiled_graph,
                 &mut plan,
                 &memory_plan,
-                &[&x_bytes, &dW_large_bytes],
+                &[&x_bytes, &d_w_large_bytes],
             )
             .expect("execution with large grad should succeed");
 
@@ -846,7 +907,7 @@ mod tests {
     fn test_builder_apply_sgd_quantized_weight() {
         let gb = GraphBuilder::new();
         // Create weight as U4 parameter
-        let W = gb.parameter(
+        let w = gb.parameter(
             &[4, 2],
             IrDType::U4 {
                 scales: vec![1.0; 4],
@@ -854,11 +915,11 @@ mod tests {
             },
         );
         // Gradient is F32
-        let dW = gb.parameter(&[4, 2], IrDType::F32);
+        let d_w = gb.parameter(&[4, 2], IrDType::F32);
         // This should auto-wrap with Dequantize/Quantize
-        let updated = gb.apply_sgd(&W, &dW, 0.01, 0.0);
+        let updated = gb.apply_sgd(&w, &d_w, 0.01, 0.0);
 
-        // The updated tensor should be Quantize(SgdUpdate(Dequantize(W), dW))
+        // The updated tensor should be Quantize(SgdUpdate(Dequantize(W), d_w))
         let graph = gb.to_graph();
         let has_deq = graph
             .nodes

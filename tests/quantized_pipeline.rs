@@ -267,13 +267,9 @@ fn test_conv2d_u4_end_to_end() {
         sum_sq += diff * diff;
         if f32_val.abs() > 0.01 {
             let rel_err = (diff / f32_val as f64).abs();
-            if rel_err < 0.6 {
-                u4_correct += 1;
-            }
+            if rel_err < 0.6 { u4_correct += 1; }
         } else {
-            if diff.abs() < 0.1 {
-                u4_correct += 1;
-            }
+            if diff.abs() < 0.1 { u4_correct += 1; }
         }
     }
     let rms = (sum_sq / 18.0).sqrt();
@@ -347,21 +343,21 @@ fn test_compile_with_quantize_rejects_invalid_bit_width() {
     let graph = gb.to_graph();
     let executor = GraphExecutor::new(CpuBackend);
 
-    let result = executor.compile_with_plan_and_quantize(&graph, Some(2));
+    let result = executor.compile_with_plan_and_quantize(&graph, Some(2), None);
     assert!(result.is_err(), "Bit width 2 should be rejected");
 
-    let result = executor.compile_with_plan_and_quantize(&graph, Some(16));
+    let result = executor.compile_with_plan_and_quantize(&graph, Some(16), None);
     assert!(result.is_err(), "Bit width 16 should be rejected");
 
     // None and Some(4) and Some(8) should succeed
     assert!(executor
-        .compile_with_plan_and_quantize(&graph, None)
+        .compile_with_plan_and_quantize(&graph, None, None)
         .is_ok());
     assert!(executor
-        .compile_with_plan_and_quantize(&graph, Some(4))
+        .compile_with_plan_and_quantize(&graph, Some(4), None)
         .is_ok());
     assert!(executor
-        .compile_with_plan_and_quantize(&graph, Some(8))
+        .compile_with_plan_and_quantize(&graph, Some(8), None)
         .is_ok());
 }
 
@@ -523,7 +519,7 @@ fn test_matmul_u8_i8_dispatch_path() {
 
     // Apply weight quantization (U8) to convert the f32 weight constant.
     infer_shapes(&mut graph).unwrap();
-    quantize_weights(&mut graph, 8).unwrap();
+    quantize_weights(&mut graph, 8, None).unwrap();
     eliminate_dead_code(&mut graph);
 
     // Now the MatMul should see [I8, U8] and select "matmul_u8_i8".
@@ -598,7 +594,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     graph.set_outputs(vec![mm_id]);
 
     infer_shapes(&mut graph).unwrap();
-    quantize_weights(&mut graph, 4).unwrap();
+    quantize_weights(&mut graph, 4, None).unwrap();
     eliminate_dead_code(&mut graph);
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
@@ -640,6 +636,7 @@ fn test_matmul_u4_i8_dispatch_path() {
         .iter()
         .map(|dim| dim.evaluate().unwrap() as usize)
         .collect();
+    // Weight node shape is logical [K, N]; data is packed in [N, K] layout.
     if packed_shape.len() == 2 {
         packed_shape.reverse();
     }
@@ -674,6 +671,146 @@ fn test_matmul_u4_i8_dispatch_path() {
             err
         );
     }
+}
+
+/// Diagnostic test: count quantized vs non-quantized conv2d kernel names
+/// in the compiled ExecutablePlan after `compile_with_plan_and_quantize`.
+///
+/// Builds a small 3-Conv2d + SiLU graph, compiles with `Some(4)`, then
+/// iterates `plan.instructions` and counts kernel names by pattern.
+#[test]
+fn test_count_quantized_kernel_names() {
+    let gb = GraphBuilder::new();
+
+    // Input: [1, 3, 8, 8]
+    let input = gb.input_with_dims(
+        &[
+            DimExpr::Known(1),
+            DimExpr::Known(3),
+            DimExpr::Known(8),
+            DimExpr::Known(8),
+        ],
+        IrDType::F32,
+    );
+
+    // Conv2d 1: 3 -> 8 channels, 3x3, stride=1, pad=1 => [1, 8, 8, 8]
+    let w1_tt = TensorType::new(
+        vec![
+            DimExpr::Known(8),
+            DimExpr::Known(3),
+            DimExpr::Known(3),
+            DimExpr::Known(3),
+        ],
+        IrDType::F32,
+    );
+    let w1_data: Vec<f32> = (0..(8 * 3 * 3 * 3)).map(|i| (i as f32) * 0.01).collect();
+    let w1 = gb.constant(bytemuck::cast_slice(&w1_data), w1_tt);
+    let conv1 = gb.conv2d_with_params(&input, &w1, 1, 1, 1, 1);
+    let silu1 = gb.silu(&conv1);
+
+    // Conv2d 2: 8 -> 16 channels, 3x3, stride=1, pad=1 => [1, 16, 8, 8]
+    let w2_tt = TensorType::new(
+        vec![
+            DimExpr::Known(16),
+            DimExpr::Known(8),
+            DimExpr::Known(3),
+            DimExpr::Known(3),
+        ],
+        IrDType::F32,
+    );
+    let w2_data: Vec<f32> = (0..(16 * 8 * 3 * 3)).map(|i| (i as f32) * 0.01).collect();
+    let w2 = gb.constant(bytemuck::cast_slice(&w2_data), w2_tt);
+    let conv2 = gb.conv2d_with_params(&silu1, &w2, 1, 1, 1, 1);
+    let silu2 = gb.silu(&conv2);
+
+    // Conv2d 3: 16 -> 32 channels, 3x3, stride=2, pad=1 => [1, 32, 4, 4]
+    let w3_tt = TensorType::new(
+        vec![
+            DimExpr::Known(32),
+            DimExpr::Known(16),
+            DimExpr::Known(3),
+            DimExpr::Known(3),
+        ],
+        IrDType::F32,
+    );
+    let w3_data: Vec<f32> = (0..(32 * 16 * 3 * 3)).map(|i| (i as f32) * 0.01).collect();
+    let w3 = gb.constant(bytemuck::cast_slice(&w3_data), w3_tt);
+    let conv3 = gb.conv2d_with_params(&silu2, &w3, 2, 1, 1, 1);
+    let _silu3 = gb.silu(&conv3);
+
+    // Compile with U4 quantization
+    let graph = gb.to_graph();
+    let executor = GraphExecutor::new(CpuBackend);
+    let (plan, _mem, _compiled_graph) = executor
+        .compile_with_plan_and_quantize(&graph, Some(4), None)
+        .expect("compile_with_plan_and_quantize(4) should succeed");
+
+    // Collect and classify kernel names
+    let mut conv2d_quant_u4 = 0usize;
+    let mut conv2d_quant_u8 = 0usize;
+    let mut conv2d_fp32 = 0usize;
+    let mut other_kernel_names: Vec<String> = Vec::new();
+
+    for instr in &plan.instructions {
+        if let Instruction::CallKernel {
+            kernel_name,
+            weight_meta,
+            ..
+        } = instr
+        {
+            let meta_info = weight_meta
+                .as_ref()
+                .map(|m| format!("(bw={}, scales={})", m.bit_width, m.scales.len()))
+                .unwrap_or_default();
+
+            if kernel_name.starts_with("conv2d_u4") {
+                conv2d_quant_u4 += 1;
+            } else if kernel_name.starts_with("conv2d_u8") {
+                conv2d_quant_u8 += 1;
+            } else if kernel_name.starts_with("conv2d") {
+                conv2d_fp32 += 1;
+            }
+
+            other_kernel_names.push(format!("{}{}", kernel_name, meta_info));
+        }
+    }
+
+    eprintln!("=== test_count_quantized_kernel_names ===");
+    eprintln!("Total instructions: {}", plan.instructions.len());
+    eprintln!("conv2d_u4 (quantized 4-bit): {}", conv2d_quant_u4);
+    eprintln!("conv2d_u8 (quantized 8-bit): {}", conv2d_quant_u8);
+    eprintln!("conv2d    (FP32 non-quantized): {}", conv2d_fp32);
+    eprintln!("All kernel names:");
+    for (i, name) in other_kernel_names.iter().enumerate() {
+        eprintln!("  [{}] {}", i, name);
+    }
+
+    // We built 3 Conv2d layers. After quantization with U4, all three
+    // should use quantized kernels (conv2d_u4* or conv2d_u8*).
+    let total_quantized = conv2d_quant_u4 + conv2d_quant_u8;
+    assert!(
+        total_quantized > 0,
+        "Expected at least one quantized conv2d kernel (conv2d_u4* or conv2d_u8*), \
+         but found conv2d_u4={}, conv2d_u8={}, conv2d_fp32={}",
+        conv2d_quant_u4,
+        conv2d_quant_u8,
+        conv2d_fp32,
+    );
+
+    // With 3 Conv2d layers and U4 quantization, expect exactly 3 quantized conv kernels.
+    assert_eq!(
+        total_quantized, 3,
+        "Expected 3 quantized conv2d kernels for 3 Conv2d layers, got {} \
+         (conv2d_u4={}, conv2d_u8={}, conv2d_fp32={})",
+        total_quantized, conv2d_quant_u4, conv2d_quant_u8, conv2d_fp32,
+    );
+
+    // All 3 should be U4, not U8
+    assert_eq!(
+        conv2d_quant_u4, 3,
+        "Expected all 3 conv kernels to be conv2d_u4*, but got conv2d_u4={}",
+        conv2d_quant_u4,
+    );
 }
 
 /// End-to-end CPU auto-cast path: a non-input activation is quantized to I8,
