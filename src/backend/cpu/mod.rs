@@ -268,7 +268,7 @@ impl Backend for CpuBackend {
                         (_, true)
                             if input_dtypes
                                 .first()
-                                .map_or(false, |d| matches!(d, IrDType::I8))
+                                .is_some_and(|d| matches!(d, IrDType::I8))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
                         {
                             "matmul_u4_i8"
@@ -277,7 +277,7 @@ impl Backend for CpuBackend {
                         (_, true)
                             if input_dtypes
                                 .first()
-                                .map_or(false, |d| matches!(d, IrDType::I8))
+                                .is_some_and(|d| matches!(d, IrDType::I8))
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
                                 && !input_dtypes
                                     .iter()
