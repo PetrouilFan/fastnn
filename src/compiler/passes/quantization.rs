@@ -3,9 +3,9 @@
 //! Finds f32 Constant weight nodes feeding MatMul/Conv2d ops and replaces
 //! them with packed U4/U8 data carrying per-channel scale/zero-point metadata.
 //! The backend dispatch already selects `matmul_u4`/`matmul_u8` kernels when
-//! it sees `IrDType::U4/U8` on the weight input.
+//! it sees `IrDType::I4/U8` on the weight input.
 
-use crate::dtypes::{U4x8, U8x4};
+use crate::dtypes::{I4x8, I8x4};
 use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
@@ -19,7 +19,7 @@ use crate::packed_tensor::PackedTensor;
 ///
 /// For a weight of shape `[out_channels, in_features]`, we compute one
 /// (scale, zero_point) pair per output channel (row).  The scales and
-/// zero_points are stored directly on the `IrDType::U4/U8` variant so
+/// zero_points are stored directly on the `IrDType::I4/U8` variant so
 /// the CPU backend can feed them into `PackedTensor::from_raw(…)`.
 pub fn quantize_weights(
     graph: &mut ComputeGraph,
@@ -150,31 +150,31 @@ pub fn quantize_weights(
         // Quantize using PackedTensor and extract raw bytes + metadata.
         let (packed_bytes, new_dtype) = if bit_width == 4 {
             let pt = if let Some(gs) = group_size {
-                PackedTensor::<U4x8>::from_f32_per_channel_asymmetric_grouped(
+                PackedTensor::<I4x8>::from_f32_per_channel_asymmetric_grouped(
                     &quant_data,
                     &quant_shape,
                     gs,
                 )
             } else {
-                PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
+                PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
             };
             let bytes = pt.as_bytes().to_vec();
             (
                 bytes,
-                IrDType::U4 {
+                IrDType::I4 {
                     scales: pt.scales,
                     zero_points: pt.zeros,
                 },
             )
         } else {
             let pt = if let Some(gs) = group_size {
-                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric_grouped(
+                PackedTensor::<I8x4>::from_f32_per_channel_asymmetric_grouped(
                     &quant_data,
                     &quant_shape,
                     gs,
                 )
             } else {
-                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
+                PackedTensor::<I8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
             };
             let bytes = pt.as_bytes().to_vec();
             (
@@ -268,7 +268,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         };
 
         let bit_width = match &weight_node.output_type.dtype {
-            IrDType::U4 { .. } => 4,
+            IrDType::I4 { .. } => 4,
             IrDType::U8 { .. } => 8,
             _ => return Ok(()), // weight is not quantized, skip
         };
@@ -321,7 +321,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         let (orig_scales, orig_zeros) = graph
             .get_node(wrap.weight_id)
             .map(|wn| match &wn.output_type.dtype {
-                IrDType::U4 {
+                IrDType::I4 {
                     scales,
                     zero_points,
                     ..
@@ -338,7 +338,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         let u_type = TensorType::new(
             weight_type.shape.clone(),
             match wrap.bit_width {
-                4 => IrDType::U4 {
+                4 => IrDType::I4 {
                     scales: orig_scales,
                     zero_points: orig_zeros,
                 },
@@ -435,7 +435,7 @@ mod tests {
 
         // Verify the weight node dtype is now U4.
         let has_u4_const = graph.nodes.iter().any(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::U4 { .. }))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::I4 { .. }))
         });
         assert!(
             has_u4_const,
@@ -446,10 +446,10 @@ mod tests {
         // The [2,8] weight is transposed to [8,2] for the packed GEMM convention,
         // resulting in 8 per-channel scales (one per output channel = N dimension).
         let u4_node = graph.nodes.iter().find(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::U4 { .. }))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::I4 { .. }))
         }).unwrap();
 
-        if let IrDType::U4 {
+        if let IrDType::I4 {
             scales,
             zero_points,
         } = &u4_node.output_type.dtype
@@ -514,7 +514,7 @@ mod tests {
         let weight_data: Vec<u8> = vec![0u8; 4]; // dummy packed data
         let weight_tt = TensorType::new(
             vec![DimExpr::Known(2), DimExpr::Known(4)],
-            IrDType::U4 {
+            IrDType::I4 {
                 scales: vec![1.0],
                 zero_points: vec![0.0],
             },
@@ -533,7 +533,7 @@ mod tests {
             .find(|n| matches!(&n.opcode, Opcode::Constant(TensorValue::Data { .. })))
             .unwrap();
         assert!(
-            matches!(node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(node.output_type.dtype, IrDType::I4 { .. }),
             "Should still be U4"
         );
     }
@@ -568,7 +568,7 @@ mod tests {
         // Verify that the compiled plan contains a matmul_u4 kernel.
         let has_u4_kernel = plan.instructions.iter().any(|i| match i {
             crate::backend::Instruction::CallKernel { kernel_name, .. } => {
-                kernel_name == "matmul_u4"
+                kernel_name == "matmul_i4"
             }
             _ => false,
         });
@@ -581,7 +581,7 @@ mod tests {
         let has_u4_weight = compiled_graph
             .nodes
             .iter()
-            .any(|n| matches!(&n.output_type.dtype, IrDType::U4 { .. }));
+            .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
         assert!(
             has_u4_weight,
             "Compiled graph should contain a U4 weight node"
@@ -656,7 +656,7 @@ mod tests {
         let u4_weight = compiled_graph
             .nodes
             .iter()
-            .find(|n| matches!(&n.output_type.dtype, IrDType::U4 { .. }));
+            .find(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
         assert!(u4_weight.is_some(), "Weight should be quantized to U4");
 
         // 2. Dequantize node should exist (inserted by wrap_quantized_optimizer)
@@ -772,7 +772,7 @@ mod tests {
         let has_u4 = compiled_graph
             .nodes
             .iter()
-            .any(|n| matches!(&n.output_type.dtype, IrDType::U4 { .. }));
+            .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
         assert!(has_u4, "Weight should be quantized to U4");
 
         let has_deq = compiled_graph
@@ -909,7 +909,7 @@ mod tests {
         // Create weight as U4 parameter
         let w = gb.parameter(
             &[4, 2],
-            IrDType::U4 {
+            IrDType::I4 {
                 scales: vec![1.0; 4],
                 zero_points: vec![0.0; 4],
             },
@@ -938,7 +938,7 @@ mod tests {
 
         // The output dtype should be U4
         assert!(
-            matches!(updated.dtype(), IrDType::U4 { .. }),
+            matches!(updated.dtype(), IrDType::I4 { .. }),
             "Updated weight should have U4 dtype, got {:?}",
             updated.dtype()
         );

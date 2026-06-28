@@ -18,13 +18,13 @@ class Precision(IntEnum):
     """
     F32 = 0  # Full float32, no quantization
     F16 = 1  # PackedTensor<F16x2> (2 × f16 per u32 word)
-    U8 = 2   # PackedTensor<U8x4>  (4 × i8 per u32 word)
-    U4 = 3   # PackedTensor<U4x8>  (8 × i4 per u32 word)
+    I8 = 2   # PackedTensor<I8x4>  (4 × i8 per u32 word)
+    I4 = 3   # PackedTensor<I4x8>  (8 × i4 per u32 word)
 
     @property
     def bit_width(self) -> int:
         return {Precision.F32: 32, Precision.F16: 16,
-                Precision.U8: 8, Precision.U4: 4}[self]
+                Precision.I8: 8, Precision.I4: 4}[self]
 
     @property
     def is_float(self) -> bool:
@@ -32,7 +32,7 @@ class Precision(IntEnum):
 
     @property
     def is_quantized(self) -> bool:
-        return self in (Precision.U8, Precision.U4)
+        return self in (Precision.I8, Precision.I4)
 
     @staticmethod
     def from_dtype_tag(tag: int) -> "Precision":
@@ -46,8 +46,8 @@ class Precision(IntEnum):
         mapping = {
             "f32": Precision.F32, "float32": Precision.F32,
             "f16": Precision.F16, "float16": Precision.F16,
-            "u8": Precision.U8, "uint8": Precision.U8,
-            "u4": Precision.U4, "uint4": Precision.U4,
+            "u8": Precision.I8, "uint8": Precision.I8,
+            "u4": Precision.I4, "uint4": Precision.I4,
         }
         s = s.lower().replace("-", "").replace("_", "")
         if s not in mapping:
@@ -353,9 +353,9 @@ def linear_only_u4() -> PrecisionConfig:
     return PrecisionConfig(
         default=Quantizer(Precision.F32),
         prefixes={
-            "Gemm_": Quantizer(Precision.U4, scheme="per_channel"),
-            "fc": Quantizer(Precision.U4, scheme="per_channel"),
-            "classifier.": Quantizer(Precision.U4, scheme="per_channel"),
+            "Gemm_": Quantizer(Precision.I4, scheme="per_channel"),
+            "fc": Quantizer(Precision.I4, scheme="per_channel"),
+            "classifier.": Quantizer(Precision.I4, scheme="per_channel"),
         },
     )
 
@@ -363,21 +363,21 @@ def linear_only_u4() -> PrecisionConfig:
 def conv_u8_linear_u4() -> PrecisionConfig:
     """U8 for Conv weights, U4 for Linear/Gemm weights."""
     return PrecisionConfig(
-        default=Quantizer(Precision.U4, scheme="per_channel"),
+        default=Quantizer(Precision.I4, scheme="per_channel"),
         prefixes={
-            "Conv_": Quantizer(Precision.U8, scheme="per_channel"),
+            "Conv_": Quantizer(Precision.I8, scheme="per_channel"),
         },
     )
 
 
 def all_u4() -> PrecisionConfig:
     """All weight parameters in U4."""
-    return PrecisionConfig.uniform(Precision.U4)
+    return PrecisionConfig.uniform(Precision.I4)
 
 
 def all_u8() -> PrecisionConfig:
     """All weight parameters in U8."""
-    return PrecisionConfig.uniform(Precision.U8)
+    return PrecisionConfig.uniform(Precision.I8)
 
 
 def all_f16() -> PrecisionConfig:

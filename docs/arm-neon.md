@@ -27,8 +27,8 @@ cargo test --test cross_arch_consistency
 ## NEON Kernels
 
 The following operations have NEON-optimized implementations:
-- GEMV for U4x8 packed weights
-- GEMV for U8x4 packed weights
+- GEMV for I4x8 packed weights
+- GEMV for I8x4 packed weights
 - Element-wise add, mul, relu
 - Softmax
 - Reduction sum
