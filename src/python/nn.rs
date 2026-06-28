@@ -1043,6 +1043,74 @@ impl Sequential {
             Ok(params)
         }
     }
+
+    fn named_parameters(&self, py: Python<'_>) -> PyResult<Vec<(String, PyTensor)>> {
+        if self.native_layers.len() == self.layers.len() {
+            let mut params = vec![];
+            for (i, layer) in self.native_layers.iter().enumerate() {
+                for (name, t) in layer.named_parameters() {
+                    params.push((format!("{}.{}", i, name), PyTensor::from_tensor(t)));
+                }
+            }
+            Ok(params)
+        } else {
+            let mut params = vec![];
+            for (i, layer) in self.layers.iter().enumerate() {
+                if let Ok(m) = layer.getattr(py, "named_parameters") {
+                    let layer_params: Vec<(String, PyTensor)> = m.call0(py)?.extract(py)?;
+                    for (name, t) in layer_params {
+                        params.push((format!("{}.{}", i, name), t));
+                    }
+                }
+            }
+            Ok(params)
+        }
+    }
+
+    fn train(&self, py: Python<'_>) {
+        for layer in &self.native_layers {
+            layer.train_mode();
+        }
+        for layer in &self.layers {
+            if let Ok(m) = layer.getattr(py, "train") {
+                let _ = m.call0(py);
+            }
+        }
+    }
+
+    fn eval(&self, py: Python<'_>) {
+        for layer in &self.native_layers {
+            layer.eval_mode();
+        }
+        for layer in &self.layers {
+            if let Ok(m) = layer.getattr(py, "eval") {
+                let _ = m.call0(py);
+            }
+        }
+    }
+
+    fn is_training(&self, py: Python<'_>) -> bool {
+        if let Some(layer) = self.native_layers.first() {
+            return layer.is_training();
+        }
+        if let Some(layer) = self.layers.first() {
+            if let Ok(m) = layer.getattr(py, "is_training") {
+                return m.call0(py).ok().and_then(|v| v.extract::<bool>(py).ok()).unwrap_or(false);
+            }
+        }
+        false
+    }
+
+    fn zero_grad(&self, py: Python<'_>) {
+        for layer in &self.native_layers {
+            layer.zero_grad();
+        }
+        for layer in &self.layers {
+            if let Ok(m) = layer.getattr(py, "zero_grad") {
+                let _ = m.call0(py);
+            }
+        }
+    }
 }
 
 #[pyclass]
