@@ -20,19 +20,29 @@ class Precision(IntEnum):
     F16 = 1  # PackedTensor<F16x2> (2 × f16 per u32 word)
     I8 = 2   # PackedTensor<I8x4>  (4 × i8 per u32 word)
     I4 = 3   # PackedTensor<I4x8>  (8 × i4 per u32 word)
+    F8 = 4   # PackedTensor<F8x4>  (4 × FP8 E4M3 per u32 word)
+    F8R = 5  # PackedTensor<F8x4R> (4 × FP8 E5M2 per u32 word)
+    F4 = 6   # PackedTensor<F4x8>  (8 × FP4 E2M1 per u32 word)
 
     @property
     def bit_width(self) -> int:
         return {Precision.F32: 32, Precision.F16: 16,
-                Precision.I8: 8, Precision.I4: 4}[self]
+                Precision.I8: 8, Precision.I4: 4,
+                Precision.F8: 8, Precision.F8R: 8, Precision.F4: 4}[self]
 
     @property
     def is_float(self) -> bool:
-        return self in (Precision.F32, Precision.F16)
+        return self in (Precision.F32, Precision.F16,
+                        Precision.F8, Precision.F8R, Precision.F4)
 
     @property
     def is_quantized(self) -> bool:
         return self in (Precision.I8, Precision.I4)
+
+    @property
+    def is_packed(self) -> bool:
+        return self in (Precision.F16, Precision.I8, Precision.I4,
+                        Precision.F8, Precision.F8R, Precision.F4)
 
     @staticmethod
     def from_dtype_tag(tag: int) -> "Precision":
@@ -48,6 +58,9 @@ class Precision(IntEnum):
             "f16": Precision.F16, "float16": Precision.F16,
             "u8": Precision.I8, "uint8": Precision.I8,
             "u4": Precision.I4, "uint4": Precision.I4,
+            "f8": Precision.F8, "fp8": Precision.F8, "e4m3": Precision.F8,
+            "f8r": Precision.F8R, "fp8r": Precision.F8R, "e5m2": Precision.F8R,
+            "f4": Precision.F4, "fp4": Precision.F4, "e2m1": Precision.F4,
         }
         s = s.lower().replace("-", "").replace("_", "")
         if s not in mapping:
