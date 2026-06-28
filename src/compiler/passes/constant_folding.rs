@@ -57,6 +57,8 @@ fn has_side_effects(opcode: &Opcode) -> bool {
             | Opcode::LionUpdate
             | Opcode::RmspropUpdate
             | Opcode::GradientScale
+            | Opcode::QuantizeGradient
+            | Opcode::DequantizeGradient
     )
 }
 
