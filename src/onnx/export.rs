@@ -184,6 +184,10 @@ fn detect_qlinear_patterns(
                 scales,
                 zero_points,
             } => (scales.clone(), zero_points.clone()),
+            IrDType::F4 {
+                scales,
+            } => (scales.clone(), vec![0.0f32]),
+            IrDType::F8 { .. } | IrDType::F8R { .. } => (vec![1.0f32], vec![0.0f32]),
             _ => continue,
         };
 
@@ -282,9 +286,7 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         } => {
             let s = scales.first().copied().unwrap_or(1.0);
             let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
-            // If scales is empty, try computing from bit_width
             if scales.is_empty() {
-                // Default U4 scale: max_val = 15, symmetric → scale = 1.0
                 (1.0, 0)
             } else {
                 (s, zp)
@@ -300,6 +302,17 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
                 (1.0, 0)
             } else {
                 (s, zp)
+            }
+        }
+        IrDType::F8 { .. } | IrDType::F8R { .. } => (1.0, 0),
+        IrDType::F4 {
+            scales,
+        } => {
+            let s = scales.first().copied().unwrap_or(1.0);
+            if scales.is_empty() {
+                (1.0, 0)
+            } else {
+                (s, 0)
             }
         }
         _ => (1.0, 0),
@@ -531,7 +544,7 @@ pub fn export_to_onnx_json_with_config(
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
                         let is_packed =
-                            matches!(&tensor_type.dtype, IrDType::I4 { .. } | IrDType::U8 { .. });
+                            matches!(&tensor_type.dtype, IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F4 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. });
                         if is_packed {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
@@ -549,6 +562,9 @@ pub fn export_to_onnx_json_with_config(
                                     dtype: match &tensor_type.dtype {
                                         IrDType::I4 { .. } => "u4".to_string(),
                                         IrDType::U8 { .. } => "u8".to_string(),
+                                        IrDType::F4 { .. } => "f4".to_string(),
+                                        IrDType::F8 { .. } => "f8".to_string(),
+                                        IrDType::F8R { .. } => "f8r".to_string(),
                                         _ => unreachable!(),
                                     },
                                 },
