@@ -4,13 +4,14 @@ v0.8.0 Hardware Latency Gate: Control Loop Profiling Script
 Run this on your actual target hardware to verify 1kHz+ control frequency stability.
 """
 
+import os
 import sys
 import time
 import argparse
 import gc
 import numpy as np
 
-sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fastnn
 

@@ -4,11 +4,12 @@ v0.8.0 Verification Gate: WGPU Device-Loss / OOM Recovery Test
 Ensures the framework handles VRAM exhaustion gracefully.
 """
 
+import os
 import sys
 
 import pytest
 
-sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fastnn
 
