@@ -721,8 +721,8 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
-            DType::U4 | DType::U8 => {
-                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32.");
+            DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+                panic!("as_f32_slice: packed/FP tensors cannot be viewed as f32.");
             }
         }
     }
@@ -769,8 +769,8 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
             }
-            DType::U4 | DType::U8 => {
-                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32.");
+            DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+                panic!("as_f32_slice_mut: packed/FP tensors cannot be viewed as f32.");
             }
         }
     }
@@ -1103,13 +1103,22 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
         // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
         // not in the Tensor-level DType.  Use default values here; the actual
         // scales are filled in by the quantization compiler pass.
-        DType::U4 => IrDType::U4 {
+        DType::I4 => IrDType::I4 {
             scales: vec![1.0],
             zero_points: vec![0.0],
         },
         DType::U8 => IrDType::U8 {
             scales: vec![1.0],
             zero_points: vec![0.0],
+        },
+        DType::F8 => IrDType::F8 {
+            scales: vec![1.0],
+        },
+        DType::F8R => IrDType::F8R {
+            scales: vec![1.0],
+        },
+        DType::F4 => IrDType::F4 {
+            scales: vec![1.0],
         },
     }
 }
@@ -1123,10 +1132,13 @@ pub fn ir_to_dtype(idt: IrDType) -> DType {
         IrDType::I64 => DType::I64,
         IrDType::Bool => DType::Bool,
         IrDType::I8 => panic!("ir_to_dtype: I8 is IR-only, not a Tensor-level DType"),
-        // U4/U8 round-trips back to simple DType::U4/U8. Per-channel metadata
+        // U4/U8 round-trips back to simple DType::I4/U8. Per-channel metadata
         // stays in the IR node; Tensor-level storage uses the packed dtype.
-        IrDType::U4 { .. } => DType::U4,
+        IrDType::I4 { .. } => DType::I4,
         IrDType::U8 { .. } => DType::U8,
+        IrDType::F8 { .. } => DType::F8,
+        IrDType::F8R { .. } => DType::F8R,
+        IrDType::F4 { .. } => DType::F4,
     }
 }
 

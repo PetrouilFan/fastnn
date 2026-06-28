@@ -259,8 +259,8 @@ impl Tensor {
                             unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr(), numel) };
                         slice.fill(1);
                     }
-                    DType::U4 | DType::U8 => {
-                        panic!("ones(): packed U4/U8 tensors are not supported. Use the IR quantization pass to create packed weights.")
+                    DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+                        panic!("ones(): packed/FP tensors are not supported. Use the IR quantization pass to create packed weights.")
                     }
                 }
                 let strides = compute_strides(&sizes);
@@ -354,7 +354,7 @@ impl Tensor {
                         };
                         slice.fill(if value != 0.0 { 1u8 } else { 0u8 });
                     }
-                    DType::U4 | DType::U8 => {
+                    DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
                         panic!("full() does not support packed U4/U8 dtypes. Use zeros() or from_vec() with packed data.");
                     }
                 }

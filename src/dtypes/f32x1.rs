@@ -15,6 +15,7 @@ impl PackedWord for F32x1 {
     const ITEMS: usize = 1;
     const BIT_WIDTH: usize = 32;
     const IS_FLOAT: bool = true;
+    const MAX_REPRESENTABLE: f32 = 1.0;
     type Array = [f32; 1];
 
     #[inline]

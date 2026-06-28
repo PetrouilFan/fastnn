@@ -1222,12 +1222,12 @@ impl GraphBuilder {
 
     /// Quantize F32 → U4/U8 with per-channel scales/zero_points.
     ///
-    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::U4` or
+    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::I4` or
     /// `IrDType::U8` with per-channel scale/zero-point metadata.
     pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
-            4 => IrDType::U4 {
+            4 => IrDType::I4 {
                 scales: vec![],
                 zero_points: vec![],
             },
@@ -1936,13 +1936,13 @@ impl GraphBuilder {
 
     /// Detect if a tensor has a packed quantized dtype (U4 or U8).
     fn is_packed_dtype(dtype: &IrDType) -> bool {
-        matches!(dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+        matches!(dtype, IrDType::I4 { .. } | IrDType::U8 { .. })
     }
 
     /// Extract the bit width from a packed dtype (4 for U4, 8 for U8).
     fn packed_bit_width(dtype: &IrDType) -> usize {
         match dtype {
-            IrDType::U4 { .. } => 4,
+            IrDType::I4 { .. } => 4,
             IrDType::U8 { .. } => 8,
             _ => panic!("packed_bit_width called on non-packed dtype: {:?}", dtype),
         }
@@ -2264,7 +2264,7 @@ impl GraphBuilder {
 
     /// Compile the graph with optional quantization.
     ///
-    /// Pass `quantize = Some(4)` for 4-bit (U4x8) or `Some(8)` for 8-bit (U8x4) quantization.
+    /// Pass `quantize = Some(4)` for 4-bit (I4x8) or `Some(8)` for 8-bit (I8x4) quantization.
     /// Pass `None` for no quantization (default f32).
     pub fn compile_with_quantize<B: Backend>(
         &self,

@@ -543,8 +543,8 @@ fn try_gpu_dispatch(
             input_slices,
             output_slice,
         ),
-        "matmul_u4" | "matmul_u8" => {
-            let bit_width = if kernel_name == "matmul_u4" { 4 } else { 8 };
+        "matmul_i4" | "matmul_i8" => {
+            let bit_width = if kernel_name == "matmul_i4" { 4 } else { 8 };
             let scales = weight_meta
                 .as_ref()
                 .map(|m| m.scales.clone())
@@ -566,8 +566,8 @@ fn try_gpu_dispatch(
                 &zero_points,
             )
         }
-        "conv2d_u4" | "conv2d_u8" => {
-            let bit_width = if kernel_name == "conv2d_u4" { 4 } else { 8 };
+        "conv2d_i4" | "conv2d_i8" => {
+            let bit_width = if kernel_name == "conv2d_i4" { 4 } else { 8 };
             let scales = weight_meta
                 .as_ref()
                 .map(|m| m.scales.clone())
