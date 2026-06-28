@@ -601,6 +601,26 @@ fn try_gpu_dispatch(
                 &zero_points,
             )
         }
+        "quantize_gradient_f32_to_f8x4r" => {
+            let numel = resolved_params.first().copied().unwrap_or(0);
+            if let Some(input_slice) = input_slices.first() {
+                quantized::dispatch_quantize_gradient_gpu(
+                    ctx, encoder, pending_reads, arena, input_slice, output_slice, numel,
+                )
+            } else {
+                Err(BackendError::Dispatch("quantize_gradient: missing input".into()))
+            }
+        }
+        "dequantize_gradient_f8x4r_to_f32" => {
+            let numel = resolved_params.first().copied().unwrap_or(0);
+            if let Some(input_slice) = input_slices.first() {
+                quantized::dispatch_dequantize_gradient_gpu(
+                    ctx, encoder, pending_reads, arena, input_slice, output_slice, numel,
+                )
+            } else {
+                Err(BackendError::Dispatch("dequantize_gradient: missing input".into()))
+            }
+        }
         "upsample_nearest2d" | "upsample_bilinear2d" => {
             Err(BackendError::UnsupportedOp(kernel_name.to_string()))
         }
