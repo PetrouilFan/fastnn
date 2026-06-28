@@ -267,13 +267,9 @@ fn test_conv2d_u4_end_to_end() {
         sum_sq += diff * diff;
         if f32_val.abs() > 0.01 {
             let rel_err = (diff / f32_val as f64).abs();
-            if rel_err < 0.6 {
-                u4_correct += 1;
-            }
+            if rel_err < 0.6 { u4_correct += 1; }
         } else {
-            if diff.abs() < 0.1 {
-                u4_correct += 1;
-            }
+            if diff.abs() < 0.1 { u4_correct += 1; }
         }
     }
     let rms = (sum_sq / 18.0).sqrt();
