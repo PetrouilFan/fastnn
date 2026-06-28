@@ -152,7 +152,7 @@ def write_fnn_file_v3(f, header, params_v3, magic=MODEL_MAGIC, version=3):
         header: JSON-serializable header dict.
         params_v3: List of (name, data, dtype, scales, zeros) tuples.
             - data: bytes for packed, numpy array for F32
-            - dtype: DTYPE_F32/DTYPE_I4/DTYPE_I8/DTYPE_F16
+            - dtype: DTYPE_F32/DTYPE_I4/DTYPE_I8/DTYPE_F16/DTYPE_F8/DTYPE_F8R/DTYPE_F4
             - scales: list of float (per-channel)
             - zeros: list of float (per-channel)
         magic: File magic bytes.
@@ -240,7 +240,7 @@ def write_tensor_v3(f, name: str, data, dtype: int = DTYPE_F32, scales=None, zer
         f: File object opened in binary write mode.
         name: Parameter name.
         data: Packed bytes (for quantized) or numpy f32 array (for F32).
-        dtype: Dtype tag (DTYPE_F32/DTYPE_I4/DTYPE_I8/DTYPE_F16).
+        dtype: Dtype tag (DTYPE_F32/DTYPE_I4/DTYPE_I8/DTYPE_F16/DTYPE_F8/DTYPE_F8R/DTYPE_F4).
         scales: Optional list of per-channel scales (float).
         zeros: Optional list of per-channel zeros (float).
         shape: Optional explicit shape list (required for packed bytes data).

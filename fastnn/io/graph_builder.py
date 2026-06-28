@@ -131,7 +131,7 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
         raw_params = read_fnn_parameters(f, num_params, version=file_version)
 
     # Unpack v3 format if needed: convert (data, dtype, scales, zeros, shape) tuples -> tensors + packed_params
-    from fastnn.io import DTYPE_F32, DTYPE_I4, DTYPE_I8, DTYPE_F16
+    from fastnn.io import DTYPE_F32, DTYPE_I4, DTYPE_I8, DTYPE_F16, DTYPE_F8, DTYPE_F8R, DTYPE_F4
     params = {}
     packed_params_dict = {}
     for name, value in raw_params.items():
@@ -154,6 +154,9 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                     DTYPE_I4: "u4",
                     DTYPE_I8: "u8",
                     DTYPE_F16: "f16",
+                    DTYPE_F8: "f8",
+                    DTYPE_F8R: "f8r",
+                    DTYPE_F4: "f4",
                 }
                 dtype_str = dtype_map.get(dtype, "f32")
                 raise NotImplementedError(
