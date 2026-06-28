@@ -2255,11 +2255,44 @@ impl AotExecutor {
                         let f32_vals: Vec<f32> = f64_vals.iter().map(|&v| v as f32).collect();
                         Tensor::from_vec(f32_vals, shape)
                     }
-                    crate::storage::DType::F8 | crate::storage::DType::F8R => {
-                        panic!("FP8 tensor loading via Python not yet implemented. Use the IR quantize/dequantize pipeline.")
+                    crate::storage::DType::F8 => {
+                        let words: Vec<u32> = data.chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let mut f32_vals = Vec::with_capacity(words.len() * 4);
+                        for &word in &words {
+                            for byte in 0..4 {
+                                let val = ((word >> (byte * 8)) & 0xFF) as u8;
+                                f32_vals.push(crate::dtypes::f8x4::e4m3_to_f32(val));
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::F8R => {
+                        let words: Vec<u32> = data.chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let mut f32_vals = Vec::with_capacity(words.len() * 4);
+                        for &word in &words {
+                            for byte in 0..4 {
+                                let val = ((word >> (byte * 8)) & 0xFF) as u8;
+                                f32_vals.push(crate::dtypes::f8x4r::e5m2_to_f32(val));
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::F4 => {
-                        panic!("FP4 tensor loading via Python not yet implemented. Use FP4 quantization via the IR pipeline.")
+                        let words: Vec<u32> = data.chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let mut f32_vals = Vec::with_capacity(words.len() * 8);
+                        for &word in &words {
+                            for nibble in 0..8 {
+                                let val = ((word >> (nibble * 4)) & 0xF) as u8;
+                                f32_vals.push(crate::dtypes::f4x8::fp4_to_f32(val));
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
                     }
                 };
                 result.insert(name.clone(), PyTensor::from_tensor(tensor));

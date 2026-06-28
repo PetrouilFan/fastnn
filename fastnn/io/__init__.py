@@ -21,6 +21,9 @@ DTYPE_F32 = 0  # full float32
 DTYPE_F16 = 1  # PackedTensor<F16x2>
 DTYPE_I8  = 2  # PackedTensor<I8x4>
 DTYPE_I4  = 3  # PackedTensor<I4x8>
+DTYPE_F8  = 4  # PackedTensor<F8x4>
+DTYPE_F8R = 5  # PackedTensor<F8x4R>
+DTYPE_F4  = 6  # PackedTensor<F4x8>
 
 
 class SerializationError(Exception):
