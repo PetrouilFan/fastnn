@@ -543,8 +543,15 @@ fn try_gpu_dispatch(
             input_slices,
             output_slice,
         ),
-        "matmul_i4" | "matmul_i8" => {
-            let bit_width = if kernel_name == "matmul_i4" { 4 } else { 8 };
+        "matmul_i4" | "matmul_i8" | "matmul_f4" | "matmul_f8" | "matmul_f8r" => {
+            let dtype_tag = match kernel_name {
+                "matmul_i4" => "i4",
+                "matmul_i8" => "i8",
+                "matmul_f4" => "f4",
+                "matmul_f8" => "f8",
+                "matmul_f8r" => "f8r",
+                _ => unreachable!(),
+            };
             let scales = weight_meta
                 .as_ref()
                 .map(|m| m.scales.clone())
@@ -561,13 +568,18 @@ fn try_gpu_dispatch(
                 input_slices,
                 output_slice,
                 &resolved_params,
-                bit_width,
+                dtype_tag,
                 &scales,
                 &zero_points,
             )
         }
-        "conv2d_i4" | "conv2d_i8" => {
-            let bit_width = if kernel_name == "conv2d_i4" { 4 } else { 8 };
+        "conv2d_i4" | "conv2d_i8" | "conv2d_f4" => {
+            let dtype_tag = match kernel_name {
+                "conv2d_i4" => "i4",
+                "conv2d_i8" => "i8",
+                "conv2d_f4" => "f4",
+                _ => unreachable!(),
+            };
             let scales = weight_meta
                 .as_ref()
                 .map(|m| m.scales.clone())
@@ -584,7 +596,7 @@ fn try_gpu_dispatch(
                 input_slices,
                 output_slice,
                 &resolved_params,
-                bit_width,
+                dtype_tag,
                 &scales,
                 &zero_points,
             )

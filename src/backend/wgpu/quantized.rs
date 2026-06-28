@@ -1,9 +1,11 @@
-//! Quantized matmul and conv2d GPU dispatch for I4x8 / I8x4 packed types.
+//! Quantized matmul and conv2d GPU dispatch for packed types.
+//!
+//! Supports I4x8, I8x4, F4x8 (E2M1), F8x4 (E4M3), and F8x4R (E5M2).
 //!
 //! Each GPU invocation computes one output element `(m, n)`:
 //!   1. Reads the packed weight word for output channel `n`
-//!   2. Unpacks to f32 (4- or 8-bit nibbles/bytes)
-//!   3. Dequantizes per-channel (scale, zero_point)
+//!   2. Unpacks to f32 (signed nibble/byte or FP4/FP8 decode)
+//!   3. Dequantizes per-channel (scale ± zero_point for integer, scale-only for float)
 //!   4. Dot products with the corresponding f32 activation segment
 //!   5. Writes the result to the output
 //!
@@ -19,11 +21,12 @@ use std::sync::OnceLock;
 // Quantized matmul dispatch (GPU)
 // ─============================================================================
 
-/// Dispatch `matmul_u4` or `matmul_u8` on the GPU.
+/// Dispatch quantized matmul on the GPU.
 ///
+/// `dtype_tag` selects the packed format: `"i4"`, `"i8"`, `"f4"`, `"f8"`, `"f8r"`.
 /// `params = [M, K, N]`
 /// `input_slices[0]` — f32 activations, shape `[M, K]`
-/// `input_slices[1]` — packed u4/u8 weights, shape `[N, K]` (packed row-major)
+/// `input_slices[1]` — packed weights, shape `[N, K]` (packed row-major)
 pub(super) fn dispatch_quantized_matmul_gpu(
     ctx: &mut WgpuContext,
     encoder: &mut wgpu::CommandEncoder,
@@ -32,7 +35,7 @@ pub(super) fn dispatch_quantized_matmul_gpu(
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
     params: &[usize],
-    bit_width: usize,
+    dtype_tag: &str,
     scales: &[f32],
     zero_points: &[f32],
 ) -> Result<(), BackendError> {
@@ -43,7 +46,7 @@ pub(super) fn dispatch_quantized_matmul_gpu(
         return Ok(());
     }
 
-    let items = if bit_width == 4 { 8usize } else { 4usize };
+    let items = if matches!(dtype_tag, "i4" | "f4") { 8usize } else { 4usize };
     let padded_k = k.div_ceil(items) * items;
 
     let read_f32 = |idx: usize| -> Vec<f32> {
@@ -88,7 +91,7 @@ pub(super) fn dispatch_quantized_matmul_gpu(
         padded_k,
         n,
         items,
-        bit_width,
+        dtype_tag,
         scales,
         zero_points,
         output_slice.offset,
@@ -100,11 +103,12 @@ pub(super) fn dispatch_quantized_matmul_gpu(
 // Quantized conv2d dispatch (im2col on CPU + GPU quantized matmul)
 // ─============================================================================
 
-/// Dispatch `conv2d_u4` or `conv2d_u8` via CPU im2col + GPU quantized matmul.
+/// Dispatch quantized conv2d via CPU im2col + GPU quantized matmul.
 ///
+/// `dtype_tag` selects the packed format: `"i4"`, `"i8"`, `"f4"`.
 /// `params = [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]`
 /// `input_slices[0]` — f32 activations, shape `[N, C, H, W]`
-/// `input_slices[1]` — packed u4/u8 weights, shape `[OC, C*KH*KW]` (packed row-major)
+/// `input_slices[1]` — packed weights, shape `[OC, C*KH*KW]` (packed row-major)
 pub(super) fn dispatch_quantized_conv_gpu(
     ctx: &mut WgpuContext,
     encoder: &mut wgpu::CommandEncoder,
@@ -113,7 +117,7 @@ pub(super) fn dispatch_quantized_conv_gpu(
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
     params: &[usize],
-    bit_width: usize,
+    dtype_tag: &str,
     scales: &[f32],
     zero_points: &[f32],
 ) -> Result<(), BackendError> {
@@ -183,9 +187,10 @@ pub(super) fn dispatch_quantized_conv_gpu(
         return Ok(());
     }
 
-    let items = if bit_width == 4 { 8usize } else { 4usize };
+    let items = if matches!(dtype_tag, "i4" | "f4") { 8usize } else { 4usize };
     let col_w = c * kernel_h * kernel_w;
     let col_h = n_batch * output_h * output_w;
+    let bit_width = if matches!(dtype_tag, "i4" | "f4") { 4 } else { 8 };
     let f = packed_bytes.len() * 8 / (col_w * bit_width).max(1);
     if f == 0 {
         return Err(BackendError::Dispatch(
@@ -238,7 +243,7 @@ pub(super) fn dispatch_quantized_conv_gpu(
         padded_k,
         f,
         items,
-        bit_width,
+        dtype_tag,
         scales,
         zero_points,
         output_slice.offset,
@@ -247,42 +252,41 @@ pub(super) fn dispatch_quantized_conv_gpu(
 }
 
 // ─============================================================================
-// Cached quantized shader sources (items=8 → u4, items=4 → u8)
+// Cached quantized shader sources
 // ─============================================================================
 
-/// Cached quantized matmul shader for u4 (items=8).
-pub(crate) fn cached_quantized_u4_shader() -> &'static str {
-    static S: OnceLock<String> = OnceLock::new();
-    if let Some(shader) = S.get() {
-        super::pipeline::record_shader_hit();
-        shader
-    } else {
-        S.get_or_init(|| {
-            super::pipeline::record_shader_miss();
-            build_quantized_matmul_shader_inner(8)
-        })
-    }
+macro_rules! define_cached_shader {
+    ($name:ident, $items:expr, $dtype:expr) => {
+        fn $name() -> &'static str {
+            static S: OnceLock<String> = OnceLock::new();
+            if let Some(s) = S.get() {
+                super::pipeline::record_shader_hit();
+                s
+            } else {
+                S.get_or_init(|| {
+                    super::pipeline::record_shader_miss();
+                    build_quantized_matmul_shader_inner($items, $dtype)
+                })
+            }
+        }
+    };
 }
 
-/// Cached quantized matmul shader for u8 (items=4).
-pub(crate) fn cached_quantized_u8_shader() -> &'static str {
-    static S: OnceLock<String> = OnceLock::new();
-    if let Some(shader) = S.get() {
-        super::pipeline::record_shader_hit();
-        shader
-    } else {
-        S.get_or_init(|| {
-            super::pipeline::record_shader_miss();
-            build_quantized_matmul_shader_inner(4)
-        })
-    }
-}
+define_cached_shader!(cached_quantized_i4_shader, 8, "i4");
+define_cached_shader!(cached_quantized_i8_shader, 4, "i8");
+define_cached_shader!(cached_quantized_f4_shader, 8, "f4");
+define_cached_shader!(cached_quantized_f8_shader, 4, "f8");
+define_cached_shader!(cached_quantized_f8r_shader, 4, "f8r");
 
-/// Return the cached shader for the given bit width (4 or 8).
-fn cached_quantized_shader(bit_width: usize) -> &'static str {
-    match bit_width {
-        4 => cached_quantized_u4_shader(),
-        _ => cached_quantized_u8_shader(),
+/// Return the cached shader for the given dtype tag.
+fn cached_quantized_shader(dtype_tag: &str) -> &'static str {
+    match dtype_tag {
+        "i4" => cached_quantized_i4_shader(),
+        "i8" => cached_quantized_i8_shader(),
+        "f4" => cached_quantized_f4_shader(),
+        "f8" => cached_quantized_f8_shader(),
+        "f8r" => cached_quantized_f8r_shader(),
+        _ => cached_quantized_i8_shader(),
     }
 }
 
@@ -292,26 +296,31 @@ fn cached_quantized_shader(bit_width: usize) -> &'static str {
 
 /// Internal GPU dispatch for quantized GEMM.
 ///
-/// Uploads the given data to the GPU, runs the quantized matmul shader,
+/// `dtype_tag` selects the unpack/dequantize formula:
+///   `"i4"`, `"i8"` — signed integer with zero_point
+///   `"f4"`, `"f8"`, `"f8r"` — float decode, scale-only (no zero_point)
+///
+/// Uploads data to the GPU, runs the quantized matmul shader,
 /// and pushes a deferred readback into `pending_reads`.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_quantized_gemm_gpu(
     ctx: &mut WgpuContext,
     encoder: &mut wgpu::CommandEncoder,
     pending_reads: &mut Vec<PendingRead>,
-    activations: &[f32],   // [M, K_padded]
-    packed_weights: &[u8], // packed weight bytes [N * K_packed * 4]
+    activations: &[f32],
+    packed_weights: &[u8],
     m: usize,
     k_padded: usize,
     n: usize,
     items: usize,
-    bit_width: usize,
+    dtype_tag: &str,
     scales: &[f32],
     zero_points: &[f32],
     cpu_offset: usize,
     output_bytes: usize,
 ) -> Result<(), BackendError> {
     let k_packed = k_padded / items;
+    let is_float = matches!(dtype_tag, "f4" | "f8" | "f8r");
 
     let scale_data: Vec<f32> = if scales.is_empty() {
         vec![1.0f32; n]
@@ -322,7 +331,9 @@ fn dispatch_quantized_gemm_gpu(
         sd
     };
 
-    let zp_data: Vec<f32> = if zero_points.is_empty() {
+    // For float types, zero_point is unused but the shader still reads the buffer.
+    // Use all-zeros (harmless: `w * a * s + 0 * ...`).
+    let zp_data: Vec<f32> = if zero_points.is_empty() || is_float {
         vec![0.0f32; n]
     } else {
         let mut zd = vec![0.0f32; n];
@@ -331,8 +342,8 @@ fn dispatch_quantized_gemm_gpu(
         zd
     };
 
-    let shader_src = cached_quantized_shader(bit_width);
-    let short_key = format!("quantized_matmul_u{}", bit_width);
+    let shader_src = cached_quantized_shader(dtype_tag);
+    let short_key = format!("quantized_matmul_{}", dtype_tag);
     super::pipeline::ensure_quantized_compute_pipeline(ctx, &short_key, shader_src)
         .map_err(BackendError::Dispatch)?;
     let pipeline_key = format!("wgpu_backend_quantized_{}", short_key);
@@ -424,7 +435,13 @@ fn dispatch_quantized_gemm_gpu(
 
 /// Build the quantized matmul WGSL shader with per-channel dequantization.
 ///
-/// `items` = 8 for I4x8, 4 for I8x4.
+/// `items` = 8 for 4-bit types (I4x8, F4x8), 4 for 8-bit types (I8x4, F8x4, F8x4R).
+/// `dtype_tag` selects the unpack function and dequantization formula:
+///   `"i4"` — signed 4-bit nibble unpack, `(w - zp) * a * s` formula
+///   `"i8"` — signed 8-bit byte unpack, `(w - zp) * a * s` formula
+///   `"f4"` — FP4 E2M1 decode, `w * a * s` formula (no zp)
+///   `"f8"` — FP8 E4M3 decode, `w * a * s` formula
+///   `"f8r"` — FP8 E5M2 decode, `w * a * s` formula
 ///
 /// Workgroup size 16×16 — each invocation computes one `(m, n)` output element.
 /// Bindings:
@@ -434,9 +451,10 @@ fn dispatch_quantized_gemm_gpu(
 ///   3: zero_points   (array<f32>)
 ///   4: output        (array<f32>)
 ///   5: params        (uniform QuantParams)
-fn build_quantized_matmul_shader_inner(items: usize) -> String {
-    let unpack_fn = if items == 8 {
-        r#"
+fn build_quantized_matmul_shader_inner(items: usize, dtype_tag: &str) -> String {
+    let unpack_fn = match dtype_tag {
+        "i4" => {
+            r#"
 fn unpack_word(word: u32, lane: u32) -> f32 {
     let shift = lane * 4u;
     let nibble = (word >> shift) & 0xFu;
@@ -445,8 +463,9 @@ fn unpack_word(word: u32, lane: u32) -> f32 {
     return f32(val);
 }
 "#
-    } else {
-        r#"
+        }
+        "i8" => {
+            r#"
 fn unpack_word(word: u32, lane: u32) -> f32 {
     let shift = lane * 8u;
     let byte = (word >> shift) & 0xFFu;
@@ -455,6 +474,100 @@ fn unpack_word(word: u32, lane: u32) -> f32 {
     return f32(val);
 }
 "#
+        }
+        "f4" => {
+            r#"
+const FP4_MAG: array<f32, 8> = array<f32, 8>(0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0);
+fn unpack_fp4(byte: u32) -> f32 {
+    let nib = byte & 0xFu;
+    let mag_idx = nib & 7u;
+    let sign = nib >> 3u;
+    let mag = FP4_MAG[mag_idx];
+    return select(mag, -mag, sign != 0u && nib != 0u);
+}
+fn unpack_word(word: u32, lane: u32) -> f32 {
+    let shift = lane * 4u;
+    let byte = (word >> shift) & 0xFFu;
+    return unpack_fp4(byte);
+}
+"#
+        }
+        "f8" => {
+            r#"
+fn unpack_fp8_e4m3(byte: u32) -> f32 {
+    let sign = byte & 0x80u;
+    let exp = (byte >> 3u) & 0xFu;
+    let mant = byte & 0x7u;
+    if (exp == 0u && mant == 0u) {
+        return select(0.0, -0.0, sign != 0u);
+    }
+    if (exp == 0xFu) {
+        if (mant == 0u) {
+            return select(1.0 / 0.0, -1.0 / 0.0, sign != 0u);
+        }
+        return 0.0 / 0.0;
+    }
+    if (exp == 0u) {
+        let v = 0.015625 * f32(mant) / 8.0;
+        return select(v, -v, sign != 0u);
+    }
+    let v = exp2(f32(i32(exp) - 7)) * (1.0 + f32(mant) / 8.0);
+    return select(v, -v, sign != 0u);
+}
+fn unpack_word(word: u32, lane: u32) -> f32 {
+    let shift = lane * 8u;
+    let byte = (word >> shift) & 0xFFu;
+    return unpack_fp8_e4m3(byte);
+}
+"#
+        }
+        "f8r" => {
+            r#"
+fn unpack_fp8_e5m2(byte: u32) -> f32 {
+    let sign = byte & 0x80u;
+    let exp = (byte >> 2u) & 0x1Fu;
+    let mant = byte & 0x3u;
+    if (exp == 0u && mant == 0u) {
+        return select(0.0, -0.0, sign != 0u);
+    }
+    if (exp == 0x1Fu) {
+        if (mant == 0u) {
+            return select(1.0 / 0.0, -1.0 / 0.0, sign != 0u);
+        }
+        return 0.0 / 0.0;
+    }
+    if (exp == 0u) {
+        let v = exp2(-14.0) * f32(mant) / 4.0;
+        return select(v, -v, sign != 0u);
+    }
+    let v = exp2(f32(i32(exp) - 15)) * (1.0 + f32(mant) / 4.0);
+    return select(v, -v, sign != 0u);
+}
+fn unpack_word(word: u32, lane: u32) -> f32 {
+    let shift = lane * 8u;
+    let byte = (word >> shift) & 0xFFu;
+    return unpack_fp8_e5m2(byte);
+}
+"#
+        }
+        _ => {
+            r#"
+fn unpack_word(word: u32, lane: u32) -> f32 {
+    let shift = lane * 8u;
+    let byte = (word >> shift) & 0xFFu;
+    let is_neg = byte >= 128u;
+    let val = select(byte, byte - 256u, is_neg);
+    return f32(val);
+}
+"#
+        }
+    };
+
+    let is_float = matches!(dtype_tag, "f4" | "f8" | "f8r");
+    let dequant_formula = if is_float {
+        "acc += w_val * a_val * scale;"
+    } else {
+        "acc += (w_val - zp) * a_val * scale;"
     };
 
     format!(
@@ -498,7 +611,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
             }}
             let w_val = unpack_word(weight_word, i);
             let a_val = activations[m * params.K + k_idx];
-            acc += (w_val - zp) * a_val * scale;
+            {dequant_formula}
         }}
     }}
 
@@ -507,5 +620,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 "#,
         items = items,
         unpack_fn = unpack_fn,
+        dequant_formula = dequant_formula,
     )
 }
