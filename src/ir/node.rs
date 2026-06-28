@@ -126,6 +126,13 @@ pub enum Opcode {
     /// Backward: dx = dy * scale (correctly scales the gradient).
     /// Attribute `"scale"`: f32 scale factor.
     GradientScale,
+    /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
+    /// Backward: straight-through estimator (gradient passes through unchanged).
+    /// Attribute `"scale"`: f32 scale factor (per-tensor).
+    QuantizeGradient,
+    /// Dequantize gradient F8x4R -> F32 for optimizer consumption.
+    /// Backward: straight-through estimator.
+    DequantizeGradient,
     // ── v2.2 fusion opcodes ────────────────────────────────────────
     /// Fused residual add + layer_norm/rms_norm: output = norm(input + residual)
     FusedResidualAddNorm,

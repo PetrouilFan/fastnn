@@ -3500,6 +3500,12 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, d_input);
                 }
             }
+            Opcode::QuantizeGradient | Opcode::DequantizeGradient => {
+                // Straight-through estimator: gradient passes through unchanged
+                if let Some(&input_id) = node.inputs.first() {
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                }
+            }
         }
     }
 
