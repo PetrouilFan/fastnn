@@ -206,7 +206,6 @@ fn test_matmul_u8_output_shape_correct() {
 // ── Conv2d tests ──────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "pre-existing conv2d_u4 kernel bug (RMS error ~5.09)"]
 fn test_conv2d_u4_end_to_end() {
     // Conv2d: 1 input channel, 2 output channels, 3x3 kernel, stride=1, padding=0
     // Input: [1, 1, 5, 5] — output: [1, 2, 3, 3]
