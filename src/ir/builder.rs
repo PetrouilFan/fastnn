@@ -49,9 +49,10 @@ static PLAN_CACHE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
 
 /// Compute a ~unique hash for a graph + its input shapes.
-fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]]) -> u64 {
+fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]], quantize: Option<u8>) -> u64 {
     use std::hash::Hash;
     let mut hasher = DefaultHasher::new();
+    quantize.hash(&mut hasher);
     let order = graph.topological_sort();
     for &nid in &order {
         if let Some(node) = graph.get_node(nid) {
@@ -68,6 +69,11 @@ fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]]) -> u64 {
                 if let DimExpr::Known(v) = dim {
                     v.hash(&mut hasher);
                 }
+            }
+            // Hash constant data bytes to distinguish different weight values
+            if let Opcode::Constant(TensorValue::Data { bytes, tensor_type }) = &node.opcode {
+                bytes.hash(&mut hasher);
+                std::mem::discriminant(&tensor_type.dtype).hash(&mut hasher);
             }
         }
     }
@@ -2317,7 +2323,7 @@ impl GraphBuilder {
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
         // ── Plan cache: skip compilation when graph+shapes match ──
-        let cache_key = plan_cache_key(&graph, inputs);
+        let cache_key = plan_cache_key(&graph, inputs, quantize);
         if let Some((mut plan, memory_plan, compiled_graph)) = lookup_plan(cache_key) {
             return GraphExecutor::new(backend).execute(
                 &compiled_graph,
