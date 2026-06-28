@@ -217,7 +217,7 @@ class ReduceLROnPlateau(LRScheduler):
             if self.mode == "min":
                 new_lr = max(new_lr, self.min_lr)
             else:
-                new_lr = max(new_lr, self.min_lr)
+                new_lr = min(new_lr, self.min_lr) if new_lr > self.min_lr else new_lr
             self._should_reduce = False
             return new_lr
         return self._get_lr()
