@@ -88,7 +88,7 @@ The top-level IR container. Holds:
 
 A single operation in the graph:
 
-- **`opcode`** — the `Opcode` variant (90 variants)
+- **`opcode`** — the `Opcode` variant (91 variants)
 - **`inputs`** — `Vec<NodeId>` referencing other nodes by ID
 - **`output_type`** — `TensorType` describing shape and dtype
 - **`attrs`** — `HashMap<String, String>` for per-op constants
@@ -96,7 +96,7 @@ A single operation in the graph:
 
 ### Opcode Enum
 
-90 variants covering: arithmetic (Add, Sub, Mul, Div, Pow...), neural network (MatMul, Conv1d/2d/3d, ConvTranspose2d, BatchNorm, LayerNorm...), activations (Relu, Gelu, Silu, Sigmoid, Tanh, Mish...), reductions (ReduceSum, ReduceMean, ReduceMax, ArgMax...), shape ops (Reshape, Transpose, Concat, Slice, Gather...), quantization (Quantize, Dequantize, ToF16, ToF32...), and optimizer updates (SgdUpdate, AdamUpdate, AdamWUpdate, MuonUpdate, LionUpdate, RmspropUpdate).
+91 variants covering: arithmetic (Add, Sub, Mul, Div, Pow...), neural network (MatMul, Conv1d/2d/3d, ConvTranspose2d, BatchNorm, LayerNorm...), activations (Relu, Gelu, Silu, Sigmoid, Tanh, Mish...), reductions (ReduceSum, ReduceMean, ReduceMax, ArgMax...), shape ops (Reshape, Transpose, Concat, Slice, Gather...), quantization (Quantize, Dequantize, ToF16, ToF32...), and optimizer updates (SgdUpdate, AdamUpdate, AdamWUpdate, MuonUpdate, LionUpdate, RmspropUpdate).
 
 Backend kernel selection (e.g., `matmul_u4`, `matmul_u8`, `conv2d_u4`) happens at runtime based on quantized input dtypes, not via separate opcodes.
 

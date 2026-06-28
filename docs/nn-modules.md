@@ -352,18 +352,18 @@ executor = AotExecutor(nodes, params, input_names, output_names, quantize=4)
 
 The compiler pass replaces eligible `MatMul` and `Conv2d` weight nodes with packed U4/U8 variants carrying per-channel scale and zero-point metadata. Dequantization is fused into the GEMM/conv kernels — no separate dequant step.
 
-## Transformer Encoder
+## Transformer
 
 ```python
 # Full transformer encoder (positional encoding + multi-head attention + FFN)
-encoder = fnn.nn.PyTransformerEncoder(
+encoder = fnn.models.Transformer(
     vocab_size=10000, max_seq_len=512,
     d_model=512, n_head=8, n_layers=6,
     ff_dim=2048, n_classes=10, dropout=0.1
 )
 ```
 
-> Note: `MultiHeadAttention` and `TransformerBlock` are available as Rust internal types but do not have standalone Python bindings. Use `TransformerEncoder` for end-to-end transformer classification, or build custom attention via `fnn.flash_attention()`.
+> Note: `MultiHeadAttention` and `TransformerBlock` are available as Rust internal types but do not have standalone Python bindings. Use `fnn.models.Transformer` for end-to-end transformer classification, or build custom attention via `fnn.flash_attention()`.
 
 ## Sequential
 
