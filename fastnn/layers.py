@@ -142,7 +142,7 @@ class _BaseModule(Module):
                     raise KeyError(f"Missing key in state_dict: {full_name}")
                 src = state_dict[full_name]
                 if hasattr(src, 'numpy'):
-                    src_arr = src.numpy()
+                    src_arr = np.asarray(src.numpy())
                 else:
                     src_arr = np.asarray(src)
                 new_param = fnn.tensor(src_arr, list(src_arr.shape))
@@ -154,9 +154,25 @@ class _BaseModule(Module):
             raise KeyError(f"Unexpected keys in state_dict: {extra_keys}")
 
 
+class NoParamsMixin:
+    """Mixin for layers with no learnable parameters."""
+
+    def parameters(self):
+        return []
+
+    def named_parameters(self):
+        return []
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
+
 # Python-implemented layers (for compatibility and educational purposes)
 
-class MaxPool2dPy(Module):
+class MaxPool2dPy(NoParamsMixin, Module):
     """Max pooling 2D layer (Python implementation).
     
     This is a pure-Python implementation of 2D max pooling, provided for
@@ -212,24 +228,12 @@ class MaxPool2dPy(Module):
             self._padding_scalar,
             self._dilation_scalar
         )
-    
-    def parameters(self):
-        return []
-
-    def named_parameters(self):
-        return []
-
-    def state_dict(self):
-        return {}
-
-    def load_state_dict(self, state_dict):
-        pass
 
     def __call__(self, x):
         return self._rust_maxpool(x)
 
 
-class Flatten(Module):
+class Flatten(NoParamsMixin, Module):
     """Flatten layer.
     
     Flattens the input tensor starting from a given dimension.
@@ -249,18 +253,6 @@ class Flatten(Module):
         super().__init__()
         self.start_dim = start_dim
         self.end_dim = end_dim
-    
-    def parameters(self):
-        return []
-
-    def named_parameters(self):
-        return []
-
-    def state_dict(self):
-        return {}
-
-    def load_state_dict(self, state_dict):
-        pass
 
     def __call__(self, x):
         shape = x.shape

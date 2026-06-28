@@ -1,7 +1,8 @@
-#![allow(dead_code)]
 pub mod activation_quantization;
 pub mod arithmetic_simplify;
 pub mod auto_cast;
+pub mod calibration;
+pub mod concat_to_conv_eligibility;
 pub mod constant_folding;
 pub mod dead_code_elimination;
 pub mod fusion;
@@ -9,6 +10,7 @@ pub mod memory_planning;
 pub mod operator_fusion;
 pub mod prune_qdq_pairs;
 pub mod quantization;
+pub mod quantize_activations;
 pub mod shape_inference;
 pub mod training;
 pub mod type_inference;

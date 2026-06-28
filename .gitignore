@@ -94,3 +94,5 @@ tests/test_threading.py
 *_REPORT.md
 .ruff_cache/
 fix_ops.py
+yolo.json
+runs/

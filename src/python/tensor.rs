@@ -9,6 +9,8 @@ pub(crate) struct PyTensor {
 }
 
 /// Destructor for DLPack PyCapsule - called when the capsule is garbage collected
+// SAFETY: Called by the Python runtime as a PyCapsule destructor. The `capsule` pointer
+// is guaranteed valid by Python's capsule lifecycle API at destruction time.
 unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     use crate::io::dlpack::DLManagedTensor;
 

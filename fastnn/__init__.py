@@ -5,15 +5,18 @@ per-channel weight quantization (U4/U8), and arena-based memory planning.
 See https://github.com/PetrouilFan/fastnn for full documentation.
 """
 
+import sys
 import warnings
 
 import numpy as np
 import fastnn._core as _core
 import fastnn.precision as precision
 
-__version__ = "2.2.4"
+__version__ = "2.3.0"
 
-# Exception hierarchy - imported from _core (Rust side)
+# ---------------------------------------------------------------------------
+# Exception hierarchy (from Rust side)
+# ---------------------------------------------------------------------------
 FastnnError = _core.FastnnError
 ShapeError = _core.ShapeError
 DtypeError = _core.DtypeError
@@ -23,6 +26,10 @@ OptimizerError = _core.OptimizerError
 IoError = _core.IoError
 CudaError = _core.CudaError
 
+# ---------------------------------------------------------------------------
+# Submodule imports — each submodule is the single source of truth for its
+# domain.  `__init__.py` only re-exports; it never defines `X = _core.X`.
+# ---------------------------------------------------------------------------
 from fastnn.core import (  # noqa: E402
     no_grad,
     set_seed,
@@ -37,40 +44,42 @@ from fastnn.callbacks import (  # noqa: E402
     LearningRateScheduler,
     CSVLogger,
 )
-from fastnn.losses import *  # noqa: F403
-from fastnn.parallel import DataParallel  # noqa: E402
-from fastnn.optimizers import (  # noqa: E402
-    SGD,
-    Adam,
-    AdamW,
-    Muon,
-    Lion,
-    RMSprop,
-    clip_grad_norm_,
-    clip_grad_value_,
+from fastnn.ops import (  # noqa: E402  — functional operations
+    relu, gelu, sigmoid, tanh, silu, leaky_relu, elu, softplus, hardswish,
+    softmax, log_softmax,
+    fused_add_relu, fused_conv_bn_silu, fused_linear_relu, fused_linear_gelu,
+    add, sub, mul, div, matmul, im2col,
+    neg, abs, exp, log, sqrt, pow, clamp,
+    argmax, argmin, cat, stack, sum, mean, max, min, maximum, minimum,
+    where, where_, gather, repeat, expand, fnn_slice, topk,
+    einsum, flash_attention, cumsum, erf,
+    mse_loss, cross_entropy_loss, bce_with_logits, huber_loss,
+)
+from fastnn.losses import mse_loss, cross_entropy_loss, bce_with_logits, huber_loss  # noqa: F403
+from fastnn.nn import (  # noqa: E402  — neural network modules
+    Linear, Conv2d, Conv1d, Conv3d, ConvTranspose2d,
+    LayerNorm, RMSNorm, GroupNorm, BatchNorm1d, BatchNorm2d,
+    Dropout, Dropout2d, Embedding, Upsample,
+    MaxPool1d, MaxPool2d, AvgPool1d, AvgPool2d, AdaptiveAvgPool2d,
+    ReLU, GELU, Sigmoid, Tanh, SiLU, LeakyReLU, Softplus, Hardswish,
+    Elu, Softmax, PReLU, Mish,
+    Sequential, ModuleList, ResidualBlock,
+    FusedConvBn, FusedConvBnRelu, FusedConvBnGelu,
+    Flatten, PySequential, BasicBlock,
 )
 from fastnn.tensor import (  # noqa: E402
-    Tensor,
-    zeros,
-    ones,
-    full,
-    eye,
-    arange,
-    linspace,
-    randint,
-    zeros_like,
-    ones_like,
-    full_like,
-    rand,
-    randn,
-    tensor,
-    from_numpy as tensor_from_numpy,
-    _flatten,
+    Tensor, tensor, from_numpy as tensor_from_numpy,
+    zeros, ones, full, eye, arange, linspace,
+    rand, randn, randint, zeros_like, ones_like, full_like, _flatten,
 )
-from fastnn.layers import Flatten, PySequential, BasicBlock  # noqa: F401, E402
-MaxPool2d = _core.MaxPool2d
-AvgPool1d = _core.AvgPool1d
-MaxPool1d = _core.MaxPool1d
+from fastnn.parallel import DataParallel  # noqa: E402
+from fastnn.optimizers import (  # noqa: E402
+    SGD, Adam, AdamW, Muon, Lion, RMSprop,
+    clip_grad_norm_, clip_grad_value_,
+)
+from fastnn.schedulers import (  # noqa: E402
+    LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau,
+)
 from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
@@ -79,204 +88,40 @@ from fastnn.io import (  # noqa: E402
     DAGModel,
 )
 from fastnn.io.graph_builder import build_model_from_fnn  # noqa: E402
-from fastnn.precision import Precision, Quantizer, PrecisionConfig, QuantizationScheme  # noqa: E402
+from fastnn.precision import (  # noqa: E402
+    Precision, Quantizer, PrecisionConfig, QuantizationScheme,
+)
 
-__all__ = [
-    # Context managers and utilities
-    "no_grad",
-    "set_seed",
-    "set_num_threads",
-    "set_default_device",
-    "checkpoint",
-    "compile_train_model",
-    "fused_linear_relu",
-    "fused_linear_gelu",
-    "import_onnx",
-    "allocator_stats",
-    "list_registered_ops",
-    "batched_mlp_forward",
-    # Tensor and factories
-    "Tensor",
-    "zeros",
-    "ones",
-    "full",
-    "eye",
-    "arange",
-    "linspace",
-    "randint",
-    "zeros_like",
-    "ones_like",
-    "full_like",
-    "rand",
-    "randn",
-    "tensor",
-    "tensor_from_numpy",
-    "_flatten",
-    # Data loading
-    "DataLoader",
-    "Dataset",
-    "TensorDataset",
-    # Callbacks
-    "EarlyStopping",
-    "ModelCheckpoint",
-    "LearningRateScheduler",
-    "CSVLogger",
-    # Parallel
-    "DataParallel",
-    # Models
-    "models",
-    # Exception hierarchy
-    "FastnnError",
-    "ShapeError",
-    "DtypeError",
-    "DeviceError",
-    "AutogradError",
-    "OptimizerError",
-    "IoError",
-    "CudaError",
-    # Layers and modules (Rust implementations)
-    "Linear",
-    "Conv2d",
-    "Conv1d",
-    "Conv3d",
-    "ConvTranspose2d",
-    "LayerNorm",
-    "RMSNorm",
-    "GroupNorm",
-    "BatchNorm1d",
-    "BatchNorm2d",
-    "Dropout",
-    "Dropout2d",
-    "Embedding",
-    "Upsample",
-    "MaxPool2d",
-    "AvgPool1d",
-    "MaxPool1d",
-    "AdaptiveAvgPool2d",
-    "ReLU",
-    "GELU",
-    "Sigmoid",
-    "Tanh",
-    "SiLU",
-    "LeakyReLU",
-    "Softplus",
-    "Hardswish",
-    "Elu",
-    "Mish",
-    "Sequential",
-    "ModuleList",
-    "FusedConvBn",
-    "FusedConvBnRelu",
-    "FusedConvBnGelu",
-    "ResidualBlock",
-    # Python layers
-    "Flatten",
-    "PySequential",
-    "BasicBlock",
-    # Activation functions (functional)
-    "relu",
-    "gelu",
-    "sigmoid",
-    "tanh",
-    "silu",
-    "softmax",
-    "log_softmax",
-    "fused_add_relu",
-    "fused_conv_bn_silu",
-    # Compiled training
-    "compile_train_model",
-    # Tensor operations
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "matmul",
-    "im2col",
-    "neg",
-    "abs",
-    "exp",
-    "log",
-    "sqrt",
-    "pow",
-    "clamp",
-    "argmax",
-    "argmin",
-    "cat",
-    "stack",
-    "sum",
-    "mean",
-    "max",
-    "min",
-    "maximum",
-    "minimum",
-    "einsum",
-    "flash_attention",
-    "cumsum",
-    "erf",
-    # Loss functions
-    "mse_loss",
-    "cross_entropy_loss",
-    "bce_with_logits",
-    "huber_loss",
-    # Optimizers
-    "SGD",
-    "Adam",
-    "AdamW",
-    "Muon",
-    "Lion",
-    "RMSprop",
-    "clip_grad_norm_",
-    "clip_grad_value_",
-    # Schedulers
-    "LRScheduler",
-    "StepLR",
-    "CosineAnnealingLR",
-    "ExponentialLR",
-    "ReduceLROnPlateau",
-    # Activations module
-    "activations",
-    # IO functions
-    "io_save",
-    "io_load",
-    "convert_from_pytorch",
-    "convert_from_onnx",
-    "DAGModel",
-    "load_onnx_model",
-    # Phase 0 additions
-    "PReLU",
-    "AvgPool2d",
-    # Phase 1 additions
-    "AotExecutor",
-    # Phase 3 additions
-    "where",
-    "gather",
-    "repeat",
-    "expand",
-    "fnn_slice",
-    "topk",
-    "leaky_relu",
-    "elu",
-    "softplus",
-    "hardswish",
-    # Precision system
-    "precision",
-    "Precision",
-    "Quantizer",
-    "PrecisionConfig",
-    "QuantizationScheme",
-    # YOLO model wrapper
-    "YOLO",
-    "load_yolo",
-    "build_model_from_fnn",
-    # NMS utilities
-    "nms",
-    "yolo_decode",
-    "yolo_dfl_decode",
-    "xywh2xyxy",
-    "scale_boxes",
-]
+# ---------------------------------------------------------------------------
+# Rust-only utilities (not in any Python submodule)
+# ---------------------------------------------------------------------------
+compile_train_model = _core.compile_train_model
+allocator_stats = _core.allocator_stats
+list_registered_ops = getattr(_core, 'list_registered_ops', lambda: [])
+batched_mlp_forward = _core.batched_mlp_forward
+AotExecutor = _core.AotExecutor if hasattr(_core, 'AotExecutor') else None
 
 
+def import_onnx(onnx_path: str, fnn_path: str, config=None):
+    """Import an ONNX model and save it in fastnn format."""
+    from fastnn.io.onnx import import_onnx as _import
+    return _import(onnx_path, fnn_path, config=config)
+
+
+def load_state_dict(model, state_dict):
+    params = model.parameters()
+    loaded = list(state_dict.values())
+    if len(params) != len(loaded):
+        raise ValueError(
+            f"state_dict has {len(loaded)} params, model has {len(params)}"
+        )
+    for p, loaded_t in zip(params, loaded):
+        p.copy_(loaded_t)
+
+
+# ---------------------------------------------------------------------------
+# Lazy-loaded submodules (via __getattr__)
+# ---------------------------------------------------------------------------
 def __getattr__(name):
     if name == "models":
         import fastnn.models
@@ -318,9 +163,9 @@ except ImportError:
     pass
 
 
-
-
-
+# ---------------------------------------------------------------------------
+# NumPy patching for PyTensor.numpy()
+# ---------------------------------------------------------------------------
 _NUMPY_DTYPE_MAP = {
     "f32": np.float32,
     "f64": np.float64,
@@ -349,116 +194,9 @@ def _patch_numpy(tensor_cls):
 _patch_numpy(_core.PyTensor)
 
 
-add = _core.add
-sub = _core.sub
-mul = _core.mul
-div = _core.div
-matmul = _core.matmul
-im2col = _core.im2col
-neg = _core.neg
-abs = _core.abs
-exp = _core.exp
-log = _core.log
-sqrt = _core.sqrt
-pow = _core.pow
-clamp = _core.clamp
-relu = _core.relu
-fused_add_relu = _core.fused_add_relu
-gelu = _core.gelu
-sigmoid = _core.sigmoid
-tanh = _core.tanh
-silu = _core.silu
-softmax = _core.softmax
-log_softmax = _core.log_softmax
-fused_conv_bn_silu = _core.fused_conv_bn_silu
-fused_linear_relu = _core.fused_linear_relu
-fused_linear_gelu = _core.fused_linear_gelu
-FusedConvBn = _core.FusedConvBn
-FusedConvBnRelu = _core.FusedConvBnRelu
-FusedConvBnGelu = _core.FusedConvBnGelu
-argmax = _core.argmax
-argmin = _core.argmin
-cat = _core.cat
-stack = _core.stack
-sum = _core.sum
-mean = _core.mean
-
-max = _core.max
-min = _core.min
-maximum = _core.maximum
-minimum = _core.minimum
-mse_loss = _core.mse_loss
-cross_entropy_loss = _core.cross_entropy_loss
-Linear = _core.Linear
-Conv2d = _core.Conv2d
-LayerNorm = _core.LayerNorm
-BatchNorm1d = _core.BatchNorm1d
-Dropout = _core.Dropout
-Embedding = _core.Embedding
-ReLU = _core.ReLU
-GELU = _core.Gelu
-Sigmoid = _core.Sigmoid
-Tanh = _core.Tanh
-SiLU = _core.SiLU
-Sequential = _core.Sequential_
-
-LeakyReLU = _core.LeakyReLU
-Softmax = _core.Softmax
-Softplus = _core.Softplus
-Hardswish = _core.Hardswish
-RMSNorm = _core.RMSNorm
-GroupNorm = _core.GroupNorm
-BatchNorm2d = _core.BatchNorm2d
-Lion = _core.PyLion
-bce_with_logits = _core.bce_with_logits
-ConvTranspose2d = _core.ConvTranspose2d
-Conv1d = _core.Conv1d
-Conv3d = _core.Conv3d
-einsum = _core.einsum
-flash_attention = _core.flash_attention
-ResidualBlock = _core.ResidualBlock
-Dropout2d = _core.Dropout2d
-Upsample = _core.Upsample
-RMSprop = _core.PyRMSprop
-Elu = _core.Elu
-Mish = _core.Mish
-AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
-
-
-def import_onnx(onnx_path: str, fnn_path: str, config=None):
-    """Import an ONNX model and save it in fastnn format.
-
-    Args:
-        onnx_path: Path to .onnx file
-        fnn_path: Path to output .fnn file
-        config: Optional PrecisionConfig for quantized import.
-            When set, weights are quantized per the config specification.
-
-    Returns:
-        Dictionary with model info (layers, input_shape, output_shape)
-    """
-    from fastnn.io.onnx import import_onnx as _import
-
-    return _import(onnx_path, fnn_path, config=config)
-
-
-def load_state_dict(model, state_dict):
-    params = model.parameters()
-    loaded = list(state_dict.values())
-    if len(params) != len(loaded):
-        raise ValueError(
-            f"state_dict has {len(loaded)} params, model has {len(params)}"
-        )
-    for p, loaded_t in zip(params, loaded):
-        p.copy_(loaded_t)
-from fastnn.schedulers import LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau  # noqa: F401
-
-allocator_stats = _core.allocator_stats
-list_registered_ops = getattr(_core, 'list_registered_ops', lambda: [])
-batched_mlp_forward = _core.batched_mlp_forward
-
-
-# Make fastnn.tensor module callable (delegates to tensor.tensor function)
+# ---------------------------------------------------------------------------
+# Callable tensor module wrapper (fastnn.tensor(...) works)
+# ---------------------------------------------------------------------------
 class _TensorModuleWrapper:
     """Wrapper that makes the tensor module callable."""
 
@@ -478,41 +216,202 @@ class _TensorModuleWrapper:
         delattr(self._module, name)
 
 
-# Phase 0: New module classes
-PReLU = _core.PReLU
-AvgPool2d = _core.AvgPool2d
-
-# Phase 1: AOT graph executor (replaces DAGExecutor from v1.x)
-AotExecutor = _core.AotExecutor if hasattr(_core, 'AotExecutor') else None
-
-# Compiled training
-compile_train_model = _core.compile_train_model
-
-# Phase 3: New tensor operation functions
-where = _core.where_
-gather = _core.gather
-repeat = _core.repeat
-expand = _core.expand
-fnn_slice = _core.slice
-topk = _core.topk
-leaky_relu = _core.leaky_relu
-elu = _core.elu
-softplus = _core.softplus
-hardswish = _core.hardswish
-cumsum = _core.cumsum
-erf = _core.erf
-
-import sys
-
-
-
-
-
-
 _tensor_module = sys.modules.get("fastnn.tensor")
 if _tensor_module is not None:
     _tensor_wrapper = _TensorModuleWrapper(_tensor_module)
     sys.modules["fastnn.tensor"] = _tensor_wrapper
     import fastnn
-
     fastnn.__dict__["tensor"] = _tensor_wrapper
+
+
+# ---------------------------------------------------------------------------
+# __all__ — deduplicated, organized by domain
+# ---------------------------------------------------------------------------
+__all__ = [
+    # Context managers and utilities
+    "no_grad",
+    "set_seed",
+    "set_num_threads",
+    "set_default_device",
+    "checkpoint",
+    "compile_train_model",
+    "import_onnx",
+    "allocator_stats",
+    "list_registered_ops",
+    "batched_mlp_forward",
+    # Tensor and factories
+    "Tensor",
+    "tensor",
+    "tensor_from_numpy",
+    "zeros",
+    "ones",
+    "full",
+    "eye",
+    "arange",
+    "linspace",
+    "rand",
+    "randn",
+    "randint",
+    "zeros_like",
+    "ones_like",
+    "full_like",
+    # Data loading
+    "DataLoader",
+    "Dataset",
+    "TensorDataset",
+    # Callbacks
+    "EarlyStopping",
+    "ModelCheckpoint",
+    "LearningRateScheduler",
+    "CSVLogger",
+    # Parallel
+    "DataParallel",
+    # Models
+    "models",
+    # Exception hierarchy
+    "FastnnError",
+    "ShapeError",
+    "DtypeError",
+    "DeviceError",
+    "AutogradError",
+    "OptimizerError",
+    "IoError",
+    "CudaError",
+    # Layers and modules
+    "Linear",
+    "Conv2d",
+    "Conv1d",
+    "Conv3d",
+    "ConvTranspose2d",
+    "LayerNorm",
+    "RMSNorm",
+    "GroupNorm",
+    "BatchNorm1d",
+    "BatchNorm2d",
+    "Dropout",
+    "Dropout2d",
+    "Embedding",
+    "Upsample",
+    "MaxPool1d",
+    "MaxPool2d",
+    "AvgPool1d",
+    "AvgPool2d",
+    "AdaptiveAvgPool2d",
+    "ReLU",
+    "GELU",
+    "Sigmoid",
+    "Tanh",
+    "SiLU",
+    "LeakyReLU",
+    "Softplus",
+    "Hardswish",
+    "Elu",
+    "Mish",
+    "PReLU",
+    "Softmax",
+    "Sequential",
+    "ModuleList",
+    "FusedConvBn",
+    "FusedConvBnRelu",
+    "FusedConvBnGelu",
+    "ResidualBlock",
+    "Flatten",
+    "PySequential",
+    "BasicBlock",
+    # Functional operations
+    "relu",
+    "gelu",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "leaky_relu",
+    "elu",
+    "softplus",
+    "hardswish",
+    "softmax",
+    "log_softmax",
+    "fused_add_relu",
+    "fused_conv_bn_silu",
+    "fused_linear_relu",
+    "fused_linear_gelu",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "matmul",
+    "im2col",
+    "neg",
+    "abs",
+    "exp",
+    "log",
+    "sqrt",
+    "pow",
+    "clamp",
+    "argmax",
+    "argmin",
+    "cat",
+    "stack",
+    "sum",
+    "mean",
+    "max",
+    "min",
+    "maximum",
+    "minimum",
+    "where",
+    "gather",
+    "repeat",
+    "expand",
+    "fnn_slice",
+    "topk",
+    "einsum",
+    "flash_attention",
+    "cumsum",
+    "erf",
+    # Loss functions
+    "mse_loss",
+    "cross_entropy_loss",
+    "bce_with_logits",
+    "huber_loss",
+    # Optimizers
+    "SGD",
+    "Adam",
+    "AdamW",
+    "Muon",
+    "Lion",
+    "RMSprop",
+    "clip_grad_norm_",
+    "clip_grad_value_",
+    # Schedulers
+    "LRScheduler",
+    "StepLR",
+    "CosineAnnealingLR",
+    "ExponentialLR",
+    "ReduceLROnPlateau",
+    # Activations module
+    "activations",
+    # IO functions
+    "io_save",
+    "io_load",
+    "convert_from_pytorch",
+    "convert_from_onnx",
+    "DAGModel",
+    "load_onnx_model",
+    # AOT executor
+    "AotExecutor",
+    # Precision system
+    "precision",
+    "Precision",
+    "Quantizer",
+    "PrecisionConfig",
+    "QuantizationScheme",
+    # YOLO model wrapper
+    "YOLO",
+    "load_yolo",
+    "build_model_from_fnn",
+    # NMS utilities
+    "nms",
+    "yolo_decode",
+    "yolo_dfl_decode",
+    "xywh2xyxy",
+    "scale_boxes",
+]

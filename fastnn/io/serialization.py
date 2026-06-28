@@ -16,12 +16,10 @@ from fastnn.io import (
     write_tensor,
     read_tensor,
     _pack_u64,
-    _pack_i64,
     _pack_u32,
     _pack_u8,
     _pack_f64,
     _unpack_u64,
-    _unpack_i64,
     _unpack_u32,
     _unpack_u8,
     _unpack_f64,
@@ -259,8 +257,9 @@ def _save_optimizer(opt: Any, path: str, version: int = OPTIMIZER_VERSION) -> No
                     else:
                         f.write(_pack_u8(0))
                         f.write(_pack_u64(0))
-            step_list = getattr(opt, "step", None)
-            if step_list and not callable(step_list):
+            state = opt.state_dict() if hasattr(opt, "state_dict") else {}
+            step_list = state.get("step") if isinstance(state, dict) else None
+            if step_list is not None:
                 for s in step_list:
                     f.write(_pack_u64(s))
 
@@ -309,7 +308,11 @@ def _load_optimizer(opt: Any, path: str) -> None:
                         state_list[i].copy_(tensor(data.copy(), list(state_list[i].shape)))
                     elif has_data:
                         f.read(data_len * 4)
-            step_list = getattr(opt, "step", None)
-            if step_list:
+            state = opt.state_dict() if hasattr(opt, "state_dict") else {}
+            step_list = state.get("step") if isinstance(state, dict) else None
+            if step_list is not None:
                 for i in range(len(step_list)):
                     step_list[i] = _unpack_u64(f.read(8))
+            # Write back the modified state dict if we changed it
+            if step_list is not None and hasattr(opt, "load_state_dict"):
+                opt.load_state_dict(state)

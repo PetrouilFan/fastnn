@@ -230,7 +230,7 @@ fn cmd_run(
     output_paths: &[String],
     iterations: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = Runtime::<CpuBackend>::load(CpuBackend, plan_path, memory_path)?;
+    let mut runtime = Runtime::<CpuBackend>::load(CpuBackend, plan_path, memory_path)?;
 
     // Read input files
     let mut inputs: Vec<Vec<u8>> = Vec::new();
@@ -273,7 +273,7 @@ fn cmd_bench(
     random_inputs: bool,
     input_sizes: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = Runtime::<CpuBackend>::load(CpuBackend, plan_path, memory_path)?;
+    let mut runtime = Runtime::<CpuBackend>::load(CpuBackend, plan_path, memory_path)?;
 
     // Generate or read inputs
     let inputs: Vec<Vec<u8>> = if random_inputs {

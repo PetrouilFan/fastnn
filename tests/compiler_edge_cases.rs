@@ -73,7 +73,7 @@ fn test_diamond_shape() {
 fn test_no_output_graph() {
     let g = GraphBuilder::new();
     let a = g.input(&[4], IrDType::F32);
-    let b = g.relu(&a);
+    let _b = g.relu(&a);
 
     let mut graph = g.to_graph();
     graph.set_inputs(vec![a.node_id()]);

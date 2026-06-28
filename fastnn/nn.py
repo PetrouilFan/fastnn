@@ -16,7 +16,9 @@ Dropout = _core.Dropout
 Dropout2d = _core.Dropout2d
 Embedding = _core.Embedding
 Upsample = _core.Upsample
+MaxPool1d = _core.MaxPool1d
 MaxPool2d = _core.MaxPool2d
+AvgPool1d = _core.AvgPool1d
 AvgPool2d = _core.AvgPool2d
 AdaptiveAvgPool2d = _core.AdaptiveAvgPool2d
 ReLU = _core.ReLU
@@ -41,8 +43,17 @@ FusedConvBnGelu = _core.FusedConvBnGelu
 # Python layers
 from fastnn.layers import Flatten, PySequential, BasicBlock
 
-# Weight initialization (use submodule import to avoid __getattr__ fallback)
-import fastnn.init as init
+# Weight initialization (lazy import to avoid circular dependency with fastnn)
+init = None
+
+
+def __getattr__(name):
+    global init
+    if name == "init":
+        import fastnn.init as _init
+        init = _init
+        return init
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # Model classes
@@ -66,7 +77,9 @@ __all__ = [
     "Dropout2d",
     "Embedding",
     "Upsample",
+    "MaxPool1d",
     "MaxPool2d",
+    "AvgPool1d",
     "AvgPool2d",
     "AdaptiveAvgPool2d",
     "ReLU",

@@ -32,7 +32,7 @@ fn execute_single_output_f32_with_kernels(
 ) -> (Vec<f32>, Vec<String>) {
     let mut executor = GraphExecutor::new(CpuBackend);
     let (mut plan, memory_plan, compiled_graph) = executor
-        .compile_with_plan_and_quantize(graph, None)
+        .compile_with_plan_and_quantize(graph, None, None)
         .expect("graph should compile");
     let kernels = plan
         .instructions

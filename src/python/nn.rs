@@ -1000,6 +1000,11 @@ impl Sequential {
         Sequential { layers, native_layers }
     }
 
+    #[getter]
+    fn layers<'py>(&self, py: Python<'py>) -> Vec<Py<PyAny>> {
+        self.layers.iter().map(|l| l.clone_ref(py)).collect()
+    }
+
     fn __call__(&self, py: Python<'_>, x: PyTensor) -> PyResult<PyTensor> {
         if self.native_layers.len() == self.layers.len() {
             // Fast native path – zero Python C API calls per layer
@@ -1036,6 +1041,74 @@ impl Sequential {
                 params.extend(layer_params);
             }
             Ok(params)
+        }
+    }
+
+    fn named_parameters(&self, py: Python<'_>) -> PyResult<Vec<(String, PyTensor)>> {
+        if self.native_layers.len() == self.layers.len() {
+            let mut params = vec![];
+            for (i, layer) in self.native_layers.iter().enumerate() {
+                for (name, t) in layer.named_parameters() {
+                    params.push((format!("{}.{}", i, name), PyTensor::from_tensor(t)));
+                }
+            }
+            Ok(params)
+        } else {
+            let mut params = vec![];
+            for (i, layer) in self.layers.iter().enumerate() {
+                if let Ok(m) = layer.getattr(py, "named_parameters") {
+                    let layer_params: Vec<(String, PyTensor)> = m.call0(py)?.extract(py)?;
+                    for (name, t) in layer_params {
+                        params.push((format!("{}.{}", i, name), t));
+                    }
+                }
+            }
+            Ok(params)
+        }
+    }
+
+    fn train(&self, py: Python<'_>) {
+        for layer in &self.native_layers {
+            layer.train_mode();
+        }
+        for layer in &self.layers {
+            if let Ok(m) = layer.getattr(py, "train") {
+                let _ = m.call0(py);
+            }
+        }
+    }
+
+    fn eval(&self, py: Python<'_>) {
+        for layer in &self.native_layers {
+            layer.eval_mode();
+        }
+        for layer in &self.layers {
+            if let Ok(m) = layer.getattr(py, "eval") {
+                let _ = m.call0(py);
+            }
+        }
+    }
+
+    fn is_training(&self, py: Python<'_>) -> bool {
+        if let Some(layer) = self.native_layers.first() {
+            return layer.is_training();
+        }
+        if let Some(layer) = self.layers.first() {
+            if let Ok(m) = layer.getattr(py, "is_training") {
+                return m.call0(py).ok().and_then(|v| v.extract::<bool>(py).ok()).unwrap_or(false);
+            }
+        }
+        false
+    }
+
+    fn zero_grad(&self, py: Python<'_>) {
+        for layer in &self.native_layers {
+            layer.zero_grad();
+        }
+        for layer in &self.layers {
+            if let Ok(m) = layer.getattr(py, "zero_grad") {
+                let _ = m.call0(py);
+            }
         }
     }
 }
@@ -1160,7 +1233,11 @@ impl AotExecutor {
                 let attrs: std::collections::HashMap<String, String> = m
                     .into_iter()
                     .filter(|(k, _)| {
-                        *k != "name" && *k != "op_type" && *k != "inputs" && *k != "outputs"
+                        *k != "name"
+                            && *k != "op_type"
+                            && *k != "inputs"
+                            && *k != "outputs"
+                            && *k != "output_shape"
                     })
                     .collect();
                 crate::onnx::converter::OnnxNode {
@@ -1208,7 +1285,7 @@ impl AotExecutor {
 
         let executor = crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, quantize)
+            .compile_with_plan_and_quantize(&graph, quantize, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
@@ -1245,6 +1322,822 @@ impl AotExecutor {
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+        self.decode_outputs(output_data)
+    }
+
+    /// Apply calibration scales from a JSON file to recompile the model with
+    /// optimized activation quantization parameters.
+    ///
+    /// The JSON should be in the format produced by `calibrate_yolo.py` or
+    /// `CalibrationData::to_quant_config()`:
+    /// ```json
+    /// {
+    ///   "tensor_name": {
+    ///     "scale": 0.01,
+    ///     "zero_point": 128.0,
+    ///     "bit_width": 8,
+    ///     "min": -1.0,
+    ///     "max": 1.0
+    ///   },
+    ///   ...
+    /// }
+    /// ```
+    ///
+    /// This recompiles the entire model with the calibration data, so it may
+    /// take some time. The model must have been originally created with
+    /// `quantize=4` or `quantize=8`.
+    fn apply_calibration(
+        &mut self,
+        scales_json: String,
+    ) -> pyo3::PyResult<()> {
+        // Parse calibration data from JSON
+        eprintln!("[APPLY_CALIB] Parsing calibration JSON...");
+        let calib = crate::compiler::passes::calibration::CalibrationData::from_json(&scales_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        eprintln!("[APPLY_CALIB] Parsed {} calibration entries", calib.stats.len());
+
+        // Recompile with calibration data - the quantization pass will UPDATE
+        // existing QuantizeActivations nodes with new calibration attrs
+        eprintln!("[APPLY_CALIB] Recompiling with calibration...");
+        let (plan, memory_plan, graph) = self.executor
+            .compile_with_plan_and_quantize(&self.graph, None, Some(calib))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.plan = plan;
+        self.memory_plan = memory_plan;
+        self.graph = graph;
+
+        eprintln!("[APPLY_CALIB] Recompilation complete");
+        Ok(())
+    }
+
+    /// Opt-in prepared-execution fallback. Accepts the same input dict
+    /// shape as [`Self::forward`] and returns a `dict` of output tensors
+    /// that is **byte-identical** to the corresponding `forward` call.
+    ///
+    /// This method is the user-facing entry point on top of the
+    /// `prepared-plan` Rust feature. It validates that the prepared
+    /// plan attached at construction time stays in lock-step with the
+    /// underlying [`ExecutablePlan`] and then delegates to the existing
+    /// executor path, so its observable behaviour is exactly the same
+    /// as `forward` on the same inputs. Future lanes can layer
+    /// specialised prepared-instruction execution on top of this entry
+    /// point without changing the contract.
+    ///
+    /// Falls back to a clear runtime error when the `prepared-plan`
+    /// cargo feature is not enabled at build time.
+    #[cfg(feature = "prepared-plan")]
+    fn forward_prepared_fallback(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let output_data = self.executor
+            .execute_prepared_fallback(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.decode_outputs(output_data)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn forward_prepared_fallback(
+        &self,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "forward_prepared_fallback requires the 'prepared-plan' feature",
+        ))
+    }
+
+    /// Opt-in prepared fallback that preloads fp32 constants from the
+    /// PreparedConstantArena into the runtime arena before normal
+    /// dispatch. WriteConst instructions still run, so this is a
+    /// behaviour-identical plumbing check rather than an optimisation.
+    #[cfg(feature = "prepared-plan")]
+    fn forward_prepared_arena_fallback(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let output_data = self.executor
+            .execute_prepared_arena_fallback(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.decode_outputs(output_data)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn forward_prepared_arena_fallback(
+        &self,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "forward_prepared_arena_fallback requires the 'prepared-plan' feature",
+        ))
+    }
+
+    /// Opt-in prepared no-copy path.  Built on top of a persistent
+    /// immutable view of the fp32 weight / bias constants stored in
+    /// [`PreparedConstantArena`].  The runtime arena is not
+    /// pre-populated for those slots, and the corresponding
+    /// `WriteConst` instructions are filtered out of the plan; the
+    /// dispatch kernel borrows the weight / bias bytes directly from
+    /// the persistent view instead of pulling them out of the mutable
+    /// arena.  Behaviour is identical to [`AotExecutor::forward`] when
+    /// the model has no fp32 Conv2d / MatMul slot to override, and
+    /// matches it bit-exactly for the models covered by the view.
+    #[cfg(feature = "prepared-plan")]
+    fn forward_prepared_no_copy(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let output_data = self.executor
+            .execute_prepared_no_copy(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.decode_outputs(output_data)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn forward_prepared_no_copy(
+        &self,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "forward_prepared_no_copy requires the 'prepared-plan' feature",
+        ))
+    }
+
+    fn profile(
+        &mut self,
+        py: pyo3::Python<'_>,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let (output_data, profile_entries) = self.executor
+            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.encode_profile_result(py, output_data, profile_entries)
+    }
+
+    #[cfg(feature = "prepared-plan")]
+    fn profile_prepared_arena_fallback(
+        &mut self,
+        py: pyo3::Python<'_>,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
+            inputs.get(name.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
+                    format!("required input '{}' not found", name),
+                ))
+                .map(|t| t.inner.as_bytes())
+        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let (output_data, profile_entries) = self.executor
+            .execute_profile_prepared_arena_fallback(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                &self.prepared_plan,
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        self.encode_profile_result(py, output_data, profile_entries)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn profile_prepared_arena_fallback(
+        &self,
+        _py: pyo3::Python<'_>,
+        _inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "profile_prepared_arena_fallback requires the 'prepared-plan' feature",
+        ))
+    }
+
+    /// Return static memory-efficiency statistics for the compiled graph/plan.
+    ///
+    /// This is model-agnostic compiler/runtime introspection: it reports arena
+    /// pressure, physical-copy/write-constant bytes, instruction mix, and alias
+    /// reuse groups without executing the graph. Use it to find broad memory and
+    /// layout efficiency targets before adding kernel-specific optimisations.
+    fn memory_stats(&self, py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+        use crate::backend::Instruction;
+        use std::collections::{BTreeMap, HashMap};
+
+        let stats = PyDict::new(py);
+        let plan = &self.plan;
+        let memory_plan = &self.memory_plan;
+
+        let mut logical_slot_bytes = 0usize;
+        let mut physical_by_offset: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut nodes_by_offset: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (node_id, slot) in &memory_plan.slots {
+            logical_slot_bytes += slot.size;
+            physical_by_offset
+                .entry(slot.offset)
+                .and_modify(|size| *size = (*size).max(slot.size))
+                .or_insert(slot.size);
+            nodes_by_offset
+                .entry(slot.offset)
+                .or_default()
+                .push(*node_id);
+        }
+        for ((node_id, _output_index), slot) in &memory_plan.secondary_slots {
+            logical_slot_bytes += slot.size;
+            physical_by_offset
+                .entry(slot.offset)
+                .and_modify(|size| *size = (*size).max(slot.size))
+                .or_insert(slot.size);
+            nodes_by_offset
+                .entry(slot.offset)
+                .or_default()
+                .push(*node_id);
+        }
+        let physical_slot_bytes: usize = physical_by_offset.values().copied().sum();
+        let alias_groups = nodes_by_offset.values().filter(|nodes| nodes.len() > 1).count();
+        let aliased_nodes: usize = nodes_by_offset
+            .values()
+            .filter(|nodes| nodes.len() > 1)
+            .map(|nodes| nodes.len())
+            .sum();
+
+        let mut call_kernel_count = 0usize;
+        let mut memcpy_count = 0usize;
+        let mut fill_count = 0usize;
+        let mut write_const_count = 0usize;
+        let mut kernel_read_bytes = 0usize;
+        let mut kernel_write_bytes = 0usize;
+        let mut memcpy_bytes = 0usize;
+        let mut fill_bytes = 0usize;
+        let mut write_const_bytes = 0usize;
+        let mut kernel_counts: HashMap<String, (usize, usize, usize)> = HashMap::new();
+        #[derive(Clone)]
+        struct InstructionTrafficRow {
+            instruction_index: usize,
+            kind: String,
+            kernel_name: String,
+            node_id: Option<usize>,
+            read_bytes: usize,
+            write_bytes: usize,
+            node_name: Option<String>,
+            op_type: Option<String>,
+            input_nodes: Vec<usize>,
+            input_shapes: Vec<Vec<Option<u64>>>,
+            output_shape: Option<Vec<Option<u64>>>,
+        }
+        let mut instruction_traffic: Vec<InstructionTrafficRow> = Vec::new();
+        let mut write_const_traffic: Vec<(usize, usize, usize, usize)> = Vec::new();
+
+        #[derive(Clone)]
+        struct PreparedStaticSlotInfo {
+            consumer_instruction_index: usize,
+            input_index: usize,
+            role: &'static str,
+            constant_index: usize,
+            constant_name: String,
+        }
+
+        #[cfg(feature = "prepared-plan")]
+        let prepared_static_slots: HashMap<(usize, usize), PreparedStaticSlotInfo> = {
+            use crate::backend::prepared::PreparedInstruction;
+
+            let mut slots = HashMap::new();
+            if let Some(arena) = self.prepared_plan.constant_arena() {
+                for prepared in &self.prepared_plan.instructions {
+                    match prepared {
+                        PreparedInstruction::Conv2d(conv) => {
+                            if let Some(id) = conv.packed_weight {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (conv.weight.offset, conv.weight.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: conv.instruction_index,
+                                            input_index: 1,
+                                            role: "conv_weight",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            if let (Some(bias), Some(id)) = (conv.bias, conv.packed_bias) {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (bias.offset, bias.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: conv.instruction_index,
+                                            input_index: 2,
+                                            role: "conv_bias",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        PreparedInstruction::MatMul(matmul) => {
+                            if let Some(id) = matmul.packed_weight {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (matmul.b.offset, matmul.b.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: matmul.instruction_index,
+                                            input_index: 1,
+                                            role: "matmul_weight",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            if let (Some(bias), Some(id)) = (matmul.bias, matmul.packed_bias) {
+                                if let Some(entry) = arena.entry(id) {
+                                    slots.insert(
+                                        (bias.offset, bias.size),
+                                        PreparedStaticSlotInfo {
+                                            consumer_instruction_index: matmul.instruction_index,
+                                            input_index: 2,
+                                            role: "matmul_bias",
+                                            constant_index: id.index,
+                                            constant_name: entry.name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        PreparedInstruction::Generic { .. } => {}
+                    }
+                }
+            }
+            slots
+        };
+        #[cfg(not(feature = "prepared-plan"))]
+        let prepared_static_slots: HashMap<(usize, usize), PreparedStaticSlotInfo> = HashMap::new();
+
+        for (instruction_index, instr) in plan.instructions.iter().enumerate() {
+            match instr {
+                Instruction::CallKernel {
+                    kernel_name,
+                    input_slices,
+                    output_slice,
+                    secondary_output_slice,
+                    node_id,
+                    ..
+                } => {
+                    call_kernel_count += 1;
+                    let entry = kernel_counts.entry(kernel_name.clone()).or_insert((0, 0, 0));
+                    entry.0 += 1;
+                    let read_bytes = input_slices.iter().map(|s| s.size).sum::<usize>();
+                    let mut write_bytes = output_slice.size;
+                    if let Some(sec) = secondary_output_slice {
+                        write_bytes += sec.size;
+                    }
+                    entry.1 += read_bytes;
+                    entry.2 += write_bytes;
+                    kernel_read_bytes += read_bytes;
+                    kernel_write_bytes += write_bytes;
+
+                    let node = node_id.and_then(|id| self.graph.get_node(id));
+                    let input_nodes = node.map(|n| n.inputs.clone()).unwrap_or_default();
+                    let input_shapes = input_nodes
+                        .iter()
+                        .filter_map(|id| self.graph.get_node(*id))
+                        .map(|input| input.output_type.shape.iter().map(|d| d.evaluate()).collect())
+                        .collect();
+                    let output_shape = node.map(|n| {
+                        n.output_type
+                            .shape
+                            .iter()
+                            .map(|d| d.evaluate())
+                            .collect()
+                    });
+                    instruction_traffic.push(InstructionTrafficRow {
+                        instruction_index,
+                        kind: "call_kernel".to_string(),
+                        kernel_name: kernel_name.clone(),
+                        node_id: *node_id,
+                        read_bytes,
+                        write_bytes,
+                        node_name: node.map(|n| n.name.clone()),
+                        op_type: node.map(|n| format!("{:?}", n.opcode)),
+                        input_nodes,
+                        input_shapes,
+                        output_shape,
+                    });
+                }
+                Instruction::MemCopy { dst, src } => {
+                    memcpy_count += 1;
+                    let bytes = dst.size.min(src.size);
+                    memcpy_bytes += bytes;
+                    instruction_traffic.push(InstructionTrafficRow {
+                        instruction_index,
+                        kind: "memcopy".to_string(),
+                        kernel_name: "memcopy".to_string(),
+                        node_id: None,
+                        read_bytes: bytes,
+                        write_bytes: bytes,
+                        node_name: None,
+                        op_type: None,
+                        input_nodes: Vec::new(),
+                        input_shapes: Vec::new(),
+                        output_shape: None,
+                    });
+                }
+                Instruction::Fill { dst, .. } => {
+                    fill_count += 1;
+                    fill_bytes += dst.size;
+                    instruction_traffic.push(InstructionTrafficRow {
+                        instruction_index,
+                        kind: "fill".to_string(),
+                        kernel_name: "fill".to_string(),
+                        node_id: None,
+                        read_bytes: 0,
+                        write_bytes: dst.size,
+                        node_name: None,
+                        op_type: None,
+                        input_nodes: Vec::new(),
+                        input_shapes: Vec::new(),
+                        output_shape: None,
+                    });
+                }
+                Instruction::WriteConst { dst, data } => {
+                    write_const_count += 1;
+                    let bytes = dst.size.min(data.len());
+                    write_const_bytes += bytes;
+                    write_const_traffic.push((instruction_index, dst.offset, dst.size, data.len()));
+                    instruction_traffic.push(InstructionTrafficRow {
+                        instruction_index,
+                        kind: "write_const".to_string(),
+                        kernel_name: "write_const".to_string(),
+                        node_id: None,
+                        read_bytes: 0,
+                        write_bytes: bytes,
+                        node_name: None,
+                        op_type: None,
+                        input_nodes: Vec::new(),
+                        input_shapes: Vec::new(),
+                        output_shape: None,
+                    });
+                }
+            }
+        }
+
+        stats.set_item("arena_size", plan.arena_size)?;
+        stats.set_item("memory_plan_total_size", memory_plan.total_size)?;
+        stats.set_item("logical_slot_bytes", logical_slot_bytes)?;
+        stats.set_item("physical_slot_bytes", physical_slot_bytes)?;
+        stats.set_item("slot_reuse_saved_bytes", logical_slot_bytes.saturating_sub(physical_slot_bytes))?;
+        stats.set_item("alias_groups", alias_groups)?;
+        stats.set_item("aliased_nodes", aliased_nodes)?;
+        stats.set_item("primary_slots", memory_plan.slots.len())?;
+        stats.set_item("secondary_slots", memory_plan.secondary_slots.len())?;
+        stats.set_item("instructions", plan.instructions.len())?;
+        stats.set_item("call_kernel_count", call_kernel_count)?;
+        stats.set_item("memcpy_count", memcpy_count)?;
+        stats.set_item("fill_count", fill_count)?;
+        stats.set_item("write_const_count", write_const_count)?;
+        stats.set_item("kernel_read_bytes", kernel_read_bytes)?;
+        stats.set_item("kernel_write_bytes", kernel_write_bytes)?;
+        stats.set_item("memcpy_bytes", memcpy_bytes)?;
+        stats.set_item("fill_bytes", fill_bytes)?;
+        stats.set_item("write_const_bytes", write_const_bytes)?;
+        stats.set_item(
+            "estimated_static_traffic_bytes",
+            kernel_read_bytes + kernel_write_bytes + memcpy_bytes + fill_bytes + write_const_bytes,
+        )?;
+
+        let top_kernels = PyList::empty(py);
+        let mut kernel_counts: Vec<(String, (usize, usize, usize))> = kernel_counts.into_iter().collect();
+        kernel_counts.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+        for (kernel, (count, read_bytes, write_bytes)) in kernel_counts.into_iter().take(20) {
+            let item = PyDict::new(py);
+            item.set_item("kernel", kernel)?;
+            item.set_item("count", count)?;
+            item.set_item("read_bytes", read_bytes)?;
+            item.set_item("write_bytes", write_bytes)?;
+            item.set_item("static_bytes", read_bytes + write_bytes)?;
+            top_kernels.append(item)?;
+        }
+        stats.set_item("top_kernels_by_count", top_kernels)?;
+
+        let top_instructions = PyList::empty(py);
+        instruction_traffic.sort_by(|a, b| {
+            let a_total = a.read_bytes + a.write_bytes;
+            let b_total = b.read_bytes + b.write_bytes;
+            b_total
+                .cmp(&a_total)
+                .then_with(|| a.instruction_index.cmp(&b.instruction_index))
+        });
+        for row in instruction_traffic.into_iter().take(50) {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", row.instruction_index)?;
+            item.set_item("kind", row.kind)?;
+            item.set_item("kernel_name", row.kernel_name)?;
+            item.set_item("node_id", row.node_id)?;
+            item.set_item("read_bytes", row.read_bytes)?;
+            item.set_item("write_bytes", row.write_bytes)?;
+            item.set_item("static_bytes", row.read_bytes + row.write_bytes)?;
+            if let Some(node_name) = row.node_name {
+                item.set_item("node_name", node_name)?;
+            }
+            if let Some(op_type) = row.op_type {
+                item.set_item("op_type", op_type)?;
+            }
+            if !row.input_nodes.is_empty() {
+                item.set_item("input_nodes", row.input_nodes.clone())?;
+                item.set_item("input_node_ids", row.input_nodes)?;
+                item.set_item("input_shapes", row.input_shapes)?;
+            }
+            if let Some(output_shape) = row.output_shape {
+                item.set_item("output_shape", output_shape)?;
+            }
+            top_instructions.append(item)?;
+        }
+        stats.set_item("top_instructions_by_static_bytes", top_instructions)?;
+
+        let top_write_consts = PyList::empty(py);
+        write_const_traffic.sort_by(|a, b| {
+            let a_bytes = a.2.min(a.3);
+            let b_bytes = b.2.min(b.3);
+            b_bytes.cmp(&a_bytes).then_with(|| a.0.cmp(&b.0))
+        });
+        for (instruction_index, dst_offset, dst_size, data_len) in
+            write_const_traffic.into_iter().take(50)
+        {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", instruction_index)?;
+            item.set_item("dst_offset", dst_offset)?;
+            item.set_item("dst_size", dst_size)?;
+            item.set_item("data_len", data_len)?;
+            item.set_item("write_bytes", dst_size.min(data_len))?;
+            if let Some(prepared) = prepared_static_slots.get(&(dst_offset, dst_size)) {
+                item.set_item(
+                    "prepared_consumer_instruction_index",
+                    prepared.consumer_instruction_index,
+                )?;
+                item.set_item("prepared_input_index", prepared.input_index)?;
+                item.set_item("prepared_static_role", prepared.role)?;
+                item.set_item("prepared_constant_index", prepared.constant_index)?;
+                item.set_item("prepared_constant_name", prepared.constant_name.as_str())?;
+            }
+            top_write_consts.append(item)?;
+        }
+        stats.set_item("top_write_consts_by_size", top_write_consts)?;
+
+        let top_alias_groups = PyList::empty(py);
+        let mut alias_vec: Vec<(usize, Vec<usize>, usize)> = nodes_by_offset
+            .into_iter()
+            .filter_map(|(offset, mut nodes)| {
+                if nodes.len() <= 1 {
+                    return None;
+                }
+                nodes.sort_unstable();
+                let size = physical_by_offset.get(&offset).copied().unwrap_or(0);
+                Some((offset, nodes, size))
+            })
+            .collect();
+        alias_vec.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.1.len().cmp(&a.1.len())));
+        for (offset, nodes, size) in alias_vec.into_iter().take(20) {
+            let item = PyDict::new(py);
+            item.set_item("offset", offset)?;
+            item.set_item("size", size)?;
+            item.set_item("nodes", nodes)?;
+            top_alias_groups.append(item)?;
+        }
+        stats.set_item("top_alias_groups", top_alias_groups)?;
+
+        Ok(stats.into())
+    }
+
+    #[cfg(feature = "prepared-plan")]
+    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
+        use crate::backend::prepared::PreparedInstruction;
+        let instructions = &self.prepared_plan.instructions;
+        let mut stats = std::collections::HashMap::new();
+        stats.insert("total".to_string(), instructions.len());
+        stats.insert(
+            "generic".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::Generic { .. }))
+                .count(),
+        );
+        stats.insert(
+            "conv2d".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::Conv2d(_)))
+                .count(),
+        );
+        stats.insert(
+            "matmul".to_string(),
+            instructions
+                .iter()
+                .filter(|i| matches!(i, PreparedInstruction::MatMul(_)))
+                .count(),
+        );
+        stats.insert(
+            "static_weight_bindings".to_string(),
+            self.prepared_plan.static_weight_binding_count(),
+        );
+        stats.insert(
+            "constant_arena_entries".to_string(),
+            self.prepared_plan.constant_arena_entry_count(),
+        );
+        stats.insert(
+            "constant_arena_bytes".to_string(),
+            self.prepared_plan.constant_arena_total_bytes(),
+        );
+        stats.insert(
+            "packed_fp32_conv_candidates".to_string(),
+            self.prepared_plan.packed_fp32_conv_candidate_count(),
+        );
+        stats.insert(
+            "packed_fp32_conv_candidate_flops".to_string(),
+            self.prepared_plan.packed_fp32_conv_candidate_flops(),
+        );
+        stats.insert(
+            "transposed_fp32_conv_entries".to_string(),
+            self.prepared_plan.transposed_fp32_conv_entry_count(),
+        );
+        stats.insert(
+            "transposed_fp32_conv_bytes".to_string(),
+            self.prepared_plan.transposed_fp32_conv_total_bytes(),
+        );
+        stats.insert(
+            "transposed_fp32_conv_bindings".to_string(),
+            self.prepared_plan.transposed_fp32_conv_binding_count(),
+        );
+        stats.insert(
+            "transposed_fp32_conv_binding_flops".to_string(),
+            self.prepared_plan.transposed_fp32_conv_binding_flops(),
+        );
+        Ok(stats)
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "prepared_stats requires the 'prepared-plan' feature",
+        ))
+    }
+
+    /// Debug method to print the compiled graph structure.
+    #[cfg(feature = "prepared-plan")]
+    fn debug_graph(&self) -> String {
+        let mut out = String::new();
+        out.push_str("=== COMPILED GRAPH ===\n");
+        for node_id in self.graph.topological_sort() {
+            if let Some(node) = self.graph.get_node(node_id) {
+                out.push_str(&format!(
+                    "  Node {}: {} / {:?} / inputs={:?}\n",
+                    node_id, node.name, node.opcode, node.inputs
+                ));
+                out.push_str(&format!(
+                    "    output_type: shape={:?}, dtype={:?}\n",
+                    node.output_type.shape, node.output_type.dtype
+                ));
+                if !node.attrs.is_empty() {
+                    out.push_str(&format!("    attrs: {:?}\n", node.attrs));
+                }
+            }
+        }
+        out.push_str(&format!("Inputs: {:?}\n", self.graph.inputs));
+        out.push_str(&format!("Outputs: {:?}\n", self.graph.outputs));
+        out
+    }
+
+    #[cfg(not(feature = "prepared-plan"))]
+    fn debug_graph(&self) -> String {
+        "debug_graph requires 'prepared-plan' feature".to_string()
+    }
+}
+
+// ── AotExecutor helpers (not exposed to Python) ────────────────────────
+
+impl AotExecutor {
+    fn encode_profile_result(
+        &self,
+        py: pyo3::Python<'_>,
+        output_data: Vec<Vec<u8>>,
+        profile_entries: Vec<crate::backend::ProfileEntry>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+        use pyo3::types::{PyDict, PyList};
+
+        let outputs = PyDict::new(py);
+        for (name, idx) in &self.output_map {
+            if let Some(data) = output_data.get(*idx) {
+                let output_node_id = self.graph.outputs[*idx];
+                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "AotExecutor: output node not found in graph",
+                    )
+                })?;
+                let shape: Vec<i64> = output_node
+                    .output_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        _ => None,
+                    })
+                    .collect();
+                let f32_vals: Vec<f32> = data
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                outputs.set_item(
+                    name,
+                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
+                )?;
+            }
+        }
+
+        let profile_list = PyList::empty(py);
+        for entry in profile_entries {
+            let item = PyDict::new(py);
+            item.set_item("instruction_index", entry.instruction_index)?;
+            item.set_item("node_id", entry.node_id)?;
+            item.set_item("kernel_name", entry.kernel_name)?;
+            item.set_item("elapsed_ns", entry.elapsed_ns)?;
+            let node_name = entry
+                .node_id
+                .and_then(|node_id| self.graph.get_node(node_id))
+                .map(|node| node.name.clone())
+                .unwrap_or_default();
+            item.set_item("node_name", node_name)?;
+            profile_list.append(item)?;
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("outputs", outputs)?;
+        result.set_item("profile", profile_list)?;
+        Ok(result.into())
+    }
+
+    /// Decode the raw `Vec<Vec<u8>>` returned by `GraphExecutor::execute`
+    /// into a `HashMap<output_name, PyTensor>` keyed by the executor's
+    /// `output_map`. Shared by [`AotExecutor::forward`] and
+    /// [`AotExecutor::forward_prepared_fallback`] so both code paths
+    /// produce identical Python-visible outputs for the same input
+    /// bytes.
+    fn decode_outputs(
+        &self,
+        output_data: Vec<Vec<u8>>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let mut result = std::collections::HashMap::new();
         for (name, idx) in &self.output_map {
             if let Some(data) = output_data.get(*idx) {
@@ -1367,75 +2260,6 @@ impl AotExecutor {
             }
         }
         Ok(result)
-    }
-
-    fn profile(
-        &mut self,
-        py: pyo3::Python<'_>,
-        inputs: std::collections::HashMap<String, PyTensor>,
-    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        use pyo3::types::{PyDict, PyList};
-
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
-
-        let (output_data, profile_entries) = self.executor
-            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-        let outputs = PyDict::new(py);
-        for (name, idx) in &self.output_map {
-            if let Some(data) = output_data.get(*idx) {
-                let output_node_id = self.graph.outputs[*idx];
-                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        "AotExecutor: output node not found in graph",
-                    )
-                })?;
-                let shape: Vec<i64> = output_node
-                    .output_type
-                    .shape
-                    .iter()
-                    .filter_map(|d| match d {
-                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
-                        _ => None,
-                    })
-                    .collect();
-                let f32_vals: Vec<f32> = data
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-                outputs.set_item(
-                    name,
-                    PyTensor::from_tensor(Tensor::from_vec(f32_vals, shape)),
-                )?;
-            }
-        }
-
-        let profile_list = PyList::empty(py);
-        for entry in profile_entries {
-            let item = PyDict::new(py);
-            item.set_item("instruction_index", entry.instruction_index)?;
-            item.set_item("node_id", entry.node_id)?;
-            item.set_item("kernel_name", entry.kernel_name)?;
-            item.set_item("elapsed_ns", entry.elapsed_ns)?;
-            let node_name = entry.node_id
-                .and_then(|node_id| self.graph.get_node(node_id))
-                .map(|node| node.name.clone())
-                .unwrap_or_default();
-            item.set_item("node_name", node_name)?;
-            profile_list.append(item)?;
-        }
-
-        let result = PyDict::new(py);
-        result.set_item("outputs", outputs)?;
-        result.set_item("profile", profile_list)?;
-        Ok(result.into())
     }
 }
 

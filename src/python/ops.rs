@@ -499,12 +499,6 @@ fn clear_storage_pool() -> String {
     "pool_cleared".to_string()
 }
 
-#[allow(dead_code)]
-#[pyfunction]
-fn list_registered_ops() -> Vec<String> {
-    vec![]
-}
-
 #[pyfunction]
 fn clamp(a: &PyTensor, min_val: f32, max_val: f32) -> PyTensor {
     let a_inner = a.inner.clone();
@@ -757,17 +751,6 @@ fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTens
 #[pyfunction]
 fn erf(tensor: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(tensor.inner.erf())
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-fn nonzero(tensor: &PyTensor) -> Vec<Vec<i64>> {
-    let flat = tensor.inner.nonzero();
-    let ndim = tensor.inner.shape_ref().len();
-    if ndim == 0 {
-        return Vec::new();
-    }
-    flat.chunks(ndim).map(|c| c.to_vec()).collect()
 }
 
 #[pyfunction]

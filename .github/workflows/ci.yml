@@ -62,7 +62,15 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
-      - uses: PyO3/maturin-action@v1
+      - name: Build (Linux/macOS - with OpenBLAS)
+        if: runner.os != 'Windows'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: develop
+          args: --features openblas
+      - name: Build (Windows - no OpenBLAS)
+        if: runner.os == 'Windows'
+        uses: PyO3/maturin-action@v1
         with:
           command: develop
       - name: Verify import

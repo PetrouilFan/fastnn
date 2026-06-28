@@ -33,10 +33,6 @@ pub trait Module: Send + Sync {
         false
     }
 
-    fn parameters_ref(&self) -> Vec<&Tensor> {
-        vec![]
-    }
-
     fn named_parameters_ref(&self) -> Vec<(&str, &Tensor)> {
         vec![]
     }

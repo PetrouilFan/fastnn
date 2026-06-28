@@ -1,3 +1,4 @@
+use crate::error::FastnnError;
 use crate::ir::node::*;
 use std::collections::HashMap;
 
@@ -45,7 +46,7 @@ pub fn inject_optimizer(
     graph: &mut ComputeGraph,
     params_with_grads: &[(NodeId, NodeId)],
     config: &OptimizerConfig,
-) -> Result<OptimizerInjection, String> {
+) -> Result<OptimizerInjection, FastnnError> {
     if params_with_grads.is_empty() {
         return Ok(OptimizerInjection {
             updated_param_nodes: vec![],
@@ -57,9 +58,9 @@ pub fn inject_optimizer(
     let mut state_input_nodes = Vec::with_capacity(params_with_grads.len());
 
     for &(param_id, grad_id) in params_with_grads {
-        let param_node = graph
-            .get_node(param_id)
-            .ok_or_else(|| format!("param node {} not found in graph", param_id))?;
+        let param_node = graph.get_node(param_id).ok_or_else(|| {
+            FastnnError::compilation(format!("param node {} not found in graph", param_id))
+        })?;
         let param_type = param_node.output_type.clone();
         let param_name = param_node.name.clone();
 

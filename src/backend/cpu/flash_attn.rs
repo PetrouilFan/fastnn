@@ -183,12 +183,16 @@ fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx512f") {
+            // SAFETY: AVX512F feature check passed; `a`, `b`, and `s` are valid
+            // slices with dimensions m×k, k×n, and m×n respectively.
             unsafe {
                 matmul_tile_avx512(a, b, &mut s, m, k, n, scale);
             }
             return s;
         }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: AVX2+FMA feature check passed; `a`, `b`, and `s` are valid
+            // slices with dimensions m×k, k×n, and m×n respectively.
             unsafe {
                 matmul_tile_avx2(a, b, &mut s, m, k, n, scale);
             }
@@ -210,6 +214,8 @@ fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
+// SAFETY: Caller must ensure `a`, `b`, and `s` are valid, non-overlapping,
+// and each at least m*k, k*n, and m*n elements respectively.
 unsafe fn matmul_tile_avx2(
     a: &[f32],
     b: &[f32],
@@ -270,6 +276,7 @@ unsafe fn matmul_tile_avx2(
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
+// SAFETY: `v` is a valid __m256 register value from an AVX2 intrinsic operation.
 unsafe fn hsum256_ps(v: __m256) -> f32 {
     let hi128 = _mm256_extractf128_ps(v, 1);
     let lo128 = _mm256_castps256_ps128(v);
@@ -282,6 +289,8 @@ unsafe fn hsum256_ps(v: __m256) -> f32 {
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
+// SAFETY: Same as matmul_tile_avx2 — caller ensures valid, non-overlapping
+// slices with sufficient length for the m×k×n dimensions.
 unsafe fn matmul_tile_avx512(
     a: &[f32],
     b: &[f32],
