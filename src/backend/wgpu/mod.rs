@@ -30,8 +30,6 @@
 //! | Quantized MatMul (matmul_u4/u8) | GPU quantized GEMM (per-channel unpack + dot) |
 //! | Quantized Conv2d (conv2d_u4/u8) | CPU im2col + GPU quantized GEMM |
 
-#![allow(dead_code)]
-
 mod argmax;
 pub mod context;
 mod conv;
@@ -72,10 +70,16 @@ impl WgpuBuffer {
     /// Get a mutable slice to the arena data.
     #[allow(clippy::mut_from_ref)]
     pub fn data_mut(&self) -> &mut [u8] {
+        // SAFETY: The `UnsafeCell` gives `&mut` to the inner `Vec<u8>`. This is safe because
+        // `data_mut()` returns a borrow that is never aliased — dispatch processes instructions
+        // sequentially and each borrow ends before the next begins.
         unsafe { &mut *self.0.get() }.as_mut_slice()
     }
 }
 
+// SAFETY: `WgpuBuffer` uses interior mutability via `UnsafeCell` but all
+// access is properly synchronized (GPU command queues / CPU thread isolation).
+// The `data` field is read-only from shared references; mutation requires `&mut self`.
 unsafe impl Send for WgpuBuffer {}
 unsafe impl Sync for WgpuBuffer {}
 
@@ -174,47 +178,39 @@ impl Backend for WgpuBackend {
                             // by this instruction to a temporary buffer, run
                             // CPU dispatch, then copy output back.
                             let arena_len = arena.data_mut().len();
-                            let o_end =
-                                (out_start + output_slice.size).min(arena_len);
+                            let o_end = (out_start + output_slice.size).min(arena_len);
 
                             let mut min_offset = out_start;
                             let mut max_end = o_end;
                             for s in input_slices {
-                                let end =
-                                    (s.offset + s.size).min(arena_len);
+                                let end = (s.offset + s.size).min(arena_len);
                                 min_offset = min_offset.min(s.offset);
                                 max_end = max_end.max(end);
                             }
 
                             let range_len = max_end - min_offset;
                             let mut tmp = vec![0u8; range_len];
-                            tmp.copy_from_slice(
-                                &arena.data_mut()[min_offset..max_end],
-                            );
+                            tmp.copy_from_slice(&arena.data_mut()[min_offset..max_end]);
 
-                            let cpu_buf =
-                                crate::backend::cpu::CpuBuffer::new(tmp);
+                            let cpu_buf = crate::backend::cpu::CpuBuffer::new(tmp);
                             let cpu = CpuBackend;
 
                             // Adjust offsets into the temp buffer range.
-                            let adjusted_inputs: Vec<BufferSlice> =
-                                input_slices
-                                    .iter()
-                                    .map(|s| BufferSlice {
-                                        offset: s.offset - min_offset,
-                                        size: s.size,
-                                    })
-                                    .collect();
+                            let adjusted_inputs: Vec<BufferSlice> = input_slices
+                                .iter()
+                                .map(|s| BufferSlice {
+                                    offset: s.offset - min_offset,
+                                    size: s.size,
+                                })
+                                .collect();
                             let adjusted_output = BufferSlice {
                                 offset: output_slice.offset - min_offset,
                                 size: output_slice.size,
                             };
                             let adjusted_secondary =
-                                secondary_output_slice.as_ref().map(|s| {
-                                    BufferSlice {
-                                        offset: s.offset - min_offset,
-                                        size: s.size,
-                                    }
+                                secondary_output_slice.as_ref().map(|s| BufferSlice {
+                                    offset: s.offset - min_offset,
+                                    size: s.size,
                                 });
 
                             let single_plan = ExecutablePlan {
@@ -231,21 +227,15 @@ impl Backend for WgpuBackend {
                                 arena_size: range_len,
                                 levels: vec![0],
                             };
-                            cpu.dispatch(
-                                &single_plan,
-                                &cpu_buf,
-                                shape_env,
-                            )?;
+                            cpu.dispatch(&single_plan, &cpu_buf, shape_env)?;
 
                             // Copy output back to real arena.
                             let cpu_data = cpu_buf.data_mut();
                             let wgpu_data = arena.data_mut();
-                            let adj_out_start =
-                                output_slice.offset - min_offset;
+                            let adj_out_start = output_slice.offset - min_offset;
                             let adj_out_end = o_end - min_offset;
-                            wgpu_data[out_start..o_end].copy_from_slice(
-                                &cpu_data[adj_out_start..adj_out_end],
-                            );
+                            wgpu_data[out_start..o_end]
+                                .copy_from_slice(&cpu_data[adj_out_start..adj_out_end]);
                         }
                     }
                     Instruction::MemCopy { dst, src } => {

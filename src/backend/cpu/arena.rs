@@ -262,11 +262,13 @@ fn assert_slice_in_bounds(arena_len: usize, slice: BufferSlice, end: usize) {
 }
 
 #[inline]
+// SAFETY: Caller must ensure `ptr` is valid for `len_bytes` and properly aligned for f32.
 unsafe fn bytes_as_f32_slice<'a>(ptr: *const u8, len_bytes: usize) -> &'a [f32] {
     std::slice::from_raw_parts(ptr.cast::<f32>(), len_bytes / std::mem::size_of::<f32>())
 }
 
 #[inline]
+// SAFETY: Caller must ensure `ptr` is valid for `len_bytes` and properly aligned for f32.
 unsafe fn bytes_as_f32_slice_mut<'a>(ptr: *mut u8, len_bytes: usize) -> &'a mut [f32] {
     std::slice::from_raw_parts_mut(ptr.cast::<f32>(), len_bytes / std::mem::size_of::<f32>())
 }

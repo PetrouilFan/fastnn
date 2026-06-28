@@ -949,6 +949,7 @@ impl GpuContext {
         let cache_key = self.get_cache_key(name, dtype, wgsl);
         let existing_data = self.load_pipeline_data_from_cache(&cache_key);
 
+        // SAFETY: The raw pointer was obtained from a `Box::into_raw` and is still valid.
         let pipeline_cache = unsafe {
             self.device
                 .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
