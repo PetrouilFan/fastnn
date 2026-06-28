@@ -6,6 +6,7 @@
 //! it sees `IrDType::U4/U8` on the weight input.
 
 use crate::dtypes::{U4x8, U8x4};
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
 
@@ -24,7 +25,7 @@ pub fn quantize_weights(
     graph: &mut ComputeGraph,
     bit_width: u8,
     group_size: Option<usize>,
-) -> Result<(), String> {
+) -> Result<(), FastnnError> {
     // ---- Phase 1: collect (constant_id, consumer_id) pairs to quantize ----
     // We collect first, then mutate, to avoid borrow-checker issues.
     let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
@@ -72,7 +73,8 @@ pub fn quantize_weights(
             }
         }
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     if to_quantize.is_empty() {
         return Ok(());
@@ -225,9 +227,7 @@ pub fn quantize_weights(
 ///
 /// The pass also updates `graph.outputs` so that any output pointing at the
 /// optimizer node is redirected to the Quantize node.
-pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> {
-    use std::collections::HashMap;
-
+pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     // Collect optimizer nodes that need wrapping, along with their
     // weight input ID and the bit_width to requantize to.
     #[derive(Clone)]
@@ -236,7 +236,6 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
         weight_id: NodeId,
         bit_width: usize,
         opt_inputs: Vec<NodeId>, // remaining inputs (grad, m, v, etc.)
-        opt_attrs: HashMap<String, String>,
     }
 
     let mut to_wrap: Vec<OptimizerWrap> = Vec::new();
@@ -281,10 +280,10 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
             weight_id,
             bit_width,
             opt_inputs: remaining_inputs,
-            opt_attrs: node.attrs.clone(),
         });
         Ok(())
-    })?;
+    })
+    .map_err(FastnnError::compilation)?;
 
     if to_wrap.is_empty() {
         return Ok(());
@@ -346,7 +345,12 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), String> 
                     scales: orig_scales,
                     zero_points: orig_zeros,
                 },
-                _ => return Err(format!("unsupported bit_width: {}", wrap.bit_width)),
+                _ => {
+                    return Err(FastnnError::compilation(format!(
+                        "unsupported bit_width: {}",
+                        wrap.bit_width
+                    )))
+                }
             },
         );
         let mut q_attrs = std::collections::HashMap::new();

@@ -75,6 +75,10 @@ pub enum FastnnError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// Compiler pass error (shape inference, fusion, quantization, etc.)
+    #[error("Compilation error: {0}")]
+    Compilation(String),
+
     /// General error with custom message
     #[error("{0}")]
     Other(String),
@@ -115,6 +119,11 @@ impl FastnnError {
     pub fn optim(msg: impl Into<String>) -> Self {
         FastnnError::Optim(msg.into())
     }
+
+    /// Create a compilation error with context
+    pub fn compilation(msg: impl Into<String>) -> Self {
+        FastnnError::Compilation(msg.into())
+    }
 }
 
 /// Result type alias for fastnn operations
@@ -138,6 +147,7 @@ impl From<FastnnError> for PyErr {
             FastnnError::DataLoader(_) => PyRuntimeError::new_err(msg),
             FastnnError::Computation(_) => PyRuntimeError::new_err(msg),
             FastnnError::Internal(_) => PyRuntimeError::new_err(msg),
+            FastnnError::Compilation(_) => PyRuntimeError::new_err(msg),
             _ => PyRuntimeError::new_err(msg),
         }
     }
@@ -173,6 +183,7 @@ impl<T> Context<T> for Result<T, FastnnError> {
             FastnnError::DataLoader(msg) => FastnnError::DataLoader(format!("{}: {}", f(), msg)),
             FastnnError::Computation(msg) => FastnnError::Computation(format!("{}: {}", f(), msg)),
             FastnnError::Internal(msg) => FastnnError::Internal(format!("{}: {}", f(), msg)),
+            FastnnError::Compilation(msg) => FastnnError::Compilation(format!("{}: {}", f(), msg)),
             _ => FastnnError::Other(format!("{}: {}", f(), e)),
         })
     }
@@ -211,5 +222,13 @@ macro_rules! device_error {
 macro_rules! tensor_op_error {
     ($($arg:tt)*) => {
         FastnnError::tensor_op(format!($($arg)*))
+    };
+}
+
+/// Macro for creating compilation errors
+#[macro_export]
+macro_rules! compilation_error {
+    ($($arg:tt)*) => {
+        FastnnError::compilation(format!($($arg)*))
     };
 }

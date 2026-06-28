@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-
+use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -224,18 +223,6 @@ impl SegFreeList {
         }
     }
 
-    fn bucket_for(size: usize) -> Option<usize> {
-        if size == 0 {
-            return None;
-        }
-        let b = (usize::BITS - size.leading_zeros()) as usize - 1;
-        if b < 64 {
-            Some(b)
-        } else {
-            None
-        }
-    }
-
     fn add(&mut self, offset: usize, size: usize) {
         if size == 0 {
             return;
@@ -297,7 +284,7 @@ fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> usize {
 
 /// Plan memory using max estimates (no ShapeEnv).  Equivalent to
 /// `plan_memory_with_env(graph, None)`.
-pub fn plan_memory(graph: &ComputeGraph) -> Result<MemoryPlan, String> {
+pub fn plan_memory(graph: &ComputeGraph) -> Result<MemoryPlan, FastnnError> {
     plan_memory_with_env(graph, None)
 }
 
@@ -309,7 +296,7 @@ pub fn plan_memory(graph: &ComputeGraph) -> Result<MemoryPlan, String> {
 pub fn plan_memory_with_env(
     graph: &ComputeGraph,
     shape_env: Option<&ShapeEnv>,
-) -> Result<MemoryPlan, String> {
+) -> Result<MemoryPlan, FastnnError> {
     if graph.nodes.is_empty() {
         return Ok(MemoryPlan {
             total_size: 0,

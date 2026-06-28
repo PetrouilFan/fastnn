@@ -1,4 +1,5 @@
 use crate::ir::node::ComputeGraph;
+use crate::FastnnError;
 
 pub mod backward;
 pub mod conv_silu;
@@ -8,97 +9,97 @@ pub mod residual_add_norm;
 
 pub trait FusionPass {
     fn name() -> &'static str;
-    fn fuse(graph: &mut ComputeGraph) -> Result<bool, String>;
+    fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError>;
 }
 
 #[cfg(feature = "fusion-op-relu")]
-fn apply_op_relu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_op_relu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     op_relu::OpRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-op-relu"))]
-fn apply_op_relu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_op_relu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-op-gelu")]
-fn apply_op_gelu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_op_gelu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     // TODO: implement dedicated OpGelu fusion pass when module exists
     let _ = graph;
     Ok(false)
 }
 #[cfg(not(feature = "fusion-op-gelu"))]
-fn apply_op_gelu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_op_gelu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-op-silu")]
-fn apply_op_silu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_op_silu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     conv_silu::ConvSilu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-op-silu"))]
-fn apply_op_silu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_op_silu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-matmul-add-relu")]
-fn apply_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     matmul_add_relu::MatMulAddRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-matmul-add-relu"))]
-fn apply_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-matmul-add-gelu")]
-fn apply_matmul_add_gelu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_matmul_add_gelu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     // TODO: implement dedicated MatMulAddGelu fusion pass when module exists
     let _ = graph;
     Ok(false)
 }
 #[cfg(not(feature = "fusion-matmul-add-gelu"))]
-fn apply_matmul_add_gelu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_matmul_add_gelu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-matmul-add-silu")]
-fn apply_matmul_add_silu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_matmul_add_silu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     // TODO: implement dedicated MatMulAddSilu fusion pass when module exists
     let _ = graph;
     Ok(false)
 }
 #[cfg(not(feature = "fusion-matmul-add-silu"))]
-fn apply_matmul_add_silu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_matmul_add_silu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-backward")]
-fn apply_backward_relu_matmul(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_backward_relu_matmul(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     backward::BackwardReluMatMul::fuse(graph)
 }
 #[cfg(not(feature = "fusion-backward"))]
-fn apply_backward_relu_matmul(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_backward_relu_matmul(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-backward")]
-fn apply_backward_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_backward_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     backward::BackwardMatMulAddRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-backward"))]
-fn apply_backward_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_backward_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
 #[cfg(feature = "fusion-residual-add-norm")]
-fn apply_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     residual_add_norm::FusedResidualAddNorm::fuse(graph)
 }
 #[cfg(not(feature = "fusion-residual-add-norm"))]
-fn apply_residual_add_norm(_graph: &mut ComputeGraph) -> Result<bool, String> {
+fn apply_residual_add_norm(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     Ok(false)
 }
 
-fn apply_pass(graph: &mut ComputeGraph, idx: usize) -> Result<bool, String> {
+fn apply_pass(graph: &mut ComputeGraph, idx: usize) -> Result<bool, FastnnError> {
     match idx {
         0 => apply_matmul_add_relu(graph),
         1 => apply_matmul_add_gelu(graph),
@@ -113,7 +114,7 @@ fn apply_pass(graph: &mut ComputeGraph, idx: usize) -> Result<bool, String> {
     }
 }
 
-pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), String> {
+pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     for i in 0..9 {
         while apply_pass(graph, i)? {}
     }
