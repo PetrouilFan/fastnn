@@ -542,7 +542,7 @@ class _PrefetchIterator(_BaseIterator):
             self.thread.join(timeout=30)
 
 
-class _MultiProcessIterator(_BaseIterator):
+class _MultiThreadedIterator(_BaseIterator):
     """Multi-threaded iterator for parallel data loading.
 
     Uses a thread pool to fetch batches in parallel, overlapping I/O with
@@ -645,7 +645,7 @@ def _fetch_batch(
 ) -> tuple:
     """Fetch and collate a batch from the dataset.
 
-    Shared helper used by both _PrefetchIterator and _MultiProcessIterator.
+    Shared helper used by both _PrefetchIterator and _MultiThreadedIterator.
     """
     batch_get = getattr(dataset, 'batch_get', None)
     if batch_get is not None:
@@ -766,7 +766,7 @@ class DataLoader:
     def __iter__(self):
         """Return the appropriate iterator based on num_workers."""
         if self.num_workers > 0:
-            return _MultiProcessIterator(
+            return _MultiThreadedIterator(
                 iter(self.batch_sampler),
                 self.dataset,
                 self.collate_fn,
