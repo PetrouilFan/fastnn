@@ -113,7 +113,7 @@ fn quantize_node_output(
 
     // Create quantized output type
     let quant_dtype = if bit_width == 4 {
-        IrDType::U4 {
+        IrDType::I4 {
             scales: vec![scale],
             zero_points: vec![zero_point],
         }

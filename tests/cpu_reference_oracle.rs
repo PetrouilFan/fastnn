@@ -214,7 +214,7 @@ fn matmul_u4_reference_oracle_hits_quantized_dispatch_on_tail_k() {
         let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
         assert!(
-            kernels.iter().any(|name| name == "matmul_u4"),
+            kernels.iter().any(|name| name == "matmul_i4"),
             "expected matmul_u4 kernel, got {kernels:?}"
         );
         assert_close(
@@ -259,7 +259,7 @@ fn matmul_u8_reference_oracle_hits_quantized_dispatch_on_tail_k() {
         let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
         assert!(
-            kernels.iter().any(|name| name == "matmul_u8"),
+            kernels.iter().any(|name| name == "matmul_i8"),
             "expected matmul_u8 kernel, got {kernels:?}"
         );
         assert_close(
@@ -321,7 +321,7 @@ fn matmul_i8_activation_path_matches_reference_oracle() {
         "expected quantize_activations kernel, got {kernels:?}"
     );
     assert!(
-        kernels.iter().any(|name| name == "matmul_u8_i8"),
+        kernels.iter().any(|name| name == "matmul_i8_i8"),
         "expected matmul_u8_i8 kernel, got {kernels:?}"
     );
     assert_close(
@@ -382,7 +382,7 @@ fn matmul_u4_i8_activation_path_matches_reference_oracle() {
         "expected quantize_activations kernel, got {kernels:?}"
     );
     assert!(
-        kernels.iter().any(|name| name == "matmul_u4_i8"),
+        kernels.iter().any(|name| name == "matmul_i4_i8"),
         "expected matmul_u4_i8 kernel, got {kernels:?}"
     );
     assert_close(
