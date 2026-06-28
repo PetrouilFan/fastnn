@@ -18,7 +18,7 @@ unsafe impl bytemuck::Zeroable for F8x4 {}
 const E4M3_BIAS: i32 = 7;
 
 #[inline]
-fn e4m3_to_f32(byte: u8) -> f32 {
+pub fn e4m3_to_f32(byte: u8) -> f32 {
     let sign = if (byte & 0x80) == 0 { 1.0 } else { -1.0 };
     let biased_exp = (byte >> 3) & 0x0F;
     let mant = (byte & 0x07) as f32;
