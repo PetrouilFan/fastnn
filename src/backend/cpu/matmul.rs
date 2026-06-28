@@ -8,147 +8,6 @@ use crate::packed_tensor::PackedTensor;
 
 use super::{aligned_packed_slice, resolve_params, CpuBuffer};
 
-/// Dequantize I8 activation payload to f32.
-///
-/// Supports two formats:
-/// - **Per-tensor** (legacy): `[scale_f32][zp_f32][i8_data...]` (header_size = 8)
-/// - **Per-channel**: `[num_channels(u32)][chunk_size(u32)][scale_1..scale_n(zp_1..zp_n)][ch_data...]`
-///
-/// Detection: if the first 4 bytes, read as u32, are > 0 and the payload is
-/// large enough for the per-channel header, we treat it as per-channel.
-pub(super) fn dequantize_i8_activation(payload: &[u8]) -> Vec<f32> {
-    // Attempt to detect per-channel format: num_channels > 0 and payload
-    // is larger than the minimal per-channel header (4 + 4 + 2*4 = 16 bytes
-    // for 1 channel).
-    let per_channel_detected = {
-        if payload.len() >= 16 {
-            let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0; 4])) as usize;
-            let chunk_size =
-                u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0; 4])) as usize;
-            let expected = 8 + nc * 8 + nc * chunk_size;
-            nc > 0 && chunk_size > 0 && payload.len() >= expected
-        } else {
-            false
-        }
-    };
-
-    if per_channel_detected {
-        let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-        let chunk_size = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
-        let data_start = 8 + nc * 8;
-        let numel = nc * chunk_size;
-        let mut out = Vec::with_capacity(numel);
-        for ch in 0..nc {
-            let scale = f32::from_le_bytes(
-                payload[8 + ch * 4..8 + (ch + 1) * 4]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
-            let zp = f32::from_le_bytes(
-                payload[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
-            let ch_start = ch * chunk_size;
-            for j in 0..chunk_size {
-                let di = data_start + j;
-                let q = if di < payload.len() {
-                    payload[di] as i8
-                } else {
-                    0i8
-                };
-                out.push((q as f32) * scale + zp);
-            }
-        }
-        out
-    } else {
-        let header_size = 8;
-        let numel = payload.len().saturating_sub(header_size);
-        let scale = if payload.len() >= 4 {
-            f32::from_le_bytes(payload[0..4].try_into().unwrap())
-        } else {
-            1.0
-        };
-        let zp = if payload.len() >= 8 {
-            f32::from_le_bytes(payload[4..8].try_into().unwrap())
-        } else {
-            0.0
-        };
-        let mut out = Vec::with_capacity(numel);
-        for i in 0..numel {
-            let idx = header_size + i;
-            let q = payload[idx] as i8;
-            out.push((q as f32) * scale + zp);
-        }
-        out
-    }
-}
-
-/// Dequantize I8 activation payload into a pre-allocated output slice.
-pub(super) fn dequantize_i8_activation_into(payload: &[u8], out: &mut [f32]) {
-    let per_channel_detected = {
-        if payload.len() >= 16 {
-            let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap_or([0; 4])) as usize;
-            let chunk_size =
-                u32::from_le_bytes(payload[4..8].try_into().unwrap_or([0; 4])) as usize;
-            let expected = 8 + nc * 8 + nc * chunk_size;
-            nc > 0 && chunk_size > 0 && payload.len() >= expected
-        } else {
-            false
-        }
-    };
-
-    if per_channel_detected {
-        let nc = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-        let chunk_size = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
-        let data_start = 8 + nc * 8;
-        let mut idx = 0;
-        for ch in 0..nc {
-            let scale = f32::from_le_bytes(
-                payload[8 + ch * 4..8 + (ch + 1) * 4]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
-            let zp = f32::from_le_bytes(
-                payload[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
-            for j in 0..chunk_size {
-                let di = data_start + j;
-                let q = if di < payload.len() {
-                    payload[di] as i8
-                } else {
-                    0i8
-                };
-                out[idx] = (q as f32) * scale + zp;
-                idx += 1;
-            }
-        }
-    } else {
-        let header_size = 8;
-        let scale = if payload.len() >= 4 {
-            f32::from_le_bytes(payload[0..4].try_into().unwrap())
-        } else {
-            1.0
-        };
-        let zp = if payload.len() >= 8 {
-            f32::from_le_bytes(payload[4..8].try_into().unwrap())
-        } else {
-            0.0
-        };
-        for i in 0..out.len() {
-            let pidx = header_size + i;
-            let q = if pidx < payload.len() {
-                payload[pidx] as i8
-            } else {
-                0i8
-            };
-            out[i] = (q as f32) * scale + zp;
-        }
-    }
-}
-
 // Runtime dispatch helpers intentionally take the IR/kernel call-site context
 // directly so they do not allocate wrapper structs on hot paths.
 
@@ -278,7 +137,12 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
 
     Ok({
         let scales_len = meta.scales.len();
-        let mut pt = PackedTensor::from_raw(data, meta.shape.clone(), meta.scales.clone(), meta.zero_points.clone());
+        let mut pt = PackedTensor::from_raw(
+            data,
+            meta.shape.clone(),
+            meta.scales.clone(),
+            meta.zero_points.clone(),
+        );
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;
         }
@@ -322,14 +186,14 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            }));
+            })
+        });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();
@@ -360,13 +224,10 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
     if let [a_slice, w_slice] = input_slices {
         let (activation_payload, typed_data) = {
             let d = arena.data_mut();
-            (
-                d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(),
-                {
-                    let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                    aligned_packed_slice::<U8x4>(raw)
-                },
-            )
+            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
+                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                aligned_packed_slice::<U8x4>(raw)
+            })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = matmul_params.as_slice() else {
@@ -374,14 +235,14 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 8,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            }));
+            })
+        });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();
@@ -419,13 +280,10 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
     if let [a_slice, w_slice] = input_slices {
         let (activation_payload, typed_data) = {
             let d = arena.data_mut();
-            (
-                d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(),
-                {
-                    let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                    aligned_packed_slice::<U4x8>(raw)
-                },
-            )
+            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
+                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
+                aligned_packed_slice::<U4x8>(raw)
+            })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = matmul_params.as_slice() else {
@@ -433,14 +291,14 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let meta = weight_meta
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+        let meta = weight_meta.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 4,
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
-            }));
+            })
+        });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32 = {
             let d = arena.data_mut();

@@ -4,8 +4,8 @@
 //! Uses SWAR dot products for 4-8× arithmetic density.
 
 use crate::backend::cpu::swar::{
-    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed,
-    u4x8_packed_to_tensor, u8x4_dot_packed, u8x4_packed_to_tensor,
+    quantize_f32_to_u4x8, quantize_f32_to_u8x4, u4x8_dot_packed, u4x8_packed_to_tensor,
+    u8x4_dot_packed, u8x4_packed_to_tensor,
 };
 use crate::dtypes::{U4x8, U8x4};
 use crate::packed_tensor::PackedTensor;
@@ -256,10 +256,7 @@ pub fn gemm_packed_u8x4_fused(
             let w_term = w_scale * qb_sum as f32;
             let zp_prod = act_zp * w_zp;
 
-            let mut val = (acc as f32) * scale_ab
-                + w_zp * r
-                + act_zp * w_term
-                + zp_prod * k_f32;
+            let mut val = (acc as f32) * scale_ab + w_zp * r + act_zp * w_term + zp_prod * k_f32;
 
             if let Some(b) = bias {
                 val += b[col];

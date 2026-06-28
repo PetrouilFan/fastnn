@@ -4,7 +4,8 @@
 //! running min/max/mean/std/histogram statistics. These are used to compute
 //! per-tensor or per-channel quantization scales and zero-points.
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode};
+use crate::error::FastnnError;
+use crate::ir::node::NodeId;
 use std::collections::HashMap;
 
 /// Calibration statistics collected per tensor.
@@ -181,7 +182,7 @@ impl CalibrationStats {
             cumsum[i + 1] = cumsum[i] + prob[i];
         }
 
-        let bin_width = (self.hist_max - self.hist_min) / bins as f32;
+        let _bin_width = (self.hist_max - self.hist_min) / bins as f32;
         let mut best_kl = f64::INFINITY;
         let mut best_threshold_idx = bins / 2;
 
@@ -209,7 +210,7 @@ impl CalibrationStats {
             for i in 0..q_bins {
                 // Map quantized bin i to original histogram range [0, clip_idx)
                 let src_start = (i * clip_idx) / q_bins;
-                let src_end = ((i + 1) * clip_idx) / q_bins;
+                let _src_end = ((i + 1) * clip_idx) / q_bins;
                 let src_bin = src_start.min(bins - 1);
                 ref_prob[i] += prob[src_bin];
             }
@@ -356,18 +357,21 @@ impl CalibrationData {
 
     /// Load calibration data from JSON produced by `to_quant_config`.
     /// The JSON format: { "tensor_name": { "scale": f32, "zero_point": f32, "bit_width": u8, "min": f32, "max": f32, ... } }
-    pub fn from_json(json: &str) -> Result<Self, String> {
+    pub fn from_json(json: &str) -> Result<Self, FastnnError> {
         use serde_json::Value;
-        let data: Value = serde_json::from_str(json).map_err(|e| format!("invalid JSON: {}", e))?;
+        let data: Value = serde_json::from_str(json)
+            .map_err(|e| FastnnError::compilation(format!("invalid JSON: {}", e)))?;
 
-        let obj = data.as_object().ok_or("JSON root must be an object")?;
+        let obj = data
+            .as_object()
+            .ok_or(FastnnError::compilation("JSON root must be an object"))?;
 
         let mut calib = CalibrationData::new();
 
         for (name, entry) in obj {
-            let entry_obj = entry
-                .as_object()
-                .ok_or_else(|| format!("entry for '{}' must be an object", name))?;
+            let entry_obj = entry.as_object().ok_or_else(|| {
+                FastnnError::compilation(format!("entry for '{}' must be an object", name))
+            })?;
 
             // Extract min/max from the entry (preferred) or derive from scale/zp
             let (min, max) = if let (Some(min_v), Some(max_v)) = (
@@ -388,7 +392,7 @@ impl CalibrationData {
                 let max = min + scale * levels;
                 (min, max)
             } else {
-                return Err(format!("entry for '{}' missing required fields (min/max or scale/zero_point/bit_width)", name));
+                return Err(FastnnError::compilation(format!("entry for '{}' missing required fields (min/max or scale/zero_point/bit_width)", name)));
             };
 
             let mut stats = CalibrationStats::new();

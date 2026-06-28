@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -1,5 +1,6 @@
 use super::FusionPass;
 use crate::ir::node::{ComputeGraph, IRNode, NodeId, Opcode};
+use crate::FastnnError;
 use std::collections::{HashMap, HashSet};
 
 fn activation_fused_name(opcode: Opcode) -> Option<&'static str> {
@@ -18,7 +19,7 @@ impl FusionPass for MatMulAddRelu {
         "MatMulAddRelu"
     }
 
-    fn fuse(graph: &mut ComputeGraph) -> Result<bool, String> {
+    fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
         let mut fused = false;
         let mut to_remove: HashSet<NodeId> = HashSet::new();
         let mut new_nodes: Vec<IRNode> = Vec::new();

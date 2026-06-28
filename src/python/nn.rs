@@ -1280,7 +1280,7 @@ impl AotExecutor {
         // Parse calibration data from JSON
         eprintln!("[APPLY_CALIB] Parsing calibration JSON...");
         let calib = crate::compiler::passes::calibration::CalibrationData::from_json(&scales_json)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         eprintln!("[APPLY_CALIB] Parsed {} calibration entries", calib.stats.len());
 
         // Recompile with calibration data - the quantization pass will UPDATE
