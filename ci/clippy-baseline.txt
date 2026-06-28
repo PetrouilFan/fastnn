@@ -1,6 +1,4 @@
 # Existing clippy diagnostics tracked by CI. Remove entries when you fix them.
-clippy::approx_constant|src/backend/cpu/microkernels/activations.rs|approximate value of `f32::consts::LN_2` found
-clippy::approx_constant|src/backend/cpu/microkernels/activations.rs|approximate value of `f32::consts::LOG2_E` found
 clippy::approx_constant|src/dtypes/f32x1.rs|approximate value of `f32::consts::PI` found
 clippy::approx_constant|src/ir/builder.rs|approximate value of `f{32, 64}::consts::E` found
 clippy::approx_constant|src/ir/builder.rs|approximate value of `f{32, 64}::consts::SQRT_2` found

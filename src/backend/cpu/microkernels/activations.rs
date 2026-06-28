@@ -342,7 +342,7 @@ pub fn tanh_f32_scalar(x: f32) -> f32 {
 // SAFETY: `x` is a valid __m256 register value; this helper is always called
 // from within a function that guarantees AVX2+FMA availability.
 pub(crate) unsafe fn exp_avx2_vec(x: __m256) -> __m256 {
-    let vlog2e = _mm256_set1_ps(1.4426950408889634f32);
+    let vlog2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
     let vln2_hi = _mm256_set1_ps(0.693359375f32);
     let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);
     let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
@@ -424,7 +424,7 @@ pub(crate) unsafe fn log_avx2_vec(x: __m256) -> __m256 {
     log_m = _mm256_fmadd_ps(log_m, mant_f, c0);
 
     // ln(x) = ln(m * 2^e) = ln(m) + e * ln(2)
-    _mm256_fmadd_ps(exp_f, _mm256_set1_ps(0.6931471805599453f32), log_m)
+    _mm256_fmadd_ps(exp_f, _mm256_set1_ps(std::f32::consts::LN_2), log_m)
 }
 
 // ============================================================
