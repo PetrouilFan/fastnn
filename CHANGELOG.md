@@ -1,5 +1,51 @@
 # Changelog
 
+## [2.3.0] - 2026-06-28
+
+### Added
+- **Prepared plan execution**: persistent constant arena for static weights/biases,
+  arena preload fallback, transposed conv weight binding, plan stats introspection
+  from Python (`AotExecutor`)
+- **Per-group quantization** for U4/U8 packed tensors
+- **Activation quantization extended to Conv2d** (previously MatMul only)
+- **OpenBLAS conv GEMM path** with thread sweep support
+- **SWAR packed kernels** for quantized inference
+- **Sequential Python API expanded**: `train()`, `eval()`, `is_training()`,
+  `zero_grad()`, `named_parameters()`, and `layers` getter
+- **Graph memory profiler**: overlay, delta mode, instruction-level traffic stats,
+  hotspots, WriteConst cross-referencing
+- **Calibration support** for quantized activation scales, STE gradient support
+- New test coverage: prepared execution, graph memory profile, concat-to-conv
+  guardrail, ReduceMean keepdims
+- New benchmark suite: conv blocked/im2col/phase, GEMM backend/layout,
+  AVX2 conv blocked, YOLO runtime matrix
+
+### Fixed
+- **ONNX import pipeline**: MatMul/Gemm `in_features`, Conv shape inference,
+  graph output tensor names, input shape propagation, `GraphExecutor` input_shapes
+- **Quantized YOLO inference**: pattern match bug, U8-to-I8 zero_point conversion,
+  calibration scale/zp reads
+- Quantized GEMM weight shape double-reverse bug
+- Plan cache key and kernel name selection for quantized matmul
+- i8 quantized conv2d dispatch packed GEMM dequant math
+- u4/u8 tail pack writes in packed_conv
+- ReduceMean keepdims not tracked for flatten reshape
+- `conv2d_u4` activation zero_point for `range=0`
+- Consolidated Python bindings, fixed broken APIs, deduplicated code
+
+### Changed
+- `requires-python` lowered to `>=3.11` (was `>=3.12`)
+- `FastnnError` enum gains `Compilation` variant (breaking for exhaustive matches)
+- maturin default features: `simd_avx512` removed, `prepared-plan` added
+- 13 CPU ops converted to borrowed arena slices (P1 copy reduction)
+- Microkernels module split into 6 sub-files
+- Python `__init__.py` restructured with explicit submodule imports
+- `SAFETY` comments added to all unsafe blocks
+
+### Removed
+- Dead code, unused dependencies, and stale docs across Rust and Python
+- `simd_avx512` feature from pyproject.toml defaults
+
 ## [2.2.4] - 2026-06-10
 
 ### Changed
