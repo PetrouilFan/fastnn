@@ -23,6 +23,9 @@ patterns and assert the compiled output shape matches the ONNX
 reference.
 """
 
+import pytest
+pytest.importorskip("onnx")
+
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
