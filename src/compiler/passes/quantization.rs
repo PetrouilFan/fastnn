@@ -133,7 +133,7 @@ pub fn quantize_weights(
             }
             (transposed, vec![cols, rows])
         } else {
-            (f32_data, orig_shape)
+            (f32_data, orig_shape.clone())
         };
 
         // Determine inner dimension for the weight tensor.
@@ -187,11 +187,12 @@ pub fn quantize_weights(
         };
 
         // Build the new TensorType with packed dtype.
-        // Use the post-transpose quant_shape so shape metadata matches
-        // the actual packed layout (scales/zeros are per-output-channel,
-        // which is dim 0 of the transposed [N, K] weight).
+        // Keep the logical shape as the original [K, N] — the packed data
+        // layout is [N, K] (transposed in Phase 2 above) but validate_shapes
+        // and memory planning rely on the logical [K, N] convention. The
+        // backend compile step reverses to [N, K] for the gemm meta.
         let new_tensor_type = TensorType {
-            shape: quant_shape
+            shape: orig_shape
                 .iter()
                 .map(|&d| DimExpr::Known(d as u64))
                 .collect(),
