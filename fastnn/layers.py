@@ -142,7 +142,7 @@ class _BaseModule(Module):
                     raise KeyError(f"Missing key in state_dict: {full_name}")
                 src = state_dict[full_name]
                 if hasattr(src, 'numpy'):
-                    src_arr = src.numpy()
+                    src_arr = np.asarray(src.numpy())
                 else:
                     src_arr = np.asarray(src)
                 new_param = fnn.tensor(src_arr, list(src_arr.shape))
