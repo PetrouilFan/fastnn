@@ -5,6 +5,7 @@ import numpy as np
 import fastnn
 from fastnn import Tensor
 
+_rng = np.random.default_rng()
 
 __all__ = [
     'uniform_',
@@ -26,8 +27,7 @@ __all__ = [
 def uniform_(tensor: Tensor, a: float = 0.0, b: float = 1.0) -> Tensor:
     """Fill tensor with values drawn from Uniform(a, b)."""
     with fastnn.no_grad():
-        rng = np.random.default_rng()
-        data = rng.uniform(a, b, tensor.shape).astype(np.float32)
+        data = _rng.uniform(a, b, tensor.shape).astype(np.float32)
         new_tensor = fastnn.from_numpy(data)
         tensor.copy_(new_tensor)
         return tensor
@@ -36,8 +36,7 @@ def uniform_(tensor: Tensor, a: float = 0.0, b: float = 1.0) -> Tensor:
 def normal_(tensor: Tensor, mean: float = 0.0, std: float = 1.0) -> Tensor:
     """Fill tensor with values drawn from Normal(mean, std)."""
     with fastnn.no_grad():
-        rng = np.random.default_rng()
-        data = rng.normal(mean, std, tensor.shape).astype(np.float32)
+        data = _rng.normal(mean, std, tensor.shape).astype(np.float32)
         new_tensor = fastnn.from_numpy(data)
         tensor.copy_(new_tensor)
         return tensor
@@ -148,8 +147,7 @@ def orthogonal_(tensor: Tensor, gain: float = 1.0) -> Tensor:
         flat_shape = (shape[-2], shape[-1])
         if len(shape) > 2:
             raise NotImplementedError("orthogonal_ for >2D tensors not yet implemented")
-        rng = np.random.default_rng()
-        q, r = np.linalg.qr(rng.normal(0.0, 1.0, flat_shape))
+        q, r = np.linalg.qr(_rng.normal(0.0, 1.0, flat_shape))
         q *= np.sign(np.diag(r))
         q *= gain
         new_tensor = fastnn.from_numpy(q)

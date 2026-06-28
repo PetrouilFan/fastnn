@@ -55,7 +55,7 @@ from fastnn.ops import (  # noqa: E402  — functional operations
     einsum, flash_attention, cumsum, erf,
     mse_loss, cross_entropy_loss, bce_with_logits, huber_loss,
 )
-from fastnn.losses import *  # noqa: F403
+from fastnn.losses import mse_loss, cross_entropy_loss, bce_with_logits, huber_loss  # noqa: F403
 from fastnn.nn import (  # noqa: E402  — neural network modules
     Linear, Conv2d, Conv1d, Conv3d, ConvTranspose2d,
     LayerNorm, RMSNorm, GroupNorm, BatchNorm1d, BatchNorm2d,
