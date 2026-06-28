@@ -150,7 +150,7 @@ fn dtypes_match(a: &IrDType, b: &IrDType) -> bool {
         | (Bool, Bool)
         | (I8, I8) => true,
         // U4/U8 match regardless of scales/zps (those are metadata)
-        (U4 { .. }, U4 { .. }) | (U8 { .. }, U8 { .. }) => true,
+        (I4 { .. }, I4 { .. }) | (U8 { .. }, U8 { .. }) => true,
         _ => false,
     }
 }
@@ -160,9 +160,9 @@ fn conversion_between(actual: &IrDType, expected: &IrDType) -> Option<Opcode> {
     use IrDType::*;
     match (actual, expected) {
         // U4/U8 → F32
-        (U4 { .. }, F32) | (U8 { .. }, F32) => Some(Opcode::Dequantize),
+        (I4 { .. }, F32) | (U8 { .. }, F32) => Some(Opcode::Dequantize),
         // F32 → U4/U8 (weight quantization — needs bit_width)
-        (F32, U4 { .. }) => Some(Opcode::Quantize),
+        (F32, I4 { .. }) => Some(Opcode::Quantize),
         (F32, U8 { .. }) => Some(Opcode::Quantize),
         // F32 ↔ F16
         (F32, F16) => Some(Opcode::ToF16),
@@ -390,7 +390,7 @@ mod tests {
             vec![input_id],
             TensorType::new(
                 vec![DimExpr::Known(4)],
-                IrDType::U4 {
+                IrDType::I4 {
                     scales: vec![],
                     zero_points: vec![],
                 },

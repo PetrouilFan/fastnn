@@ -6,7 +6,7 @@
 mod bench_util;
 
 use bench_util::bench_gemv_with_metrics;
-use fastnn::dtypes::{F16x2, F32x1, U4x8, U8x4};
+use fastnn::dtypes::{F16x2, F32x1, I4x8, I8x4};
 
 /// Benchmark memory efficiency
 fn bench_memory_efficiency() {
@@ -43,7 +43,7 @@ fn bench_memory_efficiency() {
         );
         println!(
             "{:<10} {:>10.1} MB {:>10.1}x {:>10.1} GB/s {:>10.1}x",
-            "U8x4",
+            "I8x4",
             u8_size as f64 / (1024.0 * 1024.0),
             4.0,
             200.0,
@@ -51,7 +51,7 @@ fn bench_memory_efficiency() {
         );
         println!(
             "{:<10} {:>10.1} MB {:>10.1}x {:>10.1} GB/s {:>10.1}x",
-            "U4x8",
+            "I4x8",
             u4_size as f64 / (1024.0 * 1024.0),
             8.0,
             400.0,
@@ -74,8 +74,8 @@ fn bench_large_k() {
 
         bench_gemv_with_metrics::<F32x1>(m, k, iters, "F32x1");
         bench_gemv_with_metrics::<F16x2>(m, k, iters, "F16x2");
-        bench_gemv_with_metrics::<U8x4>(m, k, iters, "U8x4");
-        bench_gemv_with_metrics::<U4x8>(m, k, iters, "U4x8");
+        bench_gemv_with_metrics::<I8x4>(m, k, iters, "I8x4");
+        bench_gemv_with_metrics::<I4x8>(m, k, iters, "I4x8");
 
         println!();
     }
@@ -94,8 +94,8 @@ fn bench_small_k() {
 
         bench_gemv_with_metrics::<F32x1>(m, k, iters, "F32x1");
         bench_gemv_with_metrics::<F16x2>(m, k, iters, "F16x2");
-        bench_gemv_with_metrics::<U8x4>(m, k, iters, "U8x4");
-        bench_gemv_with_metrics::<U4x8>(m, k, iters, "U4x8");
+        bench_gemv_with_metrics::<I8x4>(m, k, iters, "I8x4");
+        bench_gemv_with_metrics::<I4x8>(m, k, iters, "I4x8");
 
         println!();
     }
@@ -120,8 +120,8 @@ fn compare_pytorch() {
     println!("Memory Comparison (1B parameters):");
     println!("  PyTorch F32:     4.0 GB");
     println!("  PyTorch INT8:    1.0 GB (4x savings)");
-    println!("  FastNN U4x8:     0.5 GB (8x savings)");
-    println!("  FastNN U8x4:     1.0 GB (4x savings)");
+    println!("  FastNN I4x8:     0.5 GB (8x savings)");
+    println!("  FastNN I8x4:     1.0 GB (4x savings)");
     println!("  FastNN F16x2:    2.0 GB (2x savings)\n");
 }
 

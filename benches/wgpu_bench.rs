@@ -4,7 +4,7 @@ mod bench_util;
 
 use bench_util::bench_gemv;
 use fastnn::backend::cpu;
-use fastnn::dtypes::{F32x1, PackedWord, U8x4};
+use fastnn::dtypes::{F32x1, PackedWord, I8x4};
 use fastnn::packed_layer::PackedLinear;
 use fastnn::packed_tensor::PackedTensor;
 use std::time::Instant;
@@ -82,12 +82,12 @@ fn main() {
             "F32x1", cpu, orig, persist
         );
 
-        let (cpu, _) = bench_gemv::<U8x4>(m, k, iters);
-        let orig = bench_wgpu_original::<U8x4>(m, k, iters);
-        let persist = bench_wgpu_persistent::<U8x4>(m, k, iters);
+        let (cpu, _) = bench_gemv::<I8x4>(m, k, iters);
+        let orig = bench_wgpu_original::<I8x4>(m, k, iters);
+        let persist = bench_wgpu_persistent::<I8x4>(m, k, iters);
         println!(
             "{:<8} {:>10.3} {:>10.3} {:>12.3}",
-            "U8x4", cpu, orig, persist
+            "I8x4", cpu, orig, persist
         );
         println!();
     }

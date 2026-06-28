@@ -3,7 +3,7 @@
 mod bench_util;
 
 use bench_util::{bench_gemv, bench_relu, print_comparison_header, print_result_row, speedup};
-use fastnn::dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
+use fastnn::dtypes::{F16x2, F32x1, PackedWord, I4x8, I8x4};
 
 fn main() {
     println!("=== fastnn Native Packed Precision Benchmark ===\n");
@@ -38,11 +38,11 @@ fn main() {
             speedup(f32_bytes as f64, f16_bytes as f64)
         );
 
-        let (u8_ms, u8_bytes) = bench_gemv::<U8x4>(m, k, iters);
+        let (u8_ms, u8_bytes) = bench_gemv::<I8x4>(m, k, iters);
         let gflops = (2.0 * m as f64 * k as f64) / (u8_ms / 1000.0) / 1e9;
         println!(
             "{:<10} {:>10.3} {:>10.2} {:>12} {:>10.1}x {:>9.1}x",
-            "U8x4",
+            "I8x4",
             u8_ms,
             gflops,
             u8_bytes,
@@ -50,11 +50,11 @@ fn main() {
             speedup(f32_bytes as f64, u8_bytes as f64)
         );
 
-        let (u4_ms, u4_bytes) = bench_gemv::<U4x8>(m, k, iters);
+        let (u4_ms, u4_bytes) = bench_gemv::<I4x8>(m, k, iters);
         let gflops = (2.0 * m as f64 * k as f64) / (u4_ms / 1000.0) / 1e9;
         println!(
             "{:<10} {:>10.3} {:>10.2} {:>12} {:>10.1}x {:>9.1}x",
-            "U4x8",
+            "I4x8",
             u4_ms,
             gflops,
             u4_bytes,
@@ -100,22 +100,22 @@ fn main() {
             speedup(f32_ms, f16_ms)
         );
 
-        let u8_ms = bench_relu::<U8x4>(&data, &shape, iters);
+        let u8_ms = bench_relu::<I8x4>(&data, &shape, iters);
         let u8_bytes = numel.div_ceil(4) * 4;
         println!(
             "  {:<10} {:>10.4} {:>10.0} {:>12} {:>9.1}x",
-            "U8x4",
+            "I8x4",
             u8_ms,
             numel as f64 / u8_ms,
             u8_bytes,
             speedup(f32_ms, u8_ms)
         );
 
-        let u4_ms = bench_relu::<U4x8>(&data, &shape, iters);
+        let u4_ms = bench_relu::<I4x8>(&data, &shape, iters);
         let u4_bytes = numel.div_ceil(8) * 4;
         println!(
             "  {:<10} {:>10.4} {:>10.0} {:>12} {:>9.1}x",
-            "U4x8",
+            "I4x8",
             u4_ms,
             numel as f64 / u4_ms,
             u4_bytes,

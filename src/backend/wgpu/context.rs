@@ -1106,7 +1106,7 @@ fn generate_dot_logic<T: PackedWord>() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtypes::{F32x1, U4x8};
+    use crate::dtypes::{F32x1, I4x8};
 
     #[test]
     fn test_build_shader_f32x1() {
@@ -1116,8 +1116,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_shader_u4x8() {
-        let shader = build_shader_source::<U4x8>();
+    fn test_build_shader_i4x8() {
+        let shader = build_shader_source::<I4x8>();
         assert!(shader.contains("mat2x4<f32>"));
         assert!(shader.contains("unpack_word"));
     }
