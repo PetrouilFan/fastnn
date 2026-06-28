@@ -4,10 +4,11 @@ v0.8.0 Verification Gate: Optimizer Soak Test
 Ensures no numerical collapse or parameter state corruption over millions of steps.
 """
 
+import os
 import sys
 import numpy as np
 
-sys.path.insert(0, "/home/petrouil/Projects/github/fastnn")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fastnn
 
