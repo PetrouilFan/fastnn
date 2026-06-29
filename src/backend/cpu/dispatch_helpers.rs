@@ -334,6 +334,38 @@ pub(super) fn biasadd_f32(data: &[f32], bias: &[f32], output: &mut [f32], channe
 
 #[inline]
 pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    let num_rows = input.len() / row_size;
+
+    #[cfg(feature = "parallel")]
+    if num_rows > 1 {
+        use rayon::prelude::*;
+        let has_avx2 = {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                microkernels::simd_avx2_available()
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                false
+            }
+        };
+        let out_ptr = output.as_mut_ptr() as usize;
+        (0..num_rows).into_par_iter().for_each(move |r| {
+            let start = r * row_size;
+            let inp = &input[start..start + row_size];
+            let out = unsafe {
+                std::slice::from_raw_parts_mut(out_ptr as *mut f32, output.len())
+            };
+            let out_row = &mut out[start..start + row_size];
+            if has_avx2 {
+                unsafe { microkernels::norm_layernorm_f32_avx2(inp, out_row, row_size, eps) };
+            } else {
+                microkernels::norm_layernorm_f32_scalar(inp, out_row, row_size, eps);
+            }
+        });
+        return;
+    }
+
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::norm_layernorm_f32_avx2(input, output, row_size, eps) };
@@ -349,6 +381,38 @@ pub(super) fn rms_norm_f32(
     row_size: usize,
     eps: f32,
 ) {
+    let num_rows = input.len() / row_size;
+
+    #[cfg(feature = "parallel")]
+    if num_rows > 1 {
+        use rayon::prelude::*;
+        let has_avx2 = {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                microkernels::simd_avx2_available()
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                false
+            }
+        };
+        let out_ptr = output.as_mut_ptr() as usize;
+        (0..num_rows).into_par_iter().for_each(move |r| {
+            let start = r * row_size;
+            let inp = &input[start..start + row_size];
+            let out = unsafe {
+                std::slice::from_raw_parts_mut(out_ptr as *mut f32, output.len())
+            };
+            let out_row = &mut out[start..start + row_size];
+            if has_avx2 {
+                unsafe { microkernels::rms_norm_f32_avx2(inp, weight, out_row, row_size, eps) };
+            } else {
+                microkernels::rms_norm_f32_scalar(inp, weight, out_row, row_size, eps);
+            }
+        });
+        return;
+    }
+
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::rms_norm_f32_avx2(input, weight, output, row_size, eps) };

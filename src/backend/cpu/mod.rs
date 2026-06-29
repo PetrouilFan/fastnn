@@ -7,6 +7,7 @@
 #![allow(clippy::if_same_then_else)]
 
 use crate::backend::cpu::blas::matmul_blas_into;
+use crate::backend::cpu::microkernels::blocked_row_matmul;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
@@ -2626,174 +2627,158 @@ impl Backend for CpuBackend {
                                 } else {
                                     None
                                 };
-                                let (a, b, bias) = {
-                                    let d = arena.data_mut();
-                                    let a_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                    )
-                                    .to_vec();
-                                    let b_f32 = bytemuck::cast_slice::<_, f32>(
-                                        &d[b_slice.offset..b_slice.offset + b_slice.size],
-                                    )
-                                    .to_vec();
-                                    let bias_f32 = if let Some(bs) = bias_slice {
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[bs.offset..bs.offset + bs.size],
-                                        )
-                                        .to_vec()
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    (a_f32, b_f32, bias_f32)
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                // *** BATCHED MATMUL ***
-                                // Compute batch count from output buffer size. Each batch element is
-                                // M*K elements in A, K*N in B, and M*N in the output (all contiguous).
+                                let out_size = (out_end - out_start) / 4;
                                 let a_stride = m * _k;
                                 let b_stride = _k * n;
                                 let out_stride = m * n;
-                                let batch_count = out_f32.len() / out_stride;
-                                // B may be batched (same batch dims as A, e.g. Q*K^T in attention)
-                                // or shared across all batches (2D weight matrix). Detect by comparing
-                                // total B elements against a single batch's K*N slice.
-                                let b_batched = b.len() > b_stride;
-                                // Skip BLAS for tiny matrices â€” dispatch overhead dominates.
+                                let batch_count = out_size / out_stride;
                                 let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
                                 let apply_fusion = has_bias || activation != 0;
-                                if use_blas {
-                                    for batch in 0..batch_count {
-                                        let a_s = batch * a_stride;
-                                        let b_s = if b_batched { batch * b_stride } else { 0 };
-                                        let out_s = batch * out_stride;
-                                        matmul_blas_into(
-                                            &a[a_s..a_s + a_stride],
-                                            &b[b_s..b_s + b_stride],
-                                            &mut out_f32[out_s..out_s + out_stride],
-                                            m,
-                                            _k,
-                                            n,
+
+                                // Compute into a local buffer to avoid Vec copies of input data.
+                                // Input references are dropped before flushing to arena.
+                                let out_buf = {
+                                    // SAFETY: arena guarantees input and output ranges are disjoint.
+                                    let (a, b, bias) = unsafe {
+                                        let d = arena.data_mut().as_mut_ptr();
+                                        let a = std::slice::from_raw_parts(
+                                            d.add(a_slice.offset) as *const f32,
+                                            a_slice.size / 4,
                                         );
-                                        if apply_fusion {
-                                            let out_batch = &mut out_f32[out_s..out_s + out_stride];
-                                            for i in 0..out_batch.len() {
-                                                let x = out_batch[i]
-                                                    + if has_bias && i % n < bias.len() {
-                                                        bias[i % n]
-                                                    } else {
-                                                        0.0
-                                                    };
-                                                out_batch[i] = match activation {
-                                                    1 => x.max(0.0),
-                                                    2 => {
-                                                        let x3 = x * x * x;
-                                                        let tanh_arg =
-                                                            0.797_884_6 * (x + 0.044_715 * x3);
-                                                        0.5 * x * (1.0 + tanh_arg.tanh())
-                                                    }
-                                                    3 => x / (1.0 + (-x).exp()),
-                                                    _ => x,
-                                                };
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // Use SIMD+tiled blocked_row_matmul for small-to-medium matmuls
-                                    let total_rows = batch_count * m;
-                                    let b_batch_stride = if b_batched { b_stride } else { 0 };
-                                    #[cfg(feature = "parallel")]
-                                    {
-                                        use rayon::prelude::*;
-                                        let a_raw = a.as_ptr() as usize;
-                                        let b_raw = b.as_ptr() as usize;
-                                        let out_raw = out_f32.as_mut_ptr() as usize;
-                                        (0..total_rows).into_par_iter().for_each(move |row| {
-                                            let a_ptr = a_raw as *const f32;
-                                            let b_ptr = b_raw as *const f32;
-                                            let out_ptr = out_raw as *mut f32;
-                                            unsafe {
-                                                crate::backend::cpu::microkernels::blocked_row_matmul(
-                                                    a_ptr, b_ptr, out_ptr, row,
-                                                    m, n, _k,
-                                                    a_stride, _k, 1,
-                                                    b_batch_stride,
-                                                    n, 1,
-                                                );
-                                            }
-                                            if apply_fusion {
-                                                let row_start = row * n;
-                                                unsafe {
-                                                    let out_row =
-                                                        std::slice::from_raw_parts_mut(out_ptr.add(row_start), n);
-                                                    for i in 0..n {
-                                                        let x = out_row[i]
-                                                            + if has_bias && i < bias.len() {
-                                                                bias[i]
-                                                            } else {
-                                                                0.0
-                                                            };
-                                                        out_row[i] = match activation {
-                                                            1 => x.max(0.0),
-                                                            2 => {
-                                                                let x3 = x * x * x;
-                                                                let tanh_arg =
-                                                                    0.797_884_6 * (x + 0.044_715 * x3);
-                                                                0.5 * x * (1.0 + tanh_arg.tanh())
-                                                            }
-                                                            3 => x / (1.0 + (-x).exp()),
-                                                            _ => x,
-                                                        };
+                                        let b = std::slice::from_raw_parts(
+                                            d.add(b_slice.offset) as *const f32,
+                                            b_slice.size / 4,
+                                        );
+                                        let bias = bias_slice.map(|bs| {
+                                            std::slice::from_raw_parts(
+                                                d.add(bs.offset) as *const f32,
+                                                bs.size / 4,
+                                            )
+                                        });
+                                        (a, b, bias)
+                                    };
+                                    let b_batched = b.len() > b_stride;
+
+                                    let mut out = vec![0.0f32; out_size];
+                                    if use_blas {
+                                        for batch in 0..batch_count {
+                                            let a_s = batch * a_stride;
+                                            let b_s = if b_batched { batch * b_stride } else { 0 };
+                                            let out_s = batch * out_stride;
+                                            let ob = &mut out[out_s..out_s + out_stride];
+
+                                            if has_bias {
+                                                if let Some(bs) = bias {
+                                                    for j in 0..m {
+                                                        let row_start = j * n;
+                                                        ob[row_start..row_start + n]
+                                                            .copy_from_slice(&bs[..n]);
                                                     }
                                                 }
                                             }
-                                        });
-                                    }
-                                    #[cfg(not(feature = "parallel"))]
-                                    for row in 0..total_rows {
-                                        unsafe {
-                                            crate::backend::cpu::microkernels::blocked_row_matmul(
-                                                a.as_ptr(),
-                                                b.as_ptr(),
-                                                out_f32.as_mut_ptr(),
-                                                row,
-                                                m,
-                                                n,
-                                                _k,
-                                                a_stride,
-                                                _k,
-                                                1,
-                                                b_batch_stride,
-                                                n,
-                                                1,
+
+                                            matmul_blas_into(
+                                                &a[a_s..a_s + a_stride],
+                                                &b[b_s..b_s + b_stride],
+                                                ob, m, _k, n,
                                             );
-                                        }
-                                        if apply_fusion {
-                                            let row_start = row * n;
-                                            let out_row = &mut out_f32[row_start..row_start + n];
-                                            for i in 0..n {
-                                                let x = out_row[i]
-                                                    + if has_bias && i < bias.len() {
-                                                        bias[i]
-                                                    } else {
-                                                        0.0
+
+                                            if activation != 0 {
+                                                for i in 0..ob.len() {
+                                                    ob[i] = match activation {
+                                                        1 => ob[i].max(0.0),
+                                                        2 => {
+                                                            let x = ob[i];
+                                                            let x3 = x * x * x;
+                                                            let tanh_arg =
+                                                                0.797_884_6 * (x + 0.044_715 * x3);
+                                                            0.5 * x * (1.0 + tanh_arg.tanh())
+                                                        }
+                                                        3 => ob[i] / (1.0 + (-ob[i]).exp()),
+                                                        _ => ob[i],
                                                     };
-                                                out_row[i] = match activation {
-                                                    1 => x.max(0.0),
-                                                    2 => {
-                                                        let x3 = x * x * x;
-                                                        let tanh_arg =
-                                                            0.797_884_6 * (x + 0.044_715 * x3);
-                                                        0.5 * x * (1.0 + tanh_arg.tanh())
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let total_rows = batch_count * m;
+                                        let b_batch_stride = if b_batched { b_stride } else { 0 };
+                                        #[cfg(feature = "parallel")]
+                                        {
+                                            use rayon::prelude::*;
+                                            // SAFETY: each thread accesses disjoint rows of the output buffer.
+                                            let out_ptr = out.as_mut_ptr() as usize;
+                                            (0..total_rows).into_par_iter().for_each(move |row| {
+                                                let op = out_ptr as *mut f32;
+                                                unsafe {
+                                                    blocked_row_matmul(
+                                                        a.as_ptr(), b.as_ptr(), op, row,
+                                                        m, n, _k,
+                                                        a_stride, _k, 1,
+                                                        b_batch_stride, n, 1,
+                                                    );
+                                                }
+                                                if apply_fusion {
+                                                    let rs = row * n;
+                                                    unsafe {
+                                                        for i in 0..n {
+                                                            let p = rs + i;
+                                                            let x = *op.add(p) + if has_bias {
+                                                                if let Some(bs) = bias { bs[i] } else { 0.0 }
+                                                            } else { 0.0 };
+                                                            *op.add(p) = match activation {
+                                                                1 => x.max(0.0),
+                                                                2 => {
+                                                                    let x3 = x * x * x;
+                                                                    let tanh_arg = 0.797_884_6 * (x + 0.044_715 * x3);
+                                                                    0.5 * x * (1.0 + tanh_arg.tanh())
+                                                                }
+                                                                3 => x / (1.0 + (-x).exp()),
+                                                                _ => x,
+                                                            };
+                                                        }
                                                     }
-                                                    3 => x / (1.0 + (-x).exp()),
-                                                    _ => x,
-                                                };
+                                                }
+                                            });
+                                        }
+                                        #[cfg(not(feature = "parallel"))]
+                                        for row in 0..total_rows {
+                                            unsafe {
+                                                blocked_row_matmul(
+                                                    a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), row,
+                                                    m, n, _k,
+                                                    a_stride, _k, 1,
+                                                    b_batch_stride, n, 1,
+                                                );
+                                            }
+                                            if apply_fusion {
+                                                let rs = row * n;
+                                                for i in 0..n {
+                                                    let p = rs + i;
+                                                    let x = out[p] + if has_bias {
+                                                        if let Some(bs) = bias { bs[i] } else { 0.0 }
+                                                    } else { 0.0 };
+                                                    out[p] = match activation {
+                                                        1 => x.max(0.0),
+                                                        2 => {
+                                                            let x3 = x * x * x;
+                                                            let tanh_arg = 0.797_884_6 * (x + 0.044_715 * x3);
+                                                            0.5 * x * (1.0 + tanh_arg.tanh())
+                                                        }
+                                                        3 => x / (1.0 + (-x).exp()),
+                                                        _ => x,
+                                                    };
+                                                }
                                             }
                                         }
                                     }
+                                    out
+                                };
+                                {
+                                    let d = arena.data_mut();
+                                    d[out_start..out_end].copy_from_slice(
+                                        bytemuck::cast_slice(&out_buf),
+                                    );
                                 }
                             }
                         }
@@ -4786,6 +4771,21 @@ impl Backend for CpuBackend {
                                                 (false, true) => inputs[2],
                                                 _ => &[],
                                             };
+                                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                            if crate::backend::cpu::microkernels::simd_avx2_available() {
+                                                unsafe {
+                                                    microkernels::fused_residual_add_layer_norm_f32_avx2(
+                                                        inputs[0], inputs[1], weight, bias, out_f32,
+                                                        row_size, eps,
+                                                    );
+                                                }
+                                            } else {
+                                                microkernels::fused_residual_add_layer_norm_f32_scalar(
+                                                    inputs[0], inputs[1], weight, bias, out_f32,
+                                                    row_size, eps,
+                                                );
+                                            }
+                                            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                             microkernels::fused_residual_add_layer_norm_f32_scalar(
                                                 inputs[0], inputs[1], weight, bias, out_f32,
                                                 row_size, eps,
@@ -4833,6 +4833,21 @@ impl Backend for CpuBackend {
                                             } else {
                                                 &[]
                                             };
+                                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                            if crate::backend::cpu::microkernels::simd_avx2_available() {
+                                                unsafe {
+                                                    microkernels::fused_residual_add_rms_norm_f32_avx2(
+                                                        inputs[0], inputs[1], weight, out_f32, row_size,
+                                                        eps,
+                                                    );
+                                                }
+                                            } else {
+                                                microkernels::fused_residual_add_rms_norm_f32_scalar(
+                                                    inputs[0], inputs[1], weight, out_f32, row_size,
+                                                    eps,
+                                                );
+                                            }
+                                            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                             microkernels::fused_residual_add_rms_norm_f32_scalar(
                                                 inputs[0], inputs[1], weight, out_f32, row_size,
                                                 eps,
@@ -7140,7 +7155,8 @@ fn dispatch_matmul_fp32_with_view(
     param_dims: &Option<Vec<DimExpr>>,
     view: &crate::backend::prepared::PersistentPreparedWeights,
 ) -> Result<(), BackendError> {
-    use crate::backend::cpu::blas::matmul_blas_into;
+use crate::backend::cpu::blas::matmul_blas_into;
+use crate::backend::cpu::microkernels::blocked_row_matmul;
 
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
