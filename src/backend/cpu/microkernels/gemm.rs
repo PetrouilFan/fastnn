@@ -2,9 +2,9 @@
 
 #![allow(dead_code)]
 
-use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::dtypes::F16x2;
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
