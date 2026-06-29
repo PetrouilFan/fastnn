@@ -4,7 +4,7 @@ mod bench_util;
 
 use bench_util::bench_gemv;
 use fastnn::backend::cpu;
-use fastnn::dtypes::{F32x1, PackedWord, I8x4};
+use fastnn::dtypes::{F32x1, I8x4, PackedWord};
 use fastnn::packed_layer::PackedLinear;
 use fastnn::packed_tensor::PackedTensor;
 use std::time::Instant;
