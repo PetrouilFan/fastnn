@@ -14,6 +14,7 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::backend::cpu::packed_gemm::gemm_packed_float_fused;
 use crate::backend::cpu::swar::{
     i4x8_dot_packed, i8x4_dot_packed, sum_i4x8_packed, sum_i8x4_packed,
 };
@@ -334,6 +335,146 @@ unsafe fn im2col_pack_f4x8(
         };
         PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![0.0])
     })
+}
+
+// ── FP8 im2col + pack (generic for F8x4 and F8x4R) ─────────────
+
+/// Generic im2col + pack for 8-bit float types (F8x4, F8x4R — both have 4 items per word).
+///
+/// Symmetric quantization: values are scaled so max_abs maps to T::MAX_REPRESENTABLE.
+/// Zero point is always 0.0.
+unsafe fn im2col_pack_float8<T: PackedWord>(
+    input_n: &[f32],
+    c: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+) -> PackedTensor<T> {
+    debug_assert_eq!(T::ITEMS, 4);
+    let h_out = conv_out_size(h, kh, stride, padding, dilation);
+    let w_out = conv_out_size(w, kw, stride, padding, dilation);
+    let m = h_out * w_out;
+    let k = c * kh * kw;
+    let k_packed = k.div_ceil(4);
+    let col_size = m * k;
+
+    with_col_buf(col_size, |col| {
+        let (_global_min, _global_max) = crate::backend::cpu::im2col::im2col_dispatch(
+            input_n, c, h, w, kh, kw, stride, padding, dilation, col,
+        );
+
+        let max_abs = col.iter().copied().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let inv_scale = if max_abs > 0.0 {
+            T::MAX_REPRESENTABLE / max_abs
+        } else {
+            1.0
+        };
+
+        let mut packed: Vec<T> = Vec::with_capacity(m * k_packed);
+        for row in 0..m {
+            let row_start = row * k;
+            for word in 0..k_packed {
+                let mut arr: T::Array = Default::default();
+                let slice = arr.as_mut();
+                let base = row_start + word * 4;
+                for i in 0..4 {
+                    let elem_idx = base + i;
+                    slice[i] = if elem_idx < row_start + k {
+                        col[elem_idx] * inv_scale
+                    } else {
+                        0.0
+                    };
+                }
+                packed.push(T::pack_from_f32(arr));
+            }
+        }
+
+        let scale = if max_abs > 0.0 {
+            max_abs / T::MAX_REPRESENTABLE
+        } else {
+            1.0
+        };
+        PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![0.0])
+    })
+}
+
+/// Generic conv2d for 8-bit float packed types (F8x4, F8x4R).
+///
+/// Uses im2col_pack_float8 for activation packing and gemm_packed_float_fused for the GEMM.
+pub unsafe fn conv2d_packed_float<T: PackedWord>(
+    input: &[f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    weight: &PackedTensor<T>,
+    bias: Option<&[f32]>,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+    groups: usize,
+    kh: usize,
+    kw: usize,
+    activation: Option<&str>,
+    output: &mut [f32],
+) {
+    let oc = weight.shape()[0];
+    let c_per_g = c / groups;
+    let oc_per_g = oc / groups;
+    let h_out = conv_out_size(h, kh, stride, padding, dilation);
+    let w_out = conv_out_size(w, kw, stride, padding, dilation);
+    let num_pixels = h_out * w_out;
+
+    for nn in 0..n {
+        let input_base = nn * c * h * w;
+        let out_base = nn * oc * h_out * w_out;
+
+        for g in 0..groups {
+            let g_c_off = g * c_per_g;
+            let g_oc_off = g * oc_per_g;
+
+            let act_packed = im2col_pack_float8::<T>(
+                &input[input_base + g_c_off * h * w..],
+                c_per_g,
+                h,
+                w,
+                kh,
+                kw,
+                stride,
+                padding,
+                dilation,
+            );
+
+            let w_slice = if groups > 1 {
+                slice_packed(weight, g_oc_off, oc_per_g)
+            } else {
+                slice_packed(weight, 0, oc)
+            };
+
+            let local_oc = w_slice.shape()[0];
+            let b = bias.map(|b| {
+                if groups > 1 {
+                    &b[g_oc_off..g_oc_off + oc_per_g]
+                } else {
+                    b
+                }
+            });
+
+            with_col_buf(num_pixels * local_oc, |temp| {
+                gemm_packed_float_fused(&act_packed, &w_slice, b, activation, temp);
+                for pixel in 0..num_pixels {
+                    for f in 0..local_oc {
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] =
+                            temp[pixel * local_oc + f];
+                    }
+                }
+            });
+        }
+    }
 }
 
 // ── Slice helper ────────────────────────────────────────────────
@@ -1062,6 +1203,7 @@ pub unsafe fn conv2d_packed_f4x8(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dtypes::{F8x4, F8x4R};
     use crate::backend::cpu::packed_gemm::quantize_activations_to_i4x8;
 
     #[test]
@@ -1284,4 +1426,55 @@ mod tests {
             assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
         }
     }
+
+    #[test]
+    fn test_conv2d_packed_f8x4_basic() {
+        let n = 1;
+        let c = 4;
+        let h = 1;
+        let w = 1;
+        let input: Vec<f32> = (1..=4).map(|i| i as f32).collect();
+        let wdata = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let weight = PackedTensor::<F8x4>::from_f32_per_channel(&wdata, &[2, 4]);
+        let mut output = vec![0.0f32; 2];
+        unsafe {
+            conv2d_packed_float::<F8x4>(
+                &input, n, c, h, w, &weight, None, 1, 0, 1, 1, 1, 1, None, &mut output,
+            );
+        }
+        assert_eq!(output.len(), 2);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_f8x4r_basic() {
+        let n = 1;
+        let c = 4;
+        let h = 1;
+        let w = 1;
+        let input: Vec<f32> = (1..=4).map(|i| i as f32).collect();
+        let wdata = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let weight = PackedTensor::<F8x4R>::from_f32_per_channel(&wdata, &[2, 4]);
+        let mut output = vec![0.0f32; 2];
+        unsafe {
+            conv2d_packed_float::<F8x4R>(
+                &input, n, c, h, w, &weight, None, 1, 0, 1, 1, 1, 1, None, &mut output,
+            );
+        }
+        assert_eq!(output.len(), 2);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
 }
