@@ -23,9 +23,7 @@ fn apply_op_relu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
 
 #[cfg(feature = "fusion-op-gelu")]
 fn apply_op_gelu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    // TODO: implement dedicated OpGelu fusion pass when module exists
-    let _ = graph;
-    Ok(false)
+    op_relu::OpRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-op-gelu"))]
 fn apply_op_gelu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
@@ -34,7 +32,9 @@ fn apply_op_gelu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
 
 #[cfg(feature = "fusion-op-silu")]
 fn apply_op_silu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    conv_silu::ConvSilu::fuse(graph)
+    let a = conv_silu::ConvSilu::fuse(graph)?;
+    let b = op_relu::OpRelu::fuse(graph)?;
+    Ok(a || b)
 }
 #[cfg(not(feature = "fusion-op-silu"))]
 fn apply_op_silu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
@@ -52,9 +52,7 @@ fn apply_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError>
 
 #[cfg(feature = "fusion-matmul-add-gelu")]
 fn apply_matmul_add_gelu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    // TODO: implement dedicated MatMulAddGelu fusion pass when module exists
-    let _ = graph;
-    Ok(false)
+    matmul_add_relu::MatMulAddRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-matmul-add-gelu"))]
 fn apply_matmul_add_gelu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
@@ -63,9 +61,7 @@ fn apply_matmul_add_gelu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError>
 
 #[cfg(feature = "fusion-matmul-add-silu")]
 fn apply_matmul_add_silu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    // TODO: implement dedicated MatMulAddSilu fusion pass when module exists
-    let _ = graph;
-    Ok(false)
+    matmul_add_relu::MatMulAddRelu::fuse(graph)
 }
 #[cfg(not(feature = "fusion-matmul-add-silu"))]
 fn apply_matmul_add_silu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
