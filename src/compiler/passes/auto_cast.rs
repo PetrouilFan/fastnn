@@ -1,6 +1,6 @@
 //! Auto-cast insertion compiler pass.
 //!
-//! When a user specifies `model.to("u4")`, this pass:
+//! When a user specifies `model.to("i4")`, this pass:
 //!
 //! 1. Finds all f32 weight constants feeding MatMul/Conv ops and replaces them
 //!    with `Quantize(f32_weight, bit_width)` sub-graphs (or directly updates
@@ -82,7 +82,7 @@ fn quantize_weight_constants(
         .iter()
         .filter(|n| {
             matches!(n.opcode, Opcode::Constant(_))
-                && matches!(n.output_type.dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+                && matches!(n.output_type.dtype, IrDType::I4 { .. } | IrDType::U8 { .. })
         })
         .count();
     let _ = count_before;
@@ -128,7 +128,7 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
             };
 
             // Check if input is quantized (U4/U8) but consumer expects f32
-            let is_quantized = matches!(input_dtype, IrDType::U4 { .. } | IrDType::U8 { .. });
+            let is_quantized = matches!(input_dtype, IrDType::I4 { .. } | IrDType::U8 { .. });
 
             if is_quantized && !accepts_quantized {
                 rewrites.push(DequantRewrite {
@@ -230,7 +230,7 @@ mod tests {
         // Check that the weight Constant now has U4 dtype
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
             "weight should be quantized to U4 after auto_cast"
         );
     }
@@ -285,7 +285,7 @@ mod tests {
         // shared_weight should be quantized
         let shared_weight_node = graph.get_node(shared_weight_id).unwrap();
         assert!(
-            matches!(shared_weight_node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(shared_weight_node.output_type.dtype, IrDType::I4 { .. }),
             "shared_weight should be quantized"
         );
 
@@ -510,7 +510,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
             "Conv2d weight should be quantized after auto_cast"
         );
     }

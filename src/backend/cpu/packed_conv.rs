@@ -15,9 +15,10 @@
 use rayon::prelude::*;
 
 use crate::backend::cpu::swar::{
-    sum_u4x8_packed, sum_u8x4_packed, u4x8_dot_packed, u8x4_dot_packed,
+    i4x8_dot_packed, i8x4_dot_packed, sum_i4x8_packed, sum_i8x4_packed,
 };
-use crate::dtypes::{PackedWord, U4x8, U8x4};
+use crate::dtypes::f4x8::f4x8_dot_packed;
+use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 // Change 4: Thread-local scratch buffers for im2col+pack
@@ -120,7 +121,7 @@ pub(crate) unsafe fn im2col_i8(
 
 // SAFETY: Caller must ensure `input_n` is valid for the full NCHW input range
 // and the returned PackedTensor is properly constructed.
-unsafe fn im2col_pack_u8x4(
+unsafe fn im2col_pack_i8x4(
     input_n: &[f32],
     c: usize,
     h: usize,
@@ -130,7 +131,7 @@ unsafe fn im2col_pack_u8x4(
     stride: usize,
     padding: usize,
     dilation: usize,
-) -> PackedTensor<U8x4> {
+) -> PackedTensor<I8x4> {
     let h_out = conv_out_size(h, kh, stride, padding, dilation);
     let w_out = conv_out_size(w, kw, stride, padding, dilation);
     let m = h_out * w_out;
@@ -153,7 +154,7 @@ unsafe fn im2col_pack_u8x4(
         let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
 
         // Pack each row independently for correct row-wise alignment
-        let mut packed: Vec<U8x4> = Vec::with_capacity(m * k_packed);
+        let mut packed: Vec<I8x4> = Vec::with_capacity(m * k_packed);
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             use std::arch::x86_64::*;
@@ -178,7 +179,7 @@ unsafe fn im2col_pack_u8x4(
                     let bytes = _mm_packus_epi16(lo16, hi16);
                     _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
                     for j in 0..8 {
-                        packed[row * k_packed + wp + j] = U8x4(u32::from_le_bytes([
+                        packed[row * k_packed + wp + j] = I8x4(u32::from_le_bytes([
                             row_packed[4 * j],
                             row_packed[4 * j + 1],
                             row_packed[4 * j + 2],
@@ -199,7 +200,7 @@ unsafe fn im2col_pack_u8x4(
                             w |= (q as u8 as u32) << (i * 8);
                         }
                     }
-                    packed.push(U8x4(w));
+                    packed.push(I8x4(w));
                     wp += 1;
                 }
             }
@@ -220,7 +221,7 @@ unsafe fn im2col_pack_u8x4(
                         w |= (q as u8 as u32) << (i * 8);
                     }
                 }
-                packed.push(U8x4(w));
+                packed.push(I8x4(w));
             }
         }
 
@@ -228,9 +229,9 @@ unsafe fn im2col_pack_u8x4(
     })
 }
 
-// SAFETY: Same as im2col_pack_u8x4 — caller must ensure `input_n` is valid
+// SAFETY: Same as im2col_pack_i8x4 — caller must ensure `input_n` is valid
 // for the full NCHW input range.
-unsafe fn im2col_pack_u4x8(
+unsafe fn im2col_pack_i4x8(
     input_n: &[f32],
     c: usize,
     h: usize,
@@ -240,7 +241,7 @@ unsafe fn im2col_pack_u4x8(
     stride: usize,
     padding: usize,
     dilation: usize,
-) -> PackedTensor<U4x8> {
+) -> PackedTensor<I4x8> {
     let h_out = conv_out_size(h, kh, stride, padding, dilation);
     let w_out = conv_out_size(w, kw, stride, padding, dilation);
     let m = h_out * w_out;
@@ -257,7 +258,7 @@ unsafe fn im2col_pack_u4x8(
         let zero_point = global_min + 8.0 * scale;
         let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
 
-        let mut packed: Vec<U4x8> = Vec::with_capacity(m * k_packed);
+        let mut packed: Vec<I4x8> = Vec::with_capacity(m * k_packed);
         for row in 0..m {
             let row_start = row * k;
             for word in 0..k_packed {
@@ -271,11 +272,67 @@ unsafe fn im2col_pack_u4x8(
                         w |= ((q as u32) & 0xF) << (i * 4);
                     }
                 }
-                packed.push(U4x8(w));
+                packed.push(I4x8(w));
             }
         }
 
         PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![zero_point])
+    })
+}
+
+// SAFETY: Same as im2col_pack_i4x8.
+unsafe fn im2col_pack_f4x8(
+    input_n: &[f32],
+    c: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+) -> PackedTensor<F4x8> {
+    let h_out = conv_out_size(h, kh, stride, padding, dilation);
+    let w_out = conv_out_size(w, kw, stride, padding, dilation);
+    let m = h_out * w_out;
+    let k = c * kh * kw;
+    let k_packed = k.div_ceil(8);
+    let col_size = m * k;
+
+    with_col_buf(col_size, |col| {
+        let (_global_min, _global_max) = crate::backend::cpu::im2col::im2col_dispatch(
+            input_n, c, h, w, kh, kw, stride, padding, dilation, col,
+        );
+
+        let max_abs = col.iter().copied().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let inv_scale = if max_abs > 0.0 {
+            F4x8::MAX_REPRESENTABLE / max_abs
+        } else {
+            1.0
+        };
+
+        let mut packed: Vec<F4x8> = Vec::with_capacity(m * k_packed);
+        for row in 0..m {
+            let row_start = row * k;
+            for word in 0..k_packed {
+                let mut arr = [0.0f32; 8];
+                let base = row_start + word * 8;
+                for i in 0..8 {
+                    let elem_idx = base + i;
+                    if elem_idx < row_start + k {
+                        arr[i] = col[elem_idx] * inv_scale;
+                    }
+                }
+                packed.push(F4x8::pack_from_f32(arr));
+            }
+        }
+
+        let scale = if max_abs > 0.0 {
+            max_abs / F4x8::MAX_REPRESENTABLE
+        } else {
+            1.0
+        };
+        PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![0.0])
     })
 }
 
@@ -305,22 +362,22 @@ unsafe fn slice_packed<U: PackedWord>(
     PackedTensor::from_raw(data, vec![row_count, inner], scales, zeros)
 }
 
-// ── GEMM: U8x4 with fused dequantize + bias + activation ────────
+// ── GEMM: I8x4 with fused dequantize + bias + activation ────────
 // Changes 1, 2, 3, 7, 11
 
 // (Tile constants moved to per-GEMM scope below)
 
-/// Raw slice-based U8x4 packed GEMM with fused dequantize + bias + activation.
+/// Raw slice-based I8x4 packed GEMM with fused dequantize + bias + activation.
 /// Avoids PackedTensor wrapping overhead — takes slices and scalars directly.
 /// Activation scale/zp are per-tensor (scalar). Weight scales/zps can be
 /// per-channel (len == n) or per-tensor (len == 1, broadcast).
-pub fn gemm_packed_u8x4_fused_raw(
-    act_data: &[U8x4],
+pub fn gemm_packed_i8x4_fused_raw(
+    act_data: &[I8x4],
     m: usize,
     k: usize,
     act_scale: f32,
     act_zp: f32,
-    w_data: &[U8x4],
+    w_data: &[I8x4],
     n: usize,
     w_scales: &[f32],
     w_zps: &[f32],
@@ -339,7 +396,7 @@ pub fn gemm_packed_u8x4_fused_raw(
     let mut qb_sum: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
     for col in 0..n {
         let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-        qb_sum.push(w_row.iter().map(|&w| sum_u8x4_packed(w.0)).sum::<i32>());
+        qb_sum.push(w_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum::<i32>());
     }
 
     // Determine row iteration strategy
@@ -351,7 +408,7 @@ pub fn gemm_packed_u8x4_fused_raw(
         let act_row_start = row * k_packed;
         let act_row = &act_data[act_row_start..act_row_start + k_packed];
 
-        let qa_sum: i32 = act_row.iter().map(|&w| sum_u8x4_packed(w.0)).sum();
+        let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
 
         for col in 0..n {
             let w_row_start = col * k_packed;
@@ -373,7 +430,7 @@ pub fn gemm_packed_u8x4_fused_raw(
 
             let mut acc = bias_q;
             for kk in 0..k_packed {
-                acc += u8x4_dot_packed(act_row[kk].0, w_row[kk].0);
+                acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
             }
 
             let r = act_scale * qa_sum as f32;
@@ -418,12 +475,12 @@ pub fn gemm_packed_u8x4_fused_raw(
     }
 }
 
-/// PackedTensor-wrapping variant of `gemm_packed_u8x4_fused_raw`.
+/// PackedTensor-wrapping variant of `gemm_packed_i8x4_fused_raw`.
 /// Extracts shape/scales/zps from PackedTensor and delegates to the raw version.
 #[inline]
-pub fn gemm_packed_u8x4_fused(
-    act_packed: &PackedTensor<U8x4>,
-    weight_packed: &PackedTensor<U8x4>,
+pub fn gemm_packed_i8x4_fused(
+    act_packed: &PackedTensor<I8x4>,
+    weight_packed: &PackedTensor<I8x4>,
     bias: Option<&[f32]>,
     activation: Option<&str>,
     c: &mut [f32],
@@ -431,7 +488,7 @@ pub fn gemm_packed_u8x4_fused(
     let m = act_packed.shape()[0];
     let k = act_packed.shape()[1];
     let n = weight_packed.shape()[0];
-    gemm_packed_u8x4_fused_raw(
+    gemm_packed_i8x4_fused_raw(
         act_packed.as_packed(),
         m,
         k,
@@ -447,16 +504,16 @@ pub fn gemm_packed_u8x4_fused(
     );
 }
 
-// ── GEMM: U4x8 with fused dequantize + bias + activation ────────
+// ── GEMM: I4x8 with fused dequantize + bias + activation ────────
 
-/// Raw slice-based U4x8 packed GEMM with fused dequantize + bias + activation.
-pub fn gemm_packed_u4x8_fused_raw(
-    act_data: &[U4x8],
+/// Raw slice-based I4x8 packed GEMM with fused dequantize + bias + activation.
+pub fn gemm_packed_i4x8_fused_raw(
+    act_data: &[I4x8],
     m: usize,
     k: usize,
     act_scale: f32,
     act_zp: f32,
-    w_data: &[U4x8],
+    w_data: &[I4x8],
     n: usize,
     w_scales: &[f32],
     w_zps: &[f32],
@@ -475,14 +532,14 @@ pub fn gemm_packed_u4x8_fused_raw(
     let mut qb_sum: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
     for col in 0..n {
         let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-        qb_sum.push(w_row.iter().map(|&w| sum_u4x8_packed(w.0)).sum::<i32>());
+        qb_sum.push(w_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum::<i32>());
     }
 
     let compute_row = |row: usize, c_row: &mut [f32]| {
         let a_row_start = row * k_packed;
         let a_row = &act_data[a_row_start..a_row_start + k_packed];
 
-        let qa_sum: i32 = a_row.iter().map(|&w| sum_u4x8_packed(w.0)).sum();
+        let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
 
         for col in 0..n {
             let w_row_start = col * k_packed;
@@ -504,7 +561,7 @@ pub fn gemm_packed_u4x8_fused_raw(
 
             let mut acc = bias_q;
             for kk in 0..k_packed {
-                acc += u4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
             }
 
             let r = act_scale * qa_sum as f32;
@@ -545,11 +602,11 @@ pub fn gemm_packed_u4x8_fused_raw(
     }
 }
 
-/// PackedTensor-wrapping variant. Delegates to `gemm_packed_u4x8_fused_raw`.
+/// PackedTensor-wrapping variant. Delegates to `gemm_packed_i4x8_fused_raw`.
 #[inline]
-pub fn gemm_packed_u4x8_fused(
-    act_packed: &PackedTensor<U4x8>,
-    weight_packed: &PackedTensor<U4x8>,
+pub fn gemm_packed_i4x8_fused(
+    act_packed: &PackedTensor<I4x8>,
+    weight_packed: &PackedTensor<I4x8>,
     bias: Option<&[f32]>,
     activation: Option<&str>,
     c: &mut [f32],
@@ -557,7 +614,7 @@ pub fn gemm_packed_u4x8_fused(
     let m = act_packed.shape()[0];
     let k = act_packed.shape()[1];
     let n = weight_packed.shape()[0];
-    gemm_packed_u4x8_fused_raw(
+    gemm_packed_i4x8_fused_raw(
         act_packed.as_packed(),
         m,
         k,
@@ -573,14 +630,138 @@ pub fn gemm_packed_u4x8_fused(
     );
 }
 
-/// Pack flat i8 column-buffer data into U8x4 packed words.
+/// Packed F4x8 GEMM: fused dequantize + bias + activation (raw slice entry).
+///
+/// Symmetric FP4 quantization, no zero-point.
+/// Dequantization: output = acc * scale_a * scale_b / 4.0
+/// Since activations use a single per-tensor scale, `act_scale` is a scalar.
+/// Weight scales can be per-channel (len=n) or per-tensor (len=1).
+pub fn gemm_packed_f4x8_fused_raw(
+    act_data: &[F4x8],
+    m: usize,
+    k: usize,
+    act_scale: f32,
+    w_data: &[F4x8],
+    n: usize,
+    w_scales: &[f32],
+    bias: Option<&[f32]>,
+    activation: Option<&str>,
+    c: &mut [f32],
+) {
+    let k_packed = k.div_ceil(8);
+    debug_assert_eq!(c.len(), m * n);
+    debug_assert!(w_scales.len() == 1 || w_scales.len() == n);
+    let per_channel_w = w_scales.len() > 1;
+
+    #[cfg(feature = "parallel")]
+    let compute_row = |row: usize, c_row: &mut [f32]| {
+        let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+        for col in 0..n {
+            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+            let w_scale = if per_channel_w {
+                w_scales[col]
+            } else {
+                w_scales[0]
+            };
+            let mut acc = 0i32;
+            for kk in 0..k_packed {
+                acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+            }
+            let mut val = (acc as f32) * act_scale * w_scale / 4.0;
+            if let Some(b) = bias {
+                val += b[col];
+            }
+            if let Some(act) = activation {
+                val = match act {
+                    "relu" => val.max(0.0),
+                    "silu" => val / (1.0 + (-val).exp()),
+                    _ => val,
+                };
+            }
+            c_row[col] = val;
+        }
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let compute_row = |row: usize, c_row: &mut [f32]| {
+        let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+        for col in 0..n {
+            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+            let w_scale = if per_channel_w {
+                w_scales[col]
+            } else {
+                w_scales[0]
+            };
+            let mut acc = 0i32;
+            for kk in 0..k_packed {
+                acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+            }
+            let mut val = (acc as f32) * act_scale * w_scale / 4.0;
+            if let Some(b) = bias {
+                val += b[col];
+            }
+            if let Some(act) = activation {
+                val = match act {
+                    "relu" => val.max(0.0),
+                    "silu" => val / (1.0 + (-val).exp()),
+                    _ => val,
+                };
+            }
+            c_row[col] = val;
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    if m >= 512 {
+        c.par_chunks_mut(n)
+            .enumerate()
+            .for_each(|(row, c_row)| compute_row(row, c_row));
+    } else {
+        for (row, c_row) in c.chunks_mut(n).enumerate() {
+            compute_row(row, c_row);
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    for (row, c_row) in c.chunks_mut(n).enumerate() {
+        compute_row(row, c_row);
+    }
+}
+
+/// PackedTensor-wrapping variant of `gemm_packed_f4x8_fused_raw`.
+#[inline]
+pub fn gemm_packed_f4x8_fused(
+    act_packed: &PackedTensor<F4x8>,
+    weight_packed: &PackedTensor<F4x8>,
+    bias: Option<&[f32]>,
+    activation: Option<&str>,
+    c: &mut [f32],
+) {
+    let m = act_packed.shape()[0];
+    let k = act_packed.shape()[1];
+    let n = weight_packed.shape()[0];
+    gemm_packed_f4x8_fused_raw(
+        act_packed.as_packed(),
+        m,
+        k,
+        act_packed.scale_for_row(0),
+        weight_packed.as_packed(),
+        n,
+        &weight_packed.scales,
+        bias,
+        activation,
+        c,
+    );
+}
+
+/// Pack flat i8 column-buffer data into I8x4 packed words.
 ///
 /// Every 4 consecutive i8 bytes are packed into one u32 word:
 /// `word[0] = bytes[0], word[1] = bytes[1] << 8, ...`
 /// The i8→u8 conversion uses two's complement (safe cast).
 /// The output `packed` must have at least `m * k_packed` capacity.
 #[inline]
-pub fn pack_i8_col_to_u8x4(col: &[i8], m: usize, k: usize, packed: &mut [U8x4]) {
+pub fn pack_i8_col_to_i8x4(col: &[i8], m: usize, k: usize, packed: &mut [I8x4]) {
     let k_packed = k.div_ceil(4);
     let full_words = if k % 4 == 0 { k_packed } else { k_packed - 1 };
     for row in 0..m {
@@ -592,7 +773,7 @@ pub fn pack_i8_col_to_u8x4(col: &[i8], m: usize, k: usize, packed: &mut [U8x4]) 
             // SAFETY: aligned within the slice bounds, u32 has same repr as 4×i8
             let word =
                 unsafe { std::ptr::read_unaligned(col.as_ptr().add(byte_base) as *const u32) };
-            packed[word_base + w] = U8x4(word);
+            packed[word_base + w] = I8x4(word);
         }
         // Tail: handle the last partial word when k is not a multiple of 4
         if k % 4 != 0 {
@@ -602,17 +783,17 @@ pub fn pack_i8_col_to_u8x4(col: &[i8], m: usize, k: usize, packed: &mut [U8x4]) 
                 let idx = byte_base + i;
                 word |= (col[idx] as u8 as u32) << (i * 8);
             }
-            packed[word_base + full_words] = U8x4(word);
+            packed[word_base + full_words] = I8x4(word);
         }
     }
 }
 
-/// Pack flat i8 column-buffer data into U4x8 packed words (2 nibbles per byte).
+/// Pack flat i8 column-buffer data into I4x8 packed words (2 nibbles per byte).
 ///
 /// Every 8 i8 values (each clamped to [-8, 7]) are packed into one u32 word
 /// as 8× 4-bit nibbles. Out-of-range values are clamped.
 #[inline]
-pub fn pack_i8_col_to_u4x8(col: &[i8], m: usize, k: usize, packed: &mut [U4x8]) {
+pub fn pack_i8_col_to_i4x8(col: &[i8], m: usize, k: usize, packed: &mut [I4x8]) {
     let k_packed = k.div_ceil(8);
     for row in 0..m {
         let row_start = row * k;
@@ -627,7 +808,7 @@ pub fn pack_i8_col_to_u4x8(col: &[i8], m: usize, k: usize, packed: &mut [U4x8]) 
                     word |= ((val as u8 as u32) & 0xF) << (i * 4);
                 }
             }
-            packed[word_base + w] = U4x8(word);
+            packed[word_base + w] = I4x8(word);
         }
     }
 }
@@ -636,13 +817,13 @@ pub fn pack_i8_col_to_u4x8(col: &[i8], m: usize, k: usize, packed: &mut [U4x8]) 
 
 // SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
 // and sized according to the convolution parameters (n, c, h, w, oc, kh, kw, ...).
-pub unsafe fn conv2d_packed_u8x4(
+pub unsafe fn conv2d_packed_i8x4(
     input: &[f32],
     n: usize,
     c: usize,
     h: usize,
     w: usize,
-    weight: &PackedTensor<U8x4>,
+    weight: &PackedTensor<I8x4>,
     bias: Option<&[f32]>,
     stride: usize,
     padding: usize,
@@ -668,7 +849,7 @@ pub unsafe fn conv2d_packed_u8x4(
             let g_c_off = g * c_per_g;
             let g_oc_off = g * oc_per_g;
 
-            let act_packed = im2col_pack_u8x4(
+            let act_packed = im2col_pack_i8x4(
                 &input[input_base + g_c_off * h * w..],
                 c_per_g,
                 h,
@@ -695,7 +876,7 @@ pub unsafe fn conv2d_packed_u8x4(
                 }
             });
             let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
-                gemm_packed_u8x4_fused(&act_packed, &w_slice, b, activation, temp);
+                gemm_packed_i8x4_fused(&act_packed, &w_slice, b, activation, temp);
                 let mut found = false;
                 for pixel in 0..num_pixels {
                     for f in 0..local_oc {
@@ -716,15 +897,15 @@ pub unsafe fn conv2d_packed_u8x4(
     }
 }
 
-// SAFETY: Same as conv2d_packed_u8x4 — caller ensures valid, non-overlapping
+// SAFETY: Same as conv2d_packed_i8x4 — caller ensures valid, non-overlapping
 // input/output buffers sized for the convolution parameters.
-pub unsafe fn conv2d_packed_u4x8(
+pub unsafe fn conv2d_packed_i4x8(
     input: &[f32],
     n: usize,
     c: usize,
     h: usize,
     w: usize,
-    weight: &PackedTensor<U4x8>,
+    weight: &PackedTensor<I4x8>,
     bias: Option<&[f32]>,
     stride: usize,
     padding: usize,
@@ -750,7 +931,7 @@ pub unsafe fn conv2d_packed_u4x8(
             let g_c_off = g * c_per_g;
             let g_oc_off = g * oc_per_g;
 
-            let act_packed = im2col_pack_u4x8(
+            let act_packed = im2col_pack_i4x8(
                 &input[input_base + g_c_off * h * w..],
                 c_per_g,
                 h,
@@ -777,7 +958,7 @@ pub unsafe fn conv2d_packed_u4x8(
                 }
             });
             let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
-                gemm_packed_u4x8_fused(&act_packed, &w_slice, b, activation, temp);
+                gemm_packed_i4x8_fused(&act_packed, &w_slice, b, activation, temp);
                 let mut found = false;
                 for pixel in 0..num_pixels {
                     for f in 0..local_oc {
@@ -794,6 +975,84 @@ pub unsafe fn conv2d_packed_u4x8(
             if nan_found {
                 panic!("NaN in u8 conv output");
             }
+        }
+    }
+}
+
+// SAFETY: Same as conv2d_packed_i4x8 — caller ensures valid, non-overlapping buffers.
+pub unsafe fn conv2d_packed_f4x8(
+    input: &[f32],
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+    weight: &PackedTensor<F4x8>,
+    bias: Option<&[f32]>,
+    stride: usize,
+    padding: usize,
+    dilation: usize,
+    groups: usize,
+    kh: usize,
+    kw: usize,
+    activation: Option<&str>,
+    output: &mut [f32],
+) {
+    let oc = weight.shape()[0];
+    let c_per_g = c / groups;
+    let oc_per_g = oc / groups;
+    let h_out = conv_out_size(h, kh, stride, padding, dilation);
+    let w_out = conv_out_size(w, kw, stride, padding, dilation);
+    let num_pixels = h_out * w_out;
+
+    for nn in 0..n {
+        let input_base = nn * c * h * w;
+        let out_base = nn * oc * h_out * w_out;
+
+        for g in 0..groups {
+            let g_c_off = g * c_per_g;
+            let g_oc_off = g * oc_per_g;
+
+            let act_packed = im2col_pack_f4x8(
+                &input[input_base + g_c_off * h * w..],
+                c_per_g,
+                h,
+                w,
+                kh,
+                kw,
+                stride,
+                padding,
+                dilation,
+            );
+
+            let w_slice = if groups > 1 {
+                slice_packed(weight, g_oc_off, oc_per_g)
+            } else {
+                slice_packed(weight, 0, oc)
+            };
+
+            let local_oc = w_slice.shape()[0];
+            let b = bias.map(|b| {
+                if groups > 1 {
+                    &b[g_oc_off..g_oc_off + oc_per_g]
+                } else {
+                    b
+                }
+            });
+            with_col_buf(num_pixels * local_oc, |temp| {
+                gemm_packed_f4x8_fused(&act_packed, &w_slice, b, activation, temp);
+                for pixel in 0..num_pixels {
+                    for f in 0..local_oc {
+                        let v = temp[pixel * local_oc + f];
+                        if v.is_nan() {
+                            eprintln!(
+                                "[FNN_NAN] conv2d_f4 out_base={} g_oc_off={} f={} pixel={} v=nan",
+                                out_base, g_oc_off, f, pixel
+                            );
+                        }
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                    }
+                }
+            });
         }
     }
 }
@@ -803,10 +1062,10 @@ pub unsafe fn conv2d_packed_u4x8(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::cpu::packed_gemm::quantize_activations_to_u4x8;
+    use crate::backend::cpu::packed_gemm::quantize_activations_to_i4x8;
 
     #[test]
-    fn test_conv2d_packed_u4x8_basic() {
+    fn test_conv2d_packed_i4x8_basic() {
         let n = 1;
         let c = 8;
         let h = 1;
@@ -815,10 +1074,10 @@ mod tests {
         let wdata = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         ];
-        let weight = PackedTensor::<U4x8>::from_f32_per_channel(&wdata, &[2, 8]);
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&wdata, &[2, 8]);
         let mut output = vec![0.0f32; 2];
         unsafe {
-            conv2d_packed_u4x8(
+            conv2d_packed_i4x8(
                 &input,
                 n,
                 c,
@@ -845,21 +1104,21 @@ mod tests {
     }
 
     #[test]
-    fn test_gemm_packed_u4x8_fused_basic() {
+    fn test_gemm_packed_i4x8_fused_basic() {
         let input = vec![-4.0, -2.0, 0.0, 2.0, -3.0, -1.0, 1.0, 3.0];
-        let act = quantize_activations_to_u4x8(&input);
+        let act = quantize_activations_to_i4x8(&input);
         let weight_data = vec![
             4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0,
         ];
-        let weight = PackedTensor::<U4x8>::from_f32_per_channel(&weight_data, &[2, 8]);
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&weight_data, &[2, 8]);
         let mut c = vec![0.0f32; 2];
-        gemm_packed_u4x8_fused(&act, &weight, None, None, &mut c);
+        gemm_packed_i4x8_fused(&act, &weight, None, None, &mut c);
         assert_eq!(c.len(), 2);
         assert!(c[1] > 0.0, "expected second output positive, got {:?}", c);
     }
 
     #[test]
-    fn test_conv2d_packed_u4x8_non_multiple_k() {
+    fn test_conv2d_packed_i4x8_non_multiple_k() {
         let n = 1;
         let c = 3;
         let h = 4;
@@ -882,12 +1141,12 @@ mod tests {
             wdata[k + i * kh * kw + kh * kw / 2] = 0.5;
         }
 
-        let weight = PackedTensor::<U4x8>::from_f32_per_channel(&wdata, &[oc, k]);
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&wdata, &[oc, k]);
         let h_out = h;
         let w_out = w;
         let mut output = vec![0.0f32; oc * h_out * w_out];
         unsafe {
-            conv2d_packed_u4x8(
+            conv2d_packed_i4x8(
                 &input,
                 n,
                 c,
@@ -913,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_conv2d_packed_u8x4_non_multiple_k() {
+    fn test_conv2d_packed_i8x4_non_multiple_k() {
         let n = 1;
         let c = 3;
         let h = 4;
@@ -936,12 +1195,12 @@ mod tests {
             wdata[k + i * kh * kw + kh * kw / 2] = 0.5;
         }
 
-        let weight = PackedTensor::<U8x4>::from_f32_per_channel(&wdata, &[oc, k]);
+        let weight = PackedTensor::<I8x4>::from_f32_per_channel(&wdata, &[oc, k]);
         let h_out = h;
         let w_out = w;
         let mut output = vec![0.0f32; oc * h_out * w_out];
         unsafe {
-            conv2d_packed_u8x4(
+            conv2d_packed_i8x4(
                 &input,
                 n,
                 c,
@@ -964,5 +1223,65 @@ mod tests {
         }
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_f4x8_basic() {
+        let n = 1;
+        let c = 8;
+        let h = 1;
+        let w = 1;
+        let input: Vec<f32> = (1..=8).map(|i| i as f32).collect();
+        let wdata = vec![
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ];
+        let weight = PackedTensor::<F4x8>::from_f32_per_channel(&wdata, &[2, 8]);
+        let mut output = vec![0.0f32; 2];
+        unsafe {
+            conv2d_packed_f4x8(
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                None,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                None,
+                &mut output,
+            );
+        }
+        assert_eq!(output.len(), 2);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_gemm_packed_f4x8_fused_basic() {
+        let input = vec![-4.0, -2.0, 0.0, 2.0, -3.0, -1.0, 1.0, 3.0];
+        let act = crate::backend::cpu::packed_gemm::quantize_activations_to_f4x8(&input);
+        let weight_data = vec![
+            4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let weight = PackedTensor::<F4x8>::from_f32_per_channel(&weight_data, &[2, 8]);
+        let mut c = vec![0.0f32; 2];
+        gemm_packed_f4x8_fused(&act, &weight, None, None, &mut c);
+        assert_eq!(c.len(), 2);
+        assert!(
+            c[0] != 0.0 || c[1] != 0.0,
+            "Expected non-zero output, got {:?}",
+            c
+        );
+        for (i, &v) in c.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
     }
 }

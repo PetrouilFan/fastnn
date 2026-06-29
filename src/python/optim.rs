@@ -4,19 +4,27 @@ fn convert_params(params: Vec<PyTensor>) -> Vec<core_tensor::Tensor> {
     params.into_iter().map(|p| p.inner).collect()
 }
 
-fn tensor_vec_to_pylist<'a>(py: Python<'a>, tensors: &[core_tensor::Tensor]) -> PyResult<pyo3::Bound<'a, PyList>> {
+fn tensor_vec_to_pylist<'a>(
+    py: Python<'a>,
+    tensors: &[core_tensor::Tensor],
+) -> PyResult<pyo3::Bound<'a, PyList>> {
     let items: Vec<PyTensor> = tensors.iter().cloned().map(PyTensor::from_tensor).collect();
     PyList::new(py, items)
 }
 
 /// Helper to extract optional f64 value from state dict
 fn extract_optional_f64(state: &Bound<'_, PyAny>, key: &str) -> Option<f64> {
-    state.get_item(key).ok().and_then(|v| v.extract::<f64>().ok())
+    state
+        .get_item(key)
+        .ok()
+        .and_then(|v| v.extract::<f64>().ok())
 }
 
 /// Helper to extract tensor vector from state dict
 fn extract_tensor_vec(state: &Bound<'_, PyAny>, key: &str) -> Option<Vec<core_tensor::Tensor>> {
-    state.get_item(key).ok()
+    state
+        .get_item(key)
+        .ok()
         .and_then(|v| v.extract::<Vec<PyTensor>>().ok())
         .map(|v| v.into_iter().map(|p| p.inner).collect())
 }
@@ -378,7 +386,7 @@ impl PyRMSprop {
     }
 
     fn state_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-use pyo3::types::PyDict;
+        use pyo3::types::PyDict;
         let dict = PyDict::new(py);
         dict.set_item("lr", self.inner.lr)?;
         dict.set_item("alpha", self.inner.alpha)?;

@@ -1222,12 +1222,12 @@ impl GraphBuilder {
 
     /// Quantize F32 → U4/U8 with per-channel scales/zero_points.
     ///
-    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::U4` or
-    /// `IrDType::U8` with per-channel scale/zero-point metadata.
+    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::I4` or
+    /// `IrDType::I8` packed weight type with per-channel scale/zero-point metadata.
     pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
-            4 => IrDType::U4 {
+            4 => IrDType::I4 {
                 scales: vec![],
                 zero_points: vec![],
             },
@@ -1932,17 +1932,51 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
+    pub fn quantize_gradient(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(
+            output_shape,
+            IrDType::F8R {
+                scales: vec![scale],
+            },
+        );
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("scale".to_string(), scale.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::QuantizeGradient,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Dequantize gradient F8x4R -> F32 for optimizer consumption.
+    pub fn dequantize_gradient(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::DequantizeGradient,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
 
     /// Detect if a tensor has a packed quantized dtype (U4 or U8).
     fn is_packed_dtype(dtype: &IrDType) -> bool {
-        matches!(dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+        matches!(dtype, IrDType::I4 { .. } | IrDType::U8 { .. })
     }
 
     /// Extract the bit width from a packed dtype (4 for U4, 8 for U8).
     fn packed_bit_width(dtype: &IrDType) -> usize {
         match dtype {
-            IrDType::U4 { .. } => 4,
+            IrDType::I4 { .. } => 4,
             IrDType::U8 { .. } => 8,
             _ => panic!("packed_bit_width called on non-packed dtype: {:?}", dtype),
         }
@@ -2264,7 +2298,7 @@ impl GraphBuilder {
 
     /// Compile the graph with optional quantization.
     ///
-    /// Pass `quantize = Some(4)` for 4-bit (U4x8) or `Some(8)` for 8-bit (U8x4) quantization.
+    /// Pass `quantize = Some(4)` for 4-bit (I4x8) or `Some(8)` for 8-bit (I8x4) quantization.
     /// Pass `None` for no quantization (default f32).
     pub fn compile_with_quantize<B: Backend>(
         &self,

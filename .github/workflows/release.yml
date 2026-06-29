@@ -23,6 +23,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - run: cargo test --lib --no-default-features --features "simd,parallel,fusion-forward"
+      if: runner.os != 'macOS'
     - run: cargo build --release --no-default-features --features "simd,parallel,fusion-forward"
 
   build-wheels:

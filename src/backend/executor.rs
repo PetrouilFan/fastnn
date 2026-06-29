@@ -60,7 +60,7 @@ fn read_execution_outputs<B: Backend>(
                 })?;
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
             let computed = match &node.output_type.dtype {
-                IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                IrDType::I4 { .. } | IrDType::U8 { .. } => {
                     node.output_type.dtype.packed_byte_size(actual_numel)
                 }
                 IrDType::I8 => actual_numel + 8,
@@ -110,7 +110,7 @@ impl<B: Backend> GraphExecutor<B> {
     ///
     /// If `quantize` is `Some(bit_width)`, the quantization pass is applied
     /// after operator fusion and before memory planning. Valid values are
-    /// `4` (U4x8) and `8` (U8x4).
+    /// `4` (I4x8) and `8` (I8x4).
     pub fn compile_with_plan(
         &self,
         graph: &ComputeGraph,
@@ -236,9 +236,9 @@ impl<B: Backend> GraphExecutor<B> {
                         .map(|m| format!("bw={} scales={}", m.bit_width, m.scales.len()))
                         .unwrap_or_default();
                     eprintln!("  INSTR[{}] kernel={} {}", i, kernel_name, meta_info);
-                    if kernel_name.starts_with("conv2d_u4") {
+                    if kernel_name.starts_with("conv2d_i4") {
                         conv2d_quant_u4 += 1;
-                    } else if kernel_name.starts_with("conv2d_u8") {
+                    } else if kernel_name.starts_with("conv2d_i8") {
                         conv2d_quant_u8 += 1;
                     } else if kernel_name.starts_with("conv2d") {
                         conv2d_fp32 += 1;
@@ -522,7 +522,7 @@ impl<B: Backend> GraphExecutor<B> {
                     let numel: u64 = shape.iter().product();
                     let raw = numel as usize * node.output_type.dtype.byte_size();
                     match &node.output_type.dtype {
-                        IrDType::U4 { .. } | IrDType::U8 { .. } => {
+                        IrDType::I4 { .. } | IrDType::U8 { .. } => {
                             node.output_type.dtype.packed_byte_size(numel as usize)
                         }
                         IrDType::I8 => numel as usize + 8,
@@ -768,6 +768,10 @@ impl<B: Backend> GraphExecutor<B> {
         let injection =
             inject_optimizer(&mut combined_graph, &params_with_grads, &config.optimizer)
                 .map_err(|e| BackendError::Compilation(format!("inject_optimizer: {e}")))?;
+
+        // 4b. Insert F8x4R gradient quantization around optimizer gradient inputs
+        use crate::compiler::passes::gradient_quantization;
+        gradient_quantization::quantize_gradients(&mut combined_graph);
 
         // 5. Set graph inputs and outputs
         combined_graph.outputs = vec![loss_node];

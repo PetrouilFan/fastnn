@@ -238,8 +238,11 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                 4 => DType::Bool,
                 5 => DType::F16,
                 6 => DType::BF16,
-                7 => DType::U4,
+                7 => DType::I4,
                 8 => DType::U8,
+                9 => DType::F8,
+                10 => DType::F8R,
+                11 => DType::F4,
                 other => {
                     return Err(FastnnError::Serialization(format!(
                         "Unknown dtype tag {} for parameter '{}'",

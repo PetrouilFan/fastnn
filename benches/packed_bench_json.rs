@@ -2,7 +2,7 @@
 mod bench_util;
 
 use bench_util::bench_gemv;
-use fastnn::dtypes::{F16x2, F32x1, U4x8, U8x4};
+use fastnn::dtypes::{F16x2, F32x1, I4x8, I8x4};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -24,8 +24,8 @@ fn run_one(precision: &str, size: usize, results: &mut Vec<BenchRow>) {
     let (ms, packed_bytes) = match precision {
         "F32x1" => bench_gemv::<F32x1>(size, size, iters),
         "F16x2" => bench_gemv::<F16x2>(size, size, iters),
-        "U8x4" => bench_gemv::<U8x4>(size, size, iters),
-        "U4x8" => bench_gemv::<U4x8>(size, size, iters),
+        "I8x4" => bench_gemv::<I8x4>(size, size, iters),
+        "I4x8" => bench_gemv::<I4x8>(size, size, iters),
         _ => unreachable!(),
     };
     let memory_mb = packed_bytes as f64 / (1024.0 * 1024.0);
@@ -39,7 +39,7 @@ fn run_one(precision: &str, size: usize, results: &mut Vec<BenchRow>) {
 
 fn main() {
     let sizes = [256usize, 512, 1024, 4096];
-    let precisions = ["F32x1", "F16x2", "U8x4", "U4x8"];
+    let precisions = ["F32x1", "F16x2", "I8x4", "I4x8"];
     let mut results = Vec::new();
 
     for &name in &precisions {

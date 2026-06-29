@@ -6,7 +6,7 @@
 - **Prepared plan execution**: persistent constant arena for static weights/biases,
   arena preload fallback, transposed conv weight binding, plan stats introspection
   from Python (`AotExecutor`)
-- **Per-group quantization** for U4/U8 packed tensors
+- **Per-group quantization** for I4/I8 packed tensors
 - **Activation quantization extended to Conv2d** (previously MatMul only)
 - **OpenBLAS conv GEMM path** with thread sweep support
 - **SWAR packed kernels** for quantized inference

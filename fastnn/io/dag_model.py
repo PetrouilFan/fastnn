@@ -45,8 +45,8 @@ class DAGModel:
             params: Dict mapping parameter names to Tensors.
             input_names: List of input tensor names.
             output_names: List of output tensor names.
-            quantize: Optional quantization bit width. Pass 4 for U4x8
-                (4-bit packed) or 8 for U8x4 (8-bit packed) quantization.
+            quantize: Optional quantization bit width. Pass 4 for I4x8
+                (4-bit packed) or 8 for I8x4 (8-bit packed) quantization.
                 None means no quantization (default f32).
             input_shapes: Optional dict mapping input names to shape lists.
         """
