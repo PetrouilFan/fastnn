@@ -154,7 +154,13 @@ impl<B: Backend> GraphExecutor<B> {
         let weight_dtype = match quantize {
             Some(4) => WeightDtype::I4,
             Some(8) => WeightDtype::I8,
-            _ => WeightDtype::F32,
+            None => WeightDtype::F32,
+            Some(other) => {
+                return Err(BackendError::Compilation(format!(
+                    "Unsupported quantization bit width: {}. Supported values: 4, 8",
+                    other
+                )))
+            }
         };
         self.compile_with_weight_dtype(graph, weight_dtype, calib_data)
     }

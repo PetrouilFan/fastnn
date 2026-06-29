@@ -1543,15 +1543,36 @@ pub fn adam_update_f32_scalar(
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
+    adam_update_f32_scalar_into(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new, &mut v_new);
+    (w_new, m_new, v_new)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn adam_update_f32_scalar_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len()).min(v_out.len());
     for i in 0..len {
         let gi = g.get(i % g.len()).copied().unwrap_or(0.0);
-        m_new[i] = beta1 * m[i] + (1.0 - beta1) * gi;
-        v_new[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi;
-        let m_hat = m_new[i] / bias_corr1;
-        let v_hat = v_new[i] / bias_corr2;
-        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+        m_out[i] = beta1 * m[i] + (1.0 - beta1) * gi;
+        v_out[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi;
+        let m_hat = m_out[i] / bias_corr1;
+        let v_hat = v_out[i] / bias_corr2;
+        w_out[i] = w[i] - lr * m_hat / (v_hat.sqrt() + eps);
     }
-    (w_new, m_new, v_new)
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1574,6 +1595,31 @@ pub unsafe fn adam_update_f32_avx2(
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
+    adam_update_f32_avx2_into(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new, &mut v_new);
+    (w_new, m_new, v_new)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+// SAFETY: Caller ensures `w`, `g`, `m`, `v`, `w_out`, `m_out`, `v_out` are all
+// valid. `w`/`w_out` may alias; the function reads `w` before writing `w_out`.
+pub unsafe fn adam_update_f32_avx2_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len()).min(v_out.len());
     let vlr = _mm256_set1_ps(lr);
     let vb1 = _mm256_set1_ps(beta1);
     let vb1c = _mm256_set1_ps(1.0 - beta1);
@@ -1589,32 +1635,26 @@ pub unsafe fn adam_update_f32_avx2(
             let vg = _mm256_loadu_ps(g.as_ptr().add(i));
             let vm = _mm256_loadu_ps(m.as_ptr().add(i));
             let vv = _mm256_loadu_ps(v.as_ptr().add(i));
-            // m_new = beta1 * m + (1-beta1) * g
             let vm_new = _mm256_fmadd_ps(vb1c, vg, _mm256_mul_ps(vb1, vm));
-            // v_new = beta2 * v + (1-beta2) * g * g
             let vv_new = _mm256_fmadd_ps(vb2c, _mm256_mul_ps(vg, vg), _mm256_mul_ps(vb2, vv));
-            // m_hat = m_new / bias_corr1
             let vm_hat = _mm256_div_ps(vm_new, vbc1);
-            // v_hat = v_new / bias_corr2
             let vv_hat = _mm256_div_ps(vv_new, vbc2);
-            // w -= lr * m_hat / (sqrt(v_hat) + eps)
             let vdenom = _mm256_add_ps(_mm256_sqrt_ps(vv_hat), veps);
             let vupdate = _mm256_div_ps(_mm256_mul_ps(vlr, vm_hat), vdenom);
-            _mm256_storeu_ps(w_new.as_mut_ptr().add(i), _mm256_sub_ps(vw, vupdate));
-            _mm256_storeu_ps(m_new.as_mut_ptr().add(i), vm_new);
-            _mm256_storeu_ps(v_new.as_mut_ptr().add(i), vv_new);
+            _mm256_storeu_ps(w_out.as_mut_ptr().add(i), _mm256_sub_ps(vw, vupdate));
+            _mm256_storeu_ps(m_out.as_mut_ptr().add(i), vm_new);
+            _mm256_storeu_ps(v_out.as_mut_ptr().add(i), vv_new);
             i += 8;
         }
     }
     for j in i..len {
         let gi = g.get(j % g.len()).copied().unwrap_or(0.0);
-        m_new[j] = beta1 * m[j] + (1.0 - beta1) * gi;
-        v_new[j] = beta2 * v[j] + (1.0 - beta2) * gi * gi;
-        let m_hat = m_new[j] / bias_corr1;
-        let v_hat = v_new[j] / bias_corr2;
-        w_new[j] -= lr * m_hat / (v_hat.sqrt() + eps);
+        m_out[j] = beta1 * m[j] + (1.0 - beta1) * gi;
+        v_out[j] = beta2 * v[j] + (1.0 - beta2) * gi * gi;
+        let m_hat = m_out[j] / bias_corr1;
+        let v_hat = v_out[j] / bias_corr2;
+        w_out[j] = w[j] - lr * m_hat / (v_hat.sqrt() + eps);
     }
-    (w_new, m_new, v_new)
 }
 
 // ── Optimizer: adamw_update_f32 ─────────────────────────────

@@ -39,12 +39,40 @@ pub fn gemm_packed_i8x4(
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
+    let qb_sums: Vec<i32> = (0..n)
+        .map(|col| {
+            let b_row_start = col * k_packed;
+            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+            b_row
+                .iter()
+                .map(|&w| {
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum()
+        })
+        .collect();
+
     for row in 0..m {
         let a_row_start = row * k_packed;
         let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
 
         let a_scale = a_packed.scale_for_row(row);
         let a_zp = a_packed.zero_for_row(row);
+
+        let qa_sum: i32 = a_row
+            .iter()
+            .map(|&w| {
+                let b0 = (w.0 & 0xFF) as i8 as i32;
+                let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                b0 + b1 + b2 + b3
+            })
+            .sum();
 
         for col in 0..n {
             let b_row_start = col * k_packed;
@@ -60,31 +88,8 @@ pub fn gemm_packed_i8x4(
 
             let k_f32 = k as f32;
 
-            // Full dequantization with per-channel zero-point correction:
-            // Σ (qA * scale_A + zp_A) * (qB * scale_B + zp_B)
-            // = acc * scale_A * scale_B + zp_B * scale_A * ΣqA + zp_A * scale_B * ΣqB + zp_A * zp_B * K
-            // Sum all 4 signed i8 values per packed word
-            let qa_sum: i32 = a_row
-                .iter()
-                .map(|&w| {
-                    let b0 = (w.0 & 0xFF) as i8 as i32;
-                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
-                    b0 + b1 + b2 + b3
-                })
-                .sum();
-            let qb_sum: i32 = b_row
-                .iter()
-                .map(|&w| {
-                    let b0 = (w.0 & 0xFF) as i8 as i32;
-                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
-                    b0 + b1 + b2 + b3
-                })
-                .sum();
             let scale_ab = a_scale * b_scale;
+            let qb_sum = qb_sums[col];
 
             c[row * n + col] = (acc as f32) * scale_ab
                 + b_zp * (a_scale * qa_sum as f32)
@@ -119,6 +124,24 @@ pub fn gemm_packed_i4x8(
 
     let k_f32 = k as f32;
 
+    let qb_sums: Vec<i32> = (0..n)
+        .map(|col| {
+            let b_row_start = col * k_packed;
+            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+            b_row
+                .iter()
+                .map(|&w| {
+                    (0..8)
+                        .map(|i| {
+                            let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                            if nib >= 8 { nib - 16 } else { nib }
+                        })
+                        .sum::<i32>()
+                })
+                .sum()
+        })
+        .collect();
+
     for row in 0..m {
         let a_row_start = row * k_packed;
         let a_row = &a_packed_slice[a_row_start..a_row_start + k_packed];
@@ -126,18 +149,13 @@ pub fn gemm_packed_i4x8(
         let a_scale = a_packed.scale_for_row(row);
         let a_zp = a_packed.zero_for_row(row);
 
-        // Precompute activation row sum (ΣqA) for zero-point cross terms
         let qa_sum: i32 = a_row
             .iter()
             .map(|&w| {
                 (0..8)
                     .map(|i| {
                         let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                        if nib >= 8 {
-                            nib - 16
-                        } else {
-                            nib
-                        }
+                        if nib >= 8 { nib - 16 } else { nib }
                     })
                     .sum::<i32>()
             })
@@ -155,21 +173,7 @@ pub fn gemm_packed_i4x8(
                 acc += i4x8_dot_packed(a_row[k].0, b_row[k].0);
             }
 
-            let qb_sum: i32 = b_row
-                .iter()
-                .map(|&w| {
-                    (0..8)
-                        .map(|i| {
-                            let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                            if nib >= 8 {
-                                nib - 16
-                            } else {
-                                nib
-                            }
-                        })
-                        .sum::<i32>()
-                })
-                .sum();
+            let qb_sum = qb_sums[col];
 
             let scale_ab = a_scale * b_scale;
             c[row * n + col] = (acc as f32) * scale_ab
@@ -304,12 +308,43 @@ pub fn gemm_packed_i8x4_fused(
     let act_packed_slice = act_packed.as_packed();
     let weight_packed_slice = weight_packed.as_packed();
 
+    let qb_sums: Vec<i32> = (0..n)
+        .map(|col| {
+            let w_row_start = col * k_packed;
+            let w_row = &weight_packed_slice[w_row_start..w_row_start + k_packed];
+            w_row
+                .iter()
+                .map(|&w| {
+                    let b0 = (w.0 & 0xFF) as i8 as i32;
+                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                    b0 + b1 + b2 + b3
+                })
+                .sum()
+        })
+        .collect();
+
     for row in 0..m {
         let act_row_start = row * k_packed;
         let act_row = &act_packed_slice[act_row_start..act_row_start + k_packed];
 
         let act_scale = act_packed.scale_for_row(row);
         let act_zp = act_packed.zero_for_row(row);
+
+        let qa_sum: i32 = act_row
+            .iter()
+            .map(|&w| {
+                let b0 = (w.0 & 0xFF) as i8 as i32;
+                let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                b0 + b1 + b2 + b3
+            })
+            .sum();
+        let r_act = act_scale * qa_sum as f32;
+
+        let k_f32 = act_packed.shape()[1] as f32;
 
         for col in 0..n {
             let w_row_start = col * k_packed;
@@ -323,35 +358,13 @@ pub fn gemm_packed_i8x4_fused(
                 acc += i8x4_dot_packed(act_row[k].0, w_row[k].0);
             }
 
-            // Sum all 4 signed i8 values per packed word for zero-point correction
-            let qa_sum: i32 = act_row
-                .iter()
-                .map(|&w| {
-                    let b0 = (w.0 & 0xFF) as i8 as i32;
-                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
-                    b0 + b1 + b2 + b3
-                })
-                .sum();
-            let qb_sum: i32 = w_row
-                .iter()
-                .map(|&w| {
-                    let b0 = (w.0 & 0xFF) as i8 as i32;
-                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
-                    b0 + b1 + b2 + b3
-                })
-                .sum();
-            let k_f32 = act_packed.shape()[1] as f32;
+            let qb_sum = qb_sums[col];
 
             let scale_ab = act_scale * w_scale;
-            let r = act_scale * qa_sum as f32;
             let w_term = w_scale * qb_sum as f32;
             let zp_prod = act_zp * w_zp;
 
-            let mut val = (acc as f32) * scale_ab + w_zp * r + act_zp * w_term + zp_prod * k_f32;
+            let mut val = (acc as f32) * scale_ab + w_zp * r_act + act_zp * w_term + zp_prod * k_f32;
 
             if let Some(b) = bias {
                 val += b[col];
