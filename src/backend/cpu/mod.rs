@@ -602,13 +602,21 @@ impl Backend for CpuBackend {
                     let is_quantized = weight_dtype.as_ref().is_some_and(|d| {
                         matches!(
                             d,
-                            IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F4 { .. }
+                            IrDType::I4 { .. }
+                                | IrDType::U8 { .. }
+                                | IrDType::F4 { .. }
+                                | IrDType::F8 { .. }
+                                | IrDType::F8R { .. }
                         )
                     });
                     let (kernel_name, weight_meta) = if is_quantized {
                         let dtype = weight_dtype.as_ref().unwrap();
                         let mut kernel = if matches!(dtype, IrDType::F4 { .. }) {
                             "conv2d_f4".to_string()
+                        } else if matches!(dtype, IrDType::F8 { .. }) {
+                            "conv2d_f8".to_string()
+                        } else if matches!(dtype, IrDType::F8R { .. }) {
+                            "conv2d_f8r".to_string()
                         } else if matches!(dtype, IrDType::I4 { .. }) {
                             "conv2d_i4".to_string()
                         } else {
@@ -655,6 +663,8 @@ impl Backend for CpuBackend {
                                         zero_points,
                                     } => (4usize, scales.clone(), zero_points.clone()),
                                     IrDType::F4 { scales } => (4usize, scales.clone(), vec![]),
+                                    IrDType::F8 { scales } => (8usize, scales.clone(), vec![]),
+                                    IrDType::F8R { scales } => (8usize, scales.clone(), vec![]),
                                     IrDType::U8 {
                                         scales,
                                         zero_points,
@@ -3714,6 +3724,8 @@ impl Backend for CpuBackend {
                         }
                         // â”€â”€ Conv2d Quantized (u4/u8) â€” FP32 activation path (arena) â”€â”€
                         "conv2d_f4" | "conv2d_f4_relu" | "conv2d_f4_gelu" | "conv2d_f4_silu"
+                        | "conv2d_f8" | "conv2d_f8_relu" | "conv2d_f8_gelu" | "conv2d_f8_silu"
+                        | "conv2d_f8r" | "conv2d_f8r_relu" | "conv2d_f8r_gelu" | "conv2d_f8r_silu"
                         | "conv2d_i4" | "conv2d_i4_relu" | "conv2d_i4_gelu" | "conv2d_i4_silu"
                         | "conv2d_i8" | "conv2d_i8_relu" | "conv2d_i8_gelu" | "conv2d_i8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
@@ -3774,7 +3786,7 @@ impl Backend for CpuBackend {
                                     None
                                 };
                                 macro_rules! dispatch_packed_conv {
-                                    ($PackedType:ty, $fn:ident) => {{
+                                    ($PackedType:ty, $fn:path) => {{
                                         // Direct aligned cast instead of Vec<u32> intermediate
                                         let packed_data: Vec<$PackedType> =
                                             aligned_packed_slice(&raw);
@@ -3795,7 +3807,7 @@ impl Backend for CpuBackend {
                                                 None
                                             };
                                         unsafe {
-                                            packed_conv::$fn(
+                                            $fn(
                                                 &input_data,
                                                 n,
                                                 input_c,
@@ -3816,11 +3828,15 @@ impl Backend for CpuBackend {
                                     }};
                                 }
                                 if kernel_name.starts_with("conv2d_f4") {
-                                    dispatch_packed_conv!(F4x8, conv2d_packed_f4x8);
+                                    dispatch_packed_conv!(F4x8, packed_conv::conv2d_packed_f4x8);
+                                } else if kernel_name.starts_with("conv2d_f8r") {
+                                    dispatch_packed_conv!(F8x4R, packed_conv::conv2d_packed_float::<F8x4R>);
+                                } else if kernel_name.starts_with("conv2d_f8") {
+                                    dispatch_packed_conv!(F8x4, packed_conv::conv2d_packed_float::<F8x4>);
                                 } else if meta.bit_width == 4 {
-                                    dispatch_packed_conv!(I4x8, conv2d_packed_i4x8);
+                                    dispatch_packed_conv!(I4x8, packed_conv::conv2d_packed_i4x8);
                                 } else {
-                                    dispatch_packed_conv!(I8x4, conv2d_packed_i8x4);
+                                    dispatch_packed_conv!(I8x4, packed_conv::conv2d_packed_i8x4);
                                 }
                             }
                         }
