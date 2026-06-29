@@ -16,7 +16,7 @@
 //!
 //! The expected dtype for each input depends on the opcode:
 //! - Most arithmetic/activation ops expect F32.
-//! - MatMul/Conv can accept U4/U8 on the weight input and INT8 on the activation.
+//! - MatMul/Conv can accept I4/I8 packed weights or F4/F8/F8R FP packed weights, with INT8 activation quantization.
 //! - Conversion ops (Cast, Quantize, Dequantize, ToF16, ToF32) accept their
 //!   natural input type.
 

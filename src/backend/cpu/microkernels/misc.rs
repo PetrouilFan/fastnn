@@ -2,7 +2,7 @@
 
 #![allow(dead_code, unused_imports)]
 
-use crate::dtypes::{F32x1, PackedWord, I4x8, I8x4};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 use super::*;

@@ -46,7 +46,11 @@ pub(super) fn dispatch_quantized_matmul_gpu(
         return Ok(());
     }
 
-    let items = if matches!(dtype_tag, "i4" | "f4") { 8usize } else { 4usize };
+    let items = if matches!(dtype_tag, "i4" | "f4") {
+        8usize
+    } else {
+        4usize
+    };
     let padded_k = k.div_ceil(items) * items;
 
     let read_f32 = |idx: usize| -> Vec<f32> {
@@ -187,10 +191,18 @@ pub(super) fn dispatch_quantized_conv_gpu(
         return Ok(());
     }
 
-    let items = if matches!(dtype_tag, "i4" | "f4") { 8usize } else { 4usize };
+    let items = if matches!(dtype_tag, "i4" | "f4") {
+        8usize
+    } else {
+        4usize
+    };
     let col_w = c * kernel_h * kernel_w;
     let col_h = n_batch * output_h * output_w;
-    let bit_width = if matches!(dtype_tag, "i4" | "f4") { 4 } else { 8 };
+    let bit_width = if matches!(dtype_tag, "i4" | "f4") {
+        4
+    } else {
+        8
+    };
     let f = packed_bytes.len() * 8 / (col_w * bit_width).max(1);
     if f == 0 {
         return Err(BackendError::Dispatch(
@@ -779,16 +791,28 @@ pub(super) fn dispatch_quantize_gradient_gpu(
         numel: u32,
         _pad: u32,
     }
-    let qp = GradQuantParams { numel: numel as u32, _pad: 0 };
+    let qp = GradQuantParams {
+        numel: numel as u32,
+        _pad: 0,
+    };
     let buf_params = ctx.create_uniform_buffer(&qp, "gq_params");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gq_bg"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: buf_input.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: buf_output.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: buf_params.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_params.as_entire_binding(),
+            },
         ],
     });
 
@@ -844,16 +868,28 @@ pub(super) fn dispatch_dequantize_gradient_gpu(
         numel: u32,
         _pad: u32,
     }
-    let qp = GradQuantParams { numel: numel as u32, _pad: 0 };
+    let qp = GradQuantParams {
+        numel: numel as u32,
+        _pad: 0,
+    };
     let buf_params = ctx.create_uniform_buffer(&qp, "gdq_params");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gdq_bg"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: buf_input.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: buf_output.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: buf_params.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_params.as_entire_binding(),
+            },
         ],
     });
 

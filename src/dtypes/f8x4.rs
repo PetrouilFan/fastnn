@@ -202,7 +202,11 @@ mod tests {
     #[test]
     fn test_e4m3_subnormal() {
         let val = e4m3_to_f32(0x01);
-        assert!(val > 0.0 && val < 0.1, "Smallest subnormal should be tiny, got {}", val);
+        assert!(
+            val > 0.0 && val < 0.1,
+            "Smallest subnormal should be tiny, got {}",
+            val
+        );
     }
 
     #[test]
@@ -221,8 +225,8 @@ mod tests {
     #[test]
     fn test_e4m3_roundtrip_extensive() {
         let test_vals = [
-            0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0,
-            -128.0, 240.0, -240.0, 0.25, 0.125, 1.5, 2.5, 3.5, 7.0, 15.0, 31.0, 63.0, 127.0,
+            0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, -128.0,
+            240.0, -240.0, 0.25, 0.125, 1.5, 2.5, 3.5, 7.0, 15.0, 31.0, 63.0, 127.0,
         ];
         for &v in &test_vals {
             let encoded = f32_to_e4m3(v);

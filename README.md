@@ -66,7 +66,7 @@ fastnn currently includes:
 - Ahead-of-time graph compilation for selected workloads.
 - CPU kernels with runtime dispatch for supported SIMD targets.
 - Optional WGPU backend paths behind the `gpu` feature.
-- U4/U8 weight quantization paths in selected compiled inference flows.
+- I4/I8 weight quantization and F4/F8/F8R FP packed weight paths in selected compiled inference flows.
 - ONNX import and model conversion utilities for supported operator sets.
 - Benchmark and regression tooling for maintained CPU execution paths.
 

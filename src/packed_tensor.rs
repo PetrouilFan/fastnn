@@ -1059,7 +1059,11 @@ mod tests {
     fn test_packed_tensor_f4x8_single_word() {
         let data: Vec<f32> = vec![0.0, 1.0, 2.0, 4.0, -0.0, -1.0, -2.0, -4.0];
         let t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
-        assert_eq!(t.packed_len(), 17, "F4x8 packs 8 values into 1 u32 + 16 SIMD margin");
+        assert_eq!(
+            t.packed_len(),
+            17,
+            "F4x8 packs 8 values into 1 u32 + 16 SIMD margin"
+        );
         let recovered = t.to_f32_vec();
         for i in 0..8 {
             let err = (data[i] - recovered[i]).abs();

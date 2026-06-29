@@ -2,7 +2,7 @@
 
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{BackendError, BufferSlice};
-use crate::dtypes::{PackedWord, I4x8, I8x4};
+use crate::dtypes::{I4x8, I8x4, PackedWord};
 use crate::ir::node::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
 
@@ -150,9 +150,9 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     })
 }
 
-/// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
+/// Helper: dispatch a quantized matmul (I4x8/I8x4/F4x8/F8x4/F8x4R) at runtime.
 ///
-/// Generic over `T: PackedWord` — monomorphized as `I4x8` or `I8x4`.
+/// Generic over `T: PackedWord` — monomorphized as the concrete packed type.
 /// Handles arena extraction, u32-aligned weight copy, PackedTensor
 /// construction, and `gemm_cpu_flat` dispatch.
 #[inline]

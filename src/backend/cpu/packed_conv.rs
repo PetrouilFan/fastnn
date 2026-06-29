@@ -15,10 +15,10 @@
 use rayon::prelude::*;
 
 use crate::backend::cpu::swar::{
-    sum_i4x8_packed, sum_i8x4_packed, i4x8_dot_packed, i8x4_dot_packed,
+    i4x8_dot_packed, i8x4_dot_packed, sum_i4x8_packed, sum_i8x4_packed,
 };
 use crate::dtypes::f4x8::f4x8_dot_packed;
-use crate::dtypes::{F4x8, PackedWord, I4x8, I8x4};
+use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 // Change 4: Thread-local scratch buffers for im2col+pack
@@ -1044,7 +1044,10 @@ pub unsafe fn conv2d_packed_f4x8(
                     for f in 0..local_oc {
                         let v = temp[pixel * local_oc + f];
                         if v.is_nan() {
-                            eprintln!("[FNN_NAN] conv2d_f4 out_base={} g_oc_off={} f={} pixel={} v=nan", out_base, g_oc_off, f, pixel);
+                            eprintln!(
+                                "[FNN_NAN] conv2d_f4 out_base={} g_oc_off={} f={} pixel={} v=nan",
+                                out_base, g_oc_off, f, pixel
+                            );
                         }
                         output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
                     }
@@ -1272,7 +1275,11 @@ mod tests {
         let mut c = vec![0.0f32; 2];
         gemm_packed_f4x8_fused(&act, &weight, None, None, &mut c);
         assert_eq!(c.len(), 2);
-        assert!(c[0] != 0.0 || c[1] != 0.0, "Expected non-zero output, got {:?}", c);
+        assert!(
+            c[0] != 0.0 || c[1] != 0.0,
+            "Expected non-zero output, got {:?}",
+            c
+        );
         for (i, &v) in c.iter().enumerate() {
             assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
         }

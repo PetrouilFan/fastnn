@@ -1,7 +1,7 @@
 //! Quantization compiler pass.
 //!
 //! Finds f32 Constant weight nodes feeding MatMul/Conv2d ops and replaces
-//! them with packed U4/U8 data carrying per-channel scale/zero-point metadata.
+//! them with packed I4/I8 data carrying per-channel scale/zero-point metadata.
 //! The backend dispatch already selects `matmul_u4`/`matmul_u8` kernels when
 //! it sees `IrDType::I4/U8` on the weight input.
 

@@ -3,7 +3,7 @@ use fastnn::backend::cpu::microkernels::{gemm_cpu, gemv_cpu};
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::dtypes::{F32x1, PackedWord, I4x8, I8x4};
+use fastnn::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;

@@ -253,7 +253,7 @@ def main():
     parser.add_argument("output", help="Output .fnn file")
     parser.add_argument(
         "--dtype", "-d",
-        choices=["f32", "f16", "u8", "u4"],
+        choices=["f32", "f16", "i8", "i4", "u8", "u4"],
         default="f32",
         help="Target precision dtype"
     )

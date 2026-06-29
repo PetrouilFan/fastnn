@@ -56,8 +56,8 @@ class Precision(IntEnum):
         mapping = {
             "f32": Precision.F32, "float32": Precision.F32,
             "f16": Precision.F16, "float16": Precision.F16,
-            "u8": Precision.I8, "uint8": Precision.I8,
-            "u4": Precision.I4, "uint4": Precision.I4,
+            "i8": Precision.I8, "u8": Precision.I8, "uint8": Precision.I8,
+            "i4": Precision.I4, "u4": Precision.I4, "uint4": Precision.I4,
             "f8": Precision.F8, "fp8": Precision.F8, "e4m3": Precision.F8,
             "f8r": Precision.F8R, "fp8r": Precision.F8R, "e5m2": Precision.F8R,
             "f4": Precision.F4, "fp4": Precision.F4, "e2m1": Precision.F4,
