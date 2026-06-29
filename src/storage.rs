@@ -1,3 +1,5 @@
+use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "gpu")]
@@ -5,6 +7,102 @@ use parking_lot::RwLock;
 #[cfg(feature = "gpu")]
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const CACHE_LINE_ALIGN: usize = 64;
+
+/// A byte buffer guaranteed to be 64-byte (cache-line) aligned, suitable for
+/// direct SIMD load/store without alignment checks.
+///
+/// Provides [`Deref<Target=[u8]>`] and [`DerefMut`] so existing code that treats
+/// `&AlignedVec` as `&[u8]` works transparently.
+#[derive(Debug)]
+pub struct AlignedVec {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: AlignedVec owns uniquely-identified memory.  Access is governed by
+// Rust's borrow rules (shared through `&self` / `Arc`, exclusive through
+// `&mut self` / `Arc::make_mut`).
+unsafe impl Send for AlignedVec {}
+unsafe impl Sync for AlignedVec {}
+
+impl AlignedVec {
+    /// Allocate a zero-initialized buffer whose start address is 64-byte aligned.
+    /// Returns an empty (no-allocation) buffer when `nbytes == 0`.
+    pub fn new_zeroed(nbytes: usize) -> Self {
+        if nbytes == 0 {
+            return AlignedVec {
+                ptr: std::ptr::NonNull::dangling().as_ptr(),
+                len: 0,
+            };
+        }
+        let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN)
+            .expect("AlignedVec layout");
+        let ptr = unsafe { alloc_zeroed(layout) };
+        AlignedVec { ptr, len: nbytes }
+    }
+
+    /// Build an aligned buffer by copying the contents of `vec`.
+    /// The original `Vec` is dropped, freeing its (potentially unaligned) memory.
+    pub fn from_vec(vec: Vec<u8>) -> Self {
+        let nbytes = vec.len();
+        if nbytes == 0 {
+            drop(vec);
+            return AlignedVec::new_zeroed(0);
+        }
+        let mut buf = AlignedVec::new_zeroed(nbytes);
+        buf.copy_from_slice(&vec);
+        buf
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+}
+
+impl Clone for AlignedVec {
+    fn clone(&self) -> Self {
+        let mut buf = AlignedVec::new_zeroed(self.len);
+        if self.len > 0 {
+            buf.copy_from_slice(self);
+        }
+        buf
+    }
+}
+
+impl Drop for AlignedVec {
+    fn drop(&mut self) {
+        if self.len > 0 {
+            // Layout must match the one used in new_zeroed.
+            let layout = Layout::from_size_align(self.len, CACHE_LINE_ALIGN)
+                .expect("AlignedVec dealloc layout");
+            unsafe { dealloc(self.ptr, layout) };
+        }
+    }
+}
+
+impl Deref for AlignedVec {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        if self.len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+}
+
+impl DerefMut for AlignedVec {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+        }
+    }
+}
 
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
@@ -139,10 +237,22 @@ impl Device {
     }
 }
 
+/// Helper to construct a `CpuStorage` from a `Vec<u8>` (copied into aligned memory).
+impl CpuStorage {
+    pub fn from_vec(data: Vec<u8>, nbytes: usize) -> Self {
+        CpuStorage {
+            data: Arc::new(AlignedVec::from_vec(data)),
+            nbytes,
+            #[cfg(feature = "gpu")]
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
 // CPU storage variant - with optional lazy GPU buffer cache
 #[derive(Debug)]
 pub struct CpuStorage {
-    pub data: Arc<Vec<u8>>,
+    pub data: Arc<AlignedVec>,
     pub nbytes: usize,
     // Lazy GPU buffer cache: maps device_id -> GPU buffer
     // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
@@ -191,13 +301,9 @@ impl Clone for Storage {
 }
 
 impl Storage {
-    // Create CPU storage
+    // Create CPU storage with 64-byte aligned buffer
     pub fn new_cpu(_dtype: DType, nbytes: usize) -> Self {
-        let data = if nbytes > 0 {
-            Arc::new(vec![0u8; nbytes])
-        } else {
-            Arc::new(vec![])
-        };
+        let data = Arc::new(AlignedVec::new_zeroed(nbytes));
 
         if let Some(stats) = ALLOC_STATS.get() {
             stats.add_alloc(nbytes);
@@ -227,20 +333,20 @@ impl Storage {
     }
 
     pub fn from_vec_owned<T: bytemuck::Pod>(
-        mut data: Vec<T>,
+        data: Vec<T>,
         _dtype: DType,
         _device: Device,
     ) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
-        let ptr = data.as_mut_ptr() as *mut u8;
-        let len = nbytes;
-        let cap = data.capacity() * std::mem::size_of::<T>();
-        std::mem::forget(data);
-        // SAFETY: The pointer, length, and capacity were obtained from a prior `Vec` via `into_raw_parts`,
-        // ensuring they are consistent and the memory is valid for the original allocation.
-        let byte_vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+        // Copy into 64-byte aligned storage (safe, no unsafe needed)
+        let src_bytes = bytemuck::cast_slice(&data);
+        let mut aligned = AlignedVec::new_zeroed(nbytes);
+        if nbytes > 0 {
+            aligned.copy_from_slice(src_bytes);
+        }
+        drop(data);
         Storage::Cpu(CpuStorage {
-            data: Arc::new(byte_vec),
+            data: Arc::new(aligned),
             nbytes,
             #[cfg(feature = "gpu")]
             gpu_buffer_cache: Default::default(),

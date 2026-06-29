@@ -94,12 +94,7 @@ impl TensorImpl {
         }
         let sizes = self.sizes.clone();
         let nbytes = data.len();
-        let storage = Arc::new(Storage::Cpu(CpuStorage {
-            data: Arc::new(data),
-            nbytes,
-            #[cfg(feature = "gpu")]
-            gpu_buffer_cache: Default::default(),
-        }));
+        let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(data, nbytes)));
         let mut new_tensor = Tensor::new(TensorImpl::new(storage, sizes, self.dtype));
         if let Some(meta) = &self.autograd_meta {
             let meta_lock = meta.lock();

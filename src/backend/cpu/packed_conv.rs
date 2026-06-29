@@ -528,91 +528,131 @@ pub fn gemm_packed_i8x4_fused_raw(
 ) {
     let k_packed = k.div_ceil(4);
     debug_assert_eq!(c.len(), m * n);
-    debug_assert!(w_scales.len() == 1 || w_scales.len() == n);
-    debug_assert!(w_zps.len() == 1 || w_zps.len() == n);
     let k_f32 = k as f32;
     let per_channel_w = w_scales.len() > 1;
 
-    // Precompute qb_sum once per weight column
-    let mut qb_sum: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
+    // Precompute per-column arrays (hoists per_channel_w and bias branches)
+    let mut scale_ab_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut w_zp_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut bias_q_col: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut w_term_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut zp_prod_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
     for col in 0..n {
         let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-        qb_sum.push(w_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum::<i32>());
+        let qb = w_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum::<i32>();
+        let ws = if per_channel_w { w_scales[col] } else { w_scales[0] };
+        let wz = if per_channel_w { w_zps[col] } else { w_zps[0] };
+        let sab = act_scale * ws;
+        scale_ab_col.push(sab);
+        w_zp_col.push(wz);
+        bias_q_col.push(bias.map(|b| (b[col] / sab).round() as i32).unwrap_or(0));
+        w_term_col.push(ws * qb as f32);
+        zp_prod_col.push(act_zp * wz);
     }
 
     // Determine row iteration strategy
     #[cfg(feature = "parallel")]
-    let parallel = m >= 512;
+    let parallel = m >= crate::backend::cpu::topology::physical_core_count();
 
-    // Row computation lambda
-    let compute_row = |row: usize, c_row: &mut [f32]| {
-        let act_row_start = row * k_packed;
-        let act_row = &act_data[act_row_start..act_row_start + k_packed];
-
-        let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
-
-        for col in 0..n {
-            let w_row_start = col * k_packed;
-            let w_row = &w_data[w_row_start..w_row_start + k_packed];
-
-            let w_scale = if per_channel_w {
-                w_scales[col]
-            } else {
-                w_scales[0]
+    match activation {
+        None | Some("") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                }
             };
-            let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
-
-            let scale_ab = act_scale * w_scale;
-            let bias_q = if let Some(b) = bias {
-                (b[col] / scale_ab).round() as i32
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                0
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        Some("relu") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
+                    }
+                    let val = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                    c_row[col] = val.max(0.0);
+                }
             };
-
-            let mut acc = bias_q;
-            for kk in 0..k_packed {
-                acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-            }
-
-            let r = act_scale * qa_sum as f32;
-            let w_term = w_scale * qb_sum[col] as f32;
-            let zp_prod = act_zp * w_zp;
-
-            let val = (acc as f32) * scale_ab + w_zp * r + act_zp * w_term + zp_prod * k_f32;
-            if !val.is_finite() {
-                eprintln!(
-                    "[FNN_DBG_DEQUANT] u8 col={} acc={} qa={} qb={} act_zp={} w_zp={} k={} scale_ab={} val={}",
-                    col, acc, qa_sum, qb_sum[col], act_zp, w_zp, k_f32, scale_ab, val
-                );
-            }
-
-            if let Some(act) = activation {
-                let activated = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-                c_row[col] = activated;
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                c_row[col] = val;
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
             }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
         }
-    };
-
-    #[cfg(feature = "parallel")]
-    if parallel {
-        c.par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(row, c_row)| compute_row(row, c_row));
-    } else {
-        for (row, c_row) in c.chunks_mut(n).enumerate() {
-            compute_row(row, c_row);
+        Some("silu") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
+                    }
+                    let val = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                    c_row[col] = val / (1.0 + (-val).exp());
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
         }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    for (row, c_row) in c.chunks_mut(n).enumerate() {
-        compute_row(row, c_row);
+        _ => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
     }
 }
 
@@ -664,82 +704,130 @@ pub fn gemm_packed_i4x8_fused_raw(
 ) {
     let k_packed = k.div_ceil(8);
     debug_assert_eq!(c.len(), m * n);
-    debug_assert!(w_scales.len() == 1 || w_scales.len() == n);
-    debug_assert!(w_zps.len() == 1 || w_zps.len() == n);
     let k_f32 = k as f32;
     let per_channel_w = w_scales.len() > 1;
 
-    // Precompute qb_sum per weight column
-    let mut qb_sum: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
+    // Precompute per-column arrays (hoists per_channel_w and bias branches)
+    let mut scale_ab_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut w_zp_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut bias_q_col: smallvec::SmallVec<[i32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut w_term_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut zp_prod_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
     for col in 0..n {
         let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-        qb_sum.push(w_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum::<i32>());
+        let qb = w_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum::<i32>();
+        let ws = if per_channel_w { w_scales[col] } else { w_scales[0] };
+        let wz = if per_channel_w { w_zps[col] } else { w_zps[0] };
+        let sab = act_scale * ws;
+        scale_ab_col.push(sab);
+        w_zp_col.push(wz);
+        bias_q_col.push(bias.map(|b| (b[col] / sab).round() as i32).unwrap_or(0));
+        w_term_col.push(ws * qb as f32);
+        zp_prod_col.push(act_zp * wz);
     }
-
-    let compute_row = |row: usize, c_row: &mut [f32]| {
-        let a_row_start = row * k_packed;
-        let a_row = &act_data[a_row_start..a_row_start + k_packed];
-
-        let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
-
-        for col in 0..n {
-            let w_row_start = col * k_packed;
-            let w_row = &w_data[w_row_start..w_row_start + k_packed];
-
-            let w_scale = if per_channel_w {
-                w_scales[col]
-            } else {
-                w_scales[0]
-            };
-            let w_zp = if per_channel_w { w_zps[col] } else { w_zps[0] };
-
-            let scale_ab = act_scale * w_scale;
-            let bias_q = if let Some(b) = bias {
-                (b[col] / scale_ab).round() as i32
-            } else {
-                0
-            };
-
-            let mut acc = bias_q;
-            for kk in 0..k_packed {
-                acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
-            }
-
-            let r = act_scale * qa_sum as f32;
-            let w_term = w_scale * qb_sum[col] as f32;
-            let zp_prod = act_zp * w_zp;
-            let val = (acc as f32) * scale_ab + w_zp * r + act_zp * w_term + zp_prod * k_f32;
-            if !scale_ab.is_finite() || !val.is_finite() {
-                eprintln!("[FNN_DBG_DEQUANT] u4x8 col={} acc={} qa_sum={} qb_sum={} act_zp={} w_zp={} k={} scale_ab={} val={}", col, acc, qa_sum, qb_sum[col], act_zp, w_zp, k_f32, scale_ab, val);
-            }
-
-            if let Some(act) = activation {
-                let activated = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-                c_row[col] = activated;
-            } else {
-                c_row[col] = val;
-            }
-        }
-    };
 
     #[cfg(feature = "parallel")]
-    if m >= 512 {
-        c.par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(row, c_row)| compute_row(row, c_row));
-    } else {
-        for (row, c_row) in c.chunks_mut(n).enumerate() {
-            compute_row(row, c_row);
-        }
-    }
+    let parallel = m >= crate::backend::cpu::topology::physical_core_count();
 
-    #[cfg(not(feature = "parallel"))]
-    for (row, c_row) in c.chunks_mut(n).enumerate() {
-        compute_row(row, c_row);
+    match activation {
+        None | Some("") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        Some("relu") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    let val = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                    c_row[col] = val.max(0.0);
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        Some("silu") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    let val = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                    c_row[col] = val / (1.0 + (-val).exp());
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        _ => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
+                let r = act_scale * qa_sum as f32;
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = bias_q_col[col];
+                    for kk in 0..k_packed {
+                        acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = (acc as f32) * scale_ab_col[col]
+                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
     }
 }
 
@@ -791,81 +879,106 @@ pub fn gemm_packed_f4x8_fused_raw(
 ) {
     let k_packed = k.div_ceil(8);
     debug_assert_eq!(c.len(), m * n);
-    debug_assert!(w_scales.len() == 1 || w_scales.len() == n);
     let per_channel_w = w_scales.len() > 1;
 
-    #[cfg(feature = "parallel")]
-    let compute_row = |row: usize, c_row: &mut [f32]| {
-        let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
-        for col in 0..n {
-            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-            let w_scale = if per_channel_w {
-                w_scales[col]
-            } else {
-                w_scales[0]
-            };
-            let mut acc = 0i32;
-            for kk in 0..k_packed {
-                acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
-            }
-            let mut val = (acc as f32) * act_scale * w_scale / 4.0;
-            if let Some(b) = bias {
-                val += b[col];
-            }
-            if let Some(act) = activation {
-                val = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-            }
-            c_row[col] = val;
-        }
-    };
-
-    #[cfg(not(feature = "parallel"))]
-    let compute_row = |row: usize, c_row: &mut [f32]| {
-        let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
-        for col in 0..n {
-            let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-            let w_scale = if per_channel_w {
-                w_scales[col]
-            } else {
-                w_scales[0]
-            };
-            let mut acc = 0i32;
-            for kk in 0..k_packed {
-                acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
-            }
-            let mut val = (acc as f32) * act_scale * w_scale / 4.0;
-            if let Some(b) = bias {
-                val += b[col];
-            }
-            if let Some(act) = activation {
-                val = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-            }
-            c_row[col] = val;
-        }
-    };
-
-    #[cfg(feature = "parallel")]
-    if m >= 512 {
-        c.par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(row, c_row)| compute_row(row, c_row));
-    } else {
-        for (row, c_row) in c.chunks_mut(n).enumerate() {
-            compute_row(row, c_row);
-        }
+    // Precompute per-column arrays (hoists per_channel_w and bias branches)
+    let mut scale_ab_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    let mut bias_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
+    for col in 0..n {
+        let ws = if per_channel_w { w_scales[col] } else { w_scales[0] };
+        scale_ab_col.push(act_scale * ws / 4.0);
+        bias_col.push(bias.map(|b| b[col]).unwrap_or(0.0));
     }
 
-    #[cfg(not(feature = "parallel"))]
-    for (row, c_row) in c.chunks_mut(n).enumerate() {
-        compute_row(row, c_row);
+    #[cfg(feature = "parallel")]
+    let parallel = m >= crate::backend::cpu::topology::physical_core_count();
+
+    match activation {
+        None | Some("") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = 0i32;
+                    for kk in 0..k_packed {
+                        acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = (acc as f32) * scale_ab_col[col] + bias_col[col];
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        Some("relu") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = 0i32;
+                    for kk in 0..k_packed {
+                        acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = ((acc as f32) * scale_ab_col[col] + bias_col[col]).max(0.0);
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        Some("silu") => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = 0i32;
+                    for kk in 0..k_packed {
+                        acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    let val = (acc as f32) * scale_ab_col[col] + bias_col[col];
+                    c_row[col] = val / (1.0 + (-val).exp());
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
+        _ => {
+            let compute_row = |row: usize, c_row: &mut [f32]| {
+                let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
+                for col in 0..n {
+                    let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
+                    let mut acc = 0i32;
+                    for kk in 0..k_packed {
+                        acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
+                    }
+                    c_row[col] = (acc as f32) * scale_ab_col[col] + bias_col[col];
+                }
+            };
+            #[cfg(feature = "parallel")]
+            if parallel {
+                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+            } else {
+                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            }
+            #[cfg(not(feature = "parallel"))]
+            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+        }
     }
 }
 

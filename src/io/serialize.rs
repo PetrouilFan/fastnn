@@ -273,12 +273,7 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
             }
 
             let sizes: SmallVec<[i64; 8]> = shape.into();
-            let storage = Arc::new(Storage::Cpu(CpuStorage {
-                data: Arc::new(data_bytes),
-                nbytes,
-                #[cfg(feature = "gpu")]
-                gpu_buffer_cache: Default::default(),
-            }));
+            let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(data_bytes, nbytes)));
             let tensor = Tensor::new(TensorImpl::new(storage, sizes, dtype));
             result.insert(name, tensor);
         }
