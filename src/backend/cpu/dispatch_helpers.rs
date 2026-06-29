@@ -349,19 +349,22 @@ pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: us
                 false
             }
         };
-        let out_ptr = output.as_mut_ptr() as usize;
-        (0..num_rows).into_par_iter().for_each(move |r| {
+        let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
+        for r in 0..num_rows {
             let start = r * row_size;
             let inp = &input[start..start + row_size];
-            let out = unsafe {
-                std::slice::from_raw_parts_mut(out_ptr as *mut f32, output.len())
-            };
-            let out_row = &mut out[start..start + row_size];
+            // SAFETY: Each row writes to a unique non-overlapping region of output.
+            let out =
+                unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().add(start), row_size) };
+            row_slices.push((inp, out));
+        }
+        row_slices.par_iter_mut().for_each(|(inp, out)| {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             if has_avx2 {
-                unsafe { microkernels::norm_layernorm_f32_avx2(inp, out_row, row_size, eps) };
-            } else {
-                microkernels::norm_layernorm_f32_scalar(inp, out_row, row_size, eps);
+                unsafe { microkernels::norm_layernorm_f32_avx2(inp, out, row_size, eps) };
+                return;
             }
+            microkernels::norm_layernorm_f32_scalar(inp, out, row_size, eps);
         });
         return;
     }
@@ -396,19 +399,22 @@ pub(super) fn rms_norm_f32(
                 false
             }
         };
-        let out_ptr = output.as_mut_ptr() as usize;
-        (0..num_rows).into_par_iter().for_each(move |r| {
+        let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
+        for r in 0..num_rows {
             let start = r * row_size;
             let inp = &input[start..start + row_size];
-            let out = unsafe {
-                std::slice::from_raw_parts_mut(out_ptr as *mut f32, output.len())
-            };
-            let out_row = &mut out[start..start + row_size];
+            // SAFETY: Each row writes to a unique non-overlapping region of output.
+            let out =
+                unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().add(start), row_size) };
+            row_slices.push((inp, out));
+        }
+        row_slices.par_iter_mut().for_each(|(inp, out)| {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             if has_avx2 {
-                unsafe { microkernels::rms_norm_f32_avx2(inp, weight, out_row, row_size, eps) };
-            } else {
-                microkernels::rms_norm_f32_scalar(inp, weight, out_row, row_size, eps);
+                unsafe { microkernels::rms_norm_f32_avx2(inp, weight, out, row_size, eps) };
+                return;
             }
+            microkernels::rms_norm_f32_scalar(inp, weight, out, row_size, eps);
         });
         return;
     }

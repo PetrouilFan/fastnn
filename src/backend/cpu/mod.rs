@@ -2680,7 +2680,10 @@ impl Backend for CpuBackend {
                                             matmul_blas_into(
                                                 &a[a_s..a_s + a_stride],
                                                 &b[b_s..b_s + b_stride],
-                                                ob, m, _k, n,
+                                                ob,
+                                                m,
+                                                _k,
+                                                n,
                                             );
 
                                             if activation != 0 {
@@ -2712,10 +2715,19 @@ impl Backend for CpuBackend {
                                                 let op = out_ptr as *mut f32;
                                                 unsafe {
                                                     blocked_row_matmul(
-                                                        a.as_ptr(), b.as_ptr(), op, row,
-                                                        m, n, _k,
-                                                        a_stride, _k, 1,
-                                                        b_batch_stride, n, 1,
+                                                        a.as_ptr(),
+                                                        b.as_ptr(),
+                                                        op,
+                                                        row,
+                                                        m,
+                                                        n,
+                                                        _k,
+                                                        a_stride,
+                                                        _k,
+                                                        1,
+                                                        b_batch_stride,
+                                                        n,
+                                                        1,
                                                     );
                                                 }
                                                 if apply_fusion {
@@ -2723,15 +2735,24 @@ impl Backend for CpuBackend {
                                                     unsafe {
                                                         for i in 0..n {
                                                             let p = rs + i;
-                                                            let x = *op.add(p) + if has_bias {
-                                                                if let Some(bs) = bias { bs[i] } else { 0.0 }
-                                                            } else { 0.0 };
+                                                            let x = *op.add(p)
+                                                                + if has_bias {
+                                                                    if let Some(bs) = bias {
+                                                                        bs[i]
+                                                                    } else {
+                                                                        0.0
+                                                                    }
+                                                                } else {
+                                                                    0.0
+                                                                };
                                                             *op.add(p) = match activation {
                                                                 1 => x.max(0.0),
                                                                 2 => {
                                                                     let x3 = x * x * x;
-                                                                    let tanh_arg = 0.797_884_6 * (x + 0.044_715 * x3);
-                                                                    0.5 * x * (1.0 + tanh_arg.tanh())
+                                                                    let tanh_arg = 0.797_884_6
+                                                                        * (x + 0.044_715 * x3);
+                                                                    0.5 * x
+                                                                        * (1.0 + tanh_arg.tanh())
                                                                 }
                                                                 3 => x / (1.0 + (-x).exp()),
                                                                 _ => x,
@@ -2745,24 +2766,41 @@ impl Backend for CpuBackend {
                                         for row in 0..total_rows {
                                             unsafe {
                                                 blocked_row_matmul(
-                                                    a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), row,
-                                                    m, n, _k,
-                                                    a_stride, _k, 1,
-                                                    b_batch_stride, n, 1,
+                                                    a.as_ptr(),
+                                                    b.as_ptr(),
+                                                    out.as_mut_ptr(),
+                                                    row,
+                                                    m,
+                                                    n,
+                                                    _k,
+                                                    a_stride,
+                                                    _k,
+                                                    1,
+                                                    b_batch_stride,
+                                                    n,
+                                                    1,
                                                 );
                                             }
                                             if apply_fusion {
                                                 let rs = row * n;
                                                 for i in 0..n {
                                                     let p = rs + i;
-                                                    let x = out[p] + if has_bias {
-                                                        if let Some(bs) = bias { bs[i] } else { 0.0 }
-                                                    } else { 0.0 };
+                                                    let x = out[p]
+                                                        + if has_bias {
+                                                            if let Some(bs) = bias {
+                                                                bs[i]
+                                                            } else {
+                                                                0.0
+                                                            }
+                                                        } else {
+                                                            0.0
+                                                        };
                                                     out[p] = match activation {
                                                         1 => x.max(0.0),
                                                         2 => {
                                                             let x3 = x * x * x;
-                                                            let tanh_arg = 0.797_884_6 * (x + 0.044_715 * x3);
+                                                            let tanh_arg =
+                                                                0.797_884_6 * (x + 0.044_715 * x3);
                                                             0.5 * x * (1.0 + tanh_arg.tanh())
                                                         }
                                                         3 => x / (1.0 + (-x).exp()),
@@ -2776,9 +2814,8 @@ impl Backend for CpuBackend {
                                 };
                                 {
                                     let d = arena.data_mut();
-                                    d[out_start..out_end].copy_from_slice(
-                                        bytemuck::cast_slice(&out_buf),
-                                    );
+                                    d[out_start..out_end]
+                                        .copy_from_slice(bytemuck::cast_slice(&out_buf));
                                 }
                             }
                         }
@@ -3710,9 +3747,10 @@ impl Backend for CpuBackend {
                         // â”€â”€ Conv2d Quantized (u4/u8) â€” FP32 activation path (arena) â”€â”€
                         "conv2d_f4" | "conv2d_f4_relu" | "conv2d_f4_gelu" | "conv2d_f4_silu"
                         | "conv2d_f8" | "conv2d_f8_relu" | "conv2d_f8_gelu" | "conv2d_f8_silu"
-                        | "conv2d_f8r" | "conv2d_f8r_relu" | "conv2d_f8r_gelu" | "conv2d_f8r_silu"
-                        | "conv2d_i4" | "conv2d_i4_relu" | "conv2d_i4_gelu" | "conv2d_i4_silu"
-                        | "conv2d_i8" | "conv2d_i8_relu" | "conv2d_i8_gelu" | "conv2d_i8_silu" => {
+                        | "conv2d_f8r" | "conv2d_f8r_relu" | "conv2d_f8r_gelu"
+                        | "conv2d_f8r_silu" | "conv2d_i4" | "conv2d_i4_relu" | "conv2d_i4_gelu"
+                        | "conv2d_i4_silu" | "conv2d_i8" | "conv2d_i8_relu" | "conv2d_i8_gelu"
+                        | "conv2d_i8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
                             // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
@@ -3815,9 +3853,15 @@ impl Backend for CpuBackend {
                                 if kernel_name.starts_with("conv2d_f4") {
                                     dispatch_packed_conv!(F4x8, packed_conv::conv2d_packed_f4x8);
                                 } else if kernel_name.starts_with("conv2d_f8r") {
-                                    dispatch_packed_conv!(F8x4R, packed_conv::conv2d_packed_float::<F8x4R>);
+                                    dispatch_packed_conv!(
+                                        F8x4R,
+                                        packed_conv::conv2d_packed_float::<F8x4R>
+                                    );
                                 } else if kernel_name.starts_with("conv2d_f8") {
-                                    dispatch_packed_conv!(F8x4, packed_conv::conv2d_packed_float::<F8x4>);
+                                    dispatch_packed_conv!(
+                                        F8x4,
+                                        packed_conv::conv2d_packed_float::<F8x4>
+                                    );
                                 } else if meta.bit_width == 4 {
                                     dispatch_packed_conv!(I4x8, packed_conv::conv2d_packed_i4x8);
                                 } else {
@@ -4785,7 +4829,10 @@ impl Backend for CpuBackend {
                                                     row_size, eps,
                                                 );
                                             }
-                                            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                            #[cfg(not(all(
+                                                feature = "simd",
+                                                target_arch = "x86_64"
+                                            )))]
                                             microkernels::fused_residual_add_layer_norm_f32_scalar(
                                                 inputs[0], inputs[1], weight, bias, out_f32,
                                                 row_size, eps,
@@ -4847,7 +4894,10 @@ impl Backend for CpuBackend {
                                                     eps,
                                                 );
                                             }
-                                            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+                                            #[cfg(not(all(
+                                                feature = "simd",
+                                                target_arch = "x86_64"
+                                            )))]
                                             microkernels::fused_residual_add_rms_norm_f32_scalar(
                                                 inputs[0], inputs[1], weight, out_f32, row_size,
                                                 eps,
@@ -7155,8 +7205,8 @@ fn dispatch_matmul_fp32_with_view(
     param_dims: &Option<Vec<DimExpr>>,
     view: &crate::backend::prepared::PersistentPreparedWeights,
 ) -> Result<(), BackendError> {
-use crate::backend::cpu::blas::matmul_blas_into;
-use crate::backend::cpu::microkernels::blocked_row_matmul;
+    use crate::backend::cpu::blas::matmul_blas_into;
+    use crate::backend::cpu::microkernels::blocked_row_matmul;
 
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
