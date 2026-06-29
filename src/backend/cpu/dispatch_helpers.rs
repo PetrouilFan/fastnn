@@ -339,6 +339,7 @@ pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: us
     #[cfg(feature = "parallel")]
     if num_rows > 1 {
         use rayon::prelude::*;
+        #[allow(unused_variables)]
         let has_avx2 = {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
@@ -386,6 +387,7 @@ pub(super) fn rms_norm_f32(
     #[cfg(feature = "parallel")]
     if num_rows > 1 {
         use rayon::prelude::*;
+        #[allow(unused_variables)]
         let has_avx2 = {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
@@ -432,6 +434,7 @@ pub(super) fn softmax_f32(
     #[cfg(feature = "parallel")]
     if num_rows > 1 && stride == 1 {
         use rayon::prelude::*;
+        #[allow(unused_variables)]
         let has_avx2 = {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {

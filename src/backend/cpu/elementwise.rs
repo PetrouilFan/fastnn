@@ -1,6 +1,8 @@
 use crate::backend::BufferSlice;
 
-use super::{add_f32, arena, div_f32, microkernels, mul_f32, sub_f32, CpuBuffer};
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use super::{add_f32, div_f32, microkernels, mul_f32, sub_f32};
+use super::{arena, CpuBuffer};
 
 /// Compute a fused binary op + activation over already-extracted f32 slices.
 ///
@@ -10,6 +12,7 @@ use super::{add_f32, arena, div_f32, microkernels, mul_f32, sub_f32, CpuBuffer};
 /// semantics.
 #[inline]
 fn fused_binary_activation_dispatch_slices(
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(unused_variables))]
     kernel_name: &str,
     a: &[f32],
     b: &[f32],
