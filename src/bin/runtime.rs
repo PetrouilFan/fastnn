@@ -4,7 +4,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 
 use fastnn::backend::cpu::CpuBackend;
-use fastnn::backend::executor::GraphExecutor;
+use fastnn::backend::executor::{GraphExecutor, WeightDtype};
 use fastnn::backend::runtime::Runtime;
 use fastnn::backend::{ExecutablePlan, Instruction, MemoryPlan};
 use fastnn::onnx::converter::{OnnxConverter, OnnxNode};
@@ -90,9 +90,9 @@ enum Commands {
         /// Output path for .memory.json file
         #[arg(short, long, default_value = "model.memory.json")]
         output_memory: String,
-        /// Quantize weights to bit width (optional, 4 or 8)
+        /// Quantize weights (4, 8, f8, f8r, f4)
         #[arg(short, long)]
-        quantize: Option<u8>,
+        quantize: Option<String>,
     },
 }
 
@@ -413,7 +413,7 @@ fn cmd_compile(
     onnx_path: &str,
     output_plan: &str,
     output_memory: &str,
-    quantize: Option<u8>,
+    quantize: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let onnx_json = std::fs::read_to_string(onnx_path)?;
     let onnx_data: serde_json::Value = serde_json::from_str(&onnx_json)?;
@@ -477,9 +477,24 @@ fn cmd_compile(
 
     println!("ONNX model loaded: {} nodes", graph.node_count());
 
+    let weight_dtype = match quantize.as_deref() {
+        None => WeightDtype::F32,
+        Some("4") | Some("i4") => WeightDtype::I4,
+        Some("8") | Some("i8") => WeightDtype::I8,
+        Some("f8") => WeightDtype::F8x4,
+        Some("f8r") => WeightDtype::F8x4R,
+        Some("f4") => WeightDtype::F4x8,
+        Some(other) => {
+            return Err(format!(
+                "unsupported quantize value: '{other}' (expected 4, 8, f8, f8r, or f4)"
+            )
+            .into())
+        }
+    };
+
     let executor = GraphExecutor::new(CpuBackend);
     let (plan, memory_plan, _compiled_graph) = executor
-        .compile_with_plan_and_quantize(&graph, quantize)
+        .compile_with_weight_dtype(&graph, weight_dtype, None)
         .map_err(|e| format!("Compilation: {e}"))?;
 
     plan.save(output_plan)?;

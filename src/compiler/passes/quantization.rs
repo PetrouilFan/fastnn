@@ -5,10 +5,17 @@
 //! The backend dispatch already selects `matmul_u4`/`matmul_u8` kernels when
 //! it sees `IrDType::I4/U8` on the weight input.
 
-use crate::dtypes::{I4x8, I8x4};
+use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4};
 use crate::error::FastnnError;
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
+
+/// Target floating-point packed dtype for weight quantization.
+pub enum FpDtype {
+    F8x4,
+    F8x4R,
+    F4x8,
+}
 
 /// Quantize all f32 weight constants feeding MatMul / Conv2d nodes to the
 /// requested bit-width (4 or 8).
@@ -205,6 +212,142 @@ pub fn quantize_weights(
         };
 
         // Mutate the node in place.
+        if let Some(node_mut) = graph.get_node_mut(const_id) {
+            node_mut.opcode = Opcode::Constant(new_value);
+            node_mut.output_type = new_tensor_type;
+        }
+    }
+
+    Ok(())
+}
+
+/// Quantize f32 weight constants feeding MatMul / Conv2d to a floating-point
+/// packed dtype (F8x4/E4M3, F8x4R/E5M2, or F4x8/E2M1).
+///
+/// Unlike integer quantization (`quantize_weights`), FP packed quantization
+/// is symmetric (no zero points) and uses per-channel scales derived from
+/// each channel's absolute max divided by the dtype's `MAX_REPRESENTABLE`.
+pub fn quantize_weights_fp(
+    graph: &mut ComputeGraph,
+    fp_dtype: &FpDtype,
+) -> Result<(), FastnnError> {
+    let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
+
+    let graph_ref = &*graph;
+    crate::utils::traverse_graph(graph_ref, |node_id, node| {
+        let is_matmul_conv = matches!(
+            node.opcode,
+            Opcode::MatMul | Opcode::Conv1d | Opcode::Conv2d | Opcode::Conv3d
+        );
+        if !is_matmul_conv {
+            return Ok(());
+        }
+        if let Some(&weight_id) = node.inputs.get(1) {
+            let weight_node = match graph_ref.get_node(weight_id) {
+                Some(n) => n,
+                None => return Ok(()),
+            };
+            if let Opcode::Constant(ref val) = weight_node.opcode {
+                let is_float = matches!(
+                    &weight_node.output_type.dtype,
+                    IrDType::F32 | IrDType::F16 | IrDType::BF16
+                );
+                let is_data = matches!(val, TensorValue::Data { .. });
+                if is_float && is_data {
+                    to_quantize.push((weight_id, node_id));
+                }
+            }
+        }
+        Ok(())
+    })
+    .map_err(FastnnError::compilation)?;
+
+    if to_quantize.is_empty() {
+        return Ok(());
+    }
+
+    for (const_id, _consumer_id) in to_quantize {
+        let const_node = match graph.get_node(const_id) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let (f32_data, orig_shape) = match &const_node.opcode {
+            Opcode::Constant(TensorValue::Data { bytes, tensor_type }) => {
+                let numel = match tensor_type.numel() {
+                    Some(n) => n as usize,
+                    None => continue,
+                };
+                let f32_data: Vec<f32> = if bytes.len() == numel * 4 {
+                    bytemuck::cast_slice(bytes).to_vec()
+                } else {
+                    continue;
+                };
+                let shape: Vec<usize> = tensor_type
+                    .shape
+                    .iter()
+                    .filter_map(|d| match d {
+                        DimExpr::Known(v) => Some(*v as usize),
+                        _ => None,
+                    })
+                    .collect();
+                (f32_data, shape)
+            }
+            _ => continue,
+        };
+
+        if f32_data.is_empty() {
+            continue;
+        }
+
+        let (quant_data, quant_shape) = if orig_shape.len() == 2 {
+            let rows = orig_shape[0];
+            let cols = orig_shape[1];
+            let mut transposed = vec![0.0f32; rows * cols];
+            for r in 0..rows {
+                for c in 0..cols {
+                    transposed[c * rows + r] = f32_data[r * cols + c];
+                }
+            }
+            (transposed, vec![cols, rows])
+        } else {
+            (f32_data, orig_shape.clone())
+        };
+
+        let (packed_bytes, scales) = match fp_dtype {
+            FpDtype::F8x4 => {
+                let pt = PackedTensor::<F8x4>::from_f32_per_channel(&quant_data, &quant_shape);
+                (pt.as_bytes().to_vec(), pt.scales)
+            }
+            FpDtype::F8x4R => {
+                let pt = PackedTensor::<F8x4R>::from_f32_per_channel(&quant_data, &quant_shape);
+                (pt.as_bytes().to_vec(), pt.scales)
+            }
+            FpDtype::F4x8 => {
+                let pt = PackedTensor::<F4x8>::from_f32_per_channel(&quant_data, &quant_shape);
+                (pt.as_bytes().to_vec(), pt.scales)
+            }
+        };
+
+        let new_dtype = match fp_dtype {
+            FpDtype::F8x4 => IrDType::F8 { scales },
+            FpDtype::F8x4R => IrDType::F8R { scales },
+            FpDtype::F4x8 => IrDType::F4 { scales },
+        };
+
+        let new_tensor_type = TensorType {
+            shape: orig_shape
+                .iter()
+                .map(|&d| DimExpr::Known(d as u64))
+                .collect(),
+            dtype: new_dtype,
+        };
+
+        let new_value = TensorValue::Data {
+            bytes: packed_bytes,
+            tensor_type: new_tensor_type.clone(),
+        };
+
         if let Some(node_mut) = graph.get_node_mut(const_id) {
             node_mut.opcode = Opcode::Constant(new_value);
             node_mut.output_type = new_tensor_type;

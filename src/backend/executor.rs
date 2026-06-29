@@ -27,6 +27,23 @@ use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+/// Target weight dtype for compilation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WeightDtype {
+    /// No quantization — keep f32 weights as-is.
+    F32,
+    /// Integer 4-bit symmetric quantization (I4x8).
+    I4,
+    /// Integer 8-bit symmetric quantization (I8x4/U8).
+    I8,
+    /// Float 8-bit E4M3 (F8x4).
+    F8x4,
+    /// Float 8-bit E5M2 (F8x4R).
+    F8x4R,
+    /// Float 4-bit E2M1 (F4x8).
+    F4x8,
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -60,7 +77,7 @@ fn read_execution_outputs<B: Backend>(
                 })?;
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
             let computed = match &node.output_type.dtype {
-                IrDType::I4 { .. } | IrDType::U8 { .. } => {
+                IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. } | IrDType::F4 { .. } => {
                     node.output_type.dtype.packed_byte_size(actual_numel)
                 }
                 IrDType::I8 => actual_numel + 8,
@@ -125,13 +142,44 @@ impl<B: Backend> GraphExecutor<B> {
     /// packed 4-bit or 8-bit precision. If `calib_data` is provided, it will
     /// be used to compute per-tensor/per-channel activation scales for optimal
     /// quantization accuracy.
+    ///
+    /// For FP packed types (F8/F8R/F4), use [`compile_with_weight_dtype`]
+    /// instead. This method only supports integer quantization (I4/I8).
     pub fn compile_with_plan_and_quantize(
         &self,
         graph: &ComputeGraph,
         quantize: Option<u8>,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
+        let weight_dtype = match quantize {
+            Some(4) => WeightDtype::I4,
+            Some(8) => WeightDtype::I8,
+            _ => WeightDtype::F32,
+        };
+        self.compile_with_weight_dtype(graph, weight_dtype, calib_data)
+    }
+
+    /// Compile a graph with an explicit [`WeightDtype`] target, including FP
+    /// packed types (F8x4, F8x4R, F4x8).
+    ///
+    /// Supports all variants of `WeightDtype`:
+    /// - `F32`: no weight quantization
+    /// - `I4` / `I8`: integer symmetric quantization (backed by
+    ///   [`quantize_weights`])
+    /// - `F8x4` / `F8x4R` / `F4x8`: FP packed quantization (backed by
+    ///   [`quantize_weights_fp`])
+    ///
+    /// If `calib_data` is provided, per-tensor/per-channel activation scales
+    /// will be applied after weight quantization (weight-only quant only uses
+    /// the weight quant step; activations remain f32).
+    pub fn compile_with_weight_dtype(
+        &self,
+        graph: &ComputeGraph,
+        weight_dtype: WeightDtype,
+        calib_data: Option<calibration::CalibrationData>,
+    ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         let mut graph = graph.clone();
+        let do_weight_quant = weight_dtype != WeightDtype::F32;
 
         // ── Phase 1: Shape inference ──────────────────────────────────────
         shape_inference::infer_shapes(&mut graph)
@@ -164,22 +212,38 @@ impl<B: Backend> GraphExecutor<B> {
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
         // Handle three cases:
-        // 1. quantize=Some(bit_width): quantize weights only.
+        // 1. weight_dtype != F32: quantize weights.
         //    Activation quantization is only applied when calibration data is provided.
-        // 2. quantize=None, calib_data=Some(_): re-quantize activations only (weights already quantized)
-        // 3. quantize=None, calib_data=None: no quantization
-        let do_quantize = quantize.is_some() || calib_data.is_some();
+        // 2. weight_dtype == F32, calib_data=Some(_): re-quantize activations only (weights already quantized)
+        // 3. weight_dtype == F32, calib_data=None: no quantization
+        let do_quantize = do_weight_quant || calib_data.is_some();
         if do_quantize {
-            // Quantize weights if requested (or if not already quantized)
-            if let Some(bit_width) = quantize {
-                if bit_width != 4 && bit_width != 8 {
-                    return Err(BackendError::Compilation(format!(
-                        "unsupported quantization bit width: {} (expected 4 or 8)",
-                        bit_width
-                    )));
+            // Quantize weights if requested
+            if do_weight_quant {
+                use quantization::FpDtype;
+                match weight_dtype {
+                    WeightDtype::I4 => {
+                        quantization::quantize_weights(&mut graph, 4, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::I8 => {
+                        quantization::quantize_weights(&mut graph, 8, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::F8x4 => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::F8x4R => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::F4x8 => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::F32 => {}
                 }
-                quantization::quantize_weights(&mut graph, bit_width, None)
-                    .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
             }
 
             // After quantizing weights, wrap any optimizer ops that now have
@@ -522,7 +586,7 @@ impl<B: Backend> GraphExecutor<B> {
                     let numel: u64 = shape.iter().product();
                     let raw = numel as usize * node.output_type.dtype.byte_size();
                     match &node.output_type.dtype {
-                        IrDType::I4 { .. } | IrDType::U8 { .. } => {
+                        IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. } | IrDType::F4 { .. } => {
                             node.output_type.dtype.packed_byte_size(numel as usize)
                         }
                         IrDType::I8 => numel as usize + 8,
