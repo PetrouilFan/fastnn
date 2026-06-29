@@ -81,7 +81,7 @@ pub fn f4x8_dot_packed(a: u32, b: u32) -> i32 {
     let lut = f4x8_lut();
     let mut sum = 0i32;
     // Manual unroll via indices to reduce loop overhead
-    sum += lut[(((a >> 0) & 0xF) as usize) << 4 | ((b >> 0) & 0xF) as usize] as i32;
+    sum += lut[((a & 0xF) as usize) << 4 | (b & 0xF) as usize] as i32;
     sum += lut[(((a >> 4) & 0xF) as usize) << 4 | ((b >> 4) & 0xF) as usize] as i32;
     sum += lut[(((a >> 8) & 0xF) as usize) << 4 | ((b >> 8) & 0xF) as usize] as i32;
     sum += lut[(((a >> 12) & 0xF) as usize) << 4 | ((b >> 12) & 0xF) as usize] as i32;
@@ -103,21 +103,21 @@ impl PackedWord for F4x8 {
     fn unpack_to_f32(self) -> [f32; 8] {
         let w = self.0;
         [
-            fp4_to_f32((w >> 0) as u8 & 0xF),
-            fp4_to_f32((w >> 4) as u8 & 0xF),
-            fp4_to_f32((w >> 8) as u8 & 0xF),
-            fp4_to_f32((w >> 12) as u8 & 0xF),
-            fp4_to_f32((w >> 16) as u8 & 0xF),
-            fp4_to_f32((w >> 20) as u8 & 0xF),
-            fp4_to_f32((w >> 24) as u8 & 0xF),
-            fp4_to_f32((w >> 28) as u8 & 0xF),
+            fp4_to_f32((w & 0xF) as u8),
+            fp4_to_f32(((w >> 4) & 0xF) as u8),
+            fp4_to_f32(((w >> 8) & 0xF) as u8),
+            fp4_to_f32(((w >> 12) & 0xF) as u8),
+            fp4_to_f32(((w >> 16) & 0xF) as u8),
+            fp4_to_f32(((w >> 20) & 0xF) as u8),
+            fp4_to_f32(((w >> 24) & 0xF) as u8),
+            fp4_to_f32(((w >> 28) & 0xF) as u8),
         ]
     }
 
     #[inline]
     fn pack_from_f32(vals: [f32; 8]) -> Self {
         let mut w = 0u32;
-        w |= (f32_to_fp4(vals[0]) as u32) << 0;
+        w |= f32_to_fp4(vals[0]) as u32;
         w |= (f32_to_fp4(vals[1]) as u32) << 4;
         w |= (f32_to_fp4(vals[2]) as u32) << 8;
         w |= (f32_to_fp4(vals[3]) as u32) << 12;
