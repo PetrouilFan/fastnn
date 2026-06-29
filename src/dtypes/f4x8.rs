@@ -62,8 +62,7 @@ fn f4x8_lut() -> &'static [i16; 256] {
     LUT.get_or_init(|| {
         let mut lut = [0i16; 256];
         let vals: [f32; 16] = [
-            0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-            0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+            0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
         ];
         for a in 0..16u8 {
             for b in 0..16u8 {
@@ -198,7 +197,10 @@ mod tests {
             assert!(
                 err < 0.01,
                 "roundtrip err {:.6} for input {}, code 0x{:X}, decoded {}",
-                err, v, code, decoded
+                err,
+                v,
+                code,
+                decoded
             );
         }
     }
@@ -223,7 +225,9 @@ mod tests {
             assert!(
                 (unpacked[i] - vals[i]).abs() < 0.01,
                 "Mismatch at {}: got {}, expected {}",
-                i, unpacked[i], vals[i]
+                i,
+                unpacked[i],
+                vals[i]
             );
         }
     }

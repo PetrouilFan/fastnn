@@ -188,24 +188,27 @@ mod tests {
 
     #[test]
     fn test_swar_sub_i8x4() {
-        let a = (100u32) | ((50u32) << 8) | ((-30i8) as u8 as u32) << 16 | ((-1i8) as u8 as u32) << 24;
+        let a =
+            (100u32) | ((50u32) << 8) | ((-30i8) as u8 as u32) << 16 | ((-1i8) as u8 as u32) << 24;
         let b = (30u32) | ((70u32) << 8) | ((20u32) << 16) | ((-50i8) as u8 as u32) << 24;
         let result = swar_sub_i8x4(a, b);
         let bytes = result.to_le_bytes();
-        assert_eq!(bytes[0] as i8, 70);   // 100 - 30
-        assert_eq!(bytes[1] as i8, -20);  // 50 - 70
-        assert_eq!(bytes[2] as i8, -50);  // -30 - 20
-        assert_eq!(bytes[3] as i8, 49);   // -1 - (-50)
+        assert_eq!(bytes[0] as i8, 70); // 100 - 30
+        assert_eq!(bytes[1] as i8, -20); // 50 - 70
+        assert_eq!(bytes[2] as i8, -50); // -30 - 20
+        assert_eq!(bytes[3] as i8, 49); // -1 - (-50)
     }
 
     #[test]
     fn test_swar_sub_i8x4_boundary() {
-        let a = (127i8 as u8 as u32) | ((-128i8 as u8 as u32) << 8) | ((0u32) << 16) | ((1u32) << 24);
-        let b = (1u32) | ((1u32) << 8) | ((-128i8 as u8 as u32) << 16) | ((127i8 as u8 as u32) << 24);
+        let a =
+            (127i8 as u8 as u32) | ((-128i8 as u8 as u32) << 8) | ((0u32) << 16) | ((1u32) << 24);
+        let b =
+            (1u32) | ((1u32) << 8) | ((-128i8 as u8 as u32) << 16) | ((127i8 as u8 as u32) << 24);
         let result = swar_sub_i8x4(a, b);
         let bytes = result.to_le_bytes();
-        assert_eq!(bytes[0] as i8, 126);  // 127 - 1
-        assert_eq!(bytes[1] as i8, 127);  // -128 - 1 (wraps to 127)
+        assert_eq!(bytes[0] as i8, 126); // 127 - 1
+        assert_eq!(bytes[1] as i8, 127); // -128 - 1 (wraps to 127)
         assert_eq!(bytes[2] as i8, -128i8); // 0 - (-128) wraps to -128
         assert_eq!(bytes[3] as i8, -126); // 1 - 127
     }

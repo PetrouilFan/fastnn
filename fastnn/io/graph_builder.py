@@ -151,8 +151,8 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                 # Packed types require Rust-side PackedTensor for dequantization,
                 # which is not exposed to Python yet.
                 dtype_map = {
-                    DTYPE_I4: "u4",
-                    DTYPE_I8: "u8",
+                    DTYPE_I4: "i4",
+                    DTYPE_I8: "i8",
                     DTYPE_F16: "f16",
                     DTYPE_F8: "f8",
                     DTYPE_F8R: "f8r",

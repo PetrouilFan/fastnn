@@ -18,16 +18,16 @@ Add three new FP packed types (F4x8, F8x4, F8x4R) alongside renaming U4→I4 and
 | I4x8 | 8 | 4 | [-8, 7] | 8× |
 | **F4x8** | 8 | 4 | ±6 (E2M1) | 8× |
 
-### I4x8 (renamed from I4x8)
+### I4x8 (renamed from U4x8)
 - **8 × signed 4-bit integers per u32**
 - Range: [-8, 7], two's complement
-- Dot product: `u4x8_dot_packed` — extract 8 nibbles, sign-extend, multiply-accumulate in i32
+- Dot product: `i4x8_dot_packed` — extract 8 nibbles, sign-extend, multiply-accumulate in i32
 - Storage: `(sign << 3) | magnitude` per nibble, where magnitude is 3-bit unsigned [0..7]
 
-### I8x4 (renamed from I8x4)  
+### I8x4 (renamed from U8x4)  
 - **4 × signed 8-bit integers per u32**
 - Range: [-128, 127], two's complement
-- Dot product: `u8x4_dot_packed` — extract 4 bytes, i8 sign-extend, multiply-accumulate
+- Dot product: `i8x4_dot_packed` — extract 4 bytes, i8 sign-extend, multiply-accumulate
 - Storage: native byte order, each byte is a signed i8
 
 ### F8x4 (NEW — FP8 E4M3 format)
