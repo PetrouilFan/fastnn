@@ -58,7 +58,8 @@ pub(super) fn matmul_activation_dispatch(
         matmul_blas_into(a, b, out_f32, m, _k, n);
 
         if has_bias {
-            let bias: &[f32] = unsafe { arena.view_f32(input_slices[2].offset, input_slices[2].size) };
+            let bias: &[f32] =
+                unsafe { arena.view_f32(input_slices[2].offset, input_slices[2].size) };
             for i in 0..out_f32.len() {
                 out_f32[i] = act(out_f32[i] + bias[i % n]);
             }

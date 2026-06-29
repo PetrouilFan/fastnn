@@ -35,9 +35,9 @@ mod elementwise;
 use elementwise::fused_binary_activation_dispatch;
 mod scalar;
 use scalar::{scalar_kernel_instruction, scalar_op_dispatch, unary_op_dispatch};
-pub mod topology;
 pub mod affinity;
 mod params;
+pub mod topology;
 use params::resolve_params;
 mod matmul;
 use matmul::{

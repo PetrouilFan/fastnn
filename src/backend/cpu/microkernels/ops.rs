@@ -1543,7 +1543,10 @@ pub fn adam_update_f32_scalar(
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
-    adam_update_f32_scalar_into(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new, &mut v_new);
+    adam_update_f32_scalar_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
     (w_new, m_new, v_new)
 }
 
@@ -1595,7 +1598,10 @@ pub unsafe fn adam_update_f32_avx2(
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
-    adam_update_f32_avx2_into(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new, &mut v_new);
+    adam_update_f32_avx2_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
     (w_new, m_new, v_new)
 }
 

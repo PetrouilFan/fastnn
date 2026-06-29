@@ -37,8 +37,7 @@ impl AlignedVec {
                 len: 0,
             };
         }
-        let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN)
-            .expect("AlignedVec layout");
+        let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN).expect("AlignedVec layout");
         let ptr = unsafe { alloc_zeroed(layout) };
         AlignedVec { ptr, len: nbytes }
     }
@@ -332,11 +331,7 @@ impl Storage {
         })
     }
 
-    pub fn from_vec_owned<T: bytemuck::Pod>(
-        data: Vec<T>,
-        _dtype: DType,
-        _device: Device,
-    ) -> Self {
+    pub fn from_vec_owned<T: bytemuck::Pod>(data: Vec<T>, _dtype: DType, _device: Device) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
         // Copy into 64-byte aligned storage (safe, no unsafe needed)
         let src_bytes = bytemuck::cast_slice(&data);

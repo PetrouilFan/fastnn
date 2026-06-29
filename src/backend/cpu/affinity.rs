@@ -55,9 +55,8 @@ static GLOBAL_POOL: OnceLock<PinnedThreadPool> = OnceLock::new();
 
 /// Get or initialize the global pinned thread pool.
 pub fn global_pinned_pool() -> &'static PinnedThreadPool {
-    GLOBAL_POOL.get_or_init(|| {
-        PinnedThreadPool::new().expect("Failed to create pinned thread pool")
-    })
+    GLOBAL_POOL
+        .get_or_init(|| PinnedThreadPool::new().expect("Failed to create pinned thread pool"))
 }
 
 /// Ensure the global Rayon thread pool is initialized with pinned threads.
