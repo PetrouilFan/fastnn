@@ -1,4 +1,3 @@
-
 #[allow(unused_imports)]
 use pyo3::prelude::*;
 
@@ -39,7 +38,11 @@ impl PyTensor {
     /// Create a tensor from a Python buffer object (zero-copy where possible)
     #[staticmethod]
     #[pyo3(signature = (buf, device = None))]
-    fn from_buffer(py: Python<'_>, buf: &Bound<'_, PyAny>, device: Option<String>) -> PyResult<Self> {
+    fn from_buffer(
+        py: Python<'_>,
+        buf: &Bound<'_, PyAny>,
+        device: Option<String>,
+    ) -> PyResult<Self> {
         use pyo3::buffer::PyBuffer;
         let buffer = PyBuffer::<f32>::get(buf).map_err(|e| {
             pyo3::exceptions::PyBufferError::new_err(format!("PyBuffer::get failed: {e}"))
@@ -47,7 +50,11 @@ impl PyTensor {
         // For 0-d (scalar) arrays, buffer.shape() returns an empty slice.
         // Treat this as a scalar tensor with shape [].
         let shape: Vec<i64> = buffer.shape().iter().map(|&d| d as i64).collect();
-        let data_len: usize = if shape.is_empty() { 1 } else { shape.iter().product::<i64>() as usize };
+        let data_len: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product::<i64>() as usize
+        };
         let mut data = vec![0.0f32; data_len];
         buffer.copy_to_slice(py, &mut data).map_err(|e| {
             pyo3::exceptions::PyBufferError::new_err(format!("copy_to_slice failed: {e}"))
@@ -57,14 +64,11 @@ impl PyTensor {
             .and_then(|s| crate::storage::Device::from_str_label(s))
             .unwrap_or_else(crate::python::get_default_device);
         let sizes: smallvec::SmallVec<[i64; 8]> = shape.into();
-        let storage = std::sync::Arc::new(crate::storage::Storage::from_vec(
-            data,
-            DType::F32,
-            device,
-        ));
-        Ok(PyTensor::from_tensor(
-            crate::tensor::Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, DType::F32))
-        ))
+        let storage =
+            std::sync::Arc::new(crate::storage::Storage::from_vec(data, DType::F32, device));
+        Ok(PyTensor::from_tensor(crate::tensor::Tensor::new(
+            crate::tensor::TensorImpl::new(storage, sizes, DType::F32),
+        )))
     }
 
     #[getter]
@@ -118,7 +122,7 @@ impl PyTensor {
             Some(p) => p,
             None => {
                 return Err(PyValueError::new_err(
-                    "DLPack conversion failed: unsupported dtype or device"
+                    "DLPack conversion failed: unsupported dtype or device",
                 ));
             }
         };
@@ -170,19 +174,15 @@ impl PyTensor {
         // returned by `source.__dlpack__()`. `PyCapsule_GetPointer` extracts the
         // managed tensor pointer, which is valid per the DLPack protocol.
         unsafe {
-            let ptr = pyo3::ffi::PyCapsule_GetPointer(
-                capsule.as_ptr(),
-                c"dltensor".as_ptr(),
-            );
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), c"dltensor".as_ptr());
             if ptr.is_null() {
-                return Err(PyValueError::new_err("failed to get DLPack capsule pointer"));
+                return Err(PyValueError::new_err(
+                    "failed to get DLPack capsule pointer",
+                ));
             }
             let tensor =
                 crate::io::dlpack::from_dlpack(ptr as *mut crate::io::dlpack::DLManagedTensor)?;
-            pyo3::ffi::PyCapsule_SetName(
-                capsule.as_ptr(),
-                c"used_dltensor".as_ptr(),
-            );
+            pyo3::ffi::PyCapsule_SetName(capsule.as_ptr(), c"used_dltensor".as_ptr());
             Ok(PyTensor::from_tensor(tensor))
         }
     }
@@ -379,7 +379,11 @@ impl PyTensor {
             let idx_val: isize = idx.extract()?;
             let dim_size = self.inner.shape()[0] as isize;
             // Handle negative indices (Python convention: -1 is last element)
-            let idx_val = if idx_val < 0 { dim_size + idx_val } else { idx_val };
+            let idx_val = if idx_val < 0 {
+                dim_size + idx_val
+            } else {
+                idx_val
+            };
             if idx_val < 0 || idx_val >= dim_size {
                 return Err(pyo3::exceptions::PyIndexError::new_err(format!(
                     "index {} is out of bounds for dimension 0 of size {}",
@@ -405,7 +409,7 @@ impl PyTensor {
             #[cfg(feature = "gpu")]
             if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "__setitem__ does not support GPU tensors; call .cpu() first"
+                    "__setitem__ does not support GPU tensors; call .cpu() first",
                 ));
             }
             self.inner.clone()
@@ -419,12 +423,21 @@ impl PyTensor {
         }
 
         // Compute row size (number of elements per index)
-        let row_size: usize = shape.iter().skip(1).map(|&d| d as usize).product::<usize>().max(1);
+        let row_size: usize = shape
+            .iter()
+            .skip(1)
+            .map(|&d| d as usize)
+            .product::<usize>()
+            .max(1);
         let dim0 = shape[0] as isize;
 
         let (start, stop, step) = if let Ok(slice) = idx.cast::<PySlice>() {
             let indices = slice.indices(dim0)?;
-            (indices.start as isize, indices.stop as isize, indices.step as isize)
+            (
+                indices.start as isize,
+                indices.stop as isize,
+                indices.step as isize,
+            )
         } else {
             let idx_val: isize = idx.extract()?;
             let idx_val = if idx_val < 0 { dim0 + idx_val } else { idx_val };
@@ -470,7 +483,9 @@ impl PyTensor {
                     data_slice[offset..end].copy_from_slice(&val_data);
                 } else {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Value size {} does not match slice size {}", val_data.len(), row_size
+                        "Value size {} does not match slice size {}",
+                        val_data.len(),
+                        row_size
                     )));
                 }
             }
@@ -493,6 +508,3 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.contiguous())
     }
 }
-
-
-

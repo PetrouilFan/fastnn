@@ -1,5 +1,9 @@
 /// Helper to wrap loss function output with autograd support
-fn wrap_loss_with_autograd(output: Tensor, input: &Tensor, _backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>) -> PyTensor {
+fn wrap_loss_with_autograd(
+    output: Tensor,
+    input: &Tensor,
+    _backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>,
+) -> PyTensor {
     if autograd::is_grad_enabled() && input.requires_grad() {
         let inputs = vec![input.clone()];
         let mut meta = autograd::AutogradMeta::new_non_leaf(true);
@@ -79,9 +83,10 @@ fn checkpoint_op(name: &str, inputs: &[&Tensor]) -> PyResult<Tensor> {
         "exp" => Ok(inputs[0].exp()),
         "sqrt" => Ok(inputs[0].sqrt()),
         "abs" => Ok(inputs[0].abs()),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(
-            format!("Unknown checkpoint operation: {}", name)
-        ))
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown checkpoint operation: {}",
+            name
+        ))),
     }
 }
 
@@ -194,12 +199,22 @@ fn fused_conv_bn_silu(
         } else {
             conv_out
         };
-        let bn_out = g.batch_norm(&after_conv, &ins[offset], &ins[offset + 1], &ins[offset + 2], &ins[offset + 3], eps);
+        let bn_out = g.batch_norm(
+            &after_conv,
+            &ins[offset],
+            &ins[offset + 1],
+            &ins[offset + 2],
+            &ins[offset + 3],
+            eps,
+        );
         vec![g.silu(&bn_out)]
     })
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-        format!("fused_conv_bn_silu AOT execution failed: {}", e)
-    ))?;
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "fused_conv_bn_silu AOT execution failed: {}",
+            e
+        ))
+    })?;
 
     Ok(PyTensor::from_tensor(outputs.into_iter().next().unwrap()))
 }
@@ -231,9 +246,15 @@ fn batched_mlp_forward(
         if i < activations_clone.len() {
             let act = &activations_clone[i];
             match act.as_str() {
-                "relu" => { x = x.relu(); }
-                "sigmoid" => { x = x.sigmoid(); }
-                "tanh" => { x = x.tanh(); }
+                "relu" => {
+                    x = x.relu();
+                }
+                "sigmoid" => {
+                    x = x.sigmoid();
+                }
+                "tanh" => {
+                    x = x.tanh();
+                }
                 _ => {}
             }
         }
@@ -372,7 +393,11 @@ fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> Py
 
 #[pyfunction]
 #[pyo3(signature = (pred, target, reduction = None))]
-fn cross_entropy_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyResult<PyTensor> {
+fn cross_entropy_loss(
+    pred: &PyTensor,
+    target: &PyTensor,
+    reduction: Option<String>,
+) -> PyResult<PyTensor> {
     let pred_inner = pred.inner.clone();
     let target_inner = target.inner.clone();
     let reduction_str = reduction.unwrap_or_else(|| "mean".to_string());
@@ -456,9 +481,12 @@ fn _set_num_threads(n: i32) -> PyResult<()> {
         ThreadPoolBuilder::new()
             .num_threads(n as usize)
             .build_global()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Failed to set num threads: {}", e)
-            ))
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to set num threads: {}",
+                    e
+                ))
+            })
     } else {
         Ok(())
     }
@@ -472,7 +500,9 @@ fn _get_num_threads() -> usize {
 
 #[pyfunction]
 #[cfg(not(feature = "parallel"))]
-fn _set_num_threads(_n: i32) -> PyResult<()> { Ok(()) }
+fn _set_num_threads(_n: i32) -> PyResult<()> {
+    Ok(())
+}
 
 #[pyfunction]
 #[cfg(not(feature = "parallel"))]
@@ -638,10 +668,16 @@ fn topk(tensor: &PyTensor, k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
         let (values, indices) = g.topk(&ins[0], k as usize, norm_dim);
         vec![values, indices]
     })
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(
-        format!("Tensor::topk: AOT execution failed: {}", e)
-    ))?;
-    Ok((PyTensor::from_tensor(outputs[0].clone()), PyTensor::from_tensor(outputs[1].clone())))
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Tensor::topk: AOT execution failed: {}",
+            e
+        ))
+    })?;
+    Ok((
+        PyTensor::from_tensor(outputs[0].clone()),
+        PyTensor::from_tensor(outputs[1].clone()),
+    ))
 }
 
 #[pyfunction]
@@ -671,7 +707,7 @@ fn im2col(
         #[cfg(feature = "gpu")]
         if matches!(x.inner.device(), crate::storage::Device::Wgpu(_)) {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "im2col does not support GPU tensors; call .cpu() first"
+                "im2col does not support GPU tensors; call .cpu() first",
             ));
         }
         x.inner.clone()
@@ -703,8 +739,7 @@ fn im2col(
     let col_rows = batch * out_height * out_width;
     let col_cols = c * kernel_h * kernel_w;
     let mut col_data = vec![0.0f32; col_rows * col_cols];
-    let x_data =
-        unsafe { std::slice::from_raw_parts(x_cpu.data_ptr_f32(), batch * c * h * w) };
+    let x_data = unsafe { std::slice::from_raw_parts(x_cpu.data_ptr_f32(), batch * c * h * w) };
     for n in 0..batch {
         let input_off = n * (c * h * w);
         let col_off = n * out_height * out_width * col_cols;
@@ -736,11 +771,13 @@ fn flash_attention(
     scale: Option<f32>,
     causal: Option<bool>,
 ) -> PyTensor {
-    PyTensor::from_tensor(
-        crate::backend::cpu::flash_attn::flash_attention(
-            &q.inner, &k.inner, &v.inner, scale, causal.unwrap_or(false),
-        )
-    )
+    PyTensor::from_tensor(crate::backend::cpu::flash_attn::flash_attention(
+        &q.inner,
+        &k.inner,
+        &v.inner,
+        scale,
+        causal.unwrap_or(false),
+    ))
 }
 
 #[pyfunction]
