@@ -66,12 +66,12 @@ fn f32_to_e4m3(v: f32) -> u8 {
         if new_biased >= 15 {
             return sign_bit | 0x7B;
         }
-        return sign_bit | ((new_biased as u8) << 3);
+        return sign_bit | ((new_biased) << 3);
     }
     if biased_exp >= 15 {
         return sign_bit | 0x7B;
     }
-    sign_bit | ((biased_exp as u8) << 3) | mant
+    sign_bit | ((biased_exp) << 3) | mant
 }
 
 impl PackedWord for F8x4 {

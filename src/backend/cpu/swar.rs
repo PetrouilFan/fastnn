@@ -229,7 +229,7 @@ pub fn i8x4_packed_to_tensor(
     scale: f32,
     zero_point: f32,
 ) -> PackedTensor<I8x4> {
-    let data: Vec<I8x4> = packed.into_iter().map(|w| I8x4(w)).collect();
+    let data: Vec<I8x4> = packed.into_iter().map(I8x4).collect();
     PackedTensor::from_raw(data, shape, vec![scale], vec![zero_point])
 }
 
@@ -240,14 +240,13 @@ pub fn i4x8_packed_to_tensor(
     scale: f32,
     zero_point: f32,
 ) -> PackedTensor<I4x8> {
-    let data: Vec<I4x8> = packed.into_iter().map(|w| I4x8(w)).collect();
+    let data: Vec<I4x8> = packed.into_iter().map(I4x8).collect();
     PackedTensor::from_raw(data, shape, vec![scale], vec![zero_point])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtypes::I8x4;
 
     #[test]
     fn test_i8x4_dot_packed_basic() {

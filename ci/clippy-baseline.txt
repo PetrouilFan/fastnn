@@ -66,7 +66,6 @@ clippy::useless_asref|src/backend/prepared.rs|this call to `as_ref` does nothing
 clippy::useless_vec|src/backend/prepared.rs|useless use of `vec!`
 dead_code|src/compiler/passes/quantize_activations.rs|function `test_quantize_node_output` is never used
 unused_assignments|src/compiler/passes/activation_quantization.rs|value assigned to `calib` is never read
-unused_imports|src/backend/cpu/swar.rs|unused import: `crate::dtypes::U8x4`
 unused_imports|src/compiler/passes/activation_quantization.rs|unused import: `CalibrationStats`
 unused_variables|src/compiler/passes/calibration.rs|unused variable: `zp_minmax`
 unused_variables|src/compiler/passes/calibration.rs|unused variable: `zp`
