@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.4.0] - 2026-06-29
+
+### Added
+- **FP8/F4 packed types**: `F8x4` (E4M3), `F8x4R` (E5M2), `F4x8` (NVFP4-style with
+  256-entry i16 LUT) — full SWAR pipeline, serialization, ONNX export, gradient
+  quantization support
+- **WGPU conv2d dispatch** for all 5 packed types (I4x8, I8x4, F4x8, F8x4, F8x4R)
+- **F8x4/F8x4R conv2d dispatch** — generic `im2col_pack_float8<T>` and
+  `conv2d_packed_float<T>` in packed_conv + `gemm_packed_float_fused<T>` in packed_gemm
+- **Fusion pass stubs enabled**: `OpGelu`, `MatMulAddGelu`, `MatMulAddSilu`
+- **Welford single-pass variance** for scalar LayerNorm and fused residual+layernorm
+  (~33% fewer memory passes per row)
+- **AVX2 fused residual+layernorm** and **AVX2 fused residual+RMS norm**
+- **Rayon parallelism over batch rows** for layernorm, RMS norm, and reduce_f32 dispatch
+- **Arena-sourced matmul optimization** — eliminates Vec copies of matmul inputs,
+  BLAS path pre-fills output with bias (`beta=1` single-pass `C=A*B+bias`)
+
+### Fixed
+- **ONNX F8/F8R export scales** — now extracts actual per-channel scales instead
+  of hardcoding `1.0`
+- **Clippy warnings**: 10 warnings across 7 files (identity_op, unnecessary_cast,
+  doc_lazy_continuation, dead_code, unused_imports, unused_parens)
+
+### Changed
+- Version bumped to 2.4.0
+- Repository cleanup: 34+ build artifacts/results/docs removed from git tracking
+
 ## [2.3.0] - 2026-06-28
 
 ### Added

@@ -185,7 +185,7 @@ fn detect_qlinear_patterns(
                 zero_points,
             } => (scales.clone(), zero_points.clone()),
             IrDType::F4 { scales } => (scales.clone(), vec![0.0f32]),
-            IrDType::F8 { .. } | IrDType::F8R { .. } => (vec![1.0f32], vec![0.0f32]),
+            IrDType::F8 { scales } | IrDType::F8R { scales } => (scales.clone(), vec![0.0f32]),
             _ => continue,
         };
 
