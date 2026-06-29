@@ -4,7 +4,7 @@
 //! For comparison, we apply the total-order transform:
 //!   - Positive (S=0): keep bits as-is
 //!   - Negative (S=1): flip all bits
-//! After transform, unsigned comparison gives correct float ordering.
+//!     After transform, unsigned comparison gives correct float ordering.
 
 use crate::swar::ops_i4::swar_relu_i4x8;
 
@@ -29,6 +29,7 @@ fn fp8_sign_byte_mask(v: u32) -> u32 {
     (sign >> 7).wrapping_mul(0xFF)
 }
 
+#[allow(dead_code)]
 #[inline(always)]
 fn op2_fp8x4(a: u32, b: u32, cmp_t: impl Fn(u32, u32) -> u32) -> u32 {
     let a_t = total_order_fp8x4(a);
