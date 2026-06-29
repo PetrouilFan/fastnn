@@ -123,6 +123,7 @@ impl CpuBuffer {
     /// - No other access (shared or mutable) to this byte range may exist for the
     ///   lifetime of the view.
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn view_f32_mut(&self, offset: usize, size: usize) -> &mut [f32] {
         let ptr = (*self.0.get()).as_mut_ptr().add(offset) as *mut f32;
         std::slice::from_raw_parts_mut(ptr, size / 4)
