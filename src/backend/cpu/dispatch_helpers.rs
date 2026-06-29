@@ -350,16 +350,19 @@ pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: us
             }
         };
         let input_ref: &[f32] = input;
-        output.par_chunks_mut(row_size).enumerate().for_each(|(r, out)| {
-            let start = r * row_size;
-            let inp = &input_ref[start..start + row_size];
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if has_avx2 {
-                unsafe { microkernels::norm_layernorm_f32_avx2(inp, out, row_size, eps) };
-                return;
-            }
-            microkernels::norm_layernorm_f32_scalar(inp, out, row_size, eps);
-        });
+        output
+            .par_chunks_mut(row_size)
+            .enumerate()
+            .for_each(|(r, out)| {
+                let start = r * row_size;
+                let inp = &input_ref[start..start + row_size];
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if has_avx2 {
+                    unsafe { microkernels::norm_layernorm_f32_avx2(inp, out, row_size, eps) };
+                    return;
+                }
+                microkernels::norm_layernorm_f32_scalar(inp, out, row_size, eps);
+            });
         return;
     }
 
@@ -395,16 +398,19 @@ pub(super) fn rms_norm_f32(
         };
         let input_ref: &[f32] = input;
         let weight_ref: &[f32] = weight;
-        output.par_chunks_mut(row_size).enumerate().for_each(|(r, out)| {
-            let start = r * row_size;
-            let inp = &input_ref[start..start + row_size];
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if has_avx2 {
-                unsafe { microkernels::rms_norm_f32_avx2(inp, weight_ref, out, row_size, eps) };
-                return;
-            }
-            microkernels::rms_norm_f32_scalar(inp, weight_ref, out, row_size, eps);
-        });
+        output
+            .par_chunks_mut(row_size)
+            .enumerate()
+            .for_each(|(r, out)| {
+                let start = r * row_size;
+                let inp = &input_ref[start..start + row_size];
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if has_avx2 {
+                    unsafe { microkernels::rms_norm_f32_avx2(inp, weight_ref, out, row_size, eps) };
+                    return;
+                }
+                microkernels::rms_norm_f32_scalar(inp, weight_ref, out, row_size, eps);
+            });
         return;
     }
 
@@ -437,16 +443,21 @@ pub(super) fn softmax_f32(
             }
         };
         let input_ref: &[f32] = input;
-        output.par_chunks_mut(axis_dim_size).enumerate().for_each(|(row, out)| {
-            let offset = row * axis_dim_size;
-            let inp = &input_ref[offset..offset + axis_dim_size];
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if has_avx2 {
-                unsafe { microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1) };
-                return;
-            }
-            microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
-        });
+        output
+            .par_chunks_mut(axis_dim_size)
+            .enumerate()
+            .for_each(|(row, out)| {
+                let offset = row * axis_dim_size;
+                let inp = &input_ref[offset..offset + axis_dim_size];
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if has_avx2 {
+                    unsafe {
+                        microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1)
+                    };
+                    return;
+                }
+                microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
+            });
         return;
     }
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -538,7 +549,8 @@ pub(super) fn adam_update_f32(
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
     adam_update_f32_into(
-        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new, &mut v_new,
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new,
+        &mut v_new,
     );
     (w_new, m_new, v_new)
 }
