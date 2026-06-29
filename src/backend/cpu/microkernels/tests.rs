@@ -1,7 +1,7 @@
 //! CPU microkernels correctness tests — extracted from microkernels.rs
 
 use super::*;
-use crate::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 // ============================================================
@@ -249,13 +249,13 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_dispatch_u8x4_self_consistency() {
+    fn test_gemv_dispatch_i8x4_self_consistency() {
         let m = 4;
         let k = 32;
         let weights_f32: Vec<f32> = (0..m * k).map(|i| ((i % 32) as f32) - 16.0).collect();
         let activations = random_vector(k);
 
-        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+        let packed = PackedTensor::<I8x4>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
 
         let mut output_simd = vec![0.0f32; m];
         gemv_cpu(&packed, &activations, &mut output_simd);
@@ -267,13 +267,13 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_dispatch_u4x8_self_consistency() {
+    fn test_gemv_dispatch_i4x8_self_consistency() {
         let m = 4;
         let k = 32;
         let weights_f32: Vec<f32> = (0..m * k).map(|i| ((i % 8) as f32) - 4.0).collect();
         let activations = random_vector(k);
 
-        let packed = PackedTensor::<U4x8>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
+        let packed = PackedTensor::<I4x8>::from_f32_slice(&weights_f32, &[m, k], 1.0, 0.0);
 
         let mut output_simd = vec![0.0f32; m];
         gemv_cpu(&packed, &activations, &mut output_simd);
@@ -367,14 +367,14 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u8x4_basic() {
+    fn test_gemm_cpu_flat_i8_i8x4_basic() {
         let n = 2;
         let k = 4;
         let m = 1;
 
         // f32 weights: row 0 = [1, 2, 3, 4], row 1 = [5, 6, 7, 8]
         let weights_f32 = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
+        let packed = PackedTensor::<I8x4>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
 
         let act_scale = 1.0f32;
         let act_zp = 0.0f32;
@@ -387,7 +387,7 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i8x4(&packed, &payload, &mut output, m, k, n);
 
         // Expected: row 0 = 1*1 + 2*2 + 3*3 + 4*4 = 30
         //          row 1 = 5*1 + 6*2 + 7*3 + 8*4 = 70
@@ -404,14 +404,14 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u8x4_with_scale() {
+    fn test_gemm_cpu_flat_i8_i8x4_with_scale() {
         let n = 2;
         let k = 8;
         let m = 1;
 
         let w_scale = 2.0f32;
         let weights_f32: Vec<f32> = (0..n * k).map(|i| i as f32).collect();
-        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[n, k], w_scale, 0.0);
+        let packed = PackedTensor::<I8x4>::from_f32_slice(&weights_f32, &[n, k], w_scale, 0.0);
 
         let act_scale = 1.5f32;
         let act_zp = 0.0f32;
@@ -428,7 +428,7 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i8x4(&packed, &payload, &mut output, m, k, n);
 
         // Manual reference
         let quantized_weights: Vec<Vec<i8>> = (0..n)
@@ -460,13 +460,13 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u8x4_batched() {
+    fn test_gemm_cpu_flat_i8_i8x4_batched() {
         let n = 3;
         let k = 4;
         let m = 2;
 
         let weights_f32: Vec<f32> = (0..n * k).map(|i| ((i % 4) as f32) - 1.5).collect();
-        let packed = PackedTensor::<U8x4>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
+        let packed = PackedTensor::<I8x4>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
 
         // Use round numbers that are exactly representable as i8
         let act_scale = 1.0f32;
@@ -480,18 +480,18 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i8x4(&packed, &payload, &mut output, m, k, n);
 
         // Reference: use existing gemm_cpu_flat with the same dequantized activations
         let act_f32: Vec<f32> = act_i8.iter().map(|&v| v as f32).collect();
         let mut ref_output = vec![0.0f32; m * n];
-        gemm_cpu_flat::<U8x4>(&packed, &act_f32, &mut ref_output, m, k, n);
+        gemm_cpu_flat::<I8x4>(&packed, &act_f32, &mut ref_output, m, k, n);
 
         for i in 0..m * n {
             let err = (output[i] - ref_output[i]).abs();
             assert!(
                 err < 1e-4,
-                "batch {} row {}: i8_u8x4={}, ref={}, err={}",
+                "batch {} row {}: i8_i8x4={}, ref={}, err={}",
                 i / n,
                 i % n,
                 output[i],
@@ -502,7 +502,7 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_u8x4_asymmetric_zero_is_per_input_sum() {
+    fn test_gemm_cpu_flat_i8x4_asymmetric_zero_is_per_input_sum() {
         let n = 1;
         let k = 4;
         let m = 2;
@@ -510,11 +510,11 @@ mod neon_tests {
         // Dequantized weight is q_w * 2.0 + 10.0 = [12, 14, 16, 18].
         // The zero/offset contribution must be 10.0 * sum(input), not +10 once.
         let packed =
-            PackedTensor::<U8x4>::from_f32_slice(&[12.0, 14.0, 16.0, 18.0], &[n, k], 2.0, 10.0);
+            PackedTensor::<I8x4>::from_f32_slice(&[12.0, 14.0, 16.0, 18.0], &[n, k], 2.0, 10.0);
         let input = vec![1.0, 2.0, 3.0, 4.0, -1.0, 0.5, 2.0, -3.0];
         let mut output = vec![0.0f32; m * n];
 
-        gemm_cpu_flat::<U8x4>(&packed, &input, &mut output, m, k, n);
+        gemm_cpu_flat::<I8x4>(&packed, &input, &mut output, m, k, n);
 
         let expected0 = 12.0 * 1.0 + 14.0 * 2.0 + 16.0 * 3.0 + 18.0 * 4.0;
         let expected1 = 12.0 * -1.0 + 14.0 * 0.5 + 16.0 * 2.0 + 18.0 * -3.0;
@@ -533,14 +533,14 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u8x4_asymmetric_weight_zero_is_per_activation_sum() {
+    fn test_gemm_cpu_flat_i8_i8x4_asymmetric_weight_zero_is_per_activation_sum() {
         let n = 1;
         let k = 4;
         let m = 1;
 
         // q_w = [1,2,3,4], scale_w=2, zero_w=10 -> w=[12,14,16,18].
         let packed =
-            PackedTensor::<U8x4>::from_f32_slice(&[12.0, 14.0, 16.0, 18.0], &[n, k], 2.0, 10.0);
+            PackedTensor::<I8x4>::from_f32_slice(&[12.0, 14.0, 16.0, 18.0], &[n, k], 2.0, 10.0);
         let act_scale = 1.0f32;
         let act_zp = 0.0f32;
         let act_i8: Vec<i8> = vec![1, 2, 3, 4];
@@ -552,7 +552,7 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u8x4(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i8x4(&packed, &payload, &mut output, m, k, n);
 
         let expected = 12.0 * 1.0 + 14.0 * 2.0 + 16.0 * 3.0 + 18.0 * 4.0;
         assert!(
@@ -564,7 +564,7 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u4x8_signed_nibbles_match_f32_reference() {
+    fn test_gemm_cpu_flat_i8_i4x8_signed_nibbles_match_f32_reference() {
         let n = 2;
         let k = 8;
         let m = 1;
@@ -572,7 +572,7 @@ mod neon_tests {
         let weights_f32 = vec![
             -8.0, -4.0, -1.0, 0.0, 1.0, 3.0, 6.0, 7.0, 7.0, 6.0, 3.0, 1.0, 0.0, -1.0, -4.0, -8.0,
         ];
-        let packed = PackedTensor::<U4x8>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
+        let packed = PackedTensor::<I4x8>::from_f32_slice(&weights_f32, &[n, k], 1.0, 0.0);
 
         let act_scale = 1.0f32;
         let act_zp = 0.0f32;
@@ -585,17 +585,17 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u4x8(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i4x8(&packed, &payload, &mut output, m, k, n);
 
         let act_f32: Vec<f32> = act_i8.iter().map(|&v| v as f32).collect();
         let mut ref_output = vec![0.0f32; m * n];
-        gemm_cpu_flat::<U4x8>(&packed, &act_f32, &mut ref_output, m, k, n);
+        gemm_cpu_flat::<I4x8>(&packed, &act_f32, &mut ref_output, m, k, n);
 
         for i in 0..(m * n) {
             let err = (output[i] - ref_output[i]).abs();
             assert!(
                 err < 1e-4,
-                "lane {}: i8_u4x8={}, ref={}, err={}",
+                "lane {}: i8_i4x8={}, ref={}, err={}",
                 i,
                 output[i],
                 ref_output[i],
@@ -605,13 +605,13 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u4x8_asymmetric_weight_zero_is_per_activation_sum() {
+    fn test_gemm_cpu_flat_i8_i4x8_asymmetric_weight_zero_is_per_activation_sum() {
         let n = 1;
         let k = 8;
         let m = 1;
 
         let weights = [8.0, 10.0, 12.0, 14.0, -4.0, -2.0, 0.0, 2.0];
-        let packed = PackedTensor::<U4x8>::from_f32_slice(&weights, &[n, k], 2.0, 10.0);
+        let packed = PackedTensor::<I4x8>::from_f32_slice(&weights, &[n, k], 2.0, 10.0);
         let act_scale = 1.0f32;
         let act_zp = 0.0f32;
         let act_i8: Vec<i8> = vec![1, 2, 3, 4, -1, -2, -3, -4];
@@ -623,7 +623,7 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u4x8(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i4x8(&packed, &payload, &mut output, m, k, n);
 
         let expected: f32 = weights
             .iter()
@@ -639,12 +639,12 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemm_cpu_flat_i8_u4x8_nonzero_activation_zp_matches_affine_reference() {
+    fn test_gemm_cpu_flat_i8_i4x8_nonzero_activation_zp_matches_affine_reference() {
         let n = 1;
         let k = 8;
         let m = 1;
 
-        let packed = PackedTensor::<U4x8>::from_f32_slice(
+        let packed = PackedTensor::<I4x8>::from_f32_slice(
             &[-8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0],
             &[n, k],
             2.0,
@@ -661,7 +661,7 @@ mod neon_tests {
         }
 
         let mut output = vec![0.0f32; m * n];
-        gemm_cpu_flat_i8_u4x8(&packed, &payload, &mut output, m, k, n);
+        gemm_cpu_flat_i8_i4x8(&packed, &payload, &mut output, m, k, n);
 
         let deq_weights = packed.to_f32_vec();
         let expected: f32 = deq_weights
@@ -678,7 +678,7 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_cpu_u8x4_asymmetric_zero() {
+    fn test_gemv_cpu_i8x4_asymmetric_zero() {
         let m: usize = 2;
         let k: usize = 4;
 
@@ -689,10 +689,10 @@ mod neon_tests {
         // Per-channel packing for per-row scale/zero
         let scales = vec![2.0, 1.0];
         let zeros = vec![10.0, 0.0];
-        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let k_packed = k.div_ceil(I8x4::ITEMS);
         let packed_len = m * k_packed;
-        let mut packed = PackedTensor::<U8x4>::from_raw(
-            vec![U8x4::default(); packed_len],
+        let mut packed = PackedTensor::<I8x4>::from_raw(
+            vec![I8x4::default(); packed_len],
             vec![m, k],
             scales,
             zeros,
@@ -710,7 +710,7 @@ mod neon_tests {
                         arr[i] = (row_data[word * 4 + i] - z) / s;
                     }
                 }
-                packed.data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+                packed.data[row * k_packed + word] = I8x4::pack_from_f32(arr);
             }
         }
 
@@ -736,14 +736,14 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_cpu_u4x8_asymmetric_zero() {
+    fn test_gemv_cpu_i4x8_asymmetric_zero() {
         let m: usize = 1;
         let k: usize = 8;
 
-        // U4x8 range is [-8, 7]; with scale=2, zero=10:
+        // I4x8 range is [-8, 7]; with scale=2, zero=10:
         //   w = q * 2 + 10 → representable w: even numbers in [-6, 24]
         let w: Vec<f32> = vec![12.0, 14.0, 16.0, 18.0, 0.0, 2.0, 4.0, 6.0];
-        let packed = PackedTensor::<U4x8>::from_f32_slice(&w, &[m, k], 2.0, 10.0);
+        let packed = PackedTensor::<I4x8>::from_f32_slice(&w, &[m, k], 2.0, 10.0);
 
         // Reference from dequantized packed values
         let deq = packed.to_f32_vec();
@@ -762,7 +762,7 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_cpu_u8x4_asymmetric_zero_negative_activations() {
+    fn test_gemv_cpu_i8x4_asymmetric_zero_negative_activations() {
         let m: usize = 2;
         let k: usize = 4;
 
@@ -772,12 +772,12 @@ mod neon_tests {
         // With Σ(activation) != 1, the old formula gives wrong results.
         let scales = vec![2.0, 3.0];
         let zeros = vec![10.0, -5.0];
-        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let k_packed = k.div_ceil(I8x4::ITEMS);
         let packed_len = m * k_packed;
 
         // Round-trip via from_f32_slice (symmetric, zero=0) then manually set scale/zero
         let w_vals: Vec<f32> = vec![12.0, 4.0, 20.0, -6.0, 7.0, -14.0, 1.0, 13.0];
-        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        let mut packed_data = vec![I8x4::default(); packed_len + 16];
         for row in 0..m {
             let s = scales[row];
             let z = zeros[row];
@@ -789,10 +789,10 @@ mod neon_tests {
                         arr[i] = (w_vals[idx] - z) / s;
                     }
                 }
-                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+                packed_data[row * k_packed + word] = I8x4::pack_from_f32(arr);
             }
         }
-        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+        let packed = PackedTensor::<I8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
 
         let activation: Vec<f32> = vec![2.0, -3.0, 1.0, -2.0];
         let mut output = vec![0.0f32; m];
@@ -815,16 +815,16 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_packed_inner_u8x4_asymmetric_zero() {
+    fn test_gemv_packed_inner_i8x4_asymmetric_zero() {
         let m: usize = 2;
         let k: usize = 4;
 
         let w_vals: Vec<f32> = vec![5.0, 15.0, 25.0, 35.0, 0.5, 1.5, 2.5, 3.5];
         let scales = vec![2.0, 0.5];
         let zeros = vec![3.0, -1.0];
-        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let k_packed = k.div_ceil(I8x4::ITEMS);
         let packed_len = m * k_packed;
-        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        let mut packed_data = vec![I8x4::default(); packed_len + 16];
         for row in 0..m {
             let s = scales[row];
             let z = zeros[row];
@@ -836,16 +836,16 @@ mod neon_tests {
                         arr[i] = (w_vals[idx] - z) / s;
                     }
                 }
-                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+                packed_data[row * k_packed + word] = I8x4::pack_from_f32(arr);
             }
         }
-        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+        let packed = PackedTensor::<I8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
 
         let activation: Vec<f32> = vec![1.0, -2.0, 3.0, -4.0];
         let mut output = vec![0.0f32; m];
         // Call inner directly to bypass SIMD dispatch
-        let k_packed_calc = k.div_ceil(U8x4::ITEMS);
-        gemv_packed_inner::<U8x4>(&packed, &activation, &mut output, m, k, k_packed_calc);
+        let k_packed_calc = k.div_ceil(I8x4::ITEMS);
+        gemv_packed_inner::<I8x4>(&packed, &activation, &mut output, m, k, k_packed_calc);
 
         let expected0 = 5.0 * 1.0 + 15.0 * -2.0 + 25.0 * 3.0 + 35.0 * -4.0;
         let expected1 = 0.5 * 1.0 + 1.5 * -2.0 + 2.5 * 3.0 + 3.5 * -4.0;
@@ -864,15 +864,15 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_packed_blocked_u8x4_asymmetric_zero() {
+    fn test_gemv_packed_blocked_i8x4_asymmetric_zero() {
         let m: usize = 2;
         let k: usize = 48;
 
         let scales = vec![2.0, 10.0];
         let zeros = vec![3.0, -5.0];
-        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let k_packed = k.div_ceil(I8x4::ITEMS);
         let packed_len = m * k_packed;
-        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        let mut packed_data = vec![I8x4::default(); packed_len + 16];
         let w_vals: Vec<f32> = (0..m * k).map(|i| ((i % 13) as f32) * 1.5).collect();
         for row in 0..m {
             let s = scales[row];
@@ -885,16 +885,16 @@ mod neon_tests {
                         arr[i] = (w_vals[idx] - z) / s;
                     }
                 }
-                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+                packed_data[row * k_packed + word] = I8x4::pack_from_f32(arr);
             }
         }
-        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+        let packed = PackedTensor::<I8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
 
         // Reference from dequantized values (not original w_vals, which lose precision)
         let deq = packed.to_f32_vec();
         let activation: Vec<f32> = (0..k).map(|i| ((i % 7) as f32) - 3.0).collect();
         let mut output = vec![0.0f32; m];
-        gemv_packed_blocked::<U8x4>(&packed, &activation, &mut output, m, k, k_packed);
+        gemv_packed_blocked::<I8x4>(&packed, &activation, &mut output, m, k, k_packed);
 
         let expected0: f32 = (0..k).map(|i| deq[i] * activation[i]).sum();
         let expected1: f32 = (0..k).map(|i| deq[k + i] * activation[i]).sum();
@@ -913,15 +913,15 @@ mod neon_tests {
     }
 
     #[test]
-    fn test_gemv_packed_tiled_u8x4_asymmetric_zero() {
+    fn test_gemv_packed_tiled_i8x4_asymmetric_zero() {
         let m: usize = 4;
         let k: usize = 8192;
 
         let scales = vec![2.0; m];
         let zeros = vec![10.0; m];
-        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let k_packed = k.div_ceil(I8x4::ITEMS);
         let packed_len = m * k_packed;
-        let mut packed_data = vec![U8x4::default(); packed_len + 16];
+        let mut packed_data = vec![I8x4::default(); packed_len + 16];
         let w_vals: Vec<f32> = (0..m * k).map(|i| (i % 127) as f32).collect();
         for row in 0..m {
             let s = scales[row];
@@ -934,15 +934,15 @@ mod neon_tests {
                         arr[i] = (w_vals[idx] - z) / s;
                     }
                 }
-                packed_data[row * k_packed + word] = U8x4::pack_from_f32(arr);
+                packed_data[row * k_packed + word] = I8x4::pack_from_f32(arr);
             }
         }
-        let packed = PackedTensor::<U8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
+        let packed = PackedTensor::<I8x4>::from_raw(packed_data, vec![m, k], scales, zeros);
 
         let deq = packed.to_f32_vec();
         let activation: Vec<f32> = (0..k).map(|i| ((i % 31) as f32) - 15.0).collect();
         let mut output = vec![0.0f32; m];
-        gemv_packed_tiled::<U8x4>(&packed, &activation, &mut output);
+        gemv_packed_tiled::<I8x4>(&packed, &activation, &mut output);
 
         for row in 0..m {
             let expected: f32 = (0..k).map(|i| deq[row * k + i] * activation[i]).sum();

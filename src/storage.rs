@@ -17,12 +17,18 @@ pub enum DType {
     Bool,
     F16,
     BF16,
-    /// Packed 4-bit (U4x8): 8 values per u32 word.
+    /// Packed 4-bit (I4x8): 8 values per u32 word.
     /// Per-channel scales/zero_points are stored in the IR node metadata.
-    U4,
-    /// Packed 8-bit (U8x4): 4 values per u32 word.
+    I4,
+    /// Packed 8-bit (I8x4): 4 values per u32 word.
     /// Per-channel scales/zero_points are stored in the IR node metadata.
     U8,
+    /// FP8 E4M3: 4 values per u32 word.
+    F8,
+    /// FP8 E5M2 (range variant): 4 values per u32 word.
+    F8R,
+    /// FP4 E2M1 (NVFP4-style): 8 values per u32 word, 256-entry LUT dot product.
+    F4,
 }
 
 impl DType {
@@ -32,8 +38,11 @@ impl DType {
             DType::F64 | DType::I64 => 8,
             DType::F16 | DType::BF16 => 2,
             DType::Bool => 1,
-            DType::U4 => 1,
+            DType::I4 => 1,
             DType::U8 => 1,
+            DType::F8 => 1,
+            DType::F8R => 1,
+            DType::F4 => 1,
         }
     }
 
@@ -43,12 +52,16 @@ impl DType {
             DType::F64 | DType::I64 => numel * 8,
             DType::F16 | DType::BF16 => numel * 2,
             DType::Bool => numel,
-            DType::U4 => {
+            DType::I4 => {
                 let words = numel.div_ceil(8);
                 words * 4
             }
-            DType::U8 => {
+            DType::U8 | DType::F8 | DType::F8R => {
                 let words = numel.div_ceil(4);
+                words * 4
+            }
+            DType::F4 => {
+                let words = numel.div_ceil(8);
                 words * 4
             }
         }
@@ -63,8 +76,11 @@ impl DType {
             DType::Bool => "bool",
             DType::F16 => "f16",
             DType::BF16 => "bf16",
-            DType::U4 => "u4",
-            DType::U8 => "u8",
+            DType::I4 => "i4",
+            DType::U8 => "i8",
+            DType::F8 => "f8",
+            DType::F8R => "f8r",
+            DType::F4 => "f4",
         }
     }
 
@@ -77,8 +93,11 @@ impl DType {
             "bool" => Some(DType::Bool),
             "f16" | "float16" => Some(DType::F16),
             "bf16" | "bfloat16" => Some(DType::BF16),
-            "u4" | "uint4" | "int4" => Some(DType::U4),
-            "u8" | "uint8" | "int8" => Some(DType::U8),
+            "u4" | "uint4" | "int4" | "i4" => Some(DType::I4),
+            "i8" | "u8" | "uint8" | "int8" => Some(DType::U8),
+            "f8" | "fp8" | "e4m3" => Some(DType::F8),
+            "f8r" | "fp8r" | "e5m2" => Some(DType::F8R),
+            "f4" | "fp4" | "e2m1" => Some(DType::F4),
             _ => None,
         }
     }

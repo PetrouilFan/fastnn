@@ -151,8 +151,8 @@ value = (packed_value - zero_point[channel]) * scale[channel]
 
 ### PackedTensor Layout
 
-- **U4**: 8 values packed per `u32` word (`U4x8`)
-- **U8**: 4 values packed per `u32` word (`U8x4`)
+- **U4**: 8 values packed per `u32` word (`I4x8`)
+- **U8**: 4 values packed per `u32` word (`I8x4`)
 
 The packed layout eliminates wasted padding and enables SIMD-friendly access patterns.
 

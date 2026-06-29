@@ -39,10 +39,11 @@ pub fn compile_train_model(
     eps: Option<f64>,
     quantize: Option<u8>,
 ) -> PyResult<PyCompiledTrainingModel> {
-    let graph: ComputeGraph = bincode::deserialize(graph_bytes)
-        .map_err(|e| PyRuntimeError::new_err(format!(
+    let graph: ComputeGraph = bincode::deserialize(graph_bytes).map_err(|e| {
+        PyRuntimeError::new_err(format!(
             "compile_train_model: failed to deserialize graph: {e}"
-        )))?;
+        ))
+    })?;
 
     let optimizer_config = match optimizer {
         "sgd" => OptimizerConfig::SGD {

@@ -28,16 +28,34 @@ impl ResidualBlock {
         bn2_features: i64,
         downsample: Option<(i64, i64, i64, i64, i64, i64)>,
     ) -> Self {
-        let conv1 = Conv2d::new(conv1_in, conv1_out, conv1_kernel, conv1_stride, conv1_padding);
+        let conv1 = Conv2d::new(
+            conv1_in,
+            conv1_out,
+            conv1_kernel,
+            conv1_stride,
+            conv1_padding,
+        );
         let bn1 = BatchNorm2d::new(bn1_features, 1e-5, 0.1);
-        let conv2 = Conv2d::new(conv2_in, conv2_out, conv2_kernel, conv2_stride, conv2_padding);
+        let conv2 = Conv2d::new(
+            conv2_in,
+            conv2_out,
+            conv2_kernel,
+            conv2_stride,
+            conv2_padding,
+        );
         let bn2 = BatchNorm2d::new(bn2_features, 1e-5, 0.1);
         let downsample = downsample.map(|(ds_in, ds_out, ds_k, ds_s, ds_p, ds_bn)| {
             let ds_conv = Conv2d::new(ds_in, ds_out, ds_k, ds_s, ds_p);
             let ds_bn = BatchNorm2d::new(ds_bn, 1e-5, 0.1);
             (ds_conv, ds_bn)
         });
-        ResidualBlock { conv1, bn1, conv2, bn2, downsample }
+        ResidualBlock {
+            conv1,
+            bn1,
+            conv2,
+            bn2,
+            downsample,
+        }
     }
 
     /// Create ResidualBlock from existing modules (for Python BasicBlock integration).
@@ -48,7 +66,13 @@ impl ResidualBlock {
         bn2: BatchNorm2d,
         downsample: Option<(Conv2d, BatchNorm2d)>,
     ) -> Self {
-        ResidualBlock { conv1, bn1, conv2, bn2, downsample }
+        ResidualBlock {
+            conv1,
+            bn1,
+            conv2,
+            bn2,
+            downsample,
+        }
     }
 }
 
@@ -94,7 +118,10 @@ impl Module for ResidualBlock {
     }
 
     fn zero_grad(&self) {
-        for t in self.conv1.parameters().iter()
+        for t in self
+            .conv1
+            .parameters()
+            .iter()
             .chain(self.bn1.parameters().iter())
             .chain(self.conv2.parameters().iter())
             .chain(self.bn2.parameters().iter())
