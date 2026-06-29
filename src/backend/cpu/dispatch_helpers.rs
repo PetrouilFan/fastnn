@@ -544,7 +544,6 @@ pub(super) fn adam_update_f32(
     bias_corr1: f32,
     bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let len = w.len();
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
