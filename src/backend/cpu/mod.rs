@@ -3134,26 +3134,26 @@ impl Backend for CpuBackend {
                                                     input, out_f32, m, n,
                                                 );
                                             }
-                                        } else {
-                                            #[cfg(not(feature = "parallel"))]
-                                            {
-                                                for i in 0..m {
-                                                    for j in 0..n {
-                                                        out_f32[j * m + i] = input[i * n + j];
-                                                    }
+                                            return;
+                                        }
+                                        #[cfg(not(feature = "parallel"))]
+                                        {
+                                            for i in 0..m {
+                                                for j in 0..n {
+                                                    out_f32[j * m + i] = input[i * n + j];
                                                 }
                                             }
-                                            #[cfg(feature = "parallel")]
-                                            {
-                                                use rayon::prelude::*;
-                                                out_f32.par_chunks_mut(m).enumerate().for_each(
-                                                    |(j, col)| {
-                                                        for i in 0..m {
-                                                            col[i] = input[i * n + j];
-                                                        }
-                                                    },
-                                                );
-                                            }
+                                        }
+                                        #[cfg(feature = "parallel")]
+                                        {
+                                            use rayon::prelude::*;
+                                            out_f32.par_chunks_mut(m).enumerate().for_each(
+                                                |(j, col)| {
+                                                    for i in 0..m {
+                                                        col[i] = input[i * n + j];
+                                                    }
+                                                },
+                                            );
                                         }
                                     },
                                 );
@@ -3183,9 +3183,9 @@ impl Backend for CpuBackend {
                                     *input_slice,
                                     output_slice,
                                     |input, out_f32| {
-                                        let _total = out_f32.len();
                                         #[cfg(not(feature = "parallel"))]
                                         {
+                                            let total = out_f32.len();
                                             for out_idx in 0..total {
                                                 let mut in_idx = 0usize;
                                                 let mut remaining = out_idx;
