@@ -1222,12 +1222,13 @@ impl AotExecutor {
     #[new]
     #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, quantize=None))]
     fn new(
+        _py: pyo3::Python<'_>,
         nodes: Vec<std::collections::HashMap<String, String>>,
         params: std::collections::HashMap<String, PyTensor>,
         input_names: Vec<String>,
         output_names: Vec<String>,
         input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
-        quantize: Option<u8>,
+        quantize: Option<pyo3::Bound<'_, pyo3::PyAny>>,
     ) -> pyo3::PyResult<Self> {
         // Convert Python node dicts to OnnxNodes
         let onnx_nodes: Vec<crate::onnx::converter::OnnxNode> = nodes
@@ -1311,10 +1312,45 @@ impl AotExecutor {
             .to_compute_graph()
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
+        let weight_dtype: crate::backend::executor::WeightDtype = match quantize {
+            None => crate::backend::executor::WeightDtype::F32,
+            Some(obj) => {
+                if let Ok(val) = obj.extract::<u8>() {
+                    match val {
+                        4 => crate::backend::executor::WeightDtype::I4,
+                        8 => crate::backend::executor::WeightDtype::I8,
+                        _ => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported quantize value for integer: {} (expected 4 or 8)",
+                                val
+                            )))
+                        }
+                    }
+                } else if let Ok(s) = obj.extract::<String>() {
+                    match s.as_str() {
+                        "f32" => crate::backend::executor::WeightDtype::F32,
+                        "f8" => crate::backend::executor::WeightDtype::F8x4,
+                        "f8r" => crate::backend::executor::WeightDtype::F8x4R,
+                        "f4" => crate::backend::executor::WeightDtype::F4x8,
+                        _ => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported quantize string: '{}' (expected f32, f8, f8r, f4, 4, or 8)",
+                                s
+                            )))
+                        }
+                    }
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "quantize must be int (4, 8) or str (f32, f8, f8r, f4) or None",
+                    ));
+                }
+            }
+        };
+
         let executor =
             crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, quantize, None)
+            .compile_with_weight_dtype(&graph, weight_dtype, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
