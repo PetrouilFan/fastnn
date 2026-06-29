@@ -95,11 +95,12 @@ mod tests {
         w
     }
 
+    #[allow(dead_code)]
     fn word_to_vals(w: u32) -> [i8; 8] {
         let mut v = [0i8; 8];
         for i in 0..8 {
             let shift = i * 4;
-            v[i] = (((w >> shift) & 0xF) as i8 as i8);
+            v[i] = ((w >> shift) & 0xF) as i8;
         }
         v
     }
