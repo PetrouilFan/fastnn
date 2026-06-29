@@ -1229,12 +1229,7 @@ impl Tensor {
                     dt.size()
                 );
                 let data = bytes.to_vec();
-                let storage = Storage::Cpu(crate::storage::CpuStorage {
-                    data: Arc::new(data),
-                    nbytes: num_bytes,
-                    #[cfg(feature = "gpu")]
-                    gpu_buffer_cache: parking_lot::RwLock::new(std::collections::HashMap::new()),
-                });
+                let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));
                 Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
             })
             .collect())

@@ -20,6 +20,12 @@ use super::{aligned_packed_slice, resolve_params, CpuBuffer};
 ///
 /// Generic closure `act` is monomorphized and inlined — zero overhead vs the
 /// handwritten per-activation blocks.
+///
+/// # Zero-copy
+///
+/// Reads A, B, bias directly from the arena without intermediate `to_vec()` copies.
+/// The arena's memory is pre-planned with non-overlapping slots, and the `UnsafeCell`
+/// backing allows simultaneous read-only (input) and read-write (output) views.
 #[inline]
 pub(super) fn matmul_activation_dispatch(
     input_slices: &[BufferSlice],
@@ -34,44 +40,32 @@ pub(super) fn matmul_activation_dispatch(
 ) -> Result<(), BackendError> {
     if let [a_slice, b_slice] = &input_slices[..2] {
         let has_bias = input_slices.len() >= 3;
-        let (a, b, bias) = {
-            let d = arena.data_mut();
-            let a_f32 =
-                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
-                    .to_vec();
-            let b_f32 =
-                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
-                    .to_vec();
-            let bias_f32 = if has_bias {
-                let bias_slice = &input_slices[2];
-                bytemuck::cast_slice::<_, f32>(
-                    &d[bias_slice.offset..bias_slice.offset + bias_slice.size],
-                )
-                .to_vec()
-            } else {
-                Vec::new()
-            };
-            (a_f32, b_f32, bias_f32)
-        };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, _k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
-        let out_f32 = {
-            let d = arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-        };
-        matmul_blas_into(&a, &b, out_f32, m, _k, n);
-        for i in 0..out_f32.len() {
-            let x = out_f32[i]
-                + if has_bias && i % n < bias.len() {
-                    bias[i % n]
-                } else {
-                    0.0
-                };
-            out_f32[i] = act(x);
+        let out_size = out_end - out_start;
+
+        // Zero-copy views into the arena.
+        // SAFETY: The memory planner guarantees non-overlapping BufferSlice ranges.
+        // Dispatch is single-threaded via the CpuBackend sequential loop.
+        let a: &[f32] = unsafe { arena.view_f32(a_slice.offset, a_slice.size) };
+        let b: &[f32] = unsafe { arena.view_f32(b_slice.offset, b_slice.size) };
+        let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_size) };
+
+        matmul_blas_into(a, b, out_f32, m, _k, n);
+
+        if has_bias {
+            let bias: &[f32] = unsafe { arena.view_f32(input_slices[2].offset, input_slices[2].size) };
+            for i in 0..out_f32.len() {
+                out_f32[i] = act(out_f32[i] + bias[i % n]);
+            }
+        } else {
+            for x in out_f32.iter_mut() {
+                *x = act(*x);
+            }
         }
     }
     Ok(())
@@ -155,6 +149,11 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
 /// Generic over `T: PackedWord` — monomorphized as the concrete packed type.
 /// Handles arena extraction, u32-aligned weight copy, PackedTensor
 /// construction, and `gemm_cpu_flat` dispatch.
+///
+/// # Zero-copy
+///
+/// Activations are read directly from the arena via a zero-copy `&[f32]` view.
+/// Weight data is copied into a `PackedTensor` (required by the microkernel API).
 #[inline]
 pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
     input_slices: &[BufferSlice],
@@ -169,22 +168,20 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
-        let (activations, typed_data) = {
-            let d = arena.data_mut();
-            (
-                bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
-                    .to_vec(),
-                {
-                    let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                    aligned_packed_slice::<T>(raw)
-                },
-            )
-        };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = matmul_params.as_slice() else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
+        };
+
+        // Zero-copy activation view.
+        // SAFETY: input/output slices are non-overlapping; dispatch is single-threaded.
+        let activations: &[f32] = unsafe { arena.view_f32(a_slice.offset, a_slice.size) };
+        let typed_data = {
+            // SAFETY: weight slice does not overlap with activation or output.
+            let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+            aligned_packed_slice::<T>(raw)
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
@@ -195,11 +192,9 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
-        let out_f32 = {
-            let d = arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-        };
-        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, &activations, out_f32, m, k, n);
+        let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+
+        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
     }
     Ok(())
 }
@@ -209,6 +204,10 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
 /// Reads activation from arena as raw bytes (I8 payload format:
 /// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<I8x4>` from
 /// the weight bytes, and calls the scalar I8×I8x4 microkernel.
+///
+/// # Zero-copy
+///
+/// Activation payload and output are read/written directly in the arena.
 #[inline]
 pub(super) fn quantized_matmul_dispatch_i8_u8(
     input_slices: &[BufferSlice],
@@ -222,18 +221,18 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
-        let (activation_payload, typed_data) = {
-            let d = arena.data_mut();
-            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
-                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                aligned_packed_slice::<I8x4>(raw)
-            })
-        };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = matmul_params.as_slice() else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
+        };
+
+        // Zero-copy views.
+        let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
+        let typed_data = {
+            let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+            aligned_packed_slice::<I8x4>(raw)
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
@@ -244,13 +243,11 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
-        let out_f32 = {
-            let d = arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-        };
+        let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+
         crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i8x4(
             &pt,
-            &activation_payload,
+            activation_payload,
             out_f32,
             m,
             k,
@@ -265,6 +262,10 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
 /// Reads activation from arena as raw bytes (I8 payload format:
 /// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<I4x8>` from
 /// the weight bytes, and calls the scalar I8×I4x8 microkernel.
+///
+/// # Zero-copy
+///
+/// Activation payload and output are read/written directly in the arena.
 #[inline]
 pub(super) fn quantized_matmul_dispatch_i8_u4(
     input_slices: &[BufferSlice],
@@ -278,18 +279,18 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
     kernel_name: &str,
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
-        let (activation_payload, typed_data) = {
-            let d = arena.data_mut();
-            (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
-                let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                aligned_packed_slice::<I4x8>(raw)
-            })
-        };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = matmul_params.as_slice() else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
+        };
+
+        // Zero-copy views.
+        let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
+        let typed_data = {
+            let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+            aligned_packed_slice::<I4x8>(raw)
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
@@ -300,13 +301,11 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
-        let out_f32 = {
-            let d = arena.data_mut();
-            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-        };
+        let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+
         crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8(
             &pt,
-            &activation_payload,
+            activation_payload,
             out_f32,
             m,
             k,

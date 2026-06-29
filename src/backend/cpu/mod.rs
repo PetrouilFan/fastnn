@@ -35,6 +35,8 @@ mod elementwise;
 use elementwise::fused_binary_activation_dispatch;
 mod scalar;
 use scalar::{scalar_kernel_instruction, scalar_op_dispatch, unary_op_dispatch};
+pub mod topology;
+pub mod affinity;
 mod params;
 use params::resolve_params;
 mod matmul;
@@ -97,6 +99,45 @@ impl CpuBuffer {
         // `data_mut()` returns a borrow that is never aliased â€” dispatch processes instructions
         // sequentially and each borrow ends before the next begins.
         unsafe { &mut *self.0.get() }.as_mut_slice()
+    }
+
+    /// Create a zero-copy `&[f32]` view over `[offset, offset + size)` bytes.
+    ///
+    /// # Safety
+    ///
+    /// - `offset + size` must be within the buffer bounds.
+    /// - `offset` must be 4-byte aligned (f32 alignment).
+    /// - No mutable access to this byte range may exist for the lifetime of the view.
+    #[inline]
+    pub unsafe fn view_f32(&self, offset: usize, size: usize) -> &[f32] {
+        let ptr = (*self.0.get()).as_ptr().add(offset) as *const f32;
+        std::slice::from_raw_parts(ptr, size / 4)
+    }
+
+    /// Create a zero-copy `&mut [f32]` view over `[offset, offset + size)` bytes.
+    ///
+    /// # Safety
+    ///
+    /// - `offset + size` must be within the buffer bounds.
+    /// - `offset` must be 4-byte aligned (f32 alignment).
+    /// - No other access (shared or mutable) to this byte range may exist for the
+    ///   lifetime of the view.
+    #[inline]
+    pub unsafe fn view_f32_mut(&self, offset: usize, size: usize) -> &mut [f32] {
+        let ptr = (*self.0.get()).as_mut_ptr().add(offset) as *mut f32;
+        std::slice::from_raw_parts_mut(ptr, size / 4)
+    }
+
+    /// Create a zero-copy `&[u8]` view over `[offset, offset + size)` bytes.
+    ///
+    /// # Safety
+    ///
+    /// - `offset + size` must be within the buffer bounds.
+    /// - No mutable access to this byte range may exist for the lifetime of the view.
+    #[inline]
+    pub unsafe fn view_u8(&self, offset: usize, size: usize) -> &[u8] {
+        let ptr = (*self.0.get()).as_ptr().add(offset);
+        std::slice::from_raw_parts(ptr, size)
     }
 }
 
@@ -2384,6 +2425,10 @@ impl Backend for CpuBackend {
         arena: &CpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
+        // Ensure the global thread pool is initialized with pinned physical cores.
+        #[cfg(feature = "parallel")]
+        crate::backend::cpu::affinity::ensure_global_pool_initialized();
+
         // â”€â”€ Debug: collect MaxPool primary output ranges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //     (only active with `debug_canary` feature â€” expensive)
         // ANCHOR: debug-canary-start
@@ -2706,36 +2751,113 @@ impl Backend for CpuBackend {
                                     } else {
                                         let total_rows = batch_count * m;
                                         let b_batch_stride = if b_batched { b_stride } else { 0 };
-                                        #[cfg(feature = "parallel")]
                                         {
-                                            use rayon::prelude::*;
-                                            // SAFETY: each thread accesses disjoint rows of the output buffer.
-                                            let out_ptr = out.as_mut_ptr() as usize;
-                                            (0..total_rows).into_par_iter().for_each(move |row| {
-                                                let op = out_ptr as *mut f32;
-                                                unsafe {
-                                                    blocked_row_matmul(
-                                                        a.as_ptr(),
-                                                        b.as_ptr(),
-                                                        op,
-                                                        row,
-                                                        m,
-                                                        n,
-                                                        _k,
-                                                        a_stride,
-                                                        _k,
-                                                        1,
-                                                        b_batch_stride,
-                                                        n,
-                                                        1,
-                                                    );
+                                            let use_parallel = {
+                                                #[cfg(feature = "parallel")]
+                                                {
+                                                    total_rows
+                                                        >= crate::backend::cpu::topology::physical_core_count()
                                                 }
-                                                if apply_fusion {
-                                                    let rs = row * n;
+                                                #[cfg(not(feature = "parallel"))]
+                                                {
+                                                    false
+                                                }
+                                            };
+
+                                            if use_parallel {
+                                                #[cfg(feature = "parallel")]
+                                                {
+                                                    use rayon::prelude::*;
+                                                    // SAFETY: each thread accesses disjoint rows of the output buffer.
+                                                    let out_ptr = out.as_mut_ptr() as usize;
+                                                    (0..total_rows)
+                                                        .into_par_iter()
+                                                        .for_each(move |row| {
+                                                            let op = out_ptr as *mut f32;
+                                                            unsafe {
+                                                                blocked_row_matmul(
+                                                                    a.as_ptr(),
+                                                                    b.as_ptr(),
+                                                                    op,
+                                                                    row,
+                                                                    m,
+                                                                    n,
+                                                                    _k,
+                                                                    a_stride,
+                                                                    _k,
+                                                                    1,
+                                                                    b_batch_stride,
+                                                                    n,
+                                                                    1,
+                                                                );
+                                                            }
+                                                            if apply_fusion {
+                                                                let rs = row * n;
+                                                                unsafe {
+                                                                    for i in 0..n {
+                                                                        let p = rs + i;
+                                                                        let x = *op.add(p)
+                                                                            + if has_bias {
+                                                                                if let Some(bs) =
+                                                                                    bias
+                                                                                {
+                                                                                    bs[i]
+                                                                                } else {
+                                                                                    0.0
+                                                                                }
+                                                                            } else {
+                                                                                0.0
+                                                                            };
+                                                                        *op.add(p) = match activation
+                                                                        {
+                                                                            1 => x.max(0.0),
+                                                                            2 => {
+                                                                                let x3 =
+                                                                                    x * x * x;
+                                                                                let tanh_arg =
+                                                                                    0.797_884_6
+                                                                                        * (x
+                                                                                            + 0.044_715
+                                                                                                * x3);
+                                                                                0.5 * x
+                                                                                    * (1.0
+                                                                                        + tanh_arg
+                                                                                            .tanh())
+                                                                            }
+                                                                            3 => {
+                                                                                x / (1.0 + (-x).exp())
+                                                                            }
+                                                                            _ => x,
+                                                                        };
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                }
+                                            } else {
+                                                for row in 0..total_rows {
                                                     unsafe {
+                                                        blocked_row_matmul(
+                                                            a.as_ptr(),
+                                                            b.as_ptr(),
+                                                            out.as_mut_ptr(),
+                                                            row,
+                                                            m,
+                                                            n,
+                                                            _k,
+                                                            a_stride,
+                                                            _k,
+                                                            1,
+                                                            b_batch_stride,
+                                                            n,
+                                                            1,
+                                                        );
+                                                    }
+                                                    if apply_fusion {
+                                                        let rs = row * n;
                                                         for i in 0..n {
                                                             let p = rs + i;
-                                                            let x = *op.add(p)
+                                                            let x = out[p]
                                                                 + if has_bias {
                                                                     if let Some(bs) = bias {
                                                                         bs[i]
@@ -2745,7 +2867,7 @@ impl Backend for CpuBackend {
                                                                 } else {
                                                                     0.0
                                                                 };
-                                                            *op.add(p) = match activation {
+                                                            out[p] = match activation {
                                                                 1 => x.max(0.0),
                                                                 2 => {
                                                                     let x3 = x * x * x;
@@ -2759,53 +2881,6 @@ impl Backend for CpuBackend {
                                                             };
                                                         }
                                                     }
-                                                }
-                                            });
-                                        }
-                                        #[cfg(not(feature = "parallel"))]
-                                        for row in 0..total_rows {
-                                            unsafe {
-                                                blocked_row_matmul(
-                                                    a.as_ptr(),
-                                                    b.as_ptr(),
-                                                    out.as_mut_ptr(),
-                                                    row,
-                                                    m,
-                                                    n,
-                                                    _k,
-                                                    a_stride,
-                                                    _k,
-                                                    1,
-                                                    b_batch_stride,
-                                                    n,
-                                                    1,
-                                                );
-                                            }
-                                            if apply_fusion {
-                                                let rs = row * n;
-                                                for i in 0..n {
-                                                    let p = rs + i;
-                                                    let x = out[p]
-                                                        + if has_bias {
-                                                            if let Some(bs) = bias {
-                                                                bs[i]
-                                                            } else {
-                                                                0.0
-                                                            }
-                                                        } else {
-                                                            0.0
-                                                        };
-                                                    out[p] = match activation {
-                                                        1 => x.max(0.0),
-                                                        2 => {
-                                                            let x3 = x * x * x;
-                                                            let tanh_arg =
-                                                                0.797_884_6 * (x + 0.044_715 * x3);
-                                                            0.5 * x * (1.0 + tanh_arg.tanh())
-                                                        }
-                                                        3 => x / (1.0 + (-x).exp()),
-                                                        _ => x,
-                                                    };
                                                 }
                                             }
                                         }
@@ -5624,24 +5699,38 @@ impl Backend for CpuBackend {
                             }
                         }
                         "adam_update_f32" => {
-                            let (w_new, m_new, v_new) = {
-                                let d = arena.data_mut();
-                                let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[0].offset
-                                        ..input_slices[0].offset + input_slices[0].size],
+                            let d = arena.data_mut();
+                            let d_ptr = d.as_mut_ptr();
+                            // SAFETY: Slices are non-overlapping (except w which is
+                            // read-before-write in adam_update_f32_scalar_into).
+                            unsafe {
+                                let w_init = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[0].offset) as *const f32,
+                                    input_slices[0].size / 4,
                                 );
-                                let g_slice = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
+                                let g_slice = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[1].offset) as *const f32,
+                                    input_slices[1].size / 4,
                                 );
-                                let m_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[2].offset
-                                        ..input_slices[2].offset + input_slices[2].size],
+                                let m_init = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[2].offset) as *const f32,
+                                    input_slices[2].size / 4,
                                 );
-                                let v_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[3].offset
-                                        ..input_slices[3].offset + input_slices[3].size],
+                                let v_init = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[3].offset) as *const f32,
+                                    input_slices[3].size / 4,
+                                );
+                                let w_out = std::slice::from_raw_parts_mut(
+                                    d_ptr.add(input_slices[0].offset) as *mut f32,
+                                    input_slices[0].size / 4,
+                                );
+                                let m_out = std::slice::from_raw_parts_mut(
+                                    d_ptr.add(input_slices[2].offset) as *mut f32,
+                                    input_slices[2].size / 4,
+                                );
+                                let v_out = std::slice::from_raw_parts_mut(
+                                    d_ptr.add(input_slices[3].offset) as *mut f32,
+                                    input_slices[3].size / 4,
                                 );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
@@ -5650,56 +5739,58 @@ impl Backend for CpuBackend {
                                 let t = params[4] as f32;
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                                adam_update_f32(
+                                adam_update_f32_into(
                                     w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps,
-                                    bias_corr1, bias_corr2,
-                                )
-                            };
-                            let d = arena.data_mut();
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[0].offset
-                                    ..input_slices[0].offset + input_slices[0].size],
-                            )
-                            .copy_from_slice(&w_new);
-                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                .copy_from_slice(&w_new);
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[2].offset
-                                    ..input_slices[2].offset + input_slices[2].size],
-                            )
-                            .copy_from_slice(&m_new);
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[3].offset
-                                    ..input_slices[3].offset + input_slices[3].size],
-                            )
-                            .copy_from_slice(&v_new);
+                                    bias_corr1, bias_corr2, w_out, m_out, v_out,
+                                );
+                                // Copy updated w to output slot
+                                std::ptr::copy_nonoverlapping(
+                                    w_out.as_ptr(),
+                                    d_ptr.add(out_start) as *mut f32,
+                                    w_out.len(),
+                                );
+                            }
                         }
                         "adamw_update_f32" => {
-                            let (w_new, m_new, v_new) = {
-                                let d = arena.data_mut();
-                                let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[0].offset
-                                        ..input_slices[0].offset + input_slices[0].size],
+                            let d = arena.data_mut();
+                            let d_ptr = d.as_mut_ptr();
+                            // SAFETY: Slices are non-overlapping (except w which is
+                            // read-before-write in adamw_update_f32_scalar_into).
+                            unsafe {
+                                let w_init = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[0].offset) as *const f32,
+                                    input_slices[0].size / 4,
                                 );
-                                let g_slice = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
+                                let g_slice = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[1].offset) as *const f32,
+                                    input_slices[1].size / 4,
                                 );
-                                let m_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[2].offset
-                                        ..input_slices[2].offset + input_slices[2].size],
+                                let m_init = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[2].offset) as *const f32,
+                                    input_slices[2].size / 4,
                                 );
-                                let v_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[3].offset
-                                        ..input_slices[3].offset + input_slices[3].size],
+                                let v_init = std::slice::from_raw_parts(
+                                    d_ptr.add(input_slices[3].offset) as *const f32,
+                                    input_slices[3].size / 4,
+                                );
+                                let w_out = std::slice::from_raw_parts_mut(
+                                    d_ptr.add(input_slices[0].offset) as *mut f32,
+                                    input_slices[0].size / 4,
+                                );
+                                let m_out = std::slice::from_raw_parts_mut(
+                                    d_ptr.add(input_slices[2].offset) as *mut f32,
+                                    input_slices[2].size / 4,
+                                );
+                                let v_out = std::slice::from_raw_parts_mut(
+                                    d_ptr.add(input_slices[3].offset) as *mut f32,
+                                    input_slices[3].size / 4,
                                 );
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
                                 let eps = f32::from_bits(params[3] as u32);
                                 let (t, wd) = if input_slices.len() >= 5 {
-                                    // New path: t is a runtime tensor (5th input slice)
+                                    let d_ref: &[u8] = &*d;
                                     let t = u64::from_le_bytes(
                                         d_ref[input_slices[4].offset..input_slices[4].offset + 8]
                                             .try_into()
@@ -5708,36 +5799,23 @@ impl Backend for CpuBackend {
                                     let wd = f32::from_bits(params[4] as u32);
                                     (t, wd)
                                 } else {
-                                    // Old path: t is in params[4], wd in params[5]
                                     let t = params[4] as f32;
                                     let wd = f32::from_bits(params[5] as u32);
                                     (t, wd)
                                 };
                                 let bias_corr1 = 1.0 - beta1.powi(t as i32);
                                 let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                                adamw_update_f32(
+                                adamw_update_f32_into(
                                     w_init, g_slice, m_init, v_init, lr, beta1, beta2, eps,
-                                    bias_corr1, bias_corr2, wd,
-                                )
-                            };
-                            let d = arena.data_mut();
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[0].offset
-                                    ..input_slices[0].offset + input_slices[0].size],
-                            )
-                            .copy_from_slice(&w_new);
-                            bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                .copy_from_slice(&w_new);
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[2].offset
-                                    ..input_slices[2].offset + input_slices[2].size],
-                            )
-                            .copy_from_slice(&m_new);
-                            bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[input_slices[3].offset
-                                    ..input_slices[3].offset + input_slices[3].size],
-                            )
-                            .copy_from_slice(&v_new);
+                                    bias_corr1, bias_corr2, wd, w_out, m_out, v_out,
+                                );
+                                // Copy updated w to output slot
+                                std::ptr::copy_nonoverlapping(
+                                    w_out.as_ptr(),
+                                    d_ptr.add(out_start) as *mut f32,
+                                    w_out.len(),
+                                );
+                            }
                         }
                         "muon_update_f32" => {
                             let (w_new, m_new) = {
