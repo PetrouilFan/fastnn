@@ -405,6 +405,64 @@ pub fn quantize_activations_to_f4x8(data: &[f32]) -> PackedTensor<F4x8> {
     PackedTensor::from_raw(packed, shape, vec![scale], vec![0.0])
 }
 
+/// Generic packed GEMM for float types (F8x4, F8x4R).
+///
+/// Unpacks both activations and weights to f32, computes the dot product
+/// in f32, then applies dequantization scale, bias, and fused activation.
+pub fn gemm_packed_float_fused<T: PackedWord>(
+    act_packed: &PackedTensor<T>,
+    weight_packed: &PackedTensor<T>,
+    bias: Option<&[f32]>,
+    activation: Option<&str>,
+    c: &mut [f32],
+) {
+    let m = act_packed.shape()[0];
+    let k = act_packed.shape()[1];
+    let n = weight_packed.shape()[0];
+    let k_packed = k.div_ceil(T::ITEMS);
+
+    assert_eq!(weight_packed.shape()[1], k);
+    assert_eq!(c.len(), m * n);
+
+    let act_slice = act_packed.as_packed();
+    let weight_slice = weight_packed.as_packed();
+
+    for row in 0..m {
+        let act_row = &act_slice[row * k_packed..(row + 1) * k_packed];
+        let act_scale = act_packed.scale_for_row(row);
+
+        for col in 0..n {
+            let w_row = &weight_slice[col * k_packed..(col + 1) * k_packed];
+            let w_scale = weight_packed.scale_for_row(col);
+
+            let mut acc = 0.0f32;
+            for kk in 0..k_packed {
+                let a_v = act_row[kk].unpack_to_f32();
+                let b_v = w_row[kk].unpack_to_f32();
+                for i in 0..T::ITEMS {
+                    acc += a_v.as_ref()[i] * b_v.as_ref()[i];
+                }
+            }
+
+            let mut val = acc * act_scale * w_scale;
+
+            if let Some(b) = bias {
+                val += b[col];
+            }
+
+            if let Some(act) = activation {
+                val = match act {
+                    "relu" => val.max(0.0),
+                    "silu" => val / (1.0 + (-val).exp()),
+                    _ => val,
+                };
+            }
+
+            c[row * n + col] = val;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
