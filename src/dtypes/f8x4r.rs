@@ -76,12 +76,12 @@ fn f32_to_e5m2(v: f32) -> u8 {
         if new_biased >= 31 {
             return sign_bit | 0x7C;
         }
-        return sign_bit | ((new_biased as u8) << 2);
+        return sign_bit | ((new_biased) << 2);
     }
     if biased_exp >= 31 {
         return sign_bit | 0x7C;
     }
-    sign_bit | ((biased_exp as u8) << 2) | mant
+    sign_bit | ((biased_exp) << 2) | mant
 }
 
 impl PackedWord for F8x4R {
