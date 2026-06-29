@@ -201,8 +201,7 @@ mod tests {
 
     #[test]
     fn test_swar_sub_i8x4_boundary() {
-        let a =
-            (127i8 as u8 as u32) | ((-128i8 as u8 as u32) << 8) | (1u32 << 24);
+        let a = (127i8 as u8 as u32) | ((-128i8 as u8 as u32) << 8) | (1u32 << 24);
         let b =
             (1u32) | ((1u32) << 8) | ((-128i8 as u8 as u32) << 16) | ((127i8 as u8 as u32) << 24);
         let result = swar_sub_i8x4(a, b);
