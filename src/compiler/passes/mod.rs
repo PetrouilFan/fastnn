@@ -6,6 +6,7 @@ pub mod concat_to_conv_eligibility;
 pub mod constant_folding;
 pub mod dead_code_elimination;
 pub mod fusion;
+pub mod gradient_quantization;
 pub mod memory_planning;
 pub mod operator_fusion;
 pub mod prune_qdq_pairs;

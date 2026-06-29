@@ -1,6 +1,6 @@
 /// Benchmarks comparing packed vs f32 dispatch for MatMul, Conv, and Embedding.
 use fastnn::backend::cpu;
-use fastnn::dtypes::{U4x8, U8x4};
+use fastnn::dtypes::{I4x8, I8x4};
 use fastnn::packed_tensor::PackedTensor;
 use std::time::Instant;
 
@@ -86,16 +86,16 @@ fn main() {
         // Warmup
         for _ in 0..warmup_iters {
             let _ = bench_matmul_f32(m, k, n, 1);
-            let _ = bench_gemv_packed::<U4x8>(m, k, n, 1);
-            let _ = bench_gemv_packed::<U8x4>(m, k, n, 1);
-            let _ = bench_batch_gemm_packed::<U4x8>(m, k, n, 1);
+            let _ = bench_gemv_packed::<I4x8>(m, k, n, 1);
+            let _ = bench_gemv_packed::<I8x4>(m, k, n, 1);
+            let _ = bench_batch_gemm_packed::<I4x8>(m, k, n, 1);
         }
 
         let f32_ms = bench_matmul_f32(m, k, n, bench_iters);
-        let u4_gemv_ms = bench_gemv_packed::<U4x8>(m, k, n, bench_iters);
-        let u8_gemv_ms = bench_gemv_packed::<U8x4>(m, k, n, bench_iters);
-        let u4_batch_ms = bench_batch_gemm_packed::<U4x8>(m, k, n, bench_iters);
-        let u8_batch_ms = bench_batch_gemm_packed::<U8x4>(m, k, n, bench_iters);
+        let u4_gemv_ms = bench_gemv_packed::<I4x8>(m, k, n, bench_iters);
+        let u8_gemv_ms = bench_gemv_packed::<I8x4>(m, k, n, bench_iters);
+        let u4_batch_ms = bench_batch_gemm_packed::<I4x8>(m, k, n, bench_iters);
+        let u8_batch_ms = bench_batch_gemm_packed::<I8x4>(m, k, n, bench_iters);
 
         let gflops = |ms: f64| (2.0 * m as f64 * k as f64 * n as f64) / (ms / 1000.0) / 1e9;
         let speedup = |base: f64, opt: f64| base / opt;

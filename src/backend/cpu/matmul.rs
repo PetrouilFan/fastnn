@@ -2,7 +2,7 @@
 
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{BackendError, BufferSlice};
-use crate::dtypes::{PackedWord, U4x8, U8x4};
+use crate::dtypes::{I4x8, I8x4, PackedWord};
 use crate::ir::node::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
 
@@ -150,9 +150,9 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     })
 }
 
-/// Helper: dispatch a quantized matmul (u4 or u8) at runtime.
+/// Helper: dispatch a quantized matmul (I4x8/I8x4/F4x8/F8x4/F8x4R) at runtime.
 ///
-/// Generic over `T: PackedWord` — monomorphized as `U4x8` or `U8x4`.
+/// Generic over `T: PackedWord` — monomorphized as the concrete packed type.
 /// Handles arena extraction, u32-aligned weight copy, PackedTensor
 /// construction, and `gemm_cpu_flat` dispatch.
 #[inline]
@@ -204,11 +204,11 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
     Ok(())
 }
 
-/// Dispatch pre-quantized I8 activation × U8x4 packed-weight MatMul.
+/// Dispatch pre-quantized I8 activation × I8x4 packed-weight MatMul.
 ///
 /// Reads activation from arena as raw bytes (I8 payload format:
-/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<U8x4>` from
-/// the weight bytes, and calls the scalar I8×U8x4 microkernel.
+/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<I8x4>` from
+/// the weight bytes, and calls the scalar I8×I8x4 microkernel.
 #[inline]
 pub(super) fn quantized_matmul_dispatch_i8_u8(
     input_slices: &[BufferSlice],
@@ -226,7 +226,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
             let d = arena.data_mut();
             (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
                 let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                aligned_packed_slice::<U8x4>(raw)
+                aligned_packed_slice::<I8x4>(raw)
             })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
@@ -248,7 +248,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
             let d = arena.data_mut();
             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
         };
-        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u8x4(
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i8x4(
             &pt,
             &activation_payload,
             out_f32,
@@ -260,11 +260,11 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
     Ok(())
 }
 
-/// Dispatch pre-quantized I8 activation × U4x8 packed-weight MatMul.
+/// Dispatch pre-quantized I8 activation × I4x8 packed-weight MatMul.
 ///
 /// Reads activation from arena as raw bytes (I8 payload format:
-/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<U4x8>` from
-/// the weight bytes, and calls the scalar I8×U4x8 microkernel.
+/// [scale_f32][zp_f32][i8_data...]), builds a `PackedTensor<I4x8>` from
+/// the weight bytes, and calls the scalar I8×I4x8 microkernel.
 #[inline]
 pub(super) fn quantized_matmul_dispatch_i8_u4(
     input_slices: &[BufferSlice],
@@ -282,7 +282,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
             let d = arena.data_mut();
             (d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(), {
                 let raw = &d[w_slice.offset..w_slice.offset + w_slice.size];
-                aligned_packed_slice::<U4x8>(raw)
+                aligned_packed_slice::<I4x8>(raw)
             })
         };
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
@@ -304,7 +304,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
             let d = arena.data_mut();
             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
         };
-        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_u4x8(
+        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8(
             &pt,
             &activation_payload,
             out_f32,

@@ -3,7 +3,7 @@ use fastnn::backend::cpu::microkernels::{gemm_cpu, gemv_cpu};
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use fastnn::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
@@ -323,8 +323,8 @@ fn bench_gemv(c: &mut Criterion) {
         );
 
         bench_fastnn_gemv::<F32x1>(&mut group, "fastnn_f32x1", case);
-        bench_fastnn_gemv::<U8x4>(&mut group, "fastnn_u8x4", case);
-        bench_fastnn_gemv::<U4x8>(&mut group, "fastnn_u4x8", case);
+        bench_fastnn_gemv::<I8x4>(&mut group, "fastnn_i8x4", case);
+        bench_fastnn_gemv::<I4x8>(&mut group, "fastnn_i4x8", case);
     }
 
     group.finish();
@@ -401,8 +401,8 @@ fn bench_gemm(c: &mut Criterion) {
         );
 
         bench_fastnn_gemm::<F32x1>(&mut group, "fastnn_f32x1", case);
-        bench_fastnn_gemm::<U8x4>(&mut group, "fastnn_u8x4", case);
-        bench_fastnn_gemm::<U4x8>(&mut group, "fastnn_u4x8", case);
+        bench_fastnn_gemm::<I8x4>(&mut group, "fastnn_i8x4", case);
+        bench_fastnn_gemm::<I4x8>(&mut group, "fastnn_i4x8", case);
     }
 
     group.finish();

@@ -27,7 +27,8 @@ for file in "${rust_files[@]}"; do
 done
 
 sort -u "$actual" -o "$actual"
-grep -vE '^\s*(#|$)' "$baseline_file" | sort -u > "$baseline"
+
+grep -vE '^\s*(#|$)' "$baseline_file" | sort -u > "$baseline" || true
 
 new_debt=$(comm -13 "$baseline" "$actual")
 retired_debt=$(comm -23 "$baseline" "$actual")

@@ -141,7 +141,7 @@ impl From<usize> for PackedWeightId {
 ///
 /// Only [`PackedWeightKind::Fp32`] is exercised by the current runtime.
 /// The remaining variants reserve discriminant space for future packed
-/// precision modes (`i8`, packed `u4`, NF4) so consumers can match
+/// precision modes (`i8`, packed `i4`/`i8`/`f4`/`f8`/`f8r`) so consumers can match
 /// exhaustively without breaking when those lanes light up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -154,6 +154,12 @@ pub enum PackedWeightKind {
     U4 = 2,
     /// Reserved — packed 4-bit NormalFloat weight-only quantisation.
     Nf4 = 3,
+    /// FP8 E4M3 weight-only quantisation (4 × FP8 per u32).
+    F8 = 4,
+    /// FP8 E5M2 range variant, for gradient storage.
+    F8R = 5,
+    /// FP4 E2M1 (NVFP4-style), 8 × FP4 per u32 word.
+    F4 = 6,
 }
 
 impl PackedWeightKind {
@@ -164,6 +170,9 @@ impl PackedWeightKind {
             PackedWeightKind::I8 => "i8",
             PackedWeightKind::U4 => "u4",
             PackedWeightKind::Nf4 => "nf4",
+            PackedWeightKind::F8 => "f8",
+            PackedWeightKind::F8R => "f8r",
+            PackedWeightKind::F4 => "f4",
         }
     }
 
@@ -176,6 +185,8 @@ impl PackedWeightKind {
             PackedWeightKind::I8 => 1,
             // u4/nf4 are sub-byte; report 1 byte per *pair* of elements.
             PackedWeightKind::U4 | PackedWeightKind::Nf4 => 1,
+            PackedWeightKind::F8 | PackedWeightKind::F8R => 1,
+            PackedWeightKind::F4 => 1,
         }
     }
 }
@@ -482,13 +493,13 @@ pub fn activation_from_kernel_name(kernel_name: &str) -> PreparedActivation {
 
 /// Map a kernel name to the appropriate [`PreparedConvKernelKind`].
 ///
-/// Quantized kernels (`"conv2d_u4"`, `"conv2d_u8"`) map to their future
+/// Quantized kernels (`"conv2d_i4"`, `"conv2d_i8"`) map to their future
 /// packed variants; float kernels map to the current im2col/gemm path,
 /// with a 1x1 specialisation when kernel dimensions are both 1.
 pub fn kernel_kind_from_kernel_name(kernel_name: &str) -> PreparedConvKernelKind {
-    if kernel_name.starts_with("conv2d_u4") {
+    if kernel_name.starts_with("conv2d_i4") {
         PreparedConvKernelKind::FuturePackedU4
-    } else if kernel_name.starts_with("conv2d_u8") {
+    } else if kernel_name.starts_with("conv2d_i8") {
         PreparedConvKernelKind::FuturePackedI8
     } else {
         PreparedConvKernelKind::CurrentIm2colGemm
@@ -501,8 +512,8 @@ pub fn kernel_kind_from_kernel_name(kernel_name: &str) -> PreparedConvKernelKind
 /// Covers the plain `"matmul"` kernel, the activation-fused
 /// `"matmul_relu" | "matmul_gelu" | "matmul_silu"` variants, the
 /// `"fused_matmul_add_*"` family (which carry a 3rd bias input), and
-/// the quantized `"matmul_u4" | "matmul_u4_i8" | "matmul_u8" |
-/// "matmul_u8_i8"` variants. Quantized matmuls still keep the same
+/// the quantized `"matmul_i4" | "matmul_i4_i8" | "matmul_i8" |
+/// "matmul_i8_i8"` variants. Quantized matmuls still keep the same
 /// `[m, k, n]` param layout, so detection promotion is uniform.
 pub fn is_matmul_kernel_name(kernel_name: &str) -> bool {
     kernel_name == "matmul"
@@ -1685,7 +1696,7 @@ mod tests {
     #[test]
     fn activation_from_kernel_name_fallback() {
         assert_eq!(
-            activation_from_kernel_name("conv2d_u4"),
+            activation_from_kernel_name("conv2d_i4"),
             PreparedActivation::None
         );
         assert_eq!(
@@ -1715,19 +1726,19 @@ mod tests {
     #[test]
     fn kernel_kind_quantized() {
         assert_eq!(
-            kernel_kind_from_kernel_name("conv2d_u4"),
+            kernel_kind_from_kernel_name("conv2d_i4"),
             PreparedConvKernelKind::FuturePackedU4
         );
         assert_eq!(
-            kernel_kind_from_kernel_name("conv2d_u8"),
+            kernel_kind_from_kernel_name("conv2d_i8"),
             PreparedConvKernelKind::FuturePackedI8
         );
         assert_eq!(
-            kernel_kind_from_kernel_name("conv2d_u4_i8"),
+            kernel_kind_from_kernel_name("conv2d_i4_i8"),
             PreparedConvKernelKind::FuturePackedU4
         );
         assert_eq!(
-            kernel_kind_from_kernel_name("conv2d_u8_i8"),
+            kernel_kind_from_kernel_name("conv2d_i8_i8"),
             PreparedConvKernelKind::FuturePackedI8
         );
     }
@@ -1832,7 +1843,7 @@ mod tests {
     #[test]
     fn try_prepare_conv2d_quantized_u4() {
         let inst = make_conv2d_instruction(
-            "conv2d_u4",
+            "conv2d_i4",
             Conv2dParams {
                 c: 16,
                 ..Default::default()
@@ -1850,7 +1861,7 @@ mod tests {
     #[test]
     fn try_prepare_conv2d_quantized_u8() {
         let inst = make_conv2d_instruction(
-            "conv2d_u8",
+            "conv2d_i8",
             Conv2dParams {
                 c: 16,
                 ..Default::default()
@@ -1969,7 +1980,7 @@ mod tests {
 
     #[test]
     fn try_prepare_matmul_quantized() {
-        let inst = make_matmul_instruction("matmul_u4", 4, 8, 16, false);
+        let inst = make_matmul_instruction("matmul_i4", 4, 8, 16, false);
         let result = try_prepare_matmul(&inst, 0).expect("should promote quantized");
         match &result {
             PreparedInstruction::MatMul(m) => {
@@ -2026,10 +2037,10 @@ mod tests {
         assert!(is_matmul_kernel_name("matmul_relu"));
         assert!(is_matmul_kernel_name("matmul_gelu"));
         assert!(is_matmul_kernel_name("matmul_silu"));
-        assert!(is_matmul_kernel_name("matmul_u4"));
-        assert!(is_matmul_kernel_name("matmul_u4_i8"));
-        assert!(is_matmul_kernel_name("matmul_u8"));
-        assert!(is_matmul_kernel_name("matmul_u8_i8"));
+        assert!(is_matmul_kernel_name("matmul_i4"));
+        assert!(is_matmul_kernel_name("matmul_i4_i8"));
+        assert!(is_matmul_kernel_name("matmul_i8"));
+        assert!(is_matmul_kernel_name("matmul_i8_i8"));
         assert!(is_matmul_kernel_name("fused_matmul_add_relu"));
         assert!(is_matmul_kernel_name("fused_matmul_add_gelu"));
         assert!(is_matmul_kernel_name("fused_matmul_add_silu"));
