@@ -247,7 +247,11 @@ mod tests {
         //   0x9 → !0x9 = 0x6 (negative, flip)
         // 0xF → !0xF = 0x0 (negative, flip)
         let expected = fp4_word(&[0x0, 0x2, 0x7, 0x5, 0x7, 0x1, 0x6, 0x0]);
-        assert_eq!(t, expected, "total_order: got {:08x}, expected {:08x}", t, expected);
+        assert_eq!(
+            t, expected,
+            "total_order: got {:08x}, expected {:08x}",
+            t, expected
+        );
     }
 
     #[test]

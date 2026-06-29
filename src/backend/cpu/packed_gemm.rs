@@ -4,8 +4,8 @@
 //! Uses SWAR dot products for 4-8× arithmetic density.
 
 use crate::backend::cpu::swar::{
-    quantize_f32_to_i4x8, quantize_f32_to_i8x4, i4x8_dot_packed, i4x8_packed_to_tensor,
-    i8x4_dot_packed, i8x4_packed_to_tensor,
+    i4x8_dot_packed, i4x8_packed_to_tensor, i8x4_dot_packed, i8x4_packed_to_tensor,
+    quantize_f32_to_i4x8, quantize_f32_to_i8x4,
 };
 use crate::dtypes::f4x8::f4x8_dot_packed;
 use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
@@ -396,11 +396,7 @@ pub fn quantize_activations_to_f4x8(data: &[f32]) -> PackedTensor<F4x8> {
         packed.push(F4x8::pack_from_f32(arr));
     }
     let shape = vec![packed.len(), 8];
-    let max_abs = data
-        .iter()
-        .copied()
-        .map(|v| v.abs())
-        .fold(0.0f32, f32::max);
+    let max_abs = data.iter().copied().map(|v| v.abs()).fold(0.0f32, f32::max);
     let scale = if max_abs > 0.0 {
         max_abs / F4x8::MAX_REPRESENTABLE
     } else {
@@ -438,12 +434,10 @@ mod tests {
     #[test]
     fn test_gemm_packed_f4x8_simple() {
         let a_data: Vec<f32> = vec![
-            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         ];
         let b_data: Vec<f32> = vec![
-            4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0,
+            4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0,
         ];
         let a_packed = PackedTensor::<F4x8>::from_f32_per_channel(&a_data, &[2, 8]);
         let b_packed = PackedTensor::<F4x8>::from_f32_per_channel(&b_data, &[2, 8]);
@@ -463,6 +457,10 @@ mod tests {
         let b_packed = PackedTensor::<F4x8>::from_f32_per_channel(&b_data, &[2, 8]);
         let mut c = vec![0.0f32; 4];
         gemm_packed_f4x8(&a_packed, &b_packed, &mut c);
-        assert!(c.iter().all(|v| *v == 0.0), "All-zero GEMM should give zeros: {:?}", c);
+        assert!(
+            c.iter().all(|v| *v == 0.0),
+            "All-zero GEMM should give zeros: {:?}",
+            c
+        );
     }
 }

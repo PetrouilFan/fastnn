@@ -41,24 +41,18 @@ pub fn quantize_gradients(graph: &mut ComputeGraph) {
 
         let f8x4r_type = TensorType::new(
             grad_type.shape.clone(),
-            IrDType::F8R { scales: vec![scale] },
+            IrDType::F8R {
+                scales: vec![scale],
+            },
         );
 
         let mut attrs = HashMap::new();
         attrs.insert("scale".to_string(), scale.to_string());
-        let q_id = graph.add_node_with_attrs(
-            Opcode::QuantizeGradient,
-            vec![grad_id],
-            f8x4r_type,
-            attrs,
-        );
+        let q_id =
+            graph.add_node_with_attrs(Opcode::QuantizeGradient, vec![grad_id], f8x4r_type, attrs);
 
         let dq_type = TensorType::new(grad_type.shape.clone(), IrDType::F32);
-        let dq_id = graph.add_node(
-            Opcode::DequantizeGradient,
-            vec![q_id],
-            dq_type,
-        );
+        let dq_id = graph.add_node(Opcode::DequantizeGradient, vec![q_id], dq_type);
 
         if let Some(opt) = graph.get_node_mut(opt_id) {
             opt.inputs[1] = dq_id;
@@ -136,11 +130,7 @@ mod tests {
         let mut graph = make_sgd_graph();
         let count_before = graph.nodes.len();
         quantize_gradients(&mut graph);
-        assert_eq!(
-            graph.nodes.len(),
-            count_before + 2,
-            "Should add Q+DQ nodes"
-        );
+        assert_eq!(graph.nodes.len(), count_before + 2, "Should add Q+DQ nodes");
         let sgd_node = graph.get_node(graph.outputs[0]).unwrap();
         let new_grad = sgd_node.inputs[1];
         let deq = graph.get_node(new_grad).unwrap();
@@ -155,11 +145,18 @@ mod tests {
     fn test_quantize_gradients_f8r_output_type_has_scale() {
         let mut graph = make_sgd_graph();
         quantize_gradients(&mut graph);
-        let q = graph.nodes.iter().find(|n| matches!(n.opcode, Opcode::QuantizeGradient)).unwrap();
+        let q = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(n.opcode, Opcode::QuantizeGradient))
+            .unwrap();
         match &q.output_type.dtype {
             IrDType::F8R { scales } => {
                 assert_eq!(scales.len(), 1, "F8R should have one scale");
-                assert!((scales[0] - 1.0).abs() < 1e-6, "Default scale should be 1.0");
+                assert!(
+                    (scales[0] - 1.0).abs() < 1e-6,
+                    "Default scale should be 1.0"
+                );
             }
             _ => panic!("Expected F8R dtype"),
         }
@@ -169,7 +166,11 @@ mod tests {
     fn test_quantize_gradients_deq_output_is_f32() {
         let mut graph = make_sgd_graph();
         quantize_gradients(&mut graph);
-        let dq = graph.nodes.iter().find(|n| matches!(n.opcode, Opcode::DequantizeGradient)).unwrap();
+        let dq = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(n.opcode, Opcode::DequantizeGradient))
+            .unwrap();
         assert_eq!(dq.output_type.dtype, IrDType::F32);
     }
 
@@ -177,7 +178,11 @@ mod tests {
     fn test_quantize_gradients_q_has_scale_attr() {
         let mut graph = make_sgd_graph();
         quantize_gradients(&mut graph);
-        let q = graph.nodes.iter().find(|n| matches!(n.opcode, Opcode::QuantizeGradient)).unwrap();
+        let q = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(n.opcode, Opcode::QuantizeGradient))
+            .unwrap();
         assert_eq!(q.attrs.get("scale").map(|s| s.as_str()), Some("1"));
     }
 
@@ -196,20 +201,71 @@ mod tests {
     #[test]
     fn test_quantize_gradients_handles_all_optimizer_types() {
         let optimizers: Vec<(Opcode, Vec<(&str, &str)>)> = vec![
-            (Opcode::SgdUpdate, vec![("lr", "0.01"), ("weight_decay", "0.0")]),
-            (Opcode::AdamUpdate, vec![("lr", "0.001"), ("beta1", "0.9"), ("beta2", "0.999"), ("eps", "1e-8"), ("t", "1")]),
-            (Opcode::AdamWUpdate, vec![("lr", "0.001"), ("beta1", "0.9"), ("beta2", "0.999"), ("eps", "1e-8"), ("t", "1"), ("weight_decay", "0.01")]),
-            (Opcode::MuonUpdate, vec![("lr", "0.01"), ("beta1", "0.95"), ("weight_decay", "0.0")]),
-            (Opcode::LionUpdate, vec![("lr", "0.001"), ("beta1", "0.9"), ("beta2", "0.99"), ("weight_decay", "0.0")]),
-            (Opcode::RmspropUpdate, vec![("lr", "0.001"), ("beta", "0.9"), ("eps", "1e-8")]),
+            (
+                Opcode::SgdUpdate,
+                vec![("lr", "0.01"), ("weight_decay", "0.0")],
+            ),
+            (
+                Opcode::AdamUpdate,
+                vec![
+                    ("lr", "0.001"),
+                    ("beta1", "0.9"),
+                    ("beta2", "0.999"),
+                    ("eps", "1e-8"),
+                    ("t", "1"),
+                ],
+            ),
+            (
+                Opcode::AdamWUpdate,
+                vec![
+                    ("lr", "0.001"),
+                    ("beta1", "0.9"),
+                    ("beta2", "0.999"),
+                    ("eps", "1e-8"),
+                    ("t", "1"),
+                    ("weight_decay", "0.01"),
+                ],
+            ),
+            (
+                Opcode::MuonUpdate,
+                vec![("lr", "0.01"), ("beta1", "0.95"), ("weight_decay", "0.0")],
+            ),
+            (
+                Opcode::LionUpdate,
+                vec![
+                    ("lr", "0.001"),
+                    ("beta1", "0.9"),
+                    ("beta2", "0.99"),
+                    ("weight_decay", "0.0"),
+                ],
+            ),
+            (
+                Opcode::RmspropUpdate,
+                vec![("lr", "0.001"), ("beta", "0.9"), ("eps", "1e-8")],
+            ),
         ];
         for (ref op, attrs_list) in &optimizers {
             let mut graph = ComputeGraph::new();
-            let w = graph.add_node(Opcode::Input, vec![], TensorType::new(vec![DimExpr::Known(2)], IrDType::F32));
-            let g = graph.add_node(Opcode::Input, vec![], TensorType::new(vec![DimExpr::Known(2)], IrDType::F32));
+            let w = graph.add_node(
+                Opcode::Input,
+                vec![],
+                TensorType::new(vec![DimExpr::Known(2)], IrDType::F32),
+            );
+            let g = graph.add_node(
+                Opcode::Input,
+                vec![],
+                TensorType::new(vec![DimExpr::Known(2)], IrDType::F32),
+            );
             let mut attrs = std::collections::HashMap::new();
-            for (k, v) in attrs_list { attrs.insert(k.to_string(), v.to_string()); }
-            let opt_id = graph.add_node_with_attrs(op.clone(), vec![w, g], TensorType::new(vec![DimExpr::Known(2)], IrDType::F32), attrs);
+            for (k, v) in attrs_list {
+                attrs.insert(k.to_string(), v.to_string());
+            }
+            let opt_id = graph.add_node_with_attrs(
+                op.clone(),
+                vec![w, g],
+                TensorType::new(vec![DimExpr::Known(2)], IrDType::F32),
+                attrs,
+            );
             graph.set_inputs(vec![w, g]);
             graph.set_outputs(vec![opt_id]);
             let count_before = graph.nodes.len();
@@ -222,7 +278,12 @@ mod tests {
             );
             let opt = graph.get_node(opt_id).unwrap();
             let dq = graph.get_node(opt.inputs[1]).unwrap();
-            assert_eq!(dq.opcode, Opcode::DequantizeGradient, "Input[1] of {:?} should be DQ", op);
+            assert_eq!(
+                dq.opcode,
+                Opcode::DequantizeGradient,
+                "Input[1] of {:?} should be DQ",
+                op
+            );
         }
     }
 }
