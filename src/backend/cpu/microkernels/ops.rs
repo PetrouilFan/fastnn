@@ -756,28 +756,28 @@ pub unsafe fn biasadd_f32_avx2(
 
 // ── norm_layernorm_f32 — LayerNorm ──────────────────────────
 
+/// Single-pass Welford-based LayerNorm: computes mean + variance in one pass
+/// instead of two, reducing memory traffic by ~33%.
 #[inline]
 pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
-        let n = row_size as f32;
-        // Pass 1: sum
-        let mut sum = 0.0f32;
+        // Welford's online algorithm: single pass for mean + variance
+        let mut mean = 0.0f32;
+        let mut m2 = 0.0f32;
+        let mut count = 0u32;
         for i in start..end {
-            sum += input[i];
+            count += 1;
+            let x = input[i];
+            let delta = x - mean;
+            mean += delta / (count as f32);
+            let delta2 = x - mean;
+            m2 += delta * delta2;
         }
-        let mean = if n > 0.0 { sum / n } else { 0.0 };
-        // Pass 2: sum of squared diffs
-        let mut var = 0.0f32;
-        for i in start..end {
-            let d = input[i] - mean;
-            var += d * d;
-        }
-        var = var / n;
+        let var = if count > 1 { m2 / (count as f32) } else { 0.0 };
         let inv_std = 1.0 / (var + eps).sqrt();
-        // Pass 3: normalize
         for i in start..end {
             output[i] = (input[i] - mean) * inv_std;
         }
@@ -799,20 +799,20 @@ pub fn fused_residual_add_layer_norm_f32_scalar(
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
-        let n = row_size as f32;
 
-        let mut sum = 0.0f32;
+        // Welford single-pass mean + variance on (main + residual)
+        let mut mean = 0.0f32;
+        let mut m2 = 0.0f32;
+        let mut count = 0u32;
         for i in start..end {
-            sum += main[i] + residual[i];
+            count += 1;
+            let x = main[i] + residual[i];
+            let delta = x - mean;
+            mean += delta / (count as f32);
+            let delta2 = x - mean;
+            m2 += delta * delta2;
         }
-        let mean = if n > 0.0 { sum / n } else { 0.0 };
-
-        let mut var = 0.0f32;
-        for i in start..end {
-            let d = main[i] + residual[i] - mean;
-            var += d * d;
-        }
-        var /= n;
+        let var = if count > 1 { m2 / (count as f32) } else { 0.0 };
         let inv_std = 1.0 / (var + eps).sqrt();
 
         for i in start..end {
@@ -886,6 +886,90 @@ pub unsafe fn norm_layernorm_f32_avx2(
     }
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller must ensure `residual`, `main`, `weight`, `bias`, and `output` are valid,
+// non-overlapping, and each at least `num_rows * row_size` elements.
+pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
+    let len = output.len().min(main.len()).min(residual.len());
+    let num_rows = len / row_size;
+    for r in 0..num_rows {
+        let start = r * row_size;
+        let end = start + row_size;
+        let n = row_size as f32;
+
+        // Pass 1: vectorized sum of (main + residual)
+        let mut i = start;
+        let mut vsum = _mm256_setzero_ps();
+        while i + 8 <= end {
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            vsum = _mm256_add_ps(vsum, _mm256_add_ps(vm, vr));
+            i += 8;
+        }
+        let mut sum = hsum256_ps(vsum);
+        for j in i..end {
+            sum += main[j] + residual[j];
+        }
+        let mean = if n > 0.0 { sum / n } else { 0.0 };
+        let vmean = _mm256_set1_ps(mean);
+
+        // Pass 2: vectorized sum of ((main + residual) - mean)^2
+        i = start;
+        let mut vvar = _mm256_setzero_ps();
+        while i + 8 <= end {
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let d = _mm256_sub_ps(_mm256_add_ps(vm, vr), vmean);
+            vvar = _mm256_fmadd_ps(d, d, vvar);
+            i += 8;
+        }
+        let mut var = hsum256_ps(vvar);
+        for j in i..end {
+            let d = main[j] + residual[j] - mean;
+            var += d * d;
+        }
+        var = var / n;
+        let inv_std = 1.0 / (var + eps).sqrt();
+        let vinv_std = _mm256_set1_ps(inv_std);
+
+        // Pass 3: vectorized normalize with weight + bias
+        i = start;
+        while i + 8 <= end {
+            let idx = i - start;
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let vnorm = _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(vm, vr), vmean), vinv_std);
+            let vw = if weight.len() >= 8 {
+                _mm256_loadu_ps(weight.as_ptr().add(idx))
+            } else {
+                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
+            };
+            let vb = if bias.len() >= 8 {
+                _mm256_loadu_ps(bias.as_ptr().add(idx))
+            } else {
+                _mm256_set1_ps(if idx < bias.len() { bias[idx] } else { 0.0 })
+            };
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_add_ps(_mm256_mul_ps(vnorm, vw), vb));
+            i += 8;
+        }
+        for j in i..end {
+            let idx = j - start;
+            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+            output[j] = (main[j] + residual[j] - mean) * inv_std * w + b;
+        }
+    }
+}
+
 // ── rms_norm_f32 ────────────────────────────────────────────
 
 #[inline]
@@ -952,6 +1036,68 @@ pub fn fused_residual_add_rms_norm_f32_scalar(
             let idx = i - start;
             let w = if idx < weight.len() { weight[idx] } else { 1.0 };
             output[i] = (main[i] + residual[i]) / rms * w;
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller must ensure `residual`, `main`, `weight`, and `output` are valid,
+// non-overlapping, and each at least `num_rows * row_size` elements.
+pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
+    let len = output.len().min(main.len()).min(residual.len());
+    let num_rows = len / row_size;
+    for r in 0..num_rows {
+        let start = r * row_size;
+        let end = start + row_size;
+        // Vectorized sum of (main + residual)^2
+        let mut i = start;
+        let mut vsq = _mm256_setzero_ps();
+        while i + 8 <= end {
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let vx = _mm256_add_ps(vm, vr);
+            vsq = _mm256_fmadd_ps(vx, vx, vsq);
+            i += 8;
+        }
+        let mut sq_sum = hsum256_ps(vsq);
+        for j in i..end {
+            let x = main[j] + residual[j];
+            sq_sum += x * x;
+        }
+        let n = row_size as f32;
+        let rms = if n > 0.0 {
+            (sq_sum / n + eps).sqrt()
+        } else {
+            1.0
+        };
+        let inv_rms = _mm256_set1_ps(1.0 / rms);
+        // Vectorized writeback with weight
+        i = start;
+        while i + 8 <= end {
+            let idx = i - start;
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let vx = _mm256_add_ps(vm, vr);
+            let w = if weight.len() >= 8 {
+                _mm256_loadu_ps(weight.as_ptr().add(idx))
+            } else {
+                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
+            };
+            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w));
+            i += 8;
+        }
+        for j in i..end {
+            let idx = j - start;
+            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+            output[j] = (main[j] + residual[j]) / rms * w;
         }
     }
 }
