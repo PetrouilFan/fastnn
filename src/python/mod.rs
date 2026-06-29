@@ -111,6 +111,10 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         std::env::set_var("OMP_NUM_THREADS", "1");
     }
 
+    // Initialize the Rayon global thread pool with pinned physical cores.
+    #[cfg(feature = "parallel")]
+    crate::backend::cpu::affinity::ensure_global_pool_initialized();
+
     let py = m.py();
 
     // Register exception hierarchy

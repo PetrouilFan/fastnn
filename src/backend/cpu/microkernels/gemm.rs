@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 /// Cache-blocked GEMV for packed types.
 /// Tiles the K dimension to keep activation blocks in L2 cache.
-const K_BLOCK_SIZE: usize = 4096;
+const K_BLOCK_SIZE: usize = 8192;
 
 // ============================================================
 // Type-dispatched SIMD GEMV entry point

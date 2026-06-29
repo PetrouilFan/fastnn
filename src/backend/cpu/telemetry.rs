@@ -13,10 +13,22 @@ pub struct CpuTelemetrySnapshot {
     pub tls_vec_reuses: u64,
 }
 
-static ARENA_TEMP_COPIES: AtomicU64 = AtomicU64::new(0);
-static ARENA_TEMP_COPY_BYTES: AtomicU64 = AtomicU64::new(0);
-static TLS_VEC_ALLOCS: AtomicU64 = AtomicU64::new(0);
-static TLS_VEC_REUSES: AtomicU64 = AtomicU64::new(0);
+/// Pad atomic counters to separate cache lines and avoid false sharing
+/// when different threads record distinct events concurrently.
+#[repr(align(64))]
+struct AlignedAtomicU64(AtomicU64);
+
+impl std::ops::Deref for AlignedAtomicU64 {
+    type Target = AtomicU64;
+    fn deref(&self) -> &AtomicU64 {
+        &self.0
+    }
+}
+
+static ARENA_TEMP_COPIES: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
+static ARENA_TEMP_COPY_BYTES: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
+static TLS_VEC_ALLOCS: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
+static TLS_VEC_REUSES: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
 
 #[inline]
 pub(crate) fn record_arena_temp_copy(bytes: usize) {

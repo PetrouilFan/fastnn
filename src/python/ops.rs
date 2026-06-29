@@ -471,14 +471,12 @@ fn _set_seed(seed: u64) {
     set_seeded_rng(seed);
 }
 
-#[cfg(feature = "parallel")]
-use rayon::ThreadPoolBuilder;
-
 #[pyfunction]
 #[cfg(feature = "parallel")]
 fn _set_num_threads(n: i32) -> PyResult<()> {
     if n > 0 {
-        ThreadPoolBuilder::new()
+        // User explicitly set thread count — respect it (no pinning to avoid odd counts)
+        rayon::ThreadPoolBuilder::new()
             .num_threads(n as usize)
             .build_global()
             .map_err(|e| {
@@ -488,6 +486,8 @@ fn _set_num_threads(n: i32) -> PyResult<()> {
                 ))
             })
     } else {
+        // Auto: use pinned thread pool with physical core count
+        crate::backend::cpu::affinity::ensure_global_pool_initialized();
         Ok(())
     }
 }
