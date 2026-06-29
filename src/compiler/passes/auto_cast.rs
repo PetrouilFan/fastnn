@@ -1,6 +1,6 @@
 //! Auto-cast insertion compiler pass.
 //!
-//! When a user specifies `model.to("u4")`, this pass:
+//! When a user specifies `model.to("i4")`, this pass:
 //!
 //! 1. Finds all f32 weight constants feeding MatMul/Conv ops and replaces them
 //!    with `Quantize(f32_weight, bit_width)` sub-graphs (or directly updates

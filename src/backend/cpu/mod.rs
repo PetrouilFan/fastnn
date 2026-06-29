@@ -9,7 +9,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{F4x8, F8x4, F8x4R, PackedWord, I4x8, I8x4};
+use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -240,10 +240,16 @@ impl Backend for CpuBackend {
                         .filter_map(|&input_id| graph.get_node(input_id))
                         .map(|n| n.output_type.dtype.clone())
                         .collect();
-                    let is_quantized = input_dtypes
-                        .iter()
-                        .any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U8 { .. }
-                                              | IrDType::F4 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. }));
+                    let is_quantized = input_dtypes.iter().any(|d| {
+                        matches!(
+                            d,
+                            IrDType::I4 { .. }
+                                | IrDType::U8 { .. }
+                                | IrDType::F4 { .. }
+                                | IrDType::F8 { .. }
+                                | IrDType::F8R { .. }
+                        )
+                    });
 
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
                     // Determine fusion params for the unified "matmul" kernel
@@ -306,7 +312,9 @@ impl Backend for CpuBackend {
                         }
                         // Quantized: F32 activation + FP8 E5M2 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F8R { .. })) =>
+                            if input_dtypes
+                                .iter()
+                                .any(|d| matches!(d, IrDType::F8R { .. })) =>
                         {
                             "matmul_f8r"
                         }
@@ -354,9 +362,15 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (8usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![0.0]),
-                                    IrDType::F8 { scales } => (8usize, scales.clone(), vec![0.0]),
-                                    IrDType::F8R { scales } => (8usize, scales.clone(), vec![0.0]),
+                                    IrDType::F4 { scales } => {
+                                        (4usize, scales.clone(), vec![0.0; scales.len()])
+                                    }
+                                    IrDType::F8 { scales } => {
+                                        (8usize, scales.clone(), vec![0.0; scales.len()])
+                                    }
+                                    IrDType::F8R { scales } => {
+                                        (8usize, scales.clone(), vec![0.0; scales.len()])
+                                    }
                                     _ => (0usize, vec![], vec![]),
                                 };
                                 let mut w_shape: Vec<usize> = wn
@@ -585,9 +599,12 @@ impl Backend for CpuBackend {
                         .get(1)
                         .and_then(|&w_id| graph.get_node(w_id))
                         .map(|wn| wn.output_type.dtype.clone());
-                    let is_quantized = weight_dtype
-                        .as_ref()
-                        .is_some_and(|d| matches!(d, IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F4 { .. }));
+                    let is_quantized = weight_dtype.as_ref().is_some_and(|d| {
+                        matches!(
+                            d,
+                            IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F4 { .. }
+                        )
+                    });
                     let (kernel_name, weight_meta) = if is_quantized {
                         let dtype = weight_dtype.as_ref().unwrap();
                         let mut kernel = if matches!(dtype, IrDType::F4 { .. }) {
@@ -597,7 +614,8 @@ impl Backend for CpuBackend {
                         } else {
                             "conv2d_i8".to_string()
                         };
-                        let bit_width = if matches!(dtype, IrDType::I4 { .. } | IrDType::F4 { .. }) {
+                        let bit_width = if matches!(dtype, IrDType::I4 { .. } | IrDType::F4 { .. })
+                        {
                             4usize
                         } else {
                             8usize
@@ -636,9 +654,7 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (4usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales } => {
-                                        (4usize, scales.clone(), vec![])
-                                    }
+                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![]),
                                     IrDType::U8 {
                                         scales,
                                         zero_points,
@@ -5439,7 +5455,8 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     let d_ref: &[u8] = &*d;
                                     bytemuck::cast_slice::<_, f32>(
-                                        &d_ref[input_slice.offset..input_slice.offset + input_slice.size],
+                                        &d_ref[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
                                     )
                                     .to_vec()
                                 };
@@ -5466,7 +5483,8 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     let d_ref: &[u8] = &*d;
                                     bytemuck::cast_slice::<_, u32>(
-                                        &d_ref[input_slice.offset..input_slice.offset + input_slice.size],
+                                        &d_ref[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
                                     )
                                     .to_vec()
                                 };

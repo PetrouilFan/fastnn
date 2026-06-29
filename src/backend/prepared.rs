@@ -141,7 +141,7 @@ impl From<usize> for PackedWeightId {
 ///
 /// Only [`PackedWeightKind::Fp32`] is exercised by the current runtime.
 /// The remaining variants reserve discriminant space for future packed
-/// precision modes (`i8`, packed `u4`, NF4) so consumers can match
+/// precision modes (`i8`, packed `i4`/`i8`/`f4`/`f8`/`f8r`) so consumers can match
 /// exhaustively without breaking when those lanes light up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]

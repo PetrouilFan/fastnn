@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::dtypes::{F16x2, F32x1, PackedWord, I4x8, I8x4};
+use crate::dtypes::{F16x2, F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]

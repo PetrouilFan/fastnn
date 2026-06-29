@@ -1081,7 +1081,7 @@ impl<'a> OnnxConverter<'a> {
                 if ins.len() < 8 {
                     return Err("QLinearMatMul needs 8 inputs: A, A_scale, A_zp, B, B_scale, B_zp, Y_scale, Y_zp".to_string());
                 }
-                // Cast quantized U8 inputs to F32 before arithmetic.
+                // Cast quantized I8 inputs to F32 before arithmetic.
                 // ONNX QLinearMatMul inputs A, A_zp, B, B_zp are typically UINT8;
                 // A_scale, B_scale, Y_scale, Y_zp are F32.
                 let a_f32 = self.graph.cast_op(&ins[0], IrDType::F32);
@@ -1667,14 +1667,8 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
             scales: vec![1.0],
             zero_points: vec![0.0],
         },
-        DType::F8 => IrDType::F8 {
-            scales: vec![1.0],
-        },
-        DType::F8R => IrDType::F8R {
-            scales: vec![1.0],
-        },
-        DType::F4 => IrDType::F4 {
-            scales: vec![1.0],
-        },
+        DType::F8 => IrDType::F8 { scales: vec![1.0] },
+        DType::F8R => IrDType::F8R { scales: vec![1.0] },
+        DType::F4 => IrDType::F4 { scales: vec![1.0] },
     }
 }

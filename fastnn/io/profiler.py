@@ -179,18 +179,18 @@ class PrecisionProfiler:
             if new_ratio <= target_ratio:
                 quantized_params += psize
                 quantized_count += 1
-                # U4 for the most robust (least sensitive) quarter
-                # U8 for the next quarter
+                # I4 for the most robust (least sensitive) quarter
+                # I8 for the next quarter
                 quarter = total_params / 4
                 if quantized_params <= quarter:
-                    overrides[param_name] = "u4"
+                    overrides[param_name] = "i4"
                 else:
-                    overrides[param_name] = "u8"
+                    overrides[param_name] = "i8"
             else:
                 overrides[param_name] = "f32"
 
         logger.info(
-            "Auto config: %d params profiled, %.1f%% quantized (%d params to U4/U8, %d to F32)",
+            "Auto config: %d params profiled, %.1f%% quantized (%d params to I4/I8, %d to F32)",
             len(sensitivities),
             100.0 * quantized_params / total_params,
             quantized_count,
