@@ -10,7 +10,9 @@ if [[ ! -f "$baseline_file" ]]; then
   exit 1
 fi
 
+echo "DEBUG: finding Rust files..."
 mapfile -t rust_files < <(git ls-files '*.rs')
+echo "DEBUG: found ${#rust_files[@]} Rust files"
 if [[ ${#rust_files[@]} -eq 0 ]]; then
   echo "No Rust files tracked by git."
   exit 0
@@ -27,10 +29,14 @@ for file in "${rust_files[@]}"; do
 done
 
 sort -u "$actual" -o "$actual"
+echo "DEBUG: $(wc -l < "$actual") files fail rustfmt check"
+
 grep -vE '^\s*(#|$)' "$baseline_file" | sort -u > "$baseline"
 
 new_debt=$(comm -13 "$baseline" "$actual")
 retired_debt=$(comm -23 "$baseline" "$actual")
+
+echo "DEBUG: new_debt has $(echo "$new_debt" | wc -l) lines, retired_debt has $(echo "$retired_debt" | wc -l) lines"
 
 if [[ -n "$retired_debt" ]]; then
   echo "rustfmt baseline entries no longer needed:"
