@@ -573,11 +573,13 @@ fn try_gpu_dispatch(
                 &zero_points,
             )
         }
-        "conv2d_i4" | "conv2d_i8" | "conv2d_f4" => {
+        "conv2d_i4" | "conv2d_i8" | "conv2d_f4" | "conv2d_f8" | "conv2d_f8r" => {
             let dtype_tag = match kernel_name {
                 "conv2d_i4" => "i4",
                 "conv2d_i8" => "i8",
                 "conv2d_f4" => "f4",
+                "conv2d_f8" => "f8",
+                "conv2d_f8r" => "f8r",
                 _ => unreachable!(),
             };
             let scales = weight_meta
