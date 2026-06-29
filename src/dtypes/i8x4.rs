@@ -4,17 +4,18 @@ use super::PackedWord;
 /// Values are in the range [-128, 127].
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default)]
-pub struct U8x4(pub u32);
+pub struct I8x4(pub u32);
 
-// SAFETY: U8x4 is a `repr(transparent)` struct over `u32`, so it is safe to
+// SAFETY: I8x4 is a `repr(transparent)` struct over `u32`, so it is safe to
 // reinterpret cast from/to byte slices.
-unsafe impl bytemuck::Pod for U8x4 {}
-unsafe impl bytemuck::Zeroable for U8x4 {}
+unsafe impl bytemuck::Pod for I8x4 {}
+unsafe impl bytemuck::Zeroable for I8x4 {}
 
-impl PackedWord for U8x4 {
+impl PackedWord for I8x4 {
     const ITEMS: usize = 4;
     const BIT_WIDTH: usize = 8;
     const IS_FLOAT: bool = false;
+    const MAX_REPRESENTABLE: f32 = 127.0;
     type Array = [f32; 4];
 
     #[inline]
@@ -35,7 +36,7 @@ impl PackedWord for U8x4 {
             let clamped = vals[i].clamp(-128.0, 127.0).round() as i8;
             word |= (clamped as u8 as u32) << (i * 8);
         }
-        U8x4(word)
+        I8x4(word)
     }
 
     fn wgsl_unpack_body() -> &'static str {
@@ -52,9 +53,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pack_unpack_roundtrip_u8x4() {
+    fn test_pack_unpack_roundtrip_i8x4() {
         let vals = [0.0, 1.0, -1.0, 127.0];
-        let packed = U8x4::pack_from_f32(vals);
+        let packed = I8x4::pack_from_f32(vals);
         let unpacked = packed.unpack_to_f32();
         for i in 0..4 {
             assert!(
@@ -68,18 +69,18 @@ mod tests {
     }
 
     #[test]
-    fn test_clamp_u8x4() {
+    fn test_clamp_i8x4() {
         let vals = [200.0, -200.0, 50.0, -50.0];
-        let packed = U8x4::pack_from_f32(vals);
+        let packed = I8x4::pack_from_f32(vals);
         let unpacked = packed.unpack_to_f32();
         assert_eq!(unpacked[0], 127.0);
         assert_eq!(unpacked[1], -128.0);
     }
 
     #[test]
-    fn test_zero_u8x4() {
+    fn test_zero_i8x4() {
         let vals = [0.0; 4];
-        let packed = U8x4::pack_from_f32(vals);
+        let packed = I8x4::pack_from_f32(vals);
         assert_eq!(packed.0, 0);
     }
 }

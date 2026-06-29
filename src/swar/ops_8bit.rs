@@ -6,7 +6,7 @@ pub const U8_ODD: u32 = 0xFF00_FF00;
 pub const U8_SIGN: u32 = 0x8080_8080;
 
 #[inline(always)]
-pub fn swar_add_u8x4(a: u32, b: u32) -> u32 {
+pub fn swar_add_i8x4(a: u32, b: u32) -> u32 {
     let a_odd_shifted = (a >> 8) & U8_EVEN;
     let b_odd_shifted = (b >> 8) & U8_EVEN;
 
@@ -17,7 +17,7 @@ pub fn swar_add_u8x4(a: u32, b: u32) -> u32 {
 }
 
 #[inline(always)]
-pub fn swar_sub_u8x4(a: u32, b: u32) -> u32 {
+pub fn swar_sub_i8x4(a: u32, b: u32) -> u32 {
     let a_odd_shifted = (a >> 8) & U8_EVEN;
     let b_odd_shifted = (b >> 8) & U8_EVEN;
 
@@ -42,7 +42,7 @@ pub fn swar_relu_s8x4(v: u32) -> u32 {
 }
 
 #[inline(always)]
-pub fn swar_relu_backward_u8x4(grad: u32, pre_relu: u32) -> u32 {
+pub fn swar_relu_backward_i8x4(grad: u32, pre_relu: u32) -> u32 {
     let sign_bits = pre_relu & U8_SIGN;
     let neg_mask = sign_bits | sign_bits.wrapping_sub(sign_bits >> 7);
     let nz = pre_relu | (pre_relu >> 1);
@@ -53,11 +53,11 @@ pub fn swar_relu_backward_u8x4(grad: u32, pre_relu: u32) -> u32 {
     grad & not_zero & !neg_mask
 }
 
-/// Fused SWAR ReLU forward + backward for U8x4.
+/// Fused SWAR ReLU forward + backward for I8x4.
 /// Returns (relu_output, mask_for_grad) computed in a single pass
 /// sharing the sign-bit computation.
 #[inline(always)]
-pub fn swar_fused_relu_u8x4(v: u32) -> (u32, u32) {
+pub fn swar_fused_relu_i8x4(v: u32) -> (u32, u32) {
     let sign_bits = v & U8_SIGN;
     let neg_mask = sign_bits | sign_bits.wrapping_sub(sign_bits >> 7);
     let nz = v | (v >> 1);
@@ -71,7 +71,7 @@ pub fn swar_fused_relu_u8x4(v: u32) -> (u32, u32) {
 }
 
 #[inline(always)]
-pub fn swar_max_u8x4(a: u32, b: u32) -> u32 {
+pub fn swar_max_i8x4(a: u32, b: u32) -> u32 {
     let a_biased = a ^ U8_SIGN;
     let b_biased = b ^ U8_SIGN;
 
@@ -97,7 +97,7 @@ pub fn swar_max_u8x4(a: u32, b: u32) -> u32 {
 }
 
 #[inline(always)]
-pub fn swar_min_u8x4(a: u32, b: u32) -> u32 {
+pub fn swar_min_i8x4(a: u32, b: u32) -> u32 {
     let a_biased = a ^ U8_SIGN;
     let b_biased = b ^ U8_SIGN;
 
@@ -130,16 +130,16 @@ mod tests {
     fn test_swar_add_no_carry_leak() {
         let a = 0x007F_007Fu32;
         let b = 0x0001_0001u32;
-        let result = swar_add_u8x4(a, b);
+        let result = swar_add_i8x4(a, b);
         assert_eq!(result, 0x0080_0080);
     }
 
     #[test]
-    fn test_swar_max_u8x4() {
+    fn test_swar_max_i8x4() {
         // Note: 200 as u8 = -56 as i8, 0xCE as u8 = 206 = -50 as i8
         let a = (50u32) | ((0xE2u32) << 8) | ((100u32) << 16) | ((0xFFu32) << 24);
         let b = (10u32) | ((20u32) << 8) | ((200u32) << 16) | ((0xCEu32) << 24);
-        let result = swar_max_u8x4(a, b);
+        let result = swar_max_i8x4(a, b);
         let bytes = result.to_le_bytes();
         assert_eq!(bytes[0] as i8, 50); // max(50, 10) = 50
         assert_eq!(bytes[1] as i8, 20); // max(-30, 20) = 20
@@ -148,10 +148,10 @@ mod tests {
     }
 
     #[test]
-    fn test_swar_min_u8x4() {
+    fn test_swar_min_i8x4() {
         let a = (50u32) | ((0xE2u32) << 8) | ((100u32) << 16) | ((0xFFu32) << 24);
         let b = (10u32) | ((20u32) << 8) | ((200u32) << 16) | ((0xCEu32) << 24);
-        let result = swar_min_u8x4(a, b);
+        let result = swar_min_i8x4(a, b);
         let bytes = result.to_le_bytes();
         assert_eq!(bytes[0] as i8, 10); // min(50, 10) = 10
         assert_eq!(bytes[1] as i8, -30); // min(-30, 20) = -30
@@ -178,11 +178,53 @@ mod tests {
     fn test_swar_relu_backward() {
         let grad = 0xFFFF_FFFFu32;
         let pre_relu: u32 = (50u32) | ((0xE2u32) << 8) | ((100u32) << 16) | ((0xFFu32) << 24);
-        let result = swar_relu_backward_u8x4(grad, pre_relu);
+        let result = swar_relu_backward_i8x4(grad, pre_relu);
         let bytes = result.to_le_bytes();
         assert_eq!(bytes[0], 0xFF);
         assert_eq!(bytes[1], 0x00);
         assert_eq!(bytes[2], 0xFF);
         assert_eq!(bytes[3], 0x00);
+    }
+
+    #[test]
+    fn test_swar_sub_i8x4() {
+        let a =
+            (100u32) | ((50u32) << 8) | ((-30i8) as u8 as u32) << 16 | ((-1i8) as u8 as u32) << 24;
+        let b = (30u32) | ((70u32) << 8) | ((20u32) << 16) | ((-50i8) as u8 as u32) << 24;
+        let result = swar_sub_i8x4(a, b);
+        let bytes = result.to_le_bytes();
+        assert_eq!(bytes[0] as i8, 70); // 100 - 30
+        assert_eq!(bytes[1] as i8, -20); // 50 - 70
+        assert_eq!(bytes[2] as i8, -50); // -30 - 20
+        assert_eq!(bytes[3] as i8, 49); // -1 - (-50)
+    }
+
+    #[test]
+    fn test_swar_sub_i8x4_boundary() {
+        let a = (127i8 as u8 as u32) | ((-128i8 as u8 as u32) << 8) | (1u32 << 24);
+        let b =
+            (1u32) | ((1u32) << 8) | ((-128i8 as u8 as u32) << 16) | ((127i8 as u8 as u32) << 24);
+        let result = swar_sub_i8x4(a, b);
+        let bytes = result.to_le_bytes();
+        assert_eq!(bytes[0] as i8, 126); // 127 - 1
+        assert_eq!(bytes[1] as i8, 127); // -128 - 1 (wraps to 127)
+        assert_eq!(bytes[2] as i8, -128i8); // 0 - (-128) wraps to -128
+        assert_eq!(bytes[3] as i8, -126); // 1 - 127
+    }
+
+    #[test]
+    fn test_swar_fused_relu_i8x4() {
+        let pre: u32 = (50u32) | ((0xE2u32) << 8) | ((100u32) << 16) | ((0xFFu32) << 24);
+        let (out, mask) = swar_fused_relu_i8x4(pre);
+        let out_bytes = out.to_le_bytes();
+        let mask_bytes = mask.to_le_bytes();
+        assert_eq!(out_bytes[0] as i8, 50);
+        assert_eq!(out_bytes[1] as i8, 0);
+        assert_eq!(out_bytes[2] as i8, 100);
+        assert_eq!(out_bytes[3] as i8, 0);
+        assert_eq!(mask_bytes[0], 0xFF); // keep
+        assert_eq!(mask_bytes[1], 0x00); // mask out
+        assert_eq!(mask_bytes[2], 0xFF); // keep
+        assert_eq!(mask_bytes[3], 0x00); // mask out
     }
 }

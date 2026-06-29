@@ -383,11 +383,11 @@ impl<T: PackedWord> PackedTensor<T> {
     }
 
     pub fn compute_scale(data: &[f32]) -> f32 {
-        if T::IS_FLOAT {
+        if T::IS_FLOAT && T::BIT_WIDTH >= 16 {
             return 1.0;
         }
         let max_abs = data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
+        let max_val = T::MAX_REPRESENTABLE;
         if max_abs == 0.0 {
             1.0
         } else {
@@ -401,13 +401,13 @@ impl<T: PackedWord> PackedTensor<T> {
     }
 
     pub fn compute_scales_per_channel(data: &[f32], shape: &[usize]) -> Vec<f32> {
-        if T::IS_FLOAT {
+        if T::IS_FLOAT && T::BIT_WIDTH >= 16 {
             return vec![1.0];
         }
         assert!(shape.len() >= 2, "Per-channel requires 2D+ shape");
         let m = shape[0];
         let inner_stride: usize = shape[1..].iter().product();
-        let max_val = ((1u32 << (T::BIT_WIDTH - 1)) - 1) as f32;
+        let max_val = T::MAX_REPRESENTABLE;
         let mut scales = Vec::with_capacity(m);
         for row in 0..m {
             let start = row * inner_stride;
@@ -777,12 +777,11 @@ mod tests {
     use super::*;
     use crate::dtypes::F16x2;
     use crate::dtypes::F32x1;
-    use crate::dtypes::U4x8;
-    use crate::dtypes::U8x4;
+    use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4};
 
     #[test]
     fn test_packed_tensor_zeros() {
-        let t = PackedTensor::<U4x8>::zeros(&[16]);
+        let t = PackedTensor::<I4x8>::zeros(&[16]);
         assert_eq!(t.numel(), 16);
         assert_eq!(t.packed_len(), 2);
         let vals = t.to_f32_vec();
@@ -790,9 +789,9 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_tensor_roundtrip_u4x8() {
+    fn test_packed_tensor_roundtrip_i4x8() {
         let data: Vec<f32> = (0..16).map(|i| (i as f32) - 8.0).collect();
-        let t = PackedTensor::<U4x8>::from_f32_auto(&data, &[16]);
+        let t = PackedTensor::<I4x8>::from_f32_auto(&data, &[16]);
         let recovered = t.to_f32_vec();
         for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
             let tolerance = t.scale() + 0.01;
@@ -808,9 +807,9 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_tensor_roundtrip_u8x4() {
+    fn test_packed_tensor_roundtrip_i8x4() {
         let data: Vec<f32> = vec![0.0, 50.0, -50.0, 100.0];
-        let t = PackedTensor::<U8x4>::from_f32_auto(&data, &[4]);
+        let t = PackedTensor::<I8x4>::from_f32_auto(&data, &[4]);
         let recovered = t.to_f32_vec();
         for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
             assert!(
@@ -849,10 +848,10 @@ mod tests {
     }
 
     #[test]
-    fn test_block_major_roundtrip_u8x4() {
-        // 6 rows × 8 cols, U8x4 (4 values per word → k_packed = 2)
+    fn test_block_major_roundtrip_i8x4() {
+        // 6 rows × 8 cols, I8x4 (4 values per word → k_packed = 2)
         let data: Vec<f32> = (0..48).map(|i| (i as f32) - 24.0).collect();
-        let t_row = PackedTensor::<U8x4>::from_f32_auto(&data, &[6, 8]);
+        let t_row = PackedTensor::<I8x4>::from_f32_auto(&data, &[6, 8]);
         let t_block = t_row.to_block_major(4);
 
         assert!(t_block.is_block_major());
@@ -916,7 +915,7 @@ mod tests {
     fn test_block_major_non_multiple_rows() {
         // 5 rows × 8 cols (not a multiple of block_size=4)
         let data: Vec<f32> = (0..40).map(|i| (i as f32) - 20.0).collect();
-        let t_row = PackedTensor::<U8x4>::from_f32_auto(&data, &[5, 8]);
+        let t_row = PackedTensor::<I8x4>::from_f32_auto(&data, &[5, 8]);
         let t_block = t_row.to_block_major(4);
 
         assert_eq!(t_block.block_size(), 4);
@@ -938,7 +937,7 @@ mod tests {
     #[test]
     fn test_get_set() {
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
-        let mut t = PackedTensor::<U8x4>::from_f32_auto(&data, &[4]);
+        let mut t = PackedTensor::<I8x4>::from_f32_auto(&data, &[4]);
         let val = t.get(2);
         assert!((val - 3.0).abs() <= t.scale() + 0.01);
         t.set(2, 3.5);
@@ -947,13 +946,13 @@ mod tests {
     }
 
     #[test]
-    fn test_u4x8_small_k_roundtrip() {
-        // U4x8 packs 8 × 4-bit values per u32 word. With K=4 (inner_dim < ITEMS=8),
+    fn test_i4x8_small_k_roundtrip() {
+        // I4x8 packs 8 × 4-bit values per u32 word. With K=4 (inner_dim < ITEMS=8),
         // each row fits in a single word with 4 valid elements + 4 padding positions.
         // This tests the edge case where word_index() must use elem_in_row % T::ITEMS
         // (not idx % T::ITEMS) to find the correct sub-word element position.
         let data: Vec<f32> = vec![0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 128.0, 64.0];
-        let t = PackedTensor::<U4x8>::from_f32_auto(&data, &[2, 4]);
+        let t = PackedTensor::<I4x8>::from_f32_auto(&data, &[2, 4]);
         let tol = t.scale() + 0.01;
 
         // Verify get() for every element
@@ -971,7 +970,7 @@ mod tests {
         }
 
         // Verify set() roundtrip
-        let mut t2 = PackedTensor::<U4x8>::from_f32_auto(&data, &[2, 4]);
+        let mut t2 = PackedTensor::<I4x8>::from_f32_auto(&data, &[2, 4]);
         t2.set(1, 25.0);
         t2.set(5, 225.0);
         let expected_1 = 25.0f32;
@@ -1000,5 +999,129 @@ mod tests {
                 rec
             );
         }
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4_roundtrip() {
+        let data: Vec<f32> = vec![1.0, -1.0, 128.0, -128.0];
+        let t = PackedTensor::<F8x4>::from_f32_auto(&data, &[4]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err < 0.5 * orig.abs().max(1.0),
+                "F8x4 mismatch at {}: orig={}, rec={}, err={}",
+                i,
+                orig,
+                rec,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4r_roundtrip() {
+        let data: Vec<f32> = vec![1.0, -1.0, 256.0, -256.0];
+        let t = PackedTensor::<F8x4R>::from_f32_auto(&data, &[4]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err < 0.5 * orig.abs().max(1.0),
+                "F8x4R mismatch at {}: orig={}, rec={}, err={}",
+                i,
+                orig,
+                rec,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_roundtrip() {
+        let data: Vec<f32> = vec![0.0, 1.0, -1.0, 2.0, -2.0, 4.0, -4.0, 6.0];
+        let t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            assert!(
+                err < 0.5 * orig.abs().max(1.0),
+                "F4x8 mismatch at {}: orig={}, rec={}, err={}",
+                i,
+                orig,
+                rec,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_single_word() {
+        let data: Vec<f32> = vec![0.0, 1.0, 2.0, 4.0, -0.0, -1.0, -2.0, -4.0];
+        let t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
+        assert_eq!(
+            t.packed_len(),
+            17,
+            "F4x8 packs 8 values into 1 u32 + 16 SIMD margin"
+        );
+        let recovered = t.to_f32_vec();
+        for i in 0..8 {
+            let err = (data[i] - recovered[i]).abs();
+            assert!(
+                err < 0.5 * data[i].abs().max(1.0),
+                "F4x8 single_word mismatch at {}: orig={}, rec={}",
+                i,
+                data[i],
+                recovered[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4_zeros() {
+        let t = PackedTensor::<F8x4>::zeros(&[4]);
+        assert_eq!(t.numel(), 4);
+        assert_eq!(t.packed_len(), 1);
+        let vals = t.to_f32_vec();
+        assert!(vals.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_packed_tensor_f8x4r_zeros() {
+        let t = PackedTensor::<F8x4R>::zeros(&[4]);
+        assert_eq!(t.numel(), 4);
+        assert_eq!(t.packed_len(), 1);
+        let vals = t.to_f32_vec();
+        assert!(vals.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_zeros() {
+        let t = PackedTensor::<F4x8>::zeros(&[8]);
+        assert_eq!(t.numel(), 8);
+        assert_eq!(t.packed_len(), 1);
+        let vals = t.to_f32_vec();
+        assert!(vals.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_packed_tensor_f4x8_get_set() {
+        let data: Vec<f32> = vec![0.0, 1.0, -1.0, 2.0, 4.0, -4.0, 6.0, -6.0];
+        let mut t = PackedTensor::<F4x8>::from_f32_auto(&data, &[8]);
+        for i in 0..8 {
+            let v = t.get(i);
+            let err = (v - data[i]).abs();
+            assert!(
+                err < 0.5 * data[i].abs().max(1.0),
+                "F4x8 get({}) mismatch: got={}, expected={}",
+                i,
+                v,
+                data[i]
+            );
+        }
+        t.set(0, 3.0);
+        let v = t.get(0);
+        let err = (v - 3.0).abs();
+        assert!(err < 0.5 * 3.0f32.max(1.0), "F4x8 set(0, 3.0) got={}", v);
     }
 }

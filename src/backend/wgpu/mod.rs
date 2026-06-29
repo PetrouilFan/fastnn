@@ -543,8 +543,15 @@ fn try_gpu_dispatch(
             input_slices,
             output_slice,
         ),
-        "matmul_u4" | "matmul_u8" => {
-            let bit_width = if kernel_name == "matmul_u4" { 4 } else { 8 };
+        "matmul_i4" | "matmul_i8" | "matmul_f4" | "matmul_f8" | "matmul_f8r" => {
+            let dtype_tag = match kernel_name {
+                "matmul_i4" => "i4",
+                "matmul_i8" => "i8",
+                "matmul_f4" => "f4",
+                "matmul_f8" => "f8",
+                "matmul_f8r" => "f8r",
+                _ => unreachable!(),
+            };
             let scales = weight_meta
                 .as_ref()
                 .map(|m| m.scales.clone())
@@ -561,13 +568,18 @@ fn try_gpu_dispatch(
                 input_slices,
                 output_slice,
                 &resolved_params,
-                bit_width,
+                dtype_tag,
                 &scales,
                 &zero_points,
             )
         }
-        "conv2d_u4" | "conv2d_u8" => {
-            let bit_width = if kernel_name == "conv2d_u4" { 4 } else { 8 };
+        "conv2d_i4" | "conv2d_i8" | "conv2d_f4" => {
+            let dtype_tag = match kernel_name {
+                "conv2d_i4" => "i4",
+                "conv2d_i8" => "i8",
+                "conv2d_f4" => "f4",
+                _ => unreachable!(),
+            };
             let scales = weight_meta
                 .as_ref()
                 .map(|m| m.scales.clone())
@@ -584,10 +596,46 @@ fn try_gpu_dispatch(
                 input_slices,
                 output_slice,
                 &resolved_params,
-                bit_width,
+                dtype_tag,
                 &scales,
                 &zero_points,
             )
+        }
+        "quantize_gradient_f32_to_f8x4r" => {
+            let numel = resolved_params.first().copied().unwrap_or(0);
+            if let Some(input_slice) = input_slices.first() {
+                quantized::dispatch_quantize_gradient_gpu(
+                    ctx,
+                    encoder,
+                    pending_reads,
+                    arena,
+                    input_slice,
+                    output_slice,
+                    numel,
+                )
+            } else {
+                Err(BackendError::Dispatch(
+                    "quantize_gradient: missing input".into(),
+                ))
+            }
+        }
+        "dequantize_gradient_f8x4r_to_f32" => {
+            let numel = resolved_params.first().copied().unwrap_or(0);
+            if let Some(input_slice) = input_slices.first() {
+                quantized::dispatch_dequantize_gradient_gpu(
+                    ctx,
+                    encoder,
+                    pending_reads,
+                    arena,
+                    input_slice,
+                    output_slice,
+                    numel,
+                )
+            } else {
+                Err(BackendError::Dispatch(
+                    "dequantize_gradient: missing input".into(),
+                ))
+            }
         }
         "upsample_nearest2d" | "upsample_bilinear2d" => {
             Err(BackendError::UnsupportedOp(kernel_name.to_string()))

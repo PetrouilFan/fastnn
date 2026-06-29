@@ -91,9 +91,9 @@ pub enum Opcode {
     /// Casts the input tensor to a target dtype (specified via `"to"` attr).
     Cast,
     // ── v2.1 type conversion ops (quantization + precision) ──────────
-    /// Quantize F32 → U4/U8 with per-channel scales/zero_points (attribute `"bit_width"`).
+    /// Quantize F32 to I4/I8 packed weights with per-channel scales/zero_points (attribute `"bit_width"`).
     Quantize,
-    /// Dequantize U4/U8 → F32 using scales/zero_points from input dtype.
+    /// Dequantize packed weights to F32 using scales/zero_points from input dtype.
     Dequantize,
     /// Convert F32 → F16 (half-precision).
     ToF16,
@@ -126,6 +126,13 @@ pub enum Opcode {
     /// Backward: dx = dy * scale (correctly scales the gradient).
     /// Attribute `"scale"`: f32 scale factor.
     GradientScale,
+    /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
+    /// Backward: straight-through estimator (gradient passes through unchanged).
+    /// Attribute `"scale"`: f32 scale factor (per-tensor).
+    QuantizeGradient,
+    /// Dequantize gradient F8x4R -> F32 for optimizer consumption.
+    /// Backward: straight-through estimator.
+    DequantizeGradient,
     // ── v2.2 fusion opcodes ────────────────────────────────────────
     /// Fused residual add + layer_norm/rms_norm: output = norm(input + residual)
     FusedResidualAddNorm,
@@ -534,17 +541,31 @@ pub enum IrDType {
     Bool,
     /// Signed 8-bit integer (used for INT8 activation quantization).
     I8,
-    /// Packed 4-bit (U4x8): 8 values per u32 word.
+    /// Packed 4-bit (I4x8): 8 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
-    U4 {
+    I4 {
         scales: Vec<f32>,
         zero_points: Vec<f32>,
     },
-    /// Packed 8-bit (U8x4): 4 values per u32 word.
+    /// Packed 8-bit (I8x4): 4 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
+    /// Note: variant name `U8` is a historical artifact; this is I8x4 (signed, packed).
     U8 {
         scales: Vec<f32>,
         zero_points: Vec<f32>,
+    },
+    /// FP8 E4M3 (no zero-point, 2-term dequant).
+    F8 {
+        scales: Vec<f32>,
+    },
+    /// FP8 E5M2 range variant (wider range, for gradients).
+    F8R {
+        scales: Vec<f32>,
+    },
+    /// FP4 E2M1 (NVFP4-style), 8 values per u32 word.
+    /// Uses 256-entry LUT for dot product. Block scales stored in PackedTensor.
+    F4 {
+        scales: Vec<f32>,
     },
 }
 
@@ -580,8 +601,11 @@ impl_ir_dtype_props!(
     (Self::I64, 8, "i64", 64, 1),
     (Self::Bool, 1, "bool", 1, 32),
     (Self::I8, 1, "i8", 8, 4),
-    (Self::U4 { .. }, 1, "u4", 4, 8),
-    (Self::U8 { .. }, 1, "u8", 8, 4),
+    (Self::I4 { .. }, 1, "i4", 4, 8),
+    (Self::U8 { .. }, 1, "i8", 8, 4),
+    (Self::F8 { .. }, 1, "f8", 8, 4),
+    (Self::F8R { .. }, 1, "f8r", 8, 4),
+    (Self::F4 { .. }, 1, "f4", 4, 8),
 );
 
 impl IrDType {
@@ -597,16 +621,26 @@ impl IrDType {
             IrDType::I64 => numel * 8,
             IrDType::Bool => numel,
             IrDType::I8 => numel,
-            // U4x8: 8 nibbles per u32 word (4 bytes)
+            // I4x8: 8 nibbles per u32 word (4 bytes)
             // packed_len = ceil(numel / 8) words + SIMD_MARGIN(16)
-            IrDType::U4 { .. } => {
-                let words = numel.div_ceil(8) + 16; // +16 SIMD_MARGIN
+            IrDType::I4 { .. } => {
+                let words = numel.div_ceil(8) + 16;
                 words * 4
             }
-            // U8x4: 4 values per u32 word (4 bytes)
+            // I8x4: 4 values per u32 word (4 bytes)
             // packed_len = ceil(numel / 4) words + SIMD_MARGIN(16)
             IrDType::U8 { .. } => {
-                let words = numel.div_ceil(4) + 16; // +16 SIMD_MARGIN
+                let words = numel.div_ceil(4) + 16;
+                words * 4
+            }
+            // F8x4/F8x4R: 4 values per u32 word (4 bytes)
+            IrDType::F8 { .. } | IrDType::F8R { .. } => {
+                let words = numel.div_ceil(4) + 16;
+                words * 4
+            }
+            // F4x8: 8 nibbles per u32 word (4 bytes)
+            IrDType::F4 { .. } => {
+                let words = numel.div_ceil(8) + 16;
                 words * 4
             }
         }
@@ -667,7 +701,7 @@ impl TensorType {
         // This differs from flat packing (ceil(total / ITEMS)) when the inner
         // dimension is not a multiple of ITEMS, which would cause slot under-allocation.
         match &self.dtype {
-            IrDType::U4 { .. } => {
+            IrDType::I4 { .. } => {
                 let inner_dim = self
                     .shape
                     .last()
@@ -706,6 +740,42 @@ impl TensorType {
             IrDType::I8 => {
                 // I8 activation payload includes 8-byte scale/zp header
                 numel + 8
+            }
+            IrDType::F8 { .. } | IrDType::F8R { .. } => {
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 4,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
+                let words = rows * inner_dim.div_ceil(4) + 16;
+                words * 4
+            }
+            IrDType::F4 { .. } => {
+                let inner_dim = self
+                    .shape
+                    .last()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as usize,
+                        DimExpr::Bounded { max, .. } => *max as usize,
+                        DimExpr::Symbol(_) => 8,
+                    })
+                    .unwrap_or(1);
+                let rows = if inner_dim > 0 {
+                    numel.div_ceil(inner_dim)
+                } else {
+                    1
+                };
+                let words = rows * inner_dim.div_ceil(8) + 16;
+                words * 4
             }
             _ => numel * self.dtype.byte_size(),
         }

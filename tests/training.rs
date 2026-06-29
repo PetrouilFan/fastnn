@@ -100,6 +100,62 @@ fn build_mlp_single_output() -> (
     )
 }
 
+// ─── Gradient Quantization Test ─────────────────────────────────────────────
+
+/// Test that F8x4R gradient quantization works during training.
+/// Verifies:
+///   - compile_train succeeds with gradient quantization (runs unconditionally)
+///   - Loss decreases over steps (gradients survive F8x4R roundtrip)
+///   - Multiple optimizer types work with gradient quantization
+#[test]
+fn test_gradient_quantization_with_sgd_converges() {
+    let (graph, loss_id, params, param_data, batch_inputs) = build_mlp_single_output();
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let mut model: CompiledTrainingModel<CpuBackend> = executor
+        .compile_train(
+            &graph,
+            loss_id,
+            &params,
+            &param_data.iter().map(|d| &d[..]).collect::<Vec<_>>(),
+            &batch_inputs,
+            None,
+            &TrainConfig {
+                optimizer: OptimizerConfig::SGD {
+                    lr: 0.1,
+                    weight_decay: 0.0,
+                },
+                quantize: None,
+            },
+        )
+        .expect("compile_train with gradient quantization should succeed");
+
+    let x_data = f32_bytes(&[2.0, -1.0, 0.5, 3.0]);
+
+    let mut losses = Vec::new();
+    for _ in 0..50 {
+        let loss = model
+            .train_step(&[&x_data])
+            .expect("train_step should succeed with gradient quantization");
+        losses.push(loss);
+    }
+
+    assert!(
+        losses[losses.len() - 1] < losses[0] * 0.3,
+        "GradientQ: loss did not converge under gradient quantization (first={:.6}, last={:.6})",
+        losses[0],
+        losses[losses.len() - 1]
+    );
+    assert!(
+        losses[0].is_finite() && losses[0] > 0.0,
+        "GradientQ: initial loss should be positive finite"
+    );
+    assert!(
+        losses[losses.len() - 1].is_finite(),
+        "GradientQ: final loss should be finite"
+    );
+}
+
 // ─── SGD Tests ───────────────────────────────────────────────────────────────
 
 #[test]

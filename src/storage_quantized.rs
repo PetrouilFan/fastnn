@@ -214,8 +214,8 @@ fn pack_block<T: PackedWord>(block_data: &[f32], scale: f32, zero: f32, packed: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtypes::U4x8;
-    use crate::dtypes::U8x4;
+    use crate::dtypes::I4x8;
+    use crate::dtypes::I8x4;
 
     fn max_absolute_error(orig: &[f32], recovered: &[f32]) -> f32 {
         orig.iter()
@@ -227,45 +227,45 @@ mod tests {
     #[test]
     fn test_quantized_tensor_creation() {
         let data: Vec<f32> = (0..128).map(|i| (i as f32) - 64.0).collect();
-        let qt = QuantizedTensor::<U4x8>::from_f32_blockwise(&data, &[128], 32);
+        let qt = QuantizedTensor::<I4x8>::from_f32_blockwise(&data, &[128], 32);
         assert_eq!(qt.scale_zp.len(), 4);
         assert!(qt.memory_bytes() < data.len());
     }
 
     #[test]
-    fn test_quantized_tensor_roundtrip_u4x8() {
+    fn test_quantized_tensor_roundtrip_i4x8() {
         let data: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 0.5).collect();
-        let qt = QuantizedTensor::<U4x8>::from_f32_blockwise(&data, &[64], 16);
+        let qt = QuantizedTensor::<I4x8>::from_f32_blockwise(&data, &[64], 16);
         let recovered = qt.to_f32_vec();
         let max_err = max_absolute_error(&data, &recovered);
         let max_scale = qt.scale_zp.iter().map(|&(s, _)| s).fold(0.0f32, f32::max);
         assert!(
             max_err <= max_scale + 1e-4,
-            "U4x8 roundtrip max error {} exceeds scale {}",
+            "I4x8 roundtrip max error {} exceeds scale {}",
             max_err,
             max_scale
         );
     }
 
     #[test]
-    fn test_quantized_tensor_roundtrip_u8x4() {
+    fn test_quantized_tensor_roundtrip_i8x4() {
         let data: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 2.0).collect();
-        let qt = QuantizedTensor::<U8x4>::from_f32_blockwise(&data, &[64], 16);
+        let qt = QuantizedTensor::<I8x4>::from_f32_blockwise(&data, &[64], 16);
         let recovered = qt.to_f32_vec();
         let max_err = max_absolute_error(&data, &recovered);
         let max_scale = qt.scale_zp.iter().map(|&(s, _)| s).fold(0.0f32, f32::max);
         assert!(
             max_err <= max_scale + 1e-4,
-            "U8x4 roundtrip max error {} exceeds scale {}",
+            "I8x4 roundtrip max error {} exceeds scale {}",
             max_err,
             max_scale
         );
     }
 
     #[test]
-    fn test_quantized_tensor_to_packed_u4x8() {
+    fn test_quantized_tensor_to_packed_i4x8() {
         let data: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 0.5).collect();
-        let qt = QuantizedTensor::<U4x8>::from_f32_blockwise(&data, &[64], 16);
+        let qt = QuantizedTensor::<I4x8>::from_f32_blockwise(&data, &[64], 16);
         let packed = qt.to_packed();
         let recovered = packed.to_f32_vec();
         let max_err = max_absolute_error(&data, &recovered);

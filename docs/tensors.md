@@ -70,7 +70,7 @@ f = fnn.full_like(x, 3.0)
 | `i64` | 64-bit integer | 8 bytes |
 | `bool` | Boolean | 1 byte |
 
-> **Packed Precision Types** (Rust API only, not Python dtypes): For packed weight storage, the Rust API provides `U4x8`, `U8x4`, `F16x2`, `F32x1` types that pack multiple values per `u32` word. These are compile-time types used with `PackedTensor<T>` and are not accessible from Python. See `docs/performance-roadmap.md` for details.
+> **Packed Precision Types** (Rust API only, not Python dtypes): For packed weight storage, the Rust API provides `I4x8`, `I8x4`, `F16x2`, `F32x1` types that pack multiple values per `u32` word. These are compile-time types used with `PackedTensor<T>` and are not accessible from Python. See `docs/performance-roadmap.md` for details.
 
 ## Tensor Operations
 

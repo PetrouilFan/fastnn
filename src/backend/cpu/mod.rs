@@ -9,7 +9,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{PackedWord, U4x8, U8x4};
+use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -240,9 +240,16 @@ impl Backend for CpuBackend {
                         .filter_map(|&input_id| graph.get_node(input_id))
                         .map(|n| n.output_type.dtype.clone())
                         .collect();
-                    let is_quantized = input_dtypes
-                        .iter()
-                        .any(|d| matches!(d, IrDType::U4 { .. } | IrDType::U8 { .. }));
+                    let is_quantized = input_dtypes.iter().any(|d| {
+                        matches!(
+                            d,
+                            IrDType::I4 { .. }
+                                | IrDType::U8 { .. }
+                                | IrDType::F4 { .. }
+                                | IrDType::F8 { .. }
+                                | IrDType::F8R { .. }
+                        )
+                    });
 
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
                     // Determine fusion params for the unified "matmul" kernel
@@ -269,9 +276,9 @@ impl Backend for CpuBackend {
                             if input_dtypes
                                 .first()
                                 .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. })) =>
                         {
-                            "matmul_u4_i8"
+                            "matmul_i4_i8"
                         }
                         // Quantized: I8 activation + U8 weight (no U4)
                         (_, true)
@@ -281,18 +288,38 @@ impl Backend for CpuBackend {
                                 && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
                                 && !input_dtypes
                                     .iter()
-                                    .any(|d| matches!(d, IrDType::U4 { .. })) =>
+                                    .any(|d| matches!(d, IrDType::I4 { .. })) =>
                         {
-                            "matmul_u8_i8"
+                            "matmul_i8_i8"
                         }
                         // Quantized: F32 (or non-I8) activation + U4 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::U4 { .. })) =>
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. })) =>
                         {
-                            "matmul_u4"
+                            "matmul_i4"
+                        }
+                        // Quantized: F32 activation + FP4 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F4 { .. })) =>
+                        {
+                            "matmul_f4"
+                        }
+                        // Quantized: F32 activation + FP8 E4M3 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F8 { .. })) =>
+                        {
+                            "matmul_f8"
+                        }
+                        // Quantized: F32 activation + FP8 E5M2 weight
+                        (_, true)
+                            if input_dtypes
+                                .iter()
+                                .any(|d| matches!(d, IrDType::F8R { .. })) =>
+                        {
+                            "matmul_f8r"
                         }
                         // Quantized: F32 (or non-I8) activation + U8 weight
-                        (_, true) => "matmul_u8",
+                        (_, true) => "matmul_i8",
                     };
                     // Extract M, K, N from input shapes
                     let m = input_shapes
@@ -327,7 +354,7 @@ impl Backend for CpuBackend {
                         node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
                                 let (bit_width, scales, zero_points) = match &wn.output_type.dtype {
-                                    IrDType::U4 {
+                                    IrDType::I4 {
                                         scales,
                                         zero_points,
                                     } => (4usize, scales.clone(), zero_points.clone()),
@@ -335,6 +362,15 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (8usize, scales.clone(), zero_points.clone()),
+                                    IrDType::F4 { scales } => {
+                                        (4usize, scales.clone(), vec![0.0; scales.len()])
+                                    }
+                                    IrDType::F8 { scales } => {
+                                        (8usize, scales.clone(), vec![0.0; scales.len()])
+                                    }
+                                    IrDType::F8R { scales } => {
+                                        (8usize, scales.clone(), vec![0.0; scales.len()])
+                                    }
                                     _ => (0usize, vec![], vec![]),
                                 };
                                 let mut w_shape: Vec<usize> = wn
@@ -563,17 +599,23 @@ impl Backend for CpuBackend {
                         .get(1)
                         .and_then(|&w_id| graph.get_node(w_id))
                         .map(|wn| wn.output_type.dtype.clone());
-                    let is_quantized = weight_dtype
-                        .as_ref()
-                        .is_some_and(|d| matches!(d, IrDType::U4 { .. } | IrDType::U8 { .. }));
+                    let is_quantized = weight_dtype.as_ref().is_some_and(|d| {
+                        matches!(
+                            d,
+                            IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F4 { .. }
+                        )
+                    });
                     let (kernel_name, weight_meta) = if is_quantized {
                         let dtype = weight_dtype.as_ref().unwrap();
-                        let mut kernel = if matches!(dtype, IrDType::U4 { .. }) {
-                            "conv2d_u4".to_string()
+                        let mut kernel = if matches!(dtype, IrDType::F4 { .. }) {
+                            "conv2d_f4".to_string()
+                        } else if matches!(dtype, IrDType::I4 { .. }) {
+                            "conv2d_i4".to_string()
                         } else {
-                            "conv2d_u8".to_string()
+                            "conv2d_i8".to_string()
                         };
-                        let bit_width = if matches!(dtype, IrDType::U4 { .. }) {
+                        let bit_width = if matches!(dtype, IrDType::I4 { .. } | IrDType::F4 { .. })
+                        {
                             4usize
                         } else {
                             8usize
@@ -608,10 +650,11 @@ impl Backend for CpuBackend {
                         let meta = node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
                                 let (bw, scales, zero_points) = match &wn.output_type.dtype {
-                                    IrDType::U4 {
+                                    IrDType::I4 {
                                         scales,
                                         zero_points,
                                     } => (4usize, scales.clone(), zero_points.clone()),
+                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![]),
                                     IrDType::U8 {
                                         scales,
                                         zero_points,
@@ -1883,7 +1926,7 @@ impl Backend for CpuBackend {
                         .first()
                         .and_then(|&input_id| graph.get_node(input_id))
                         .map(|n| match &n.output_type.dtype {
-                            IrDType::U4 {
+                            IrDType::I4 {
                                 scales,
                                 zero_points,
                                 ..
@@ -1933,7 +1976,7 @@ impl Backend for CpuBackend {
                         .first()
                         .and_then(|&input_id| graph.get_node(input_id))
                         .map(|n| match &n.output_type.dtype {
-                            IrDType::U4 {
+                            IrDType::I4 {
                                 scales,
                                 zero_points,
                             } => (scales.clone(), zero_points.clone()),
@@ -2186,6 +2229,42 @@ impl Backend for CpuBackend {
                             output_slice,
                             secondary_output_slice: None,
                             params: vec![numel, scale.to_bits() as usize],
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
+                }
+                Opcode::QuantizeGradient => {
+                    if let Some(&_input_slice) = input_slices.first() {
+                        let numel = input_shapes
+                            .first()
+                            .map(|s| s.iter().product::<u64>() as usize)
+                            .unwrap_or(1);
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "quantize_gradient_f32_to_f8x4r".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![numel],
+                            param_dims: None,
+                            weight_meta: None,
+                        });
+                    }
+                }
+                Opcode::DequantizeGradient => {
+                    if let Some(&_input_slice) = input_slices.first() {
+                        let numel = input_shapes
+                            .first()
+                            .map(|s| s.iter().product::<u64>() as usize)
+                            .unwrap_or(1);
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "dequantize_gradient_f8x4r_to_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![numel],
                             param_dims: None,
                             weight_meta: None,
                         });
@@ -2796,8 +2875,8 @@ impl Backend for CpuBackend {
                                 |x| x / (1.0 + (-x).exp()),
                             )?;
                         }
-                        "matmul_u4" => {
-                            quantized_matmul_dispatch::<U4x8>(
+                        "matmul_i4" => {
+                            quantized_matmul_dispatch::<I4x8>(
                                 input_slices,
                                 arena,
                                 params,
@@ -2807,10 +2886,10 @@ impl Backend for CpuBackend {
                                 out_start,
                                 out_end,
                                 4,
-                                "matmul_u4",
+                                "matmul_i4",
                             )?;
                         }
-                        "matmul_u4_i8" => {
+                        "matmul_i4_i8" => {
                             quantized_matmul_dispatch_i8_u4(
                                 input_slices,
                                 arena,
@@ -2820,10 +2899,10 @@ impl Backend for CpuBackend {
                                 weight_meta,
                                 out_start,
                                 out_end,
-                                "matmul_u4_i8",
+                                "matmul_i4_i8",
                             )?;
                         }
-                        "matmul_u8_i8" => {
+                        "matmul_i8_i8" => {
                             quantized_matmul_dispatch_i8_u8(
                                 input_slices,
                                 arena,
@@ -2833,11 +2912,11 @@ impl Backend for CpuBackend {
                                 weight_meta,
                                 out_start,
                                 out_end,
-                                "matmul_u8_i8",
+                                "matmul_i8_i8",
                             )?;
                         }
-                        "matmul_u8" => {
-                            quantized_matmul_dispatch::<U8x4>(
+                        "matmul_i8" => {
+                            quantized_matmul_dispatch::<I8x4>(
                                 input_slices,
                                 arena,
                                 params,
@@ -2847,7 +2926,49 @@ impl Backend for CpuBackend {
                                 out_start,
                                 out_end,
                                 8,
-                                "matmul_u8",
+                                "matmul_i8",
+                            )?;
+                        }
+                        "matmul_f4" => {
+                            quantized_matmul_dispatch::<F4x8>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                4,
+                                "matmul_f4",
+                            )?;
+                        }
+                        "matmul_f8" => {
+                            quantized_matmul_dispatch::<F8x4>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_f8",
+                            )?;
+                        }
+                        "matmul_f8r" => {
+                            quantized_matmul_dispatch::<F8x4R>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_f8r",
                             )?;
                         }
                         "reduce_f32" => {
@@ -3371,9 +3492,9 @@ impl Backend for CpuBackend {
                             }
                         }
                         // â”€â”€ Conv2d Quantized (u4/u8) â€” i8 activation path (arena) â”€â”€
-                        "conv2d_u4_i8" | "conv2d_u4_i8_relu" | "conv2d_u4_i8_gelu"
-                        | "conv2d_u4_i8_silu" | "conv2d_u8_i8" | "conv2d_u8_i8_relu"
-                        | "conv2d_u8_i8_gelu" | "conv2d_u8_i8_silu" => {
+                        "conv2d_i4_i8" | "conv2d_i4_i8_relu" | "conv2d_i4_i8_gelu"
+                        | "conv2d_i4_i8_silu" | "conv2d_i8_i8" | "conv2d_i8_i8_relu"
+                        | "conv2d_i8_i8_gelu" | "conv2d_i8_i8_silu" => {
                             if input_slices.len() >= 2 {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];
@@ -3396,11 +3517,11 @@ impl Backend for CpuBackend {
                                 let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
                                 else {
-                                    return Err(BackendError::Dispatch("conv2d_u4_i8/u8_i8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                                    return Err(BackendError::Dispatch("conv2d_i4_i8/u8_i8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
                                 };
                                 let meta = weight_meta.clone().ok_or_else(|| {
                                     BackendError::Dispatch(
-                                        "conv2d_u4_i8/u8_i8: missing weight_meta".into(),
+                                        "conv2d_i4_i8/u8_i8: missing weight_meta".into(),
                                     )
                                 })?;
                                 let out_f32 = {
@@ -3460,7 +3581,7 @@ impl Backend for CpuBackend {
                                 let inner: usize = meta.shape[1..].iter().product();
                                 // Pre-allocate reusable buffers across groups/batches
                                 let mut payload = Vec::with_capacity(8 + num_pixels * k);
-                                let mut packed_act = vec![U8x4(0); num_pixels * inner.div_ceil(4)];
+                                let mut packed_act = vec![I8x4(0); num_pixels * inner.div_ceil(4)];
                                 let mut temp = vec![0.0f32; num_pixels * oc_per_g];
 
                                 for nn in 0..n {
@@ -3492,8 +3613,8 @@ impl Backend for CpuBackend {
                                             payload.extend_from_slice(&affine.zero.to_le_bytes());
                                             let col_u8: &[u8] = bytemuck::cast_slice(&col_buf);
                                             payload.extend_from_slice(col_u8);
-                                            let kp = inner.div_ceil(U4x8::ITEMS);
-                                            let w_sl = aligned_packed_slice::<U4x8>(&raw);
+                                            let kp = inner.div_ceil(I4x8::ITEMS);
+                                            let w_sl = aligned_packed_slice::<I4x8>(&raw);
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let local_scales = if meta.scales.len() > 1 {
@@ -3513,7 +3634,7 @@ impl Backend for CpuBackend {
                                                 local_scales,
                                                 local_zps,
                                             );
-                                            microkernels::gemm_cpu_flat_i8_u4x8(
+                                            microkernels::gemm_cpu_flat_i8_i4x8(
                                                 &pt, &payload, &mut temp, num_pixels, k, oc_per_g,
                                             );
                                             for pixel in 0..num_pixels {
@@ -3535,9 +3656,9 @@ impl Backend for CpuBackend {
                                                 }
                                             }
                                         } else {
-                                            // U8 path: pack i8 â†’ U8x4 (lossless), use fast packed SWAR GEMM
-                                            let kp = inner.div_ceil(U8x4::ITEMS);
-                                            let w_sl = aligned_packed_slice::<U8x4>(&raw);
+                                            // U8 path: pack i8 â†’ I8x4 (lossless), use fast packed SWAR GEMM
+                                            let kp = inner.div_ceil(I8x4::ITEMS);
+                                            let w_sl = aligned_packed_slice::<I8x4>(&raw);
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let per_channel_w = meta.scales.len() > 1;
@@ -3552,8 +3673,8 @@ impl Backend for CpuBackend {
                                             } else {
                                                 &meta.zero_points
                                             };
-                                            // Pack i8 â†’ U8x4 into reusable buffer
-                                            packed_conv::pack_i8_col_to_u8x4(
+                                            // Pack i8 â†’ I8x4 into reusable buffer
+                                            packed_conv::pack_i8_col_to_i8x4(
                                                 &col_buf,
                                                 num_pixels,
                                                 k,
@@ -3565,7 +3686,7 @@ impl Backend for CpuBackend {
                                                 None
                                             };
                                             // Raw packed GEMM â€” no PackedTensor wrapping, no allocations
-                                            packed_conv::gemm_packed_u8x4_fused_raw(
+                                            packed_conv::gemm_packed_i8x4_fused_raw(
                                                 &packed_act,
                                                 num_pixels,
                                                 k,
@@ -3592,8 +3713,9 @@ impl Backend for CpuBackend {
                             }
                         }
                         // â”€â”€ Conv2d Quantized (u4/u8) â€” FP32 activation path (arena) â”€â”€
-                        "conv2d_u4" | "conv2d_u4_relu" | "conv2d_u4_gelu" | "conv2d_u4_silu"
-                        | "conv2d_u8" | "conv2d_u8_relu" | "conv2d_u8_gelu" | "conv2d_u8_silu" => {
+                        "conv2d_f4" | "conv2d_f4_relu" | "conv2d_f4_gelu" | "conv2d_f4_silu"
+                        | "conv2d_i4" | "conv2d_i4_relu" | "conv2d_i4_gelu" | "conv2d_i4_silu"
+                        | "conv2d_i8" | "conv2d_i8_relu" | "conv2d_i8_gelu" | "conv2d_i8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
                             // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
@@ -3622,16 +3744,16 @@ impl Backend for CpuBackend {
                                 let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
                                 else {
-                                    return Err(BackendError::Dispatch("conv2d_u4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                                    return Err(BackendError::Dispatch("conv2d_i4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
                                 };
                                 if groups == 0 {
                                     return Err(BackendError::Dispatch(
-                                        "conv2d_u4/u8: groups=0".into(),
+                                        "conv2d_i4/u8: groups=0".into(),
                                     ));
                                 }
                                 let meta = weight_meta.clone().ok_or_else(|| {
                                     BackendError::Dispatch(
-                                        "conv2d_u4/u8: missing weight_meta".into(),
+                                        "conv2d_i4/u8: missing weight_meta".into(),
                                     )
                                 })?;
                                 let out_f32 = {
@@ -3693,10 +3815,12 @@ impl Backend for CpuBackend {
                                         }
                                     }};
                                 }
-                                if meta.bit_width == 4 {
-                                    dispatch_packed_conv!(U4x8, conv2d_packed_u4x8);
+                                if kernel_name.starts_with("conv2d_f4") {
+                                    dispatch_packed_conv!(F4x8, conv2d_packed_f4x8);
+                                } else if meta.bit_width == 4 {
+                                    dispatch_packed_conv!(I4x8, conv2d_packed_i4x8);
                                 } else {
-                                    dispatch_packed_conv!(U8x4, conv2d_packed_u8x4);
+                                    dispatch_packed_conv!(I8x4, conv2d_packed_i8x4);
                                 }
                             }
                         }
@@ -5325,6 +5449,66 @@ impl Backend for CpuBackend {
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
                         }
+                        "quantize_gradient_f32_to_f8x4r" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let in_f32: Vec<f32> = {
+                                    let d = arena.data_mut();
+                                    let d_ref: &[u8] = &*d;
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
+                                    )
+                                    .to_vec()
+                                };
+                                let d = arena.data_mut();
+                                let out = &mut d[out_start..out_end];
+                                let out_len = out.len();
+                                let num_words = out_len / 4;
+                                for w in 0..num_words {
+                                    let base = w * 4;
+                                    let mut vals = [0.0f32; 4];
+                                    for j in 0..4 {
+                                        let idx = base + j;
+                                        vals[j] = in_f32.get(idx).copied().unwrap_or(0.0);
+                                    }
+                                    let packed = F8x4R::pack_from_f32(vals).0;
+                                    out[w * 4..w * 4 + 4].copy_from_slice(&packed.to_le_bytes());
+                                }
+                            }
+                        }
+                        "dequantize_gradient_f8x4r_to_f32" => {
+                            if let Some(input_slice) = input_slices.first() {
+                                let numel = *params.first().unwrap_or(&0);
+                                let in_u32: Vec<u32> = {
+                                    let d = arena.data_mut();
+                                    let d_ref: &[u8] = &*d;
+                                    bytemuck::cast_slice::<_, u32>(
+                                        &d_ref[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
+                                    )
+                                    .to_vec()
+                                };
+                                let d = arena.data_mut();
+                                let out = &mut d[out_start..out_end];
+                                let num_words = numel.div_ceil(4);
+                                for w in 0..num_words {
+                                    let word = in_u32.get(w).copied().unwrap_or(0);
+                                    let word = F8x4R(word);
+                                    let vals = word.unpack_to_f32();
+                                    let base = w * 4;
+                                    for j in 0..4 {
+                                        let idx = base + j;
+                                        if idx < numel {
+                                            let bytes = vals[j].to_le_bytes();
+                                            let off = idx * 4;
+                                            if off + 4 <= out.len() {
+                                                out[off..off + 4].copy_from_slice(&bytes);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         "gradient_scale" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let numel = *params.first().unwrap_or(&0);
@@ -6784,7 +6968,7 @@ impl Backend for CpuBackend {
                     ..
                 } if matches!(
                     kernel_name.as_str(),
-                    "matmul_u4" | "matmul_u4_i8" | "matmul_u8" | "matmul_u8_i8"
+                    "matmul_i4" | "matmul_i4_i8" | "matmul_i8" | "matmul_i8_i8"
                 ) =>
                 {
                     let single = ExecutablePlan {
@@ -7022,7 +7206,7 @@ fn dispatch_matmul_fp32_with_view(
 }
 
 #[cfg(feature = "prepared-plan")]
-fn pack_bytes_to_u4x8(raw: &[u8]) -> Vec<U4x8> {
+fn pack_bytes_to_i4x8(raw: &[u8]) -> Vec<I4x8> {
     let mut packed = vec![0u32; raw.len().div_ceil(4)];
     {
         let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
@@ -7032,7 +7216,7 @@ fn pack_bytes_to_u4x8(raw: &[u8]) -> Vec<U4x8> {
 }
 
 #[cfg(feature = "prepared-plan")]
-fn pack_bytes_to_u8x4(raw: &[u8]) -> Vec<U8x4> {
+fn pack_bytes_to_i8x4(raw: &[u8]) -> Vec<I8x4> {
     let mut packed = vec![0u32; raw.len().div_ceil(4)];
     {
         let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
