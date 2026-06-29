@@ -193,7 +193,9 @@ fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> P
         )));
     }
     let sizes: SmallVec<[i64; 8]> = shape.into();
-    let storage = Arc::new(crate::storage::Storage::Cpu(crate::storage::CpuStorage::from_vec(data, expected_bytes)));
+    let storage = Arc::new(crate::storage::Storage::Cpu(
+        crate::storage::CpuStorage::from_vec(data, expected_bytes),
+    ));
     let tensor = Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, dtype));
     Ok(PyTensor::from_tensor(tensor))
 }

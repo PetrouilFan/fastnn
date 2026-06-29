@@ -77,9 +77,11 @@ fn read_execution_outputs<B: Backend>(
                 })?;
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
             let computed = match &node.output_type.dtype {
-                IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. } | IrDType::F4 { .. } => {
-                    node.output_type.dtype.packed_byte_size(actual_numel)
-                }
+                IrDType::I4 { .. }
+                | IrDType::U8 { .. }
+                | IrDType::F8 { .. }
+                | IrDType::F8R { .. }
+                | IrDType::F4 { .. } => node.output_type.dtype.packed_byte_size(actual_numel),
                 IrDType::I8 => actual_numel + 8,
                 _ => actual_numel * node.output_type.dtype.byte_size(),
             };
@@ -592,7 +594,11 @@ impl<B: Backend> GraphExecutor<B> {
                     let numel: u64 = shape.iter().product();
                     let raw = numel as usize * node.output_type.dtype.byte_size();
                     match &node.output_type.dtype {
-                        IrDType::I4 { .. } | IrDType::U8 { .. } | IrDType::F8 { .. } | IrDType::F8R { .. } | IrDType::F4 { .. } => {
+                        IrDType::I4 { .. }
+                        | IrDType::U8 { .. }
+                        | IrDType::F8 { .. }
+                        | IrDType::F8R { .. }
+                        | IrDType::F4 { .. } => {
                             node.output_type.dtype.packed_byte_size(numel as usize)
                         }
                         IrDType::I8 => numel as usize + 8,

@@ -540,7 +540,11 @@ pub fn gemm_packed_i8x4_fused_raw(
     for col in 0..n {
         let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
         let qb = w_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum::<i32>();
-        let ws = if per_channel_w { w_scales[col] } else { w_scales[0] };
+        let ws = if per_channel_w {
+            w_scales[col]
+        } else {
+            w_scales[0]
+        };
         let wz = if per_channel_w { w_zps[col] } else { w_zps[0] };
         let sab = act_scale * ws;
         scale_ab_col.push(sab);
@@ -567,17 +571,25 @@ pub fn gemm_packed_i8x4_fused_raw(
                         acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
                     }
                     c_row[col] = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         Some("relu") => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -591,18 +603,26 @@ pub fn gemm_packed_i8x4_fused_raw(
                         acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
                     }
                     let val = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                     c_row[col] = val.max(0.0);
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         Some("silu") => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -616,18 +636,26 @@ pub fn gemm_packed_i8x4_fused_raw(
                         acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
                     }
                     let val = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                     c_row[col] = val / (1.0 + (-val).exp());
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         _ => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -641,17 +669,25 @@ pub fn gemm_packed_i8x4_fused_raw(
                         acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
                     }
                     c_row[col] = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
     }
 }
@@ -716,7 +752,11 @@ pub fn gemm_packed_i4x8_fused_raw(
     for col in 0..n {
         let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
         let qb = w_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum::<i32>();
-        let ws = if per_channel_w { w_scales[col] } else { w_scales[0] };
+        let ws = if per_channel_w {
+            w_scales[col]
+        } else {
+            w_scales[0]
+        };
         let wz = if per_channel_w { w_zps[col] } else { w_zps[0] };
         let sab = act_scale * ws;
         scale_ab_col.push(sab);
@@ -742,17 +782,25 @@ pub fn gemm_packed_i4x8_fused_raw(
                         acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
                     c_row[col] = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         Some("relu") => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -766,18 +814,26 @@ pub fn gemm_packed_i4x8_fused_raw(
                         acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
                     let val = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                     c_row[col] = val.max(0.0);
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         Some("silu") => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -791,18 +847,26 @@ pub fn gemm_packed_i4x8_fused_raw(
                         acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
                     let val = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                     c_row[col] = val / (1.0 + (-val).exp());
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         _ => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -816,17 +880,25 @@ pub fn gemm_packed_i4x8_fused_raw(
                         acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
                     c_row[col] = (acc as f32) * scale_ab_col[col]
-                        + w_zp_col[col] * r + act_zp * w_term_col[col] + zp_prod_col[col] * k_f32;
+                        + w_zp_col[col] * r
+                        + act_zp * w_term_col[col]
+                        + zp_prod_col[col] * k_f32;
                 }
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
     }
 }
@@ -885,7 +957,11 @@ pub fn gemm_packed_f4x8_fused_raw(
     let mut scale_ab_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
     let mut bias_col: smallvec::SmallVec<[f32; 256]> = smallvec::SmallVec::with_capacity(n);
     for col in 0..n {
-        let ws = if per_channel_w { w_scales[col] } else { w_scales[0] };
+        let ws = if per_channel_w {
+            w_scales[col]
+        } else {
+            w_scales[0]
+        };
         scale_ab_col.push(act_scale * ws / 4.0);
         bias_col.push(bias.map(|b| b[col]).unwrap_or(0.0));
     }
@@ -908,12 +984,18 @@ pub fn gemm_packed_f4x8_fused_raw(
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         Some("relu") => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -929,12 +1011,18 @@ pub fn gemm_packed_f4x8_fused_raw(
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         Some("silu") => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -951,12 +1039,18 @@ pub fn gemm_packed_f4x8_fused_raw(
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
         _ => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
@@ -972,12 +1066,18 @@ pub fn gemm_packed_f4x8_fused_raw(
             };
             #[cfg(feature = "parallel")]
             if parallel {
-                c.par_chunks_mut(n).enumerate().for_each(|(row, c_row)| compute_row(row, c_row));
+                c.par_chunks_mut(n)
+                    .enumerate()
+                    .for_each(|(row, c_row)| compute_row(row, c_row));
             } else {
-                for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+                for (row, c_row) in c.chunks_mut(n).enumerate() {
+                    compute_row(row, c_row);
+                }
             }
             #[cfg(not(feature = "parallel"))]
-            for (row, c_row) in c.chunks_mut(n).enumerate() { compute_row(row, c_row); }
+            for (row, c_row) in c.chunks_mut(n).enumerate() {
+                compute_row(row, c_row);
+            }
         }
     }
 }

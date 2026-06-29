@@ -134,7 +134,11 @@ pub fn gemm_packed_i4x8(
                     (0..8)
                         .map(|i| {
                             let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                            if nib >= 8 { nib - 16 } else { nib }
+                            if nib >= 8 {
+                                nib - 16
+                            } else {
+                                nib
+                            }
                         })
                         .sum::<i32>()
                 })
@@ -155,7 +159,11 @@ pub fn gemm_packed_i4x8(
                 (0..8)
                     .map(|i| {
                         let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                        if nib >= 8 { nib - 16 } else { nib }
+                        if nib >= 8 {
+                            nib - 16
+                        } else {
+                            nib
+                        }
                     })
                     .sum::<i32>()
             })
@@ -364,7 +372,8 @@ pub fn gemm_packed_i8x4_fused(
             let w_term = w_scale * qb_sum as f32;
             let zp_prod = act_zp * w_zp;
 
-            let mut val = (acc as f32) * scale_ab + w_zp * r_act + act_zp * w_term + zp_prod * k_f32;
+            let mut val =
+                (acc as f32) * scale_ab + w_zp * r_act + act_zp * w_term + zp_prod * k_f32;
 
             if let Some(b) = bias {
                 val += b[col];
