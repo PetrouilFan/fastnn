@@ -12,7 +12,10 @@ use super::{arena, CpuBuffer};
 /// semantics.
 #[inline]
 fn fused_binary_activation_dispatch_slices(
-    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(unused_variables))]
+    #[cfg_attr(
+        not(all(feature = "simd", target_arch = "x86_64")),
+        allow(unused_variables)
+    )]
     kernel_name: &str,
     a: &[f32],
     b: &[f32],
