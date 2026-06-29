@@ -7,7 +7,11 @@ const I4_SIGN: u32 = 0x88888888;
 #[inline(always)]
 fn nibble_to_signed(n: u32) -> i32 {
     let n = n & 0xF;
-    if n >= 8 { (n as i32) - 16 } else { n as i32 }
+    if n >= 8 {
+        (n as i32) - 16
+    } else {
+        n as i32
+    }
 }
 
 #[inline(always)]
@@ -102,7 +106,11 @@ mod tests {
 
     fn to_i8(w: u32, i: usize) -> i8 {
         let n = (w >> (i * 4)) & 0xF;
-        if n >= 8 { (n as i8) - 16 } else { n as i8 }
+        if n >= 8 {
+            (n as i8) - 16
+        } else {
+            n as i8
+        }
     }
 
     #[test]

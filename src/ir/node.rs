@@ -91,9 +91,9 @@ pub enum Opcode {
     /// Casts the input tensor to a target dtype (specified via `"to"` attr).
     Cast,
     // ── v2.1 type conversion ops (quantization + precision) ──────────
-    /// Quantize F32 → U4/U8 with per-channel scales/zero_points (attribute `"bit_width"`).
+    /// Quantize F32 to I4/I8 packed weights with per-channel scales/zero_points (attribute `"bit_width"`).
     Quantize,
-    /// Dequantize U4/U8 → F32 using scales/zero_points from input dtype.
+    /// Dequantize packed weights to F32 using scales/zero_points from input dtype.
     Dequantize,
     /// Convert F32 → F16 (half-precision).
     ToF16,
@@ -549,6 +549,7 @@ pub enum IrDType {
     },
     /// Packed 8-bit (I8x4): 4 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
+    /// Note: variant name `U8` is a historical artifact; this is I8x4 (signed, packed).
     U8 {
         scales: Vec<f32>,
         zero_points: Vec<f32>,
@@ -601,7 +602,7 @@ impl_ir_dtype_props!(
     (Self::Bool, 1, "bool", 1, 32),
     (Self::I8, 1, "i8", 8, 4),
     (Self::I4 { .. }, 1, "i4", 4, 8),
-    (Self::U8 { .. }, 1, "u8", 8, 4),
+    (Self::U8 { .. }, 1, "i8", 8, 4),
     (Self::F8 { .. }, 1, "f8", 8, 4),
     (Self::F8R { .. }, 1, "f8r", 8, 4),
     (Self::F4 { .. }, 1, "f4", 4, 8),

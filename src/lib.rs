@@ -2,7 +2,7 @@
 //!
 //! fastnn provides a complete **ahead-of-time (AOT) compiler pipeline** built on a
 //! first-class IR (`ComputeGraph`). The pipeline compiles computation graphs through
-//! shape inference, operator fusion, optional weight quantization (U4/U8), and memory
+//! shape inference, operator fusion, optional weight quantization (I4/I8/F4/F8/F8R), and memory
 //! planning before dispatching to a backend (CPU or WGPU).
 //!
 //! # Quick Start

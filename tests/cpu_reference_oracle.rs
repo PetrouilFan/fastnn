@@ -3,8 +3,10 @@ use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::Instruction;
 use fastnn::compiler::passes::activation_quantization;
 use fastnn::compiler::passes::shape_inference;
+use fastnn::dtypes::{F4x8, F8x4, F8x4R, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
+use fastnn::packed_tensor::PackedTensor;
 use half::f16;
 
 #[derive(Clone, Copy)]
@@ -470,4 +472,112 @@ fn broadcast_add_reference_oracle_covers_negative_values() {
             rel: 1e-6,
         },
     );
+}
+
+fn run_fp_matmul_test<T, F>(
+    seed: u64,
+    m: usize,
+    k: usize,
+    n: usize,
+    make_dtype: F,
+    expected_kernel: &str,
+    tol: Tolerance,
+) where
+    T: PackedWord + 'static,
+    F: Fn(Vec<f32>) -> IrDType,
+{
+    let builder = GraphBuilder::new();
+    let weights = seeded_values(seed + 1, k * n);
+
+    let mut transposed = vec![0.0f32; k * n];
+    for r in 0..k {
+        for c in 0..n {
+            transposed[c * k + r] = weights[r * n + c];
+        }
+    }
+    let pt = PackedTensor::<T>::from_f32_per_channel(&transposed, &[n, k]);
+    let scales: Vec<f32> = (0..n).map(|r| pt.scale_for_row(r)).collect();
+    let weight = builder.constant(
+        pt.as_bytes(),
+        TensorType::new(
+            vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+            make_dtype(scales),
+        ),
+    );
+    let input = builder.input_with_dims(
+        &[DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+        IrDType::F32,
+    );
+    let output = builder.matmul(&input, &weight);
+    let graph = graph_from(&builder, &output);
+
+    let activations = seeded_values(seed, m * k);
+    let input_bytes = bytemuck::cast_slice(&activations).to_vec();
+    let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+    let expected = naive_matmul(&activations, &weights, 1, m, k, n);
+
+    assert!(
+        kernels.iter().any(|name| name == expected_kernel),
+        "expected {expected_kernel} kernel, got {kernels:?}"
+    );
+    assert_close(
+        &format!("{expected_kernel} matmul seed={seed} shape=[{m},{k}]x[{k},{n}]"),
+        &actual,
+        &expected,
+        tol,
+    );
+}
+
+#[test]
+fn matmul_f4_reference_oracle() {
+    for (seed, m, k, n) in [(23u64, 2usize, 7, 5), (29u64, 3usize, 9, 4)] {
+        run_fp_matmul_test::<F4x8, _>(
+            seed,
+            m,
+            k,
+            n,
+            |scales| IrDType::F4 { scales },
+            "matmul_f4",
+            Tolerance {
+                abs: 2.0,
+                rel: 0.25,
+            },
+        );
+    }
+}
+
+#[test]
+fn matmul_f8_reference_oracle() {
+    for (seed, m, k, n) in [(23u64, 2usize, 7, 5), (29u64, 3usize, 9, 4)] {
+        run_fp_matmul_test::<F8x4, _>(
+            seed,
+            m,
+            k,
+            n,
+            |scales| IrDType::F8 { scales },
+            "matmul_f8",
+            Tolerance {
+                abs: 0.20,
+                rel: 0.10,
+            },
+        );
+    }
+}
+
+#[test]
+fn matmul_f8r_reference_oracle() {
+    for (seed, m, k, n) in [(23u64, 2usize, 7, 5), (29u64, 3usize, 9, 4)] {
+        run_fp_matmul_test::<F8x4R, _>(
+            seed,
+            m,
+            k,
+            n,
+            |scales| IrDType::F8R { scales },
+            "matmul_f8r",
+            Tolerance {
+                abs: 0.50,
+                rel: 0.15,
+            },
+        );
+    }
 }

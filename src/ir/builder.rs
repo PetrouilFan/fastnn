@@ -1223,7 +1223,7 @@ impl GraphBuilder {
     /// Quantize F32 → U4/U8 with per-channel scales/zero_points.
     ///
     /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::I4` or
-    /// `IrDType::U8` with per-channel scale/zero-point metadata.
+    /// `IrDType::I8` packed weight type with per-channel scale/zero-point metadata.
     pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
@@ -1935,7 +1935,12 @@ impl GraphBuilder {
     /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
     pub fn quantize_gradient(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
         let output_shape = input.shape().to_vec();
-        let output_type = TensorType::new(output_shape, IrDType::F8R { scales: vec![scale] });
+        let output_type = TensorType::new(
+            output_shape,
+            IrDType::F8R {
+                scales: vec![scale],
+            },
+        );
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("scale".to_string(), scale.to_string());
         let mut inner = self.inner.borrow_mut();
