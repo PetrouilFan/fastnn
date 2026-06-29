@@ -31,7 +31,6 @@ clippy::needless_update|src/macros/optim.rs|struct update has no effect, all the
 clippy::neg_multiply|src/backend/cpu/microkernels/tests.rs|this multiplication by -1 can be written more succinctly
 clippy::redundant_closure_call|src/tensor/mod.rs|try not to call a closure in the expression where it is declared
 clippy::redundant_closure|src/backend/cpu/mod.rs|redundant closure
-clippy::redundant_closure|src/backend/cpu/swar.rs|redundant closure
 clippy::redundant_field_names|src/compiler/passes/activation_quantization.rs|redundant field names in struct initialization
 clippy::redundant_locals|src/backend/prepared.rs|redundant redefinition of a binding `arena`
 clippy::too_many_arguments|src/backend/cpu/dispatch_helpers.rs|this function has too many arguments (10/7)
