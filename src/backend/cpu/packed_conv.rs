@@ -1203,8 +1203,8 @@ pub unsafe fn conv2d_packed_f4x8(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dtypes::{F8x4, F8x4R};
     use crate::backend::cpu::packed_gemm::quantize_activations_to_i4x8;
+    use crate::dtypes::{F8x4, F8x4R};
 
     #[test]
     fn test_conv2d_packed_i4x8_basic() {
@@ -1434,14 +1434,26 @@ mod tests {
         let h = 1;
         let w = 1;
         let input: Vec<f32> = (1..=4).map(|i| i as f32).collect();
-        let wdata = vec![
-            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ];
+        let wdata = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
         let weight = PackedTensor::<F8x4>::from_f32_per_channel(&wdata, &[2, 4]);
         let mut output = vec![0.0f32; 2];
         unsafe {
             conv2d_packed_float::<F8x4>(
-                &input, n, c, h, w, &weight, None, 1, 0, 1, 1, 1, 1, None, &mut output,
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                None,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                None,
+                &mut output,
             );
         }
         assert_eq!(output.len(), 2);
@@ -1459,14 +1471,26 @@ mod tests {
         let h = 1;
         let w = 1;
         let input: Vec<f32> = (1..=4).map(|i| i as f32).collect();
-        let wdata = vec![
-            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ];
+        let wdata = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
         let weight = PackedTensor::<F8x4R>::from_f32_per_channel(&wdata, &[2, 4]);
         let mut output = vec![0.0f32; 2];
         unsafe {
             conv2d_packed_float::<F8x4R>(
-                &input, n, c, h, w, &weight, None, 1, 0, 1, 1, 1, 1, None, &mut output,
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                None,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                None,
+                &mut output,
             );
         }
         assert_eq!(output.len(), 2);
@@ -1476,5 +1500,4 @@ mod tests {
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
     }
-
 }

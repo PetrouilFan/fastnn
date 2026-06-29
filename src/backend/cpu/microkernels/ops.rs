@@ -958,7 +958,10 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
             } else {
                 _mm256_set1_ps(if idx < bias.len() { bias[idx] } else { 0.0 })
             };
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_add_ps(_mm256_mul_ps(vnorm, vw), vb));
+            _mm256_storeu_ps(
+                output.as_mut_ptr().add(i),
+                _mm256_add_ps(_mm256_mul_ps(vnorm, vw), vb),
+            );
             i += 8;
         }
         for j in i..end {
@@ -1091,7 +1094,10 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
             } else {
                 _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
             };
-            _mm256_storeu_ps(output.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w));
+            _mm256_storeu_ps(
+                output.as_mut_ptr().add(i),
+                _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
+            );
             i += 8;
         }
         for j in i..end {
