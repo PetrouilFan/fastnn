@@ -36,7 +36,7 @@ fn bench_case(m: usize, k: usize, n: usize, iters: usize) {
     let mut c = vec![0.0f32; m * n];
 
     unsafe {
-        matrixmultiply::sgemm(
+        fastnn::backend::cpu::sgemm::sgemm(
             m,
             k,
             n,
@@ -55,7 +55,7 @@ fn bench_case(m: usize, k: usize, n: usize, iters: usize) {
     }
 
     unsafe {
-        matrixmultiply::sgemm(
+        fastnn::backend::cpu::sgemm::sgemm(
             m,
             k,
             n,
@@ -76,7 +76,7 @@ fn bench_case(m: usize, k: usize, n: usize, iters: usize) {
 
     for _ in 0..5 {
         unsafe {
-            matrixmultiply::sgemm(
+            fastnn::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,
@@ -97,7 +97,7 @@ fn bench_case(m: usize, k: usize, n: usize, iters: usize) {
     let t0 = Instant::now();
     for _ in 0..iters {
         unsafe {
-            matrixmultiply::sgemm(
+            fastnn::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,
@@ -119,7 +119,7 @@ fn bench_case(m: usize, k: usize, n: usize, iters: usize) {
 
     for _ in 0..5 {
         unsafe {
-            matrixmultiply::sgemm(
+            fastnn::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,
@@ -140,7 +140,7 @@ fn bench_case(m: usize, k: usize, n: usize, iters: usize) {
     let t1 = Instant::now();
     for _ in 0..iters {
         unsafe {
-            matrixmultiply::sgemm(
+            fastnn::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,

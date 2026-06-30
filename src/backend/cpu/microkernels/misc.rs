@@ -34,18 +34,15 @@ pub fn matmul_blas_with_transpose_into(
     trans_a: bool,
     trans_b: bool,
 ) {
-    use matrixmultiply::sgemm;
-
     let rsa: isize = if trans_a { 1 } else { k as isize };
     let csa: isize = if trans_a { m as isize } else { 1 };
     let rsb: isize = if trans_b { 1 } else { n as isize };
     let csb: isize = if trans_b { k as isize } else { 1 };
 
-    // SAFETY: matrixmultiply::sgemm operates on valid slices with correct
-    // dimensions and strides. All pointers are properly aligned and
-    // dereferenceable for the full m×n output region.
+    // SAFETY: sgemm operates on valid slices with correct
+    // dimensions and strides.
     unsafe {
-        sgemm(
+        crate::backend::cpu::sgemm::sgemm(
             m,
             k,
             n,

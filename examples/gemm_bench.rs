@@ -95,7 +95,7 @@ fn main() {
         // warmup
         for _ in 0..5 {
             unsafe {
-                matrixmultiply::sgemm(
+                fastnn::backend::cpu::sgemm::sgemm(
                     m,
                     k,
                     n,
@@ -117,7 +117,7 @@ fn main() {
         let start = Instant::now();
         for _ in 0..iters {
             unsafe {
-                matrixmultiply::sgemm(
+                fastnn::backend::cpu::sgemm::sgemm(
                     m,
                     k,
                     n,
