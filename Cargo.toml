@@ -21,7 +21,7 @@ serde         = { version = "1.0", features = ["derive", "rc"] }
 serde_json    = "1.0"
 bincode       = "1.3"
 rand          = "0.8"
-matrixmultiply = { version = "0.3", default-features = false, features = [] }
+matrixmultiply = { version = "0.3", default-features = false, features = ["std", "threading"] }
 core_affinity = "0.8"
 raw-cpuid = "11.0"
 wgpu         = { version = "24", optional = true }
@@ -36,7 +36,7 @@ clap         = { version = "4", features = ["derive"], optional = true }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports"] }
 
 [features]
-default = ["simd", "parallel", "fusion-forward", "python"]
+default = ["simd", "parallel", "fusion-forward", "python", "prepared-plan"]
 python = ["dep:pyo3"]
 gpu = ["dep:wgpu", "dep:pollster"]
 openblas = ["blas-src/openblas-src"]

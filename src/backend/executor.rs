@@ -44,6 +44,14 @@ pub enum WeightDtype {
     F4x8,
 }
 
+/// Cached state for an all-Known-shape model so that every forward call
+/// after the first can skip ShapeEnv resolution, shape validation, and
+/// memory-plan tightening.
+struct StaticShapeCache {
+    tightened_memory_plan: MemoryPlan,
+    shape_env: ShapeEnv,
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -51,6 +59,9 @@ pub enum WeightDtype {
 pub struct GraphExecutor<B: Backend> {
     backend: B,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
+    /// Populated after the first inference when `graph.has_static_shapes()`
+    /// is true. Subsequent calls skip ShapeEnv/tighten/tighten_slices.
+    static_shape_cache: Option<StaticShapeCache>,
 }
 
 /// Read output tensors from the arena using the tightened memory plan
@@ -101,6 +112,7 @@ impl<B: Backend> GraphExecutor<B> {
         GraphExecutor {
             backend,
             cached_arena: None,
+            static_shape_cache: None,
         }
     }
 
@@ -580,13 +592,35 @@ impl<B: Backend> GraphExecutor<B> {
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         // ── Preamble: shape env, tighten, safety, arena, input write ──
-        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
-            .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
-        validate_shapes(graph, &shape_env)
-            .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
+        let (tightened_memory_plan, shape_env) =
+            if let Some(StaticShapeCache { ref tightened_memory_plan, ref shape_env }) =
+                self.static_shape_cache
+            {
+                // Fast path: the plan was already tightened on the first
+                // inference.  Reuse the cached tightened memory plan and
+                // shape env, skipping the O(N_nodes) resolve + tighten
+                // + tighten_slices steps entirely.
+                (tightened_memory_plan.clone(), shape_env.clone())
+            } else {
+                let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
+                    .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
+                validate_shapes(graph, &shape_env)
+                    .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-        let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+                let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
+                tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+
+                // Cache for static-shape models so subsequent calls
+                // skip the entire preamble.
+                if graph.has_static_shapes() {
+                    self.static_shape_cache = Some(StaticShapeCache {
+                        tightened_memory_plan: tightened_memory_plan.clone(),
+                        shape_env: shape_env.clone(),
+                    });
+                }
+
+                (tightened_memory_plan, shape_env)
+            };
 
         for (&node_id, slot) in &tightened_memory_plan.slots {
             if let Some(node) = graph.get_node(node_id) {
@@ -649,20 +683,17 @@ impl<B: Backend> GraphExecutor<B> {
                 plan.clone()
             } else {
                 let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
-                let mut removed = 0usize;
                 for instr in &plan.instructions {
                     let drop = matches!(
                         instr,
                         Instruction::WriteConst { dst, .. }
                             if view.get(&(dst.offset, dst.size)).is_some()
+                                || view.get_u8(&(dst.offset, dst.size)).is_some()
                     );
-                    if drop {
-                        removed += 1;
-                    } else {
+                    if !drop {
                         filtered.push(instr.clone());
                     }
                 }
-                let _ = removed;
                 ExecutablePlan {
                     instructions: filtered,
                     arena_size: plan.arena_size,
@@ -2033,6 +2064,94 @@ mod prepared_fallback_tests {
         assert_eq!(
             read_f32(&out[0]),
             vec![0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    /// Verify that the static shape cache is populated after the first
+    /// inference and produces byte-identical results on subsequent calls.
+    #[test]
+    fn static_shape_cache_produces_correct_repeated_results() {
+        let g = GraphBuilder::new();
+        let a = g.input(&[1, 4], IrDType::F32);
+        let b = g.input(&[1, 4], IrDType::F32);
+        let c = g.add(&a, &b);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&c], CpuBackend).expect("compile must succeed");
+        let mut executor = GraphExecutor::new(CpuBackend);
+
+        let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let b_data = f32_data(&[10.0, 20.0, 30.0, 40.0]);
+
+        // First call — populates the cache.
+        let first = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+        );
+
+        // Second call — should use the cached fast path.
+        let second = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+        );
+
+        // Third call — another cache hit.
+        let third = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+        );
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0], second[0], "second call (cache path) must match first");
+        assert_eq!(second[0], third[0], "third call (cache path) must match first");
+        assert_eq!(
+            read_f32(&first[0]),
+            vec![11.0, 22.0, 33.0, 44.0],
+            "correctness: 1+10=11, 2+20=22, 3+30=33, 4+40=44"
+        );
+
+        // The cache must be populated now.
+        assert!(
+            executor.static_shape_cache.is_some(),
+            "static shape cache must be populated for a Known-only graph"
+        );
+    }
+
+    /// Verify that the static shape cache is NOT populated when the graph
+    /// has symbolic (non-Known) dims.
+    #[test]
+    fn static_shape_cache_skipped_for_dynamic_graph() {
+        let g = GraphBuilder::new();
+        let batch = DimExpr::Symbol("N".into());
+        let x = g.input_with_dims(&[batch, DimExpr::Known(4)], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let mut executor = GraphExecutor::new(CpuBackend);
+
+        let input = f32_data(&[-1.0, -2.0, 3.0, 4.0]);
+        let _ = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+        );
+
+        // Dynamic-shape graph should NOT populate the cache.
+        assert!(
+            executor.static_shape_cache.is_none(),
+            "static shape cache must NOT be populated for a graph with Symbol dims"
         );
     }
 
