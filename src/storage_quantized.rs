@@ -7,6 +7,7 @@
 use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// A quantizable tensor that stores data in blocks with independent scale/zero.
 /// Each block has independent scale/zero for better accuracy.
@@ -134,7 +135,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
         }
 
         PackedTensor {
-            data: packed,
+            data: Arc::new(packed),
             shape: self.shape.clone(),
             scales: vec![global_scale],
             zeros: vec![0.0],

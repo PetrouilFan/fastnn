@@ -23,9 +23,23 @@ fn fused_binary_activation_dispatch_slices(
     op: &(impl Fn(f32, f32) -> f32 + Sync),
     act: &(impl Fn(f32) -> f32 + Sync),
 ) {
-    // SIMD fast path: chain elementwise op + activation using existing
-    // SIMD microkernels. The `kernel_name` tells us which combination
-    // to dispatch. Two SIMD passes is still 4-8x faster than scalar.
+    // Single-pass fused SIMD kernels: combine binary op + activation in one pass.
+    // Only works when a, b, and out are same length (no broadcast needed).
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if out_f32.len() >= 8 && a.len() == out_f32.len() && b.len() == out_f32.len()
+        && microkernels::simd_avx2_available()
+    {
+        match kernel_name {
+            "add_relu_f32" => return unsafe { microkernels::fused_add_relu_f32_avx2(a, b, out_f32) },
+            "mul_relu_f32" => return unsafe { microkernels::fused_mul_relu_f32_avx2(a, b, out_f32) },
+            "add_silu_f32" => return unsafe { microkernels::fused_add_silu_f32_avx2(a, b, out_f32) },
+            "mul_silu_f32" => return unsafe { microkernels::fused_mul_silu_f32_avx2(a, b, out_f32) },
+            "add_gelu_f32" => return unsafe { microkernels::fused_add_gelu_f32_avx2(a, b, out_f32) },
+            _ => {}
+        }
+    }
+
+    // Two-pass SIMD path: binary op then activation in-place.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
         // Binary op dispatch

@@ -1,4 +1,5 @@
 use crate::dtypes::PackedWord;
+use std::sync::Arc;
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     if len == 0 {
@@ -15,7 +16,7 @@ fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
 }
 
 pub struct PackedTensor<T: PackedWord> {
-    pub(crate) data: Vec<T>,
+    pub(crate) data: Arc<Vec<T>>,
     pub(crate) shape: Vec<usize>,
     pub(crate) scales: Vec<f32>,
     pub(crate) zeros: Vec<f32>,
@@ -42,7 +43,7 @@ impl<T: PackedWord> PackedTensor<T> {
         };
         let data = zeroed_vec(packed_len);
         PackedTensor {
-            data,
+            data: Arc::new(data),
             shape: shape.to_vec(),
             scales: vec![1.0],
             zeros: vec![0.0],
@@ -52,6 +53,22 @@ impl<T: PackedWord> PackedTensor<T> {
     }
 
     pub fn from_raw(data: Vec<T>, shape: Vec<usize>, scales: Vec<f32>, zeros: Vec<f32>) -> Self {
+        PackedTensor {
+            data: Arc::new(data),
+            shape,
+            scales,
+            zeros,
+            block_size: 1,
+            group_size: 0,
+        }
+    }
+
+    pub fn from_raw_arc(
+        data: Arc<Vec<T>>,
+        shape: Vec<usize>,
+        scales: Vec<f32>,
+        zeros: Vec<f32>,
+    ) -> Self {
         PackedTensor {
             data,
             shape,
@@ -70,7 +87,7 @@ impl<T: PackedWord> PackedTensor<T> {
         block_size: usize,
     ) -> Self {
         PackedTensor {
-            data,
+            data: Arc::new(data),
             shape,
             scales,
             zeros,
@@ -137,7 +154,7 @@ impl<T: PackedWord> PackedTensor<T> {
         }
 
         PackedTensor {
-            data: packed,
+            data: Arc::new(packed),
             shape: shape.to_vec(),
             scales: vec![scale],
             zeros: vec![zero],
@@ -359,27 +376,28 @@ impl<T: PackedWord> PackedTensor<T> {
             val
         };
         arr.as_mut()[elem_idx] = quantized;
-        self.data[word_idx] = T::pack_from_f32(arr);
+        let data_mut = Arc::make_mut(&mut self.data);
+        data_mut[word_idx] = T::pack_from_f32(arr);
     }
 
     #[inline]
     pub fn as_packed(&self) -> &[T] {
-        &self.data
+        self.data.as_slice()
     }
 
     #[inline]
     pub fn as_packed_mut(&mut self) -> &mut [T] {
-        &mut self.data
+        Arc::make_mut(&mut self.data).as_mut_slice()
     }
 
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
-        bytemuck::cast_slice(&self.data)
+        bytemuck::cast_slice(self.data.as_slice())
     }
 
     #[inline]
     pub fn as_u32(&self) -> &[u32] {
-        bytemuck::cast_slice(&self.data)
+        bytemuck::cast_slice(self.data.as_slice())
     }
 
     pub fn compute_scale(data: &[f32]) -> f32 {
@@ -471,7 +489,7 @@ impl<T: PackedWord> PackedTensor<T> {
         }
 
         PackedTensor {
-            data: packed,
+            data: Arc::new(packed),
             shape: shape.to_vec(),
             scales,
             zeros: vec![0.0; m],
@@ -650,7 +668,7 @@ impl<T: PackedWord> PackedTensor<T> {
         }
 
         PackedTensor {
-            data: packed,
+            data: Arc::new(packed),
             shape: shape.to_vec(),
             scales,
             zeros,
@@ -728,7 +746,7 @@ impl<T: PackedWord> PackedTensor<T> {
         }
 
         PackedTensor {
-            data: reordered,
+            data: Arc::new(reordered),
             shape: self.shape.clone(),
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
