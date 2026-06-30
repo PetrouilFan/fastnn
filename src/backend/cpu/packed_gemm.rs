@@ -3,6 +3,7 @@
 //! High-performance matrix multiplication directly on packed quantized tensors.
 //! Uses SWAR dot products for 4-8× arithmetic density.
 
+use crate::backend::cpu::microkernels::{tls_alloc_i32, ScopedVecI32};
 use crate::backend::cpu::swar::{
     i4x8_dot_packed, i4x8_packed_to_tensor, i8x4_dot_packed, i8x4_packed_to_tensor,
     quantize_f32_to_i4x8, quantize_f32_to_i8x4,
@@ -39,22 +40,21 @@ pub fn gemm_packed_i8x4(
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
 
-    let qb_sums: Vec<i32> = (0..n)
-        .map(|col| {
-            let b_row_start = col * k_packed;
-            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
-            b_row
-                .iter()
-                .map(|&w| {
-                    let b0 = (w.0 & 0xFF) as i8 as i32;
-                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
-                    b0 + b1 + b2 + b3
-                })
-                .sum()
-        })
-        .collect();
+    let mut qb_sums: ScopedVecI32 = tls_alloc_i32(n);
+    for col in 0..n {
+        let b_row_start = col * k_packed;
+        let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+        qb_sums[col] = b_row
+            .iter()
+            .map(|&w| {
+                let b0 = (w.0 & 0xFF) as i8 as i32;
+                let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                b0 + b1 + b2 + b3
+            })
+            .sum();
+    }
 
     for row in 0..m {
         let a_row_start = row * k_packed;
@@ -124,27 +124,26 @@ pub fn gemm_packed_i4x8(
 
     let k_f32 = k as f32;
 
-    let qb_sums: Vec<i32> = (0..n)
-        .map(|col| {
-            let b_row_start = col * k_packed;
-            let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
-            b_row
-                .iter()
-                .map(|&w| {
-                    (0..8)
-                        .map(|i| {
-                            let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
-                            if nib >= 8 {
-                                nib - 16
-                            } else {
-                                nib
-                            }
-                        })
-                        .sum::<i32>()
-                })
-                .sum()
-        })
-        .collect();
+    let mut qb_sums: ScopedVecI32 = tls_alloc_i32(n);
+    for col in 0..n {
+        let b_row_start = col * k_packed;
+        let b_row = &b_packed_slice[b_row_start..b_row_start + k_packed];
+        qb_sums[col] = b_row
+            .iter()
+            .map(|&w| {
+                (0..8)
+                    .map(|i| {
+                        let nib = ((w.0 >> (i * 4)) & 0xF) as i32;
+                        if nib >= 8 {
+                            nib - 16
+                        } else {
+                            nib
+                        }
+                    })
+                    .sum::<i32>()
+            })
+            .sum();
+    }
 
     for row in 0..m {
         let a_row_start = row * k_packed;
@@ -316,22 +315,21 @@ pub fn gemm_packed_i8x4_fused(
     let act_packed_slice = act_packed.as_packed();
     let weight_packed_slice = weight_packed.as_packed();
 
-    let qb_sums: Vec<i32> = (0..n)
-        .map(|col| {
-            let w_row_start = col * k_packed;
-            let w_row = &weight_packed_slice[w_row_start..w_row_start + k_packed];
-            w_row
-                .iter()
-                .map(|&w| {
-                    let b0 = (w.0 & 0xFF) as i8 as i32;
-                    let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
-                    let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
-                    let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
-                    b0 + b1 + b2 + b3
-                })
-                .sum()
-        })
-        .collect();
+    let mut qb_sums: ScopedVecI32 = tls_alloc_i32(n);
+    for col in 0..n {
+        let w_row_start = col * k_packed;
+        let w_row = &weight_packed_slice[w_row_start..w_row_start + k_packed];
+        qb_sums[col] = w_row
+            .iter()
+            .map(|&w| {
+                let b0 = (w.0 & 0xFF) as i8 as i32;
+                let b1 = ((w.0 >> 8) & 0xFF) as i8 as i32;
+                let b2 = ((w.0 >> 16) & 0xFF) as i8 as i32;
+                let b3 = ((w.0 >> 24) & 0xFF) as i8 as i32;
+                b0 + b1 + b2 + b3
+            })
+            .sum();
+    }
 
     for row in 0..m {
         let act_row_start = row * k_packed;
