@@ -6850,13 +6850,7 @@ impl Backend for CpuBackend {
             _ => return self.dispatch(plan, arena, shape_env),
         };
 
-            let total_time = std::time::Instant::now();
-            let mut conv_time = std::time::Duration::ZERO;
-            let mut fallback_time = std::time::Duration::ZERO;
-            let mut conv_count = 0usize;
-            let mut fallback_count = 0usize;
-
-            for instruction in &plan.instructions {
+        for instruction in &plan.instructions {
             match instruction {
                 // Skip WriteConst for slots the persistent view will
                 // satisfy directly.  Check both f32 and u8 payloads
@@ -6887,7 +6881,6 @@ impl Backend for CpuBackend {
                     "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu"
                 ) =>
                 {
-                    let t = std::time::Instant::now();
                     let has_override = input_slices
                         .get(1)
                         .map(|w| view.get(&(w.offset, w.size)).is_some())
@@ -6915,13 +6908,6 @@ impl Backend for CpuBackend {
                         };
                         self.dispatch(&single, arena, shape_env)?;
                     }
-                    let elapsed = t.elapsed();
-                    if elapsed.as_secs_f64() > 0.010 {
-                        let params_str: String = params.iter().map(|p| p.to_string() + ",").collect();
-                        eprintln!("  [long] {}: {} params=[{}] ({:.1}ms)", kernel_name, conv_count + 1, params_str, elapsed.as_secs_f64() * 1000.0);
-                    }
-                    conv_time += elapsed;
-                    conv_count += 1;
                 }
 
                 // Fp32 MatMul family (matmul, matmul_relu/gelu/silu,
@@ -6947,7 +6933,6 @@ impl Backend for CpuBackend {
                         | "fused_matmul_add_silu"
                 ) =>
                 {
-                    let t = std::time::Instant::now();
                     let has_override = input_slices
                         .get(1)
                         .map(|b| view.get(&(b.offset, b.size)).is_some())
@@ -6975,8 +6960,6 @@ impl Backend for CpuBackend {
                         };
                         self.dispatch(&single, arena, shape_env)?;
                     }
-                    conv_time += t.elapsed();
-                    conv_count += 1;
                 }
 
                 // Quantized MatMul family (u4, u8, and i8-activation
@@ -6997,37 +6980,27 @@ impl Backend for CpuBackend {
                     "matmul_i4" | "matmul_i4_i8" | "matmul_i8" | "matmul_i8_i8"
                 ) =>
                 {
-                    let t = std::time::Instant::now();
                     let single = ExecutablePlan {
                         instructions: vec![instruction.clone()],
                         arena_size: plan.arena_size,
                         levels: vec![0],
                     };
                     self.dispatch(&single, arena, shape_env)?;
-                    fallback_time += t.elapsed();
-                    fallback_count += 1;
                 }
 
                 // Everything else: defer to the standard per-instruction
                 // dispatch so we keep the existing single-threaded,
                 // sequential behaviour for the rest of the plan.
                 _ => {
-                    let t = std::time::Instant::now();
                     let single = ExecutablePlan {
                         instructions: vec![instruction.clone()],
                         arena_size: plan.arena_size,
                         levels: vec![0],
                     };
                     self.dispatch(&single, arena, shape_env)?;
-                    fallback_time += t.elapsed();
-                    fallback_count += 1;
                 }
             }
         }
-        eprintln!("[profile] conv: {} calls in {:.1}ms, fallback: {} calls in {:.1}ms, total: {:.1}ms",
-            conv_count, conv_time.as_secs_f64() * 1000.0,
-            fallback_count, fallback_time.as_secs_f64() * 1000.0,
-            total_time.elapsed().as_secs_f64() * 1000.0);
         Ok(())
     }
 }

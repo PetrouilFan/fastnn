@@ -7,8 +7,6 @@
 //!
 //! Supported: 3×3 stride-1/2, 1×1 stride-1 (via matmul view, no copy).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use super::ConvActivation;
 use crate::backend::cpu::microkernels::conv::apply_conv_activation;
 
@@ -19,7 +17,11 @@ use core::arch::x86_64::*;
 
 use crate::backend::cpu::microkernels::activations::{exp_avx2_vec, tanh_avx2_vec};
 
+#[cfg(feature = "debug_canary")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "debug_canary")]
 static DID_AVX2: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "debug_canary")]
 static DID_SCALAR: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -291,7 +293,7 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 // ── Top-level 3×3 direct conv ─────────────────────────────────
 
 /// 3×3 direct convolution with fused bias+activation.
-/// stride-1 pad-1 uses AVX2; stride-2 uses scalar.
+/// stride-1/2 pad-1 uses AVX2; other cases use scalar.
 pub fn direct_conv3x3_f32(
     input: &[f32],
     weight: &[f32],
@@ -312,6 +314,7 @@ pub fn direct_conv3x3_f32(
     // Fast path: AVX2 stride-1 pad-1
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if padding == 1 && stride == 1 && is_x86_feature_detected!("avx2") {
+        #[cfg(feature = "debug_canary")]
         if !DID_AVX2.swap(true, Ordering::Relaxed) {
             eprintln!("[direct_conv3x3] AVX2 PATH ACTIVE (c={} h={} w={} f={})", c, h, w, f);
         }
@@ -324,7 +327,8 @@ pub fn direct_conv3x3_f32(
         return;
     }
 
-    // Scalar path (handles stride-2, any padding)
+    // Scalar path (unsupported stride/padding combos)
+    #[cfg(feature = "debug_canary")]
     if !DID_SCALAR.swap(true, Ordering::Relaxed) {
         eprintln!("[direct_conv3x3] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})", padding, stride, c, h, w, f);
     }

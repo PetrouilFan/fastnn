@@ -1,0 +1,43 @@
+# Enforce LF line endings for all text files (prevents Windows/Linux churn)
+* text=auto eol=lf
+
+# Explicit text files
+*.rs     text eol=lf
+*.py     text eol=lf
+*.toml   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.sh     text eol=lf
+*.json   text eol=lf
+*.lock   text eol=lf
+*.txt    text eol=lf
+*.html   text eol=lf
+*.css    text eol=lf
+*.js     text eol=lf
+*.ts     text eol=lf
+*.jsx    text eol=lf
+*.tsx    text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+
+# Windows-only files keep CRLF
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+
+# Binary files — do not touch
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.so     binary
+*.dylib  binary
+*.dll    binary
+*.pyd    binary
+*.whl    binary

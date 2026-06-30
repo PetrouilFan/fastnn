@@ -20,30 +20,34 @@ __all__ = ["import_onnx", "import_onnx_to_compute_graph"]
 logger = logging.getLogger(__name__)
 
 ONNX_TO_IR_OP = {
+    # NOTE: IR op names MUST match what the Rust converter (src/onnx/converter.rs)
+    # handles. If a name doesn't match, the converter's fallback silently passes
+    # through ins[0], producing wrong results. When in doubt, use the ONNX name
+    # directly — the Rust converter generally handles ONNX names.
     "Relu": "Relu", "Sigmoid": "Sigmoid", "Tanh": "Tanh",
-    "Add": "Add", "Sub": "ElementwiseSub", "Mul": "Mul", "Div": "Div", "MatMul": "MatMul",
-    "Conv": "Conv2d", "BatchNormalization": "BatchNorm", "Reshape": "Reshape",
-    "Transpose": "Transpose", "Gemm": "MatMul", "MaxPool": "MaxPool",
-    "AveragePool": "AvgPool", "Softmax": "Softmax", "Concat": "Concat",
+    "Add": "Add", "Sub": "Sub", "Mul": "Mul", "Div": "Div", "MatMul": "MatMul",
+    "Conv": "Conv2d", "BatchNormalization": "BatchNormalization", "Reshape": "Reshape",
+    "Transpose": "Transpose", "Gemm": "Gemm", "MaxPool": "MaxPool",
+    "AveragePool": "AveragePool", "Softmax": "Softmax", "Concat": "Concat",
     "Flatten": "Flatten", "Slice": "Slice", "Pad": "Pad",
     "ReduceMean": "ReduceMean", "ReduceSum": "ReduceSum",
-    "GlobalAveragePool": "ReduceMean", "Constant": "Constant",
+    "GlobalAveragePool": "GlobalAveragePool", "Constant": "Constant",
     "LeakyRelu": "LeakyRelu", "Elu": "Elu", "Clip": "Clip",
-    "Dropout": "Identity", "InstanceNormalization": "InstanceNorm",
-    "Split": "Split", "Shape": "ShapeOp", "Cast": "CastOp",
-    "Gather": "GatherOp", "Unsqueeze": "Unsqueeze", "Squeeze": "Squeeze",
+    "Dropout": "Identity", "InstanceNormalization": "InstanceNormalization",
+    "Split": "Split", "Shape": "Shape", "Cast": "Cast",
+    "Gather": "Gather", "Unsqueeze": "Unsqueeze", "Squeeze": "Squeeze",
     "Identity": "Identity", "Resize": "Resize", "Tile": "Tile",
     "Where": "Where", "Compress": "Compress", "CumSum": "CumSum",
     "DepthToSpace": "DepthToSpace", "SpaceToDepth": "SpaceToDepth",
     "LogSoftmax": "LogSoftmax", "Selu": "Selu",
     "HardSigmoid": "HardSigmoid", "HardSwish": "HardSwish",
-    "LayerNormalization": "LayerNorm", "ConvTranspose": "ConvTranspose",
+    "LayerNormalization": "LayerNormalization", "ConvTranspose": "ConvTranspose",
     "TopK": "TopK", "GatherND": "GatherND", "ScatterND": "ScatterND",
     "Exp": "Exp", "Sqrt": "Sqrt", "Neg": "Neg", "Log": "Log", "Erf": "Erf",
-    "Ceil": "CeilOp", "Floor": "FloorOp", "Round": "RoundOp", "Sign": "SignOp",
-    "Reciprocal": "ReciprocalOp", "IsNaN": "IsNaNOp", "IsInf": "IsInfOp",
-    "And": "AndOp", "Or": "OrOp", "Xor": "XorOp", "Not": "NotOp",
-    "Less": "LessOp", "Greater": "GreaterOp", "Equal": "EqualOp",
+    "Ceil": "Ceil", "Floor": "Floor", "Round": "Round", "Sign": "Sign",
+    "Reciprocal": "Reciprocal", "IsNaN": "IsNaN", "IsInf": "IsInf",
+    "And": "And", "Or": "Or", "Xor": "Xor", "Not": "Not",
+    "Less": "Less", "Greater": "Greater", "Equal": "Equal",
     "NonMaxSuppression": "NonMaxSuppression", "Pow": "Pow", "Expand": "Expand",
     "GRU": "GRU", "LSTM": "LSTM", "Gelu": "Gelu", "Swish": "Swish",
     "BiasGelu": "BiasGelu", "FastGelu": "FastGelu",
@@ -52,7 +56,7 @@ ONNX_TO_IR_OP = {
     "EmbedLayerNormalization": "EmbedLayerNormalization",
     "QuantizeLinear": "QuantizeLinear", "DequantizeLinear": "DequantizeLinear",
     "QLinearMatMul": "QLinearMatMul", "QLinearConv": "QLinearConv",
-    "RMSNormalization": "RMSNorm", "RotaryEmbedding": "RotaryEmbedding",
+    "RMSNormalization": "RMSNormalization", "RotaryEmbedding": "RotaryEmbedding",
     "SkipLayerNormalization": "SkipLayerNorm",
     "ConstantOfShape": "ConstantOfShape", "LRN": "LRN",
     "Tril": "Tril", "Triu": "Triu", "Loop": "Loop", "If": "If",
@@ -361,9 +365,8 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
             out_to_nid[matmul_out_name] = oid
 
         elif onn.op_type in ("Conv", "ConvTranspose"):
-            # For Conv/ConvTranspose, include weight and bias as input tensors
-            # ins currently only has data input (X); need to add weight/bias param names
-            conv_ins = list(ins_names)
+            data_inputs = [n for n in ins_names if n not in init_names]
+            conv_ins = list(data_inputs)
             for suffix, idx in _OP_PARAM_SLOTS.get(onn.op_type, []):
                 if idx < len(onn.input) and onn.input[idx] in init_map:
                     param_name = f"{oname}.{suffix}"
@@ -385,11 +388,16 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         elif onn.op_type == "Constant":
             value = _get_attr(onn, "value", None)
             if value is not None:
-                try:
-                    const_arr = onnx.numpy_helper.to_array(value)
-                    params[f"{oname}.value"] = {"data": const_arr.tobytes(), "shape": list(const_arr.shape), "dtype": "F32", "is_constant": True}
-                except Exception:
-                    pass
+                if isinstance(value, np.ndarray):
+                    const_arr = value
+                else:
+                    try:
+                        const_arr = onnx.numpy_helper.to_array(value)
+                    except Exception:
+                        const_arr = None
+                if const_arr is not None:
+                    f32_arr = const_arr.astype(np.float32, copy=False)
+                    params[f"{oname}.value"] = {"data": f32_arr.tobytes(), "shape": list(f32_arr.shape), "dtype": "F32", "is_constant": True}
             nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Reshape":
@@ -585,10 +593,10 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     layer["type"] = "Linear"
             else:
                 layer["type"] = "Linear"
-        elif opcode == "BatchNorm":
+        elif opcode == "BatchNormalization":
             layer["type"] = "BatchNorm2d"
-        elif opcode == "InstanceNorm":
-            layer["type"] = "InstanceNorm"
+        elif opcode == "InstanceNormalization":
+            layer["type"] = "InstanceNormalization"
             # Add num_features from scale/bias weight shape
             scale_name = f"{node.get('name', '')}.weight"
             if scale_name in params:
@@ -598,8 +606,8 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
             # Add eps from attrs (Rust expects 'eps' but ONNX uses 'epsilon')
             if "epsilon" in attrs:
                 layer["eps"] = attrs["epsilon"]
-        elif opcode == "RMSNorm":
-            layer["type"] = "RMSNorm"
+        elif opcode == "RMSNormalization":
+            layer["type"] = "RMSNormalization"
             # Add eps from attrs
             if "epsilon" in attrs:
                 layer["eps"] = attrs["epsilon"]
