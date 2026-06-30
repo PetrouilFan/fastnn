@@ -1,6 +1,7 @@
 use crate::backend::cpu::microkernels::TlsVecPool;
 use crate::backend::cpu::telemetry::record_arena_temp_copy;
 use crate::backend::BufferSlice;
+use smallvec::SmallVec;
 
 use super::CpuBuffer;
 
@@ -167,7 +168,7 @@ pub(super) fn with_nary_f32_slices<R>(
     output: BufferSlice,
     f: impl FnOnce(&[&[f32]], &mut [f32]) -> R,
 ) -> R {
-    let input_ends: Vec<usize> = inputs.iter().copied().map(checked_end).collect();
+    let input_ends: SmallVec<[usize; 8]> = inputs.iter().copied().map(checked_end).collect();
     let output_end = checked_end(output);
     let output_overlaps_input =
         inputs
@@ -189,7 +190,7 @@ pub(super) fn with_nary_f32_slices<R>(
         // from the mutable output byte range. Input ranges may overlap each
         // other, which is fine for shared f32 slices.
         unsafe {
-            let input_f32: Vec<&[f32]> = inputs
+            let input_f32: SmallVec<[&[f32]; 8]> = inputs
                 .iter()
                 .map(|input| bytes_as_f32_slice(arena_bytes.as_ptr().add(input.offset), input.size))
                 .collect();
@@ -213,14 +214,14 @@ pub(super) fn with_nary_f32_slices<R>(
                     record_arena_temp_copy(input.size);
                     copy
                 })
-                .collect::<Vec<_>>()
+                .collect::<SmallVec<[_; 8]>>()
         };
         let output_f32 = {
             let arena_bytes = arena.data_mut();
             assert_slice_in_bounds(arena_bytes.len(), output, output_end);
             bytemuck::cast_slice_mut::<_, f32>(&mut arena_bytes[output.offset..output_end])
         };
-        let input_refs: Vec<&[f32]> = input_copies.iter().map(|copy| &copy[..]).collect();
+        let input_refs: SmallVec<[&[f32]; 8]> = input_copies.iter().map(|copy| &copy[..]).collect();
         f(&input_refs, output_f32)
     }
 }
@@ -247,14 +248,14 @@ fn checked_end(slice: BufferSlice) -> usize {
 
 #[inline]
 fn assert_slice_in_bounds(arena_len: usize, slice: BufferSlice, end: usize) {
-    assert!(
+    debug_assert!(
         end <= arena_len,
         "BufferSlice out of bounds: offset={} size={} arena_len={}",
         slice.offset,
         slice.size,
         arena_len
     );
-    assert_eq!(
+    debug_assert_eq!(
         slice.size % std::mem::size_of::<f32>(),
         0,
         "f32 BufferSlice size must be a multiple of 4"
