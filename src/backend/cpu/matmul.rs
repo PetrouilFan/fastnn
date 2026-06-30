@@ -171,7 +171,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = matmul_params.as_slice() else {
+        let &[m, k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
@@ -224,7 +224,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = matmul_params.as_slice() else {
+        let &[m, k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
@@ -282,7 +282,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
 ) -> Result<(), BackendError> {
     if let [a_slice, w_slice] = input_slices {
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-        let &[m, k, n] = matmul_params.as_slice() else {
+        let &[m, k, n] = &matmul_params[..] else {
             return Err(BackendError::Dispatch(format!(
                 "{kernel_name}: expected params [M,K,N]"
             )));
