@@ -18,6 +18,7 @@ use crate::backend::cpu::packed_gemm::gemm_packed_float_fused;
 use crate::backend::cpu::swar::{
     i4x8_dot_packed, i8x4_dot_packed, sum_i4x8_packed, sum_i8x4_packed,
 };
+use crate::backend::prepared::PreparedActivation;
 use crate::dtypes::f4x8::f4x8_dot_packed;
 use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
@@ -423,7 +424,7 @@ pub unsafe fn conv2d_packed_float<T: PackedWord>(
     groups: usize,
     kh: usize,
     kw: usize,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     output: &mut [f32],
 ) {
     let oc = weight.shape()[0];
@@ -527,7 +528,7 @@ pub fn gemm_packed_i8x4_fused_raw(
     w_scales: &[f32],
     w_zps: &[f32],
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let k_packed = k.div_ceil(4);
@@ -563,7 +564,7 @@ pub fn gemm_packed_i8x4_fused_raw(
     let parallel = m >= crate::backend::cpu::topology::physical_core_count();
 
     match activation {
-        None | Some("") => {
+        PreparedActivation::None => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
@@ -595,7 +596,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        Some("relu") => {
+        PreparedActivation::Relu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
@@ -628,7 +629,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        Some("silu") => {
+        PreparedActivation::Silu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
@@ -661,7 +662,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        _ => {
+        PreparedActivation::Gelu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let act_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = act_row.iter().map(|&w| sum_i8x4_packed(w.0)).sum();
@@ -672,10 +673,11 @@ pub fn gemm_packed_i8x4_fused_raw(
                     for kk in 0..k_packed {
                         acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
                     }
-                    c_row[col] = (acc as f32) * scale_ab_col[col]
+                    let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
                         + zp_prod_col[col] * k_f32;
+                    c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
                 }
             };
             #[cfg(feature = "parallel")]
@@ -703,7 +705,7 @@ pub fn gemm_packed_i8x4_fused(
     act_packed: &PackedTensor<I8x4>,
     weight_packed: &PackedTensor<I8x4>,
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
@@ -739,7 +741,7 @@ pub fn gemm_packed_i4x8_fused_raw(
     w_scales: &[f32],
     w_zps: &[f32],
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let k_packed = k.div_ceil(8);
@@ -774,7 +776,7 @@ pub fn gemm_packed_i4x8_fused_raw(
     let parallel = m >= crate::backend::cpu::topology::physical_core_count();
 
     match activation {
-        None | Some("") => {
+        PreparedActivation::None => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
@@ -806,7 +808,7 @@ pub fn gemm_packed_i4x8_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        Some("relu") => {
+        PreparedActivation::Relu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
@@ -839,7 +841,7 @@ pub fn gemm_packed_i4x8_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        Some("silu") => {
+        PreparedActivation::Silu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
@@ -872,7 +874,7 @@ pub fn gemm_packed_i4x8_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        _ => {
+        PreparedActivation::Gelu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 let qa_sum: i32 = a_row.iter().map(|&w| sum_i4x8_packed(w.0)).sum();
@@ -883,10 +885,11 @@ pub fn gemm_packed_i4x8_fused_raw(
                     for kk in 0..k_packed {
                         acc += i4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
-                    c_row[col] = (acc as f32) * scale_ab_col[col]
+                    let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
                         + zp_prod_col[col] * k_f32;
+                    c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
                 }
             };
             #[cfg(feature = "parallel")]
@@ -913,7 +916,7 @@ pub fn gemm_packed_i4x8_fused(
     act_packed: &PackedTensor<I4x8>,
     weight_packed: &PackedTensor<I4x8>,
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
@@ -950,7 +953,7 @@ pub fn gemm_packed_f4x8_fused_raw(
     n: usize,
     w_scales: &[f32],
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let k_packed = k.div_ceil(8);
@@ -974,7 +977,7 @@ pub fn gemm_packed_f4x8_fused_raw(
     let parallel = m >= crate::backend::cpu::topology::physical_core_count();
 
     match activation {
-        None | Some("") => {
+        PreparedActivation::None => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 for col in 0..n {
@@ -1001,7 +1004,7 @@ pub fn gemm_packed_f4x8_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        Some("relu") => {
+        PreparedActivation::Relu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 for col in 0..n {
@@ -1028,7 +1031,7 @@ pub fn gemm_packed_f4x8_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        Some("silu") => {
+        PreparedActivation::Silu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 for col in 0..n {
@@ -1056,7 +1059,7 @@ pub fn gemm_packed_f4x8_fused_raw(
                 compute_row(row, c_row);
             }
         }
-        _ => {
+        PreparedActivation::Gelu => {
             let compute_row = |row: usize, c_row: &mut [f32]| {
                 let a_row = &act_data[row * k_packed..(row + 1) * k_packed];
                 for col in 0..n {
@@ -1065,7 +1068,8 @@ pub fn gemm_packed_f4x8_fused_raw(
                     for kk in 0..k_packed {
                         acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
-                    c_row[col] = (acc as f32) * scale_ab_col[col] + bias_col[col];
+                    let val = (acc as f32) * scale_ab_col[col] + bias_col[col];
+                    c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
                 }
             };
             #[cfg(feature = "parallel")]
@@ -1092,7 +1096,7 @@ pub fn gemm_packed_f4x8_fused(
     act_packed: &PackedTensor<F4x8>,
     weight_packed: &PackedTensor<F4x8>,
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
@@ -1189,7 +1193,7 @@ pub unsafe fn conv2d_packed_i8x4(
     groups: usize,
     kh: usize,
     kw: usize,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     output: &mut [f32],
 ) {
     let oc = weight.shape()[0];
@@ -1271,7 +1275,7 @@ pub unsafe fn conv2d_packed_i4x8(
     groups: usize,
     kh: usize,
     kw: usize,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     output: &mut [f32],
 ) {
     let oc = weight.shape()[0];
@@ -1352,7 +1356,7 @@ pub unsafe fn conv2d_packed_f4x8(
     groups: usize,
     kh: usize,
     kw: usize,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     output: &mut [f32],
 ) {
     let oc = weight.shape()[0];
@@ -1450,7 +1454,7 @@ mod tests {
                 1,
                 1,
                 1,
-                None,
+                PreparedActivation::None,
                 &mut output,
             );
         }
@@ -1471,7 +1475,7 @@ mod tests {
         ];
         let weight = PackedTensor::<I4x8>::from_f32_per_channel(&weight_data, &[2, 8]);
         let mut c = vec![0.0f32; 2];
-        gemm_packed_i4x8_fused(&act, &weight, None, None, &mut c);
+        gemm_packed_i4x8_fused(&act, &weight, None, PreparedActivation::None, &mut c);
         assert_eq!(c.len(), 2);
         assert!(c[1] > 0.0, "expected second output positive, got {:?}", c);
     }
@@ -1519,7 +1523,7 @@ mod tests {
                 groups,
                 kh,
                 kw,
-                None,
+                PreparedActivation::None,
                 &mut output,
             );
         }
@@ -1573,7 +1577,7 @@ mod tests {
                 groups,
                 kh,
                 kw,
-                None,
+                PreparedActivation::None,
                 &mut output,
             );
         }
@@ -1611,7 +1615,7 @@ mod tests {
                 1,
                 1,
                 1,
-                None,
+                PreparedActivation::None,
                 &mut output,
             );
         }
@@ -1632,7 +1636,7 @@ mod tests {
         ];
         let weight = PackedTensor::<F4x8>::from_f32_per_channel(&weight_data, &[2, 8]);
         let mut c = vec![0.0f32; 2];
-        gemm_packed_f4x8_fused(&act, &weight, None, None, &mut c);
+        gemm_packed_f4x8_fused(&act, &weight, None, PreparedActivation::None, &mut c);
         assert_eq!(c.len(), 2);
         assert!(
             c[0] != 0.0 || c[1] != 0.0,
@@ -1669,7 +1673,7 @@ mod tests {
                 1,
                 1,
                 1,
-                None,
+                PreparedActivation::None,
                 &mut output,
             );
         }
@@ -1706,7 +1710,7 @@ mod tests {
                 1,
                 1,
                 1,
-                None,
+                PreparedActivation::None,
                 &mut output,
             );
         }
