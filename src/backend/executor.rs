@@ -50,6 +50,7 @@ pub enum WeightDtype {
 struct StaticShapeCache {
     tightened_memory_plan: MemoryPlan,
     shape_env: ShapeEnv,
+    filtered_plan: ExecutablePlan,
 }
 
 /// An ahead-of-time graph executor that compiles and dispatches
@@ -594,15 +595,15 @@ impl<B: Backend> GraphExecutor<B> {
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         // ── Preamble: shape env, tighten, safety, arena, input write ──
-        let (tightened_memory_plan, shape_env) =
-            if let Some(StaticShapeCache { ref tightened_memory_plan, ref shape_env }) =
+        let (tightened_memory_plan, shape_env, cached_filtered_plan) =
+            if let Some(StaticShapeCache { ref tightened_memory_plan, ref shape_env, ref filtered_plan }) =
                 self.static_shape_cache
             {
                 // Fast path: the plan was already tightened on the first
                 // inference.  Reuse the cached tightened memory plan and
                 // shape env, skipping the O(N_nodes) resolve + tighten
                 // + tighten_slices steps entirely.
-                (tightened_memory_plan.clone(), shape_env.clone())
+                (tightened_memory_plan.clone(), shape_env.clone(), Some(filtered_plan.clone()))
             } else {
                 let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
                     .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
@@ -615,39 +616,66 @@ impl<B: Backend> GraphExecutor<B> {
                 // Cache for static-shape models so subsequent calls
                 // skip the entire preamble.
                 if graph.has_static_shapes() {
+                    let filtered_instructions: Vec<Instruction> = plan
+                        .instructions
+                        .iter()
+                        .filter(|instr| {
+                            !matches!(
+                                instr,
+                                Instruction::WriteConst { .. } | Instruction::Fill { .. }
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    let filtered_plan = ExecutablePlan {
+                        instructions: filtered_instructions,
+                        arena_size: plan.arena_size,
+                        levels: plan.levels.clone(),
+                    };
                     self.static_shape_cache = Some(StaticShapeCache {
                         tightened_memory_plan: tightened_memory_plan.clone(),
                         shape_env: shape_env.clone(),
+                        filtered_plan,
                     });
+                    // Return None so the FIRST call uses the full plan
+                    // (including WriteConst/Fill) to populate the arena.
+                    // Subsequent cache-hit calls will use the filtered plan.
+                    (tightened_memory_plan, shape_env, None)
+                } else {
+                    (tightened_memory_plan, shape_env, None)
                 }
-
-                (tightened_memory_plan, shape_env)
             };
 
-        for (&node_id, slot) in &tightened_memory_plan.slots {
-            if let Some(node) = graph.get_node(node_id) {
-                let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
-                    let numel: u64 = shape.iter().product();
-                    let raw = numel as usize * node.output_type.dtype.byte_size();
-                    match &node.output_type.dtype {
-                        IrDType::I4 { .. }
-                        | IrDType::U8 { .. }
-                        | IrDType::F8 { .. }
-                        | IrDType::F8R { .. }
-                        | IrDType::F4 { .. } => {
-                            node.output_type.dtype.packed_byte_size(numel as usize)
+        // Slot safety check: only needed on the first call when shapes are
+        // being resolved for the first time. On subsequent calls with a
+        // populated static_shape_cache the shapes are identical and were
+        // already validated.
+        if cached_filtered_plan.is_none() {
+            for (&node_id, slot) in &tightened_memory_plan.slots {
+                if let Some(node) = graph.get_node(node_id) {
+                    let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
+                        let numel: u64 = shape.iter().product();
+                        let raw = numel as usize * node.output_type.dtype.byte_size();
+                        match &node.output_type.dtype {
+                            IrDType::I4 { .. }
+                            | IrDType::U8 { .. }
+                            | IrDType::F8 { .. }
+                            | IrDType::F8R { .. }
+                            | IrDType::F4 { .. } => {
+                                node.output_type.dtype.packed_byte_size(numel as usize)
+                            }
+                            IrDType::I8 => numel as usize + 8,
+                            _ => raw,
                         }
-                        IrDType::I8 => numel as usize + 8,
-                        _ => raw,
+                    } else {
+                        continue;
+                    };
+                    if needed > slot.size {
+                        return Err(BackendError::Dispatch(format!(
+                            "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
+                            node_id, needed, slot.size, node.output_type.shape
+                        )));
                     }
-                } else {
-                    continue;
-                };
-                if needed > slot.size {
-                    return Err(BackendError::Dispatch(format!(
-                        "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
-                        node_id, needed, slot.size, node.output_type.shape
-                    )));
                 }
             }
         }
@@ -774,7 +802,11 @@ impl<B: Backend> GraphExecutor<B> {
         #[cfg(not(feature = "prepared-plan"))]
         let arena_preloaded_plan: Option<ExecutablePlan> = None;
 
-        let dispatch_plan = arena_preloaded_plan.as_ref().unwrap_or(plan);
+        let dispatch_plan = if let Some(ref fp) = cached_filtered_plan {
+            fp
+        } else {
+            arena_preloaded_plan.as_ref().unwrap_or(plan)
+        };
 
         let profile_entries = if profile {
             self.backend
