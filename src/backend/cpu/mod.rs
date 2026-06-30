@@ -2713,11 +2713,16 @@ impl Backend for CpuBackend {
                                 let use_blas = m * _k * n >= blas::MIN_BLAS_SIZE * 64;
                                 let apply_fusion = has_bias || activation != 0;
 
-                                // Compute into a local buffer to avoid Vec copies of input data.
-                                // Input references are dropped before flushing to arena.
-                                let out_buf = {
-                                    // SAFETY: arena guarantees input and output ranges are disjoint.
-                                    let (a, b, bias) = unsafe {
+                                // Get mutable output region from arena
+                                let out_slice = {
+                                    let d = arena.data_mut();
+                                    &mut d[out_start..out_end]
+                                };
+
+                                // Compute into arena output directly — no intermediate Vec needed.
+                                // SAFETY: arena guarantees input and output ranges are disjoint.
+                                unsafe {
+                                    let (a, b, bias) = {
                                         let d = arena.data_mut().as_mut_ptr();
                                         let a = std::slice::from_raw_parts(
                                             d.add(a_slice.offset) as *const f32,
@@ -2735,15 +2740,21 @@ impl Backend for CpuBackend {
                                         });
                                         (a, b, bias)
                                     };
+
+                                    // Cast out_slice to f32 slice for direct computation
+                                    let out_f32: &mut [f32] = bytemuck::cast_slice_mut(out_slice);
+
+                                    // Zero the output first
+                                    out_f32.fill(0.0);
+
                                     let b_batched = b.len() > b_stride;
 
-                                    let mut out = vec![0.0f32; out_size];
                                     if use_blas {
                                         for batch in 0..batch_count {
                                             let a_s = batch * a_stride;
                                             let b_s = if b_batched { batch * b_stride } else { 0 };
                                             let out_s = batch * out_stride;
-                                            let ob = &mut out[out_s..out_s + out_stride];
+                                            let ob = &mut out_f32[out_s..out_s + out_stride];
 
                                             if has_bias {
                                                 if let Some(bs) = bias {
@@ -2784,96 +2795,31 @@ impl Backend for CpuBackend {
                                     } else {
                                         let total_rows = batch_count * m;
                                         let b_batch_stride = if b_batched { b_stride } else { 0 };
-                                        {
-                                            let use_parallel = {
-                                                #[cfg(feature = "parallel")]
-                                                {
-                                                    total_rows
-                                                        >= crate::backend::cpu::topology::physical_core_count()
-                                                }
-                                                #[cfg(not(feature = "parallel"))]
-                                                {
-                                                    false
-                                                }
-                                            };
+                                        let use_parallel = {
+                                            #[cfg(feature = "parallel")]
+                                            {
+                                                total_rows
+                                                    >= crate::backend::cpu::topology::physical_core_count()
+                                            }
+                                            #[cfg(not(feature = "parallel"))]
+                                            {
+                                                false
+                                            }
+                                        };
 
-                                            if use_parallel {
-                                                #[cfg(feature = "parallel")]
-                                                {
-                                                    use rayon::prelude::*;
-                                                    // SAFETY: each thread accesses disjoint rows of the output buffer.
-                                                    let out_ptr = out.as_mut_ptr() as usize;
-                                                    (0..total_rows)
-                                                        .into_par_iter()
-                                                        .for_each(move |row| {
-                                                            let op = out_ptr as *mut f32;
-                                                            unsafe {
-                                                                blocked_row_matmul(
-                                                                    a.as_ptr(),
-                                                                    b.as_ptr(),
-                                                                    op,
-                                                                    row,
-                                                                    m,
-                                                                    n,
-                                                                    _k,
-                                                                    a_stride,
-                                                                    _k,
-                                                                    1,
-                                                                    b_batch_stride,
-                                                                    n,
-                                                                    1,
-                                                                );
-                                                            }
-                                                            if apply_fusion {
-                                                                let rs = row * n;
-                                                                unsafe {
-                                                                    for i in 0..n {
-                                                                        let p = rs + i;
-                                                                        let x = *op.add(p)
-                                                                            + if has_bias {
-                                                                                if let Some(bs) =
-                                                                                    bias
-                                                                                {
-                                                                                    bs[i]
-                                                                                } else {
-                                                                                    0.0
-                                                                                }
-                                                                            } else {
-                                                                                0.0
-                                                                            };
-                                                                        *op.add(p) = match activation
-                                                                        {
-                                                                            1 => x.max(0.0),
-                                                                            2 => {
-                                                                                let x3 =
-                                                                                    x * x * x;
-                                                                                let tanh_arg =
-                                                                                    0.797_884_6
-                                                                                        * (x
-                                                                                            + 0.044_715
-                                                                                                * x3);
-                                                                                0.5 * x
-                                                                                    * (1.0
-                                                                                        + tanh_arg
-                                                                                            .tanh())
-                                                                            }
-                                                                            3 => {
-                                                                                x / (1.0 + (-x).exp())
-                                                                            }
-                                                                            _ => x,
-                                                                        };
-                                                                    }
-                                                                }
-                                                            }
-                                                        });
-                                                }
-                                            } else {
-                                                for row in 0..total_rows {
-                                                    unsafe {
+                                        if use_parallel {
+                                            #[cfg(feature = "parallel")]
+                                            {
+                                                use rayon::prelude::*;
+                                                let out_ptr = out_f32.as_mut_ptr() as usize;
+                                                (0..total_rows)
+                                                    .into_par_iter()
+                                                    .for_each(move |row| {
+                                                        let op = out_ptr as *mut f32;
                                                         blocked_row_matmul(
                                                             a.as_ptr(),
                                                             b.as_ptr(),
-                                                            out.as_mut_ptr(),
+                                                            op,
                                                             row,
                                                             m,
                                                             n,
@@ -2885,45 +2831,95 @@ impl Backend for CpuBackend {
                                                             n,
                                                             1,
                                                         );
-                                                    }
-                                                    if apply_fusion {
-                                                        let rs = row * n;
-                                                        for i in 0..n {
-                                                            let p = rs + i;
-                                                            let x = out[p]
-                                                                + if has_bias {
-                                                                    if let Some(bs) = bias {
-                                                                        bs[i]
-                                                                    } else {
-                                                                        0.0
-                                                                    }
+                                                        if apply_fusion {
+                                                            let rs = row * n;
+                                                            for i in 0..n {
+                                                                    let p = rs + i;
+                                                                    let x = *op.add(p)
+                                                                        + if has_bias {
+                                                                            if let Some(bs) =
+                                                                                bias
+                                                                            {
+                                                                                bs[i]
+                                                                            } else {
+                                                                                0.0
+                                                                            }
+                                                                        } else {
+                                                                            0.0
+                                                                        };
+                                                                    *op.add(p) = match activation
+                                                                    {
+                                                                        1 => x.max(0.0),
+                                                                        2 => {
+                                                                            let x3 =
+                                                                                x * x * x;
+                                                                            let tanh_arg =
+                                                                                0.797_884_6
+                                                                                    * (x
+                                                                                        + 0.044_715
+                                                                                            * x3);
+                                                                            0.5 * x
+                                                                                * (1.0
+                                                                                    + tanh_arg
+                                                                                        .tanh())
+                                                                        }
+                                                                        3 => {
+                                                                            x / (1.0 + (-x).exp())
+                                                                        }
+                                                                        _ => x,
+                                                                    };
+                                                                }
+                                                        }
+                                                    });
+                                            }
+                                        } else {
+                                            for row in 0..total_rows {
+                                                blocked_row_matmul(
+                                                    a.as_ptr(),
+                                                    b.as_ptr(),
+                                                    out_f32.as_mut_ptr(),
+                                                    row,
+                                                    m,
+                                                    n,
+                                                    _k,
+                                                    a_stride,
+                                                    _k,
+                                                    1,
+                                                    b_batch_stride,
+                                                    n,
+                                                    1,
+                                                );
+                                                if apply_fusion {
+                                                    let rs = row * n;
+                                                    for i in 0..n {
+                                                        let p = rs + i;
+                                                        let x = out_f32[p]
+                                                            + if has_bias {
+                                                                if let Some(bs) = bias {
+                                                                    bs[i]
                                                                 } else {
                                                                     0.0
-                                                                };
-                                                            out[p] = match activation {
-                                                                1 => x.max(0.0),
-                                                                2 => {
-                                                                    let x3 = x * x * x;
-                                                                    let tanh_arg = 0.797_884_6
-                                                                        * (x + 0.044_715 * x3);
-                                                                    0.5 * x
-                                                                        * (1.0 + tanh_arg.tanh())
                                                                 }
-                                                                3 => x / (1.0 + (-x).exp()),
-                                                                _ => x,
+                                                            } else {
+                                                                0.0
                                                             };
-                                                        }
+                                                        out_f32[p] = match activation {
+                                                            1 => x.max(0.0),
+                                                            2 => {
+                                                                let x3 = x * x * x;
+                                                                let tanh_arg = 0.797_884_6
+                                                                    * (x + 0.044_715 * x3);
+                                                                0.5 * x
+                                                                    * (1.0 + tanh_arg.tanh())
+                                                            }
+                                                            3 => x / (1.0 + (-x).exp()),
+                                                            _ => x,
+                                                        };
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    out
-                                };
-                                {
-                                    let d = arena.data_mut();
-                                    d[out_start..out_end]
-                                        .copy_from_slice(bytemuck::cast_slice(&out_buf));
                                 }
                             }
                         }
