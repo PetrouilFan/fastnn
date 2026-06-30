@@ -469,12 +469,12 @@ pub(crate) unsafe fn conv_sgemm(
                 n as i32,
             );
         } else {
-            matrixmultiply::sgemm(
+            crate::backend::cpu::sgemm::sgemm(
                 m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
             );
         }
     } else {
-        matrixmultiply::sgemm(
+        crate::backend::cpu::sgemm::sgemm(
             m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
         );
     }
@@ -498,7 +498,7 @@ pub(crate) unsafe fn conv_sgemm(
     rs_c: isize,
     cs_c: isize,
 ) {
-    matrixmultiply::sgemm(
+    crate::backend::cpu::sgemm::sgemm(
         m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
     );
 }

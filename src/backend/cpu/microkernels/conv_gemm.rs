@@ -194,16 +194,16 @@ pub fn conv_gemm_f32(
     // ── No bias or activation: straight GEMM ──
     if bias.is_none() && activation.is_none() {
         unsafe {
-            matrixmultiply::sgemm(
+            crate::backend::cpu::sgemm::sgemm(
                 m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
             );
         }
         return;
     }
 
-    // ── With bias/activation: matrixmultiply then post-process ──
+    // ── With bias/activation: GEMM then post-process ──
     unsafe {
-        matrixmultiply::sgemm(
+        crate::backend::cpu::sgemm::sgemm(
             m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
         );
     }

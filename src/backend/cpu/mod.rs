@@ -34,6 +34,7 @@ pub mod microkernels;
 pub mod packed_conv;
 pub mod packed_gemm;
 pub mod reductions_fast;
+pub mod sgemm;
 pub mod swar;
 pub mod telemetry;
 
