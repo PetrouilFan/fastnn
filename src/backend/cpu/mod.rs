@@ -13,6 +13,8 @@ use crate::backend::cpu::microkernels::{
 };
 use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
+use smallvec::{smallvec, SmallVec};
+use std::borrow::Cow;
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
@@ -3291,7 +3293,7 @@ impl Backend for CpuBackend {
                                     |input, out_f32| {
                                         let softmax_params =
                                             resolve_params(params, param_dims, shape_env, 2)
-                                                .unwrap_or_else(|_| vec![input.len(), 1]);
+                                                .unwrap_or_else(|_| Cow::Owned(vec![input.len(), 1]));
                                         let axis_dim_size = softmax_params[0].max(1);
                                         let stride =
                                             softmax_params.get(1).copied().unwrap_or(1).max(1);
@@ -3594,10 +3596,10 @@ impl Backend for CpuBackend {
                                 // and avoids the previous per-call `.to_vec()` copies of the input
                                 // and weight tensors.
                                 if let [input_s, weight_s, bias_s @ ..] = &input_slices[..] {
-                                    let inputs_for_kernel: Vec<BufferSlice> = if bias_s.is_empty() {
-                                        vec![*input_s, *weight_s]
+                                    let inputs_for_kernel: SmallVec<[BufferSlice; 4]> = if bias_s.is_empty() {
+                                        smallvec![*input_s, *weight_s]
                                     } else {
-                                        vec![*input_s, *weight_s, bias_s[0]]
+                                        smallvec![*input_s, *weight_s, bias_s[0]]
                                     };
                                     arena::with_nary_f32_slices(
                                         arena,
@@ -4058,11 +4060,13 @@ impl Backend for CpuBackend {
                             if let Some(input_slice) = input_slices.first() {
                                 let input = {
                                     let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
+                                    let src = bytemuck::cast_slice::<_, f32>(
                                         &d[input_slice.offset
                                             ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
+                                    );
+                                    let mut copy = tls_alloc_f32(src.len());
+                                    copy.copy_from_slice(src);
+                                    copy
                                 };
                                 // params: [kernel, stride, padding, is_max, N, C, H, W]
                                 let &[kernel, stride_val, padding_val, is_max, n, c, h, w] =
@@ -7313,7 +7317,7 @@ fn dispatch_matmul_fp32_with_view(
     };
 
     let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-    let &[m, _k, n] = matmul_params.as_slice() else {
+    let &[m, _k, n] = &matmul_params[..] else {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: expected params [M,K,N]"
         )));
