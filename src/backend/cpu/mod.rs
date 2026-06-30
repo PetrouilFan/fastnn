@@ -6939,8 +6939,6 @@ impl Backend for CpuBackend {
     ) -> Result<(), BackendError> {
         use crate::backend::prepared::PersistentPreparedWeights;
 
-        let total_time = std::time::Instant::now();
-
         // Fast path: empty / missing view degrades to the standard
         // dispatch without any per-instruction overhead.
         let view: &PersistentPreparedWeights = match persistent_view {
@@ -6954,7 +6952,6 @@ impl Backend for CpuBackend {
             let mut conv_count = 0usize;
             let mut fallback_count = 0usize;
 
-            let mut prev_conv_time = conv_time.as_secs_f64();
             for instruction in &plan.instructions {
             match instruction {
                 // Skip WriteConst for slots the persistent view will
@@ -7263,9 +7260,6 @@ fn dispatch_matmul_fp32_with_view(
     view: &crate::backend::prepared::PersistentPreparedWeights,
 ) -> Result<(), BackendError> {
     use crate::backend::cpu::blas::matmul_blas_into;
-    // used in QuantizedConv2dAvx2 (avx2 feature gate)
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    use crate::backend::cpu::microkernels::blocked_row_matmul;
     
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
@@ -7350,22 +7344,4 @@ fn dispatch_matmul_fp32_with_view(
     Ok(())
 }
 
-#[cfg(feature = "prepared-plan")]
-fn pack_bytes_to_i4x8(raw: &[u8]) -> Vec<I4x8> {
-    let mut packed = vec![0u32; raw.len().div_ceil(4)];
-    {
-        let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
-        bytes[..raw.len()].copy_from_slice(raw);
-    }
-    bytemuck::cast_slice(&packed).to_vec()
-}
 
-#[cfg(feature = "prepared-plan")]
-fn pack_bytes_to_i8x4(raw: &[u8]) -> Vec<I8x4> {
-    let mut packed = vec![0u32; raw.len().div_ceil(4)];
-    {
-        let bytes = bytemuck::cast_slice_mut::<_, u8>(&mut packed);
-        bytes[..raw.len()].copy_from_slice(raw);
-    }
-    bytemuck::cast_slice(&packed).to_vec()
-}
