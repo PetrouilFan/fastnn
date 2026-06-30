@@ -4015,18 +4015,11 @@ impl Backend for CpuBackend {
                                 // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
                                 for (_si, slice) in input_slices.iter().enumerate() {
-                                    let input_data = {
-                                        let d = arena.data_mut();
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[slice.offset..slice.offset + slice.size],
-                                        )
-                                        .to_vec()
+                                    let input_data = unsafe {
+                                        arena.view_f32(slice.offset, slice.size)
                                     };
-                                    let out_f32 = {
-                                        let d = arena.data_mut();
-                                        bytemuck::cast_slice_mut::<_, f32>(
-                                            &mut d[out_start..out_end],
-                                        )
+                                    let out_f32 = unsafe {
+                                        arena.view_f32_mut(out_start, out_end - out_start)
                                     };
                                     let end = (output_offset + input_data.len()).min(out_f32.len());
                                     let actual_copy = end - output_offset;
@@ -4518,19 +4511,10 @@ impl Backend for CpuBackend {
                         }
                         "conv3d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = {
-                                    let d = arena.data_mut();
+                                let (input, weight) = unsafe {
                                     (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[input_slice.offset
-                                                ..input_slice.offset + input_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
+                                        arena.view_f32(input_slice.offset, input_slice.size),
+                                        arena.view_f32(weight_slice.offset, weight_slice.size),
                                     )
                                 };
                                 let &[stride, padding, dilation, c, d, h, w, kd, kh, kw] =
@@ -4554,9 +4538,8 @@ impl Backend for CpuBackend {
                                     .saturating_sub(dilation * (kw - 1) + 1)
                                     / stride
                                     + 1;
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
                                 for nn in 0..n {
                                     for ff in 0..f {
@@ -4625,19 +4608,10 @@ impl Backend for CpuBackend {
                         }
                         "conv_transpose2d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = {
-                                    let d = arena.data_mut();
+                                let (input, weight) = unsafe {
                                     (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[input_slice.offset
-                                                ..input_slice.offset + input_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
+                                        arena.view_f32(input_slice.offset, input_slice.size),
+                                        arena.view_f32(weight_slice.offset, weight_slice.size),
                                     )
                                 };
                                 let &[stride, padding, c, hin, win, kh, kw] = &params[..] else {
@@ -4650,9 +4624,8 @@ impl Backend for CpuBackend {
                                 let f = weight.len() / (c * kh * kw).max(1);
                                 let h_out = ((hin - 1) * stride + kh).saturating_sub(2 * padding);
                                 let w_out = ((win - 1) * stride + kw).saturating_sub(2 * padding);
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
                                 out_f32.fill(0.0f32);
                                 for nn in 0..n {
@@ -4708,24 +4681,14 @@ impl Backend for CpuBackend {
                         }
                         "prelu" => {
                             if let [data_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = {
-                                    let d = arena.data_mut();
+                                let (input, weight) = unsafe {
                                     (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
+                                        arena.view_f32(data_slice.offset, data_slice.size),
+                                        arena.view_f32(weight_slice.offset, weight_slice.size),
                                     )
                                 };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
                                 let channel_stride =
                                     if !weight.is_empty() && input.len() > weight.len() {
@@ -4922,24 +4885,14 @@ impl Backend for CpuBackend {
                         }
                         "embedding" => {
                             if let [weight_slice, indices_slice] = &input_slices[..] {
-                                let (weight, indices) = {
-                                    let d = arena.data_mut();
+                                let (weight, indices) = unsafe {
                                     (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[indices_slice.offset
-                                                ..indices_slice.offset + indices_slice.size],
-                                        )
-                                        .to_vec(),
+                                        arena.view_f32(weight_slice.offset, weight_slice.size),
+                                        arena.view_f32(indices_slice.offset, indices_slice.size),
                                     )
                                 };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
                                 let dim = if !weight.is_empty() && !indices.is_empty() {
                                     out_f32.len() / indices.len()
@@ -4962,23 +4915,14 @@ impl Backend for CpuBackend {
                         }
                         "pow_f32" => {
                             if let [data_slice, exp_slice] = &input_slices[..] {
-                                let (data, exponent) = {
-                                    let d = arena.data_mut();
+                                let (data, exponent) = unsafe {
                                     (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[exp_slice.offset..exp_slice.offset + exp_slice.size],
-                                        )
-                                        .to_vec(),
+                                        arena.view_f32(data_slice.offset, data_slice.size),
+                                        arena.view_f32(exp_slice.offset, exp_slice.size),
                                     )
                                 };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
                                 let len = out_f32.len().min(data.len());
                                 #[cfg(not(feature = "parallel"))]
@@ -5545,19 +5489,13 @@ impl Backend for CpuBackend {
                         }
                         "quantize_gradient_f32_to_f8x4r" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let in_f32: Vec<f32> = {
-                                    let d = arena.data_mut();
-                                    let d_ref: &[u8] = &*d;
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d_ref[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
+                                let in_f32 = unsafe {
+                                    arena.view_f32(input_slice.offset, input_slice.size)
                                 };
-                                let d = arena.data_mut();
-                                let out = &mut d[out_start..out_end];
-                                let out_len = out.len();
-                                let num_words = out_len / 4;
+                                let out = unsafe {
+                                    bytemuck::cast_slice_mut(arena.view_f32_mut(out_start, out_end - out_start))
+                                };
+                                let num_words = out.len() / 4;
                                 for w in 0..num_words {
                                     let base = w * 4;
                                     let mut vals = [0.0f32; 4];
@@ -5573,17 +5511,20 @@ impl Backend for CpuBackend {
                         "dequantize_gradient_f8x4r_to_f32" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let numel = *params.first().unwrap_or(&0);
-                                let in_u32: Vec<u32> = {
-                                    let d = arena.data_mut();
-                                    let d_ref: &[u8] = &*d;
-                                    bytemuck::cast_slice::<_, u32>(
-                                        &d_ref[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
+                                let in_u32 = unsafe {
+                                    std::slice::from_raw_parts(
+                                        arena.view_f32(input_slice.offset, input_slice.size)
+                                            .as_ptr() as *const u32,
+                                        input_slice.size / 4,
                                     )
-                                    .to_vec()
                                 };
-                                let d = arena.data_mut();
-                                let out = &mut d[out_start..out_end];
+                                let out_bytes = unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        arena.view_f32_mut(out_start, out_end - out_start)
+                                            .as_mut_ptr() as *mut u8,
+                                        out_end - out_start,
+                                    )
+                                };
                                 let num_words = numel.div_ceil(4);
                                 for w in 0..num_words {
                                     let word = in_u32.get(w).copied().unwrap_or(0);
@@ -5595,8 +5536,8 @@ impl Backend for CpuBackend {
                                         if idx < numel {
                                             let bytes = vals[j].to_le_bytes();
                                             let off = idx * 4;
-                                            if off + 4 <= out.len() {
-                                                out[off..off + 4].copy_from_slice(&bytes);
+                                            if off + 4 <= out_bytes.len() {
+                                                out_bytes[off..off + 4].copy_from_slice(&bytes);
                                             }
                                         }
                                     }
@@ -5607,18 +5548,12 @@ impl Backend for CpuBackend {
                             if let Some(input_slice) = input_slices.first() {
                                 let numel = *params.first().unwrap_or(&0);
                                 let scale = f32::from_bits(*params.get(1).unwrap_or(&0) as u32);
-                                let in_f32 = {
-                                    let d = arena.data_mut();
-                                    let d_ref: &[u8] = &*d;
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d_ref[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
+                                let in_f32 = unsafe {
+                                    arena.view_f32(input_slice.offset, input_slice.size)
                                 };
-                                let d = arena.data_mut();
-                                let out_f32 =
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end]);
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
+                                };
                                 let len = out_f32.len().min(in_f32.len()).min(numel);
                                 #[cfg(not(feature = "parallel"))]
                                 {
@@ -6082,33 +6017,40 @@ impl Backend for CpuBackend {
                             let in_byte_size = *params.first().unwrap_or(&4);
                             let out_byte_size = *params.get(1).unwrap_or(&4);
                             if let Some(input_slice) = input_slices.first() {
-                                let d = arena.data_mut();
-                                let in_data =
-                                    &d[input_slice.offset..input_slice.offset + input_slice.size];
                                 if in_byte_size == 4 && out_byte_size == 8 {
-                                    // F32/I32 â†’ I64: widen
-                                    let in_f32 = bytemuck::cast_slice::<_, f32>(in_data).to_vec();
-                                    let mut out_bytes = Vec::with_capacity(in_f32.len() * 8);
-                                    for &v in &in_f32 {
-                                        out_bytes.extend_from_slice(&(v as i64).to_le_bytes());
+                                    let in_f32 = unsafe {
+                                        arena.view_f32(input_slice.offset, input_slice.size)
+                                    };
+                                    let out = unsafe {
+                                        bytemuck::cast_slice_mut(
+                                            arena.view_f32_mut(out_start, out_end - out_start),
+                                        )
+                                    };
+                                    let num = in_f32.len();
+                                    for i in 0..num {
+                                        let byte_off = i * 8;
+                                        if byte_off + 8 <= out.len() {
+                                            out[byte_off..byte_off + 8]
+                                                .copy_from_slice(&(in_f32[i] as i64).to_le_bytes());
+                                        }
                                     }
-                                    let end = (out_start + out_bytes.len()).min(d.len());
-                                    d[out_start..end]
-                                        .copy_from_slice(&out_bytes[..end - out_start]);
                                 } else if in_byte_size == 8 && out_byte_size == 4 {
-                                    // I64 â†’ F32/I32: narrow
-                                    let in_i64 = bytemuck::cast_slice::<_, i64>(in_data).to_vec();
-                                    let mut out_bytes = Vec::with_capacity(in_i64.len() * 4);
-                                    for &v in &in_i64 {
-                                        out_bytes.extend_from_slice(&(v as f32).to_le_bytes());
+                                    let in_f32_src = unsafe {
+                                        arena.view_f32(input_slice.offset, input_slice.size)
+                                    };
+                                    let in_i64: &[i64] = bytemuck::cast_slice(in_f32_src);
+                                    let out_f32 = unsafe {
+                                        arena.view_f32_mut(out_start, out_end - out_start)
+                                    };
+                                    let len = in_i64.len().min(out_f32.len());
+                                    for i in 0..len {
+                                        out_f32[i] = in_i64[i] as f32;
                                     }
-                                    let end = (out_start + out_bytes.len()).min(d.len());
-                                    d[out_start..end]
-                                        .copy_from_slice(&out_bytes[..end - out_start]);
                                 }
                                 // Same-size casts handled by MemCopy at compile time
                             }
                         }
+
                         "expand_f32" => {
                             // Expand broadcasts input[0] (f32 data) using target
                             // shape input[1] (i64 dims).  params layout:
@@ -6138,26 +6080,13 @@ impl Backend for CpuBackend {
                             let data_numel = data_slice.size / 4; // f32 = 4 bytes
                             let out_numel = output_slice.size / 4;
 
-                            let d = arena.data_mut();
+                            let in_f32 = unsafe {
+                                arena.view_f32(data_slice.offset, data_slice.size)
+                            };
 
-                            // NOTE: We do NOT read the runtime shape tensor here.
-                            // The compile-time broadcast dims from the instruction params
-                            // (in_dims, out_dims) are the source of truth.  The shape
-                            // tensor (input[1]) is stored as F32 (4 bytes/elem) by the
-                            // Shape/Gather/Concat pipeline, but the old code attempted to
-                            // read it as i64 (8 bytes/elem) â€” a latent bytemuck panic for
-                            // tensors with odd element counts (e.g. 3 dims â†’ 12 bytes,
-                            // not a multiple of 8).
-
-                            // Read input data
-                            let in_f32: Vec<f32> = bytemuck::cast_slice::<_, f32>(
-                                &d[data_slice.offset..data_slice.offset + data_slice.size],
-                            )
-                            .to_vec();
-
-                            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[out_start..out_start + output_slice.size],
-                            );
+                            let out_f32 = unsafe {
+                                arena.view_f32_mut(out_start, output_slice.size)
+                            };
 
                             // Broadcast: for each output element, map back to input coords
                             #[cfg(not(feature = "parallel"))]
@@ -6557,18 +6486,13 @@ impl Backend for CpuBackend {
                         }
                         "to_f16" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let f32_data = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
+                                let f32_data = unsafe {
+                                    arena.view_f32(input_slice.offset, input_slice.size)
                                 };
-                                let out_bytes = {
-                                    let d = arena.data_mut();
-                                    &mut d[out_start..out_end]
+                                let out_bytes = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
+                                let out_bytes: &mut [u8] = bytemuck::cast_slice_mut(out_bytes);
                                 for (i, &v) in f32_data.iter().enumerate() {
                                     let f16_val = half::f16::from_f32(v);
                                     let bytes = f16_val.to_le_bytes();
@@ -6583,14 +6507,11 @@ impl Backend for CpuBackend {
                         }
                         "to_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let in_data = {
-                                    let d = arena.data_mut();
-                                    d[input_slice.offset..input_slice.offset + input_slice.size]
-                                        .to_vec()
+                                let in_data = unsafe {
+                                    arena.view_u8(input_slice.offset, input_slice.size)
                                 };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
                                 let max_out = out_f32.len().min(in_data.len() / 2);
                                 for i in 0..max_out {
@@ -6609,17 +6530,11 @@ impl Backend for CpuBackend {
                             let is_per_channel = params.get(1).copied().unwrap_or(0) == 1;
                             let num_channels = params.get(2).copied().unwrap_or(0);
                             if let Some(input_slice) = input_slices.first() {
-                                let f32_data = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
+                                let f32_data = unsafe {
+                                    arena.view_f32(input_slice.offset, input_slice.size)
                                 };
-                                let out_bytes = {
-                                    let d = arena.data_mut();
-                                    &mut d[out_start..out_end]
+                                let out_bytes = unsafe {
+                                    bytemuck::cast_slice_mut(arena.view_f32_mut(out_start, out_end - out_start))
                                 };
 
                                 if is_per_channel && num_channels > 0 {
@@ -6700,15 +6615,12 @@ impl Backend for CpuBackend {
                                 0
                             };
                             if let Some(input_slice) = input_slices.first() {
-                                let in_data = {
-                                    let d = arena.data_mut();
-                                    d[input_slice.offset..input_slice.offset + input_slice.size]
-                                        .to_vec()
-                                };
+                                let in_data = bytemuck::cast_slice(unsafe {
+                                    arena.view_f32(input_slice.offset, input_slice.size)
+                                });
 
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
+                                let out_f32 = unsafe {
+                                    arena.view_f32_mut(out_start, out_end - out_start)
                                 };
 
                                 if is_per_channel && num_channels > 0 {
