@@ -9,8 +9,6 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use super::ConvActivation;
 use crate::backend::cpu::microkernels::conv::apply_conv_activation;
 
@@ -19,7 +17,11 @@ use core::arch::x86_64::*;
 
 use crate::backend::cpu::microkernels::activations::{exp_avx2_vec, tanh_avx2_vec};
 
+#[cfg(feature = "debug_canary")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "debug_canary")]
 static DID_AVX2: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "debug_canary")]
 static DID_SCALAR: AtomicBool = AtomicBool::new(false);
 
 // ── Helper: apply activation to an AVX2 vector ──────────────────
@@ -239,12 +241,14 @@ pub fn direct_depthwise_conv3x3_f32(
     padding: usize,
     activation: Option<ConvActivation>,
 ) {
+    let _ = &groups; // used only under debug_canary
     let h_out = (h + 2 * padding).saturating_sub(3) / stride + 1;
     let w_out = (w + 2 * padding).saturating_sub(3) / stride + 1;
 
     // Fast path: AVX2 stride-1 pad-1
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if padding == 1 && stride == 1 && is_x86_feature_detected!("avx2") {
+        #[cfg(feature = "debug_canary")]
         if !DID_AVX2.swap(true, Ordering::Relaxed) {
             eprintln!("[direct_depthwise_conv] AVX2 PATH ACTIVE (c={} h={} w={} f={} groups={})", c, h, w, f, groups);
         }
@@ -258,6 +262,7 @@ pub fn direct_depthwise_conv3x3_f32(
     }
 
     // Scalar path (handles stride-2, any padding)
+    #[cfg(feature = "debug_canary")]
     if !DID_SCALAR.swap(true, Ordering::Relaxed) {
         eprintln!("[direct_depthwise_conv] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})", padding, stride, c, h, w, f);
     }
