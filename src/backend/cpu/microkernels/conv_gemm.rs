@@ -171,7 +171,10 @@ pub fn conv_gemm_f32(
     // ── M=1 fast path: dot product per spatial position ──
     // Avoids matrixmultiply's per-call overhead for depthwise GEMMs
     // where a single output channel is computed per group.
-    if m == 1 && rs_c == n as isize && cs_c == 1 {
+    if m == 1 && rs_c == n as isize && cs_c == 1
+        && rs_a == k as isize && cs_a == 1
+        && rs_b == 1 && cs_b == k as isize
+    {
         let bv = bias.and_then(|b| b.first().copied()).unwrap_or(0.0);
         let out = unsafe { std::slice::from_raw_parts_mut(c, n) };
         let wgt = unsafe { std::slice::from_raw_parts(a, k) };
