@@ -12,6 +12,8 @@ use std::arch::x86_64::*;
 
 pub mod activations;
 pub mod conv;
+pub mod conv_gemm;
+pub mod direct_conv;
 pub mod gemm;
 pub mod misc;
 pub mod ops;

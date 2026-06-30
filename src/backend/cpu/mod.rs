@@ -3279,19 +3279,17 @@ impl Backend for CpuBackend {
                         }
                         "biasadd" => {
                             if let [data_slice, bias_slice] = &input_slices[..] {
-                                let (data, bias) = {
+                                let (data, bias): (&[f32], &[f32]) = {
                                     let d = arena.data_mut();
                                     (
                                         bytemuck::cast_slice::<_, f32>(
                                             &d[data_slice.offset
                                                 ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
+                                        ),
                                         bytemuck::cast_slice::<_, f32>(
                                             &d[bias_slice.offset
                                                 ..bias_slice.offset + bias_slice.size],
-                                        )
-                                        .to_vec(),
+                                        ),
                                     )
                                 };
                                 let out_f32 = {
@@ -3303,7 +3301,7 @@ impl Backend for CpuBackend {
                                         "biasadd: expected params [channel_stride]".into(),
                                     ));
                                 };
-                                biasadd_f32(&data, &bias, out_f32, channel_stride);
+                                biasadd_f32(data, bias, out_f32, channel_stride);
                             }
                         }
                         "norm_f32" => {
@@ -3318,34 +3316,29 @@ impl Backend for CpuBackend {
                                 if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] =
                                     &input_slices[..]
                                 {
-                                    let (data, weight, bias, running_mean, running_var) = {
+                                    let (data, weight, bias, running_mean, running_var): (&[f32], &[f32], &[f32], &[f32], &[f32]) = {
                                         let d = arena.data_mut();
                                         (
                                             bytemuck::cast_slice::<_, f32>(
                                                 &d[data_slice.offset
                                                     ..data_slice.offset + data_slice.size],
-                                            )
-                                            .to_vec(),
+                                            ),
                                             bytemuck::cast_slice::<_, f32>(
                                                 &d[weight_slice.offset
                                                     ..weight_slice.offset + weight_slice.size],
-                                            )
-                                            .to_vec(),
+                                            ),
                                             bytemuck::cast_slice::<_, f32>(
                                                 &d[bias_slice.offset
                                                     ..bias_slice.offset + bias_slice.size],
-                                            )
-                                            .to_vec(),
+                                            ),
                                             bytemuck::cast_slice::<_, f32>(
                                                 &d[mean_slice.offset
                                                     ..mean_slice.offset + mean_slice.size],
-                                            )
-                                            .to_vec(),
+                                            ),
                                             bytemuck::cast_slice::<_, f32>(
                                                 &d[var_slice.offset
                                                     ..var_slice.offset + var_slice.size],
-                                            )
-                                            .to_vec(),
+                                            ),
                                         )
                                     };
                                     let out_f32 = {
@@ -3361,13 +3354,13 @@ impl Backend for CpuBackend {
                                             // SAFETY: AVX2 feature checked by has_avx2()
                                             unsafe {
                                                 crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
-                                                    &data, &weight, &bias, &running_mean, &running_var,
+                                                    data, weight, bias, running_mean, running_var,
                                                     out_f32, eps,
                                                 );
                                             }
                                         } else {
                                             crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                                &data, &weight, &bias, &running_mean, &running_var,
+                                                data, weight, bias, running_mean, running_var,
                                                 out_f32, eps,
                                             );
                                         }
@@ -3375,11 +3368,11 @@ impl Backend for CpuBackend {
                                     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
                                     {
                                         crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                            &data,
-                                            &weight,
-                                            &bias,
-                                            &running_mean,
-                                            &running_var,
+                                            data,
+                                            weight,
+                                            bias,
+                                            running_mean,
+                                            running_var,
                                             out_f32,
                                             eps,
                                         );
@@ -6993,6 +6986,8 @@ impl Backend for CpuBackend {
     ) -> Result<(), BackendError> {
         use crate::backend::prepared::PersistentPreparedWeights;
 
+        let total_time = std::time::Instant::now();
+
         // Fast path: empty / missing view degrades to the standard
         // dispatch without any per-instruction overhead.
         let view: &PersistentPreparedWeights = match persistent_view {
@@ -7000,15 +6995,21 @@ impl Backend for CpuBackend {
             _ => return self.dispatch(plan, arena, shape_env),
         };
 
-        for instruction in &plan.instructions {
+            let total_time = std::time::Instant::now();
+            let mut conv_time = std::time::Duration::ZERO;
+            let mut fallback_time = std::time::Duration::ZERO;
+            let mut conv_count = 0usize;
+            let mut fallback_count = 0usize;
+
+            let mut prev_conv_time = conv_time.as_secs_f64();
+            for instruction in &plan.instructions {
             match instruction {
                 // Skip WriteConst for slots the persistent view will
-                // satisfy directly.  The slot offset/size is the
-                // exact byte range that the WriteConst would have
-                // materialised; the dispatch kernel will read the
-                // same range from the persistent payload instead.
+                // satisfy directly.  Check both f32 and u8 payloads
+                // (FP32 weights go to `get()`, quantized go to `get_u8()`).
                 Instruction::WriteConst { dst, .. }
-                    if view.get(&(dst.offset, dst.size)).is_some() =>
+                    if view.get(&(dst.offset, dst.size)).is_some()
+                        || view.get_u8(&(dst.offset, dst.size)).is_some() =>
                 {
                     continue;
                 }
@@ -7032,6 +7033,7 @@ impl Backend for CpuBackend {
                     "conv2d" | "conv2d_relu" | "conv2d_gelu" | "conv2d_silu"
                 ) =>
                 {
+                    let t = std::time::Instant::now();
                     let has_override = input_slices
                         .get(1)
                         .map(|w| view.get(&(w.offset, w.size)).is_some())
@@ -7059,6 +7061,13 @@ impl Backend for CpuBackend {
                         };
                         self.dispatch(&single, arena, shape_env)?;
                     }
+                    let elapsed = t.elapsed();
+                    if elapsed.as_secs_f64() > 0.010 {
+                        let params_str: String = params.iter().map(|p| p.to_string() + ",").collect();
+                        eprintln!("  [long] {}: {} params=[{}] ({:.1}ms)", kernel_name, conv_count + 1, params_str, elapsed.as_secs_f64() * 1000.0);
+                    }
+                    conv_time += elapsed;
+                    conv_count += 1;
                 }
 
                 // Fp32 MatMul family (matmul, matmul_relu/gelu/silu,
@@ -7084,6 +7093,7 @@ impl Backend for CpuBackend {
                         | "fused_matmul_add_silu"
                 ) =>
                 {
+                    let t = std::time::Instant::now();
                     let has_override = input_slices
                         .get(1)
                         .map(|b| view.get(&(b.offset, b.size)).is_some())
@@ -7111,6 +7121,8 @@ impl Backend for CpuBackend {
                         };
                         self.dispatch(&single, arena, shape_env)?;
                     }
+                    conv_time += t.elapsed();
+                    conv_count += 1;
                 }
 
                 // Quantized MatMul family (u4, u8, and i8-activation
@@ -7131,27 +7143,37 @@ impl Backend for CpuBackend {
                     "matmul_i4" | "matmul_i4_i8" | "matmul_i8" | "matmul_i8_i8"
                 ) =>
                 {
+                    let t = std::time::Instant::now();
                     let single = ExecutablePlan {
                         instructions: vec![instruction.clone()],
                         arena_size: plan.arena_size,
                         levels: vec![0],
                     };
                     self.dispatch(&single, arena, shape_env)?;
+                    fallback_time += t.elapsed();
+                    fallback_count += 1;
                 }
 
                 // Everything else: defer to the standard per-instruction
                 // dispatch so we keep the existing single-threaded,
                 // sequential behaviour for the rest of the plan.
                 _ => {
+                    let t = std::time::Instant::now();
                     let single = ExecutablePlan {
                         instructions: vec![instruction.clone()],
                         arena_size: plan.arena_size,
                         levels: vec![0],
                     };
                     self.dispatch(&single, arena, shape_env)?;
+                    fallback_time += t.elapsed();
+                    fallback_count += 1;
                 }
             }
         }
+        eprintln!("[profile] conv: {} calls in {:.1}ms, fallback: {} calls in {:.1}ms, total: {:.1}ms",
+            conv_count, conv_time.as_secs_f64() * 1000.0,
+            fallback_count, fallback_time.as_secs_f64() * 1000.0,
+            total_time.elapsed().as_secs_f64() * 1000.0);
         Ok(())
     }
 }
@@ -7212,38 +7234,41 @@ fn dispatch_conv2d_fp32_with_view(
     // Resolve the weight / bias f32 slices.  Persistent-view entries
     // are borrowed directly (no copy); non-overridden slots fall
     // back to a Vec copy of the arena bytes (these are rare in
-    // practice â€” the no-copy plan only filters WriteConst for
+    // practice — the no-copy plan only filters WriteConst for
     // overridden slots, so any non-overridden slot still has its
     // WriteConst running and the arena bytes are valid).
-    let weight_f32: Vec<f32> = match view.get(&(weight_slice.offset, weight_slice.size)) {
-        Some(payload) => payload.to_vec(),
+    let weight_f32: Vec<f32>;
+    let weight_slice_ref: &[f32] = match view.get(&(weight_slice.offset, weight_slice.size)) {
+        Some(payload) => payload,  // borrow directly, no copy
         None => {
             let d = arena.data_mut();
-            bytemuck::cast_slice::<_, f32>(
+            weight_f32 = bytemuck::cast_slice::<_, f32>(
                 &d[weight_slice.offset..weight_slice.offset + weight_slice.size],
             )
-            .to_vec()
+            .to_vec();
+            &weight_f32
         }
     };
-    let bias_f32: Vec<f32> = if let Some(b) = bias_slice {
+    let bias_f32: Vec<f32>;
+    let bias_slice_ref: &[f32] = if let Some(b) = bias_slice {
         match view.get(&(b.offset, b.size)) {
-            Some(payload) => payload.to_vec(),
+            Some(payload) => payload,
             None => {
                 let d = arena.data_mut();
-                bytemuck::cast_slice::<_, f32>(&d[b.offset..b.offset + b.size]).to_vec()
+                bias_f32 = bytemuck::cast_slice::<_, f32>(&d[b.offset..b.offset + b.size]).to_vec();
+                &bias_f32
             }
         }
     } else {
-        Vec::new()
+        &[]
     };
 
-    // Borrow the input tensor from the arena.
-    let input_f32: Vec<f32> = {
+    // Borrow the input tensor from the arena (zero-copy).
+    let input_f32: &[f32] = {
         let d = arena.data_mut();
         bytemuck::cast_slice::<_, f32>(
             &d[input_slice.offset..input_slice.offset + input_slice.size],
         )
-        .to_vec()
     };
     let out_f32: &mut [f32] = {
         let d = arena.data_mut();
@@ -7253,9 +7278,9 @@ fn dispatch_conv2d_fp32_with_view(
     };
 
     conv2d_f32_im2col_gemm(
-        &input_f32,
-        &weight_f32,
-        &bias_f32,
+        input_f32,
+        weight_slice_ref,
+        bias_slice_ref,
         out_f32,
         n_in,
         c,
@@ -7285,8 +7310,9 @@ fn dispatch_matmul_fp32_with_view(
     view: &crate::backend::prepared::PersistentPreparedWeights,
 ) -> Result<(), BackendError> {
     use crate::backend::cpu::blas::matmul_blas_into;
+    // used in QuantizedConv2dAvx2 (avx2 feature gate)
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     use crate::backend::cpu::microkernels::blocked_row_matmul;
-
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
             "matmul_persistent: expected â‰¥ 2 input slices, got {}",
@@ -7298,30 +7324,34 @@ fn dispatch_matmul_fp32_with_view(
     let bias_slice = input_slices.get(2).copied();
 
     // Resolve the B (weight) / bias f32 slices.
-    let b_f32: Vec<f32> = match view.get(&(b_slice.offset, b_slice.size)) {
-        Some(payload) => payload.to_vec(),
+    let b_f32: Vec<f32>;
+    let b_slice_ref: &[f32] = match view.get(&(b_slice.offset, b_slice.size)) {
+        Some(payload) => payload,  // borrow directly, no copy
         None => {
             let d = arena.data_mut();
-            bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
-                .to_vec()
+            b_f32 = bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                .to_vec();
+            &b_f32
         }
     };
-    let bias_f32: Vec<f32> = if let Some(b) = bias_slice {
+    let bias_f32: Vec<f32>;
+    let bias_slice_ref: &[f32] = if let Some(b) = bias_slice {
         match view.get(&(b.offset, b.size)) {
-            Some(payload) => payload.to_vec(),
+            Some(payload) => payload,
             None => {
                 let d = arena.data_mut();
-                bytemuck::cast_slice::<_, f32>(&d[b.offset..b.offset + b.size]).to_vec()
+                bias_f32 = bytemuck::cast_slice::<_, f32>(&d[b.offset..b.offset + b.size]).to_vec();
+                &bias_f32
             }
         }
     } else {
-        Vec::new()
+        &[]
     };
 
-    // Borrow the activation tensor from the arena.
-    let a_f32: Vec<f32> = {
+    // Borrow the activation tensor from the arena (zero-copy).
+    let a_f32: &[f32] = {
         let d = arena.data_mut();
-        bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size]).to_vec()
+        bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
     };
 
     let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
@@ -7338,11 +7368,11 @@ fn dispatch_matmul_fp32_with_view(
         )
     };
 
-    matmul_blas_into(&a_f32, &b_f32, out_f32, m, _k, n);
+    matmul_blas_into(a_f32, b_slice_ref, out_f32, m, _k, n);
 
     // Apply fused activation / bias on top of the GEMM output, mirroring
     // the `matmul_activation_dispatch` semantics.
-    let has_bias = !bias_f32.is_empty();
+    let has_bias = !bias_slice_ref.is_empty();
     let act: fn(f32) -> f32 = match kernel_name {
         "matmul_relu" | "fused_matmul_add_relu" => |x| x.max(0.0),
         "matmul_gelu" | "fused_matmul_add_gelu" => |x: f32| {
@@ -7356,8 +7386,8 @@ fn dispatch_matmul_fp32_with_view(
     };
     for i in 0..out_f32.len() {
         let x = out_f32[i]
-            + if has_bias && i % n < bias_f32.len() {
-                bias_f32[i % n]
+            + if has_bias && i % n < bias_slice_ref.len() {
+                bias_slice_ref[i % n]
             } else {
                 0.0
             };

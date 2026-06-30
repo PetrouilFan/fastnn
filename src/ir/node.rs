@@ -1143,4 +1143,17 @@ impl ComputeGraph {
         let graph: ComputeGraph = bincode::deserialize(&bytes)?;
         Ok(graph)
     }
+
+    /// Returns `true` when every node in the graph has a fully-known
+    /// (i.e. containing zero symbolic [`DimExpr`] variants) output shape.
+    ///
+    /// When this returns `true` the per-inference shape-resolution and
+    /// memory-plan tightening steps always produce the same result, so
+    /// they can be cached after the first inference and skipped on
+    /// subsequent calls.
+    pub fn has_static_shapes(&self) -> bool {
+        self.nodes
+            .iter()
+            .all(|n| n.output_type.shape.iter().all(|d| matches!(d, DimExpr::Known(_))))
+    }
 }
