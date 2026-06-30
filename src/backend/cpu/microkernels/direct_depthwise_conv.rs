@@ -139,14 +139,23 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
             let w7 = _mm256_set1_ps(*w_base.add(7));
             let w8 = _mm256_set1_ps(*w_base.add(8));
 
-            // Pre-compute left-edge mask for _mm256_maskload_ps.
-            // Element 0 zeroed (pad value), elements 1-7 loaded normally.
-            let left_mask = _mm256_set_epi32(-1, -1, -1, -1, -1, -1, -1, 0);
-
             let inp_plane_off = inp_img_off + g * hw;
 
             for oh in 0..h_out {
                 let mut ow = 0usize;
+
+                // Left-edge scalar pixel: the maskload trick (ow=0, kw=0)
+                // incorrectly shifts lanes 1-7 by +1 (loads row_off+1..row_off+7
+                // instead of row_off+0..row_off+6), corrupting 7 output columns.
+                // Process ow=0 via safe per-pixel scalar, then SIMD from ow=1.
+                if w_out > 0 {
+                    depthwise_conv3x3_scalar_pixel(
+                        input, weight, output,
+                        img, g, oh, 0, c, h, w, f, h_out, w_out,
+                        1, 1, bv, activation,
+                    );
+                    ow = 1;
+                }
 
                 // ── SIMD main loop (8 output columns at a time) ──
                 // Condition: ow + 8 < w_out ensures all input loads are in-bounds
@@ -163,14 +172,8 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
                         let row_off = inp_plane_off + (ih as usize) * w;
 
                         for kw in 0..3isize {
-                            // Left edge: for kw=0 at ow=0, the input at position -1
-                            // is zero-padded. Load from index 0 and mask out element 0.
-                            let v = if ow == 0 && kw == 0 {
-                                _mm256_maskload_ps(inp_ptr.add(row_off), left_mask)
-                            } else {
-                                let iw_base = ow as isize + kw - 1;
-                                _mm256_loadu_ps(inp_ptr.add(row_off + iw_base as usize))
-                            };
+                            let iw_base = ow as isize + kw - 1;
+                            let v = _mm256_loadu_ps(inp_ptr.add(row_off + iw_base as usize));
 
                             acc = match kw {
                                 0 => match kr {
