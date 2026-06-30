@@ -7,15 +7,18 @@
 #![allow(clippy::if_same_then_else)]
 
 use crate::backend::cpu::blas::matmul_blas_into;
-use crate::backend::cpu::microkernels::blocked_row_matmul;
+use crate::backend::cpu::microkernels::{blocked_row_matmul, TlsVecPool};
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
+use std::any::TypeId;
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod arena;
 pub mod blas;
@@ -44,6 +47,37 @@ use matmul::{
     matmul_activation_dispatch, quantized_matmul_dispatch, quantized_matmul_dispatch_i8_u4,
     quantized_matmul_dispatch_i8_u8,
 };
+
+/// Global cache for aligned packed weight data, keyed by
+/// `(arena_offset, arena_size, TypeId)`.  Each entry is reference-counted
+/// via `Arc<Vec<T>>`, so the first dispatch allocates and subsequent
+/// dispatches share the same data without copying.
+fn packed_weight_cache() -> &'static Mutex<HashMap<(usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>
+{
+    static CACHE: OnceLock<Mutex<HashMap<(usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cache-aware version of [`aligned_packed_slice`].  Returns an
+/// `Arc<Vec<T>>` that may be shared across dispatch calls, avoiding
+/// repeated alignment checks and heap copies of constant weight data.
+fn get_or_cache_packed<T: PackedWord + 'static>(
+    write_offset: usize,
+    write_size: usize,
+    raw: &[u8],
+) -> Arc<Vec<T>> {
+    let key = (write_offset, write_size, TypeId::of::<T>());
+    let mut cache = packed_weight_cache().lock().unwrap();
+    if let Some(arc_any) = cache.get(&key) {
+        if let Ok(arc_vec) = arc_any.clone().downcast::<Vec<T>>() {
+            return arc_vec;
+        }
+    }
+    let v: Arc<Vec<T>> = Arc::new(aligned_packed_slice::<T>(raw));
+    cache.insert(key, v.clone());
+    v
+}
 
 #[allow(clippy::cognitive_complexity)]
 /// Align-packed-weight helper: cast raw bytes to &[PackedType] when the
@@ -3599,21 +3633,14 @@ impl Backend for CpuBackend {
                             if input_slices.len() >= 2 {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];
-                                let (activation_payload, raw, bias_data) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        d[a_slice.offset..a_slice.offset + a_slice.size].to_vec(),
-                                        d[w_slice.offset..w_slice.offset + w_slice.size].to_vec(),
-                                        if input_slices.len() >= 3 {
-                                            let b = &input_slices[2];
-                                            bytemuck::cast_slice::<_, f32>(
-                                                &d[b.offset..b.offset + b.size],
-                                            )
-                                            .to_vec()
-                                        } else {
-                                            vec![]
-                                        },
-                                    )
+                                let activation_payload: &[u8] =
+                                    unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
+                                let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+                                let bias_data: Option<&[f32]> = if input_slices.len() >= 3 {
+                                    let b = &input_slices[2];
+                                    Some(unsafe { arena.view_f32(b.offset, b.size) })
+                                } else {
+                                    None
                                 };
                                 let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
@@ -3631,7 +3658,7 @@ impl Backend for CpuBackend {
                                 };
 
                                 // Parse i8 activation header
-                                let (affine, act_i8) = {
+                                let affine = {
                                     let scale = if activation_payload.len() >= 4 {
                                         f32::from_le_bytes(
                                             activation_payload[0..4].try_into().unwrap(),
@@ -3646,13 +3673,11 @@ impl Backend for CpuBackend {
                                     } else {
                                         0.0
                                     };
-                                    let payload = activation_payload.get(8..).unwrap_or(&[]);
-                                    let act_i8: &[i8] = bytemuck::cast_slice(payload);
-                                    (
-                                        microkernels::I8ActivationAffine { scale, zero: zp },
-                                        act_i8.to_vec(),
-                                    )
+                                    microkernels::I8ActivationAffine { scale, zero: zp }
                                 };
+                                // Zero-copy view of i8 activation data (payload starts at byte 8)
+                                let payload = activation_payload.get(8..).unwrap_or(&[]);
+                                let act_i8: &[i8] = bytemuck::cast_slice(payload);
 
                                 let oc = meta.shape[0];
                                 let c_per_g = input_c / groups;
@@ -3680,7 +3705,6 @@ impl Backend for CpuBackend {
                                 let bit_width = meta.bit_width;
                                 let mut col_buf: Vec<i8> = vec![0i8; num_pixels * k];
                                 let inner: usize = meta.shape[1..].iter().product();
-                                // Pre-allocate reusable buffers across groups/batches
                                 let mut payload = Vec::with_capacity(8 + num_pixels * k);
                                 let mut packed_act = vec![I8x4(0); num_pixels * inner.div_ceil(4)];
                                 let mut temp = vec![0.0f32; num_pixels * oc_per_g];
@@ -3715,7 +3739,7 @@ impl Backend for CpuBackend {
                                             let col_u8: &[u8] = bytemuck::cast_slice(&col_buf);
                                             payload.extend_from_slice(col_u8);
                                             let kp = inner.div_ceil(I4x8::ITEMS);
-                                            let w_sl = aligned_packed_slice::<I4x8>(&raw);
+                                            let w_sl = get_or_cache_packed::<I4x8>(w_slice.offset, w_slice.size, &raw);
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let local_scales = if meta.scales.len() > 1 {
@@ -3741,9 +3765,11 @@ impl Backend for CpuBackend {
                                             for pixel in 0..num_pixels {
                                                 for f in 0..oc_per_g {
                                                     let mut val = temp[pixel * oc_per_g + f];
-                                                    if g_oc_off + f < bias_data.len() {
-                                                        val += bias_data[g_oc_off + f];
+                                                    if let Some(bias) = bias_data {
+                                                    if g_oc_off + f < bias.len() {
+                                                        val += bias[g_oc_off + f];
                                                     }
+                                                }
                                                     if let Some(act) = fused_act {
                                                         val = match act {
                                                             "relu" => val.max(0.0),
@@ -3759,7 +3785,7 @@ impl Backend for CpuBackend {
                                         } else {
                                             // U8 path: pack i8 â†’ I8x4 (lossless), use fast packed SWAR GEMM
                                             let kp = inner.div_ceil(I8x4::ITEMS);
-                                            let w_sl = aligned_packed_slice::<I8x4>(&raw);
+                                            let w_sl = get_or_cache_packed::<I8x4>(w_slice.offset, w_slice.size, &raw);
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let per_channel_w = meta.scales.len() > 1;
@@ -3781,11 +3807,13 @@ impl Backend for CpuBackend {
                                                 k,
                                                 &mut packed_act,
                                             );
-                                            let bias_group = if g_oc_off < bias_data.len() {
-                                                Some(&bias_data[g_oc_off..g_oc_off + oc_per_g])
-                                            } else {
-                                                None
-                                            };
+                                            let bias_group = bias_data.and_then(|bias| {
+                                                if g_oc_off < bias.len() {
+                                                    Some(&bias[g_oc_off..g_oc_off + oc_per_g])
+                                                } else {
+                                                    None
+                                                }
+                                            });
                                             // Raw packed GEMM â€” no PackedTensor wrapping, no allocations
                                             packed_conv::gemm_packed_i8x4_fused_raw(
                                                 &packed_act,
@@ -3826,24 +3854,14 @@ impl Backend for CpuBackend {
                             if input_slices.len() >= 2 {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];
-                                let (input_data, raw, bias_data) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[a_slice.offset..a_slice.offset + a_slice.size],
-                                        )
-                                        .to_vec(),
-                                        d[w_slice.offset..w_slice.offset + w_slice.size].to_vec(),
-                                        if input_slices.len() >= 3 {
-                                            let b = &input_slices[2];
-                                            bytemuck::cast_slice::<_, f32>(
-                                                &d[b.offset..b.offset + b.size],
-                                            )
-                                            .to_vec()
-                                        } else {
-                                            vec![]
-                                        },
-                                    )
+                                // Zero-copy views into arena (no to_vec() allocations)
+                                let input_data: &[f32] = unsafe { arena.view_f32(a_slice.offset, a_slice.size) };
+                                let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+                                let bias_data: Option<&[f32]> = if input_slices.len() >= 3 {
+                                    let b = &input_slices[2];
+                                    Some(unsafe { arena.view_f32(b.offset, b.size) })
+                                } else {
+                                    None
                                 };
                                 let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
                                     &params[..]
@@ -3872,17 +3890,13 @@ impl Backend for CpuBackend {
                                     meta.shape.clone()
                                 };
                                 let n = input_data.len() / (input_c * input_h * input_w).max(1);
-                                let bias_opt = if !bias_data.is_empty() {
-                                    Some(&bias_data[..])
-                                } else {
-                                    None
-                                };
+                                let bias_opt = bias_data.filter(|b| !b.is_empty());
                                 macro_rules! dispatch_packed_conv {
                                     ($PackedType:ty, $fn:path) => {{
-                                        // Direct aligned cast instead of Vec<u32> intermediate
-                                        let packed_data: Vec<$PackedType> =
-                                            aligned_packed_slice(&raw);
-                                        let pt = PackedTensor::from_raw(
+                                        let packed_data = get_or_cache_packed::<$PackedType>(
+                                            w_slice.offset, w_slice.size, &raw,
+                                        );
+                                        let pt = PackedTensor::from_raw_arc(
                                             packed_data,
                                             flat_shape,
                                             meta.scales.clone(),
@@ -4355,18 +4369,9 @@ impl Backend for CpuBackend {
                         }
                         "pad_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                // Zero-copy view of input
+                                let input: &[f32] = unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let out_f32 = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 // Simple flat copy: the caller right-sizes the output buffer.
                                 // Output includes padding zeros already allocated.
                                 let end = input.len().min(out_f32.len());
@@ -4375,25 +4380,10 @@ impl Backend for CpuBackend {
                         }
                         "gather" => {
                             if let [data_slice, indices_slice] = &input_slices[..] {
-                                let (input, indices) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[indices_slice.offset
-                                                ..indices_slice.offset + indices_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                // Zero-copy views of input and indices
+                                let input: &[f32] = unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
+                                let indices: &[f32] = unsafe { arena.view_f32(indices_slice.offset, indices_slice.size) };
+                                let out_f32 = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let axis = if !params.is_empty() { params[0] } else { 0 };
                                 let inner = if axis == 0 {
                                     input.len() / out_f32.len().max(1)
@@ -4402,8 +4392,7 @@ impl Backend for CpuBackend {
                                 };
                                 for i in 0..out_f32.len() {
                                     let idx_idx = i.checked_div(inner).unwrap_or(i);
-                                    let idx = indices[idx_idx.min(indices.len().saturating_sub(1))]
-                                        as usize;
+                                    let idx = indices[idx_idx.min(indices.len().saturating_sub(1))] as usize;
                                     let src = idx * inner + (i % inner);
                                     out_f32[i] = if src < input.len() { input[src] } else { 0.0 };
                                 }
@@ -4411,24 +4400,14 @@ impl Backend for CpuBackend {
                         }
                         "slice_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
-                                    )
-                                    .to_vec()
-                                };
+                                let input: &[f32] = unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
                                 let &[_dim, start, end, stride] = &params[..] else {
                                     return Err(BackendError::Dispatch(
                                         "slice_f32: expected params [dim, start, end, stride]"
                                             .into(),
                                     ));
                                 };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                let out_f32 = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 // General strided slice along dimension `dim`.
                                 // input layout (row-major): outer * dim_size * stride
                                 // output layout:             outer * (end-start) * stride
@@ -4460,31 +4439,11 @@ impl Backend for CpuBackend {
                         }
                         "scatter_nd" => {
                             if let [data_slice, indices_slice, updates_slice] = &input_slices[..] {
-                                let (data, indices_f32, updates) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[data_slice.offset
-                                                ..data_slice.offset + data_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[indices_slice.offset
-                                                ..indices_slice.offset + indices_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[updates_slice.offset
-                                                ..updates_slice.offset + updates_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                out_f32.copy_from_slice(&data);
+                                let data: &[f32] = unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
+                                let indices_f32: &[f32] = unsafe { arena.view_f32(indices_slice.offset, indices_slice.size) };
+                                let updates: &[f32] = unsafe { arena.view_f32(updates_slice.offset, updates_slice.size) };
+                                let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                out_f32.copy_from_slice(data);
                                 if let Some((&index_depth, data_dims)) = params.split_first() {
                                     let data_rank = data_dims.len();
                                     if index_depth > 0
@@ -4521,21 +4480,8 @@ impl Backend for CpuBackend {
                         }
                         "conv1d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = {
-                                    let d = arena.data_mut();
-                                    (
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[input_slice.offset
-                                                ..input_slice.offset + input_slice.size],
-                                        )
-                                        .to_vec(),
-                                        bytemuck::cast_slice::<_, f32>(
-                                            &d[weight_slice.offset
-                                                ..weight_slice.offset + weight_slice.size],
-                                        )
-                                        .to_vec(),
-                                    )
-                                };
+                                let input: &[f32] = unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let weight: &[f32] = unsafe { arena.view_f32(weight_slice.offset, weight_slice.size) };
                                 let &[stride, padding, c, w, kw] = &params[..] else {
                                     return Err(BackendError::Dispatch(
                                         "conv1d: expected params [stride, padding, input_c, input_w, kernel_w]".into(),
@@ -4544,10 +4490,7 @@ impl Backend for CpuBackend {
                                 let n = input.len() / (c * w).max(1);
                                 let f = weight.len() / (c * kw).max(1);
                                 let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
+                                let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 for nn in 0..n {
                                     for ff in 0..f {
                                         for ww in 0..w_out {
@@ -7313,6 +7256,7 @@ fn dispatch_matmul_fp32_with_view(
     // used in QuantizedConv2dAvx2 (avx2 feature gate)
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     use crate::backend::cpu::microkernels::blocked_row_matmul;
+    
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
             "matmul_persistent: expected â‰¥ 2 input slices, got {}",

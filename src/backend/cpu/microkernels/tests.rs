@@ -710,7 +710,8 @@ mod neon_tests {
                         arr[i] = (row_data[word * 4 + i] - z) / s;
                     }
                 }
-                packed.data[row * k_packed + word] = I8x4::pack_from_f32(arr);
+                let data_mut = std::sync::Arc::make_mut(&mut packed.data);
+                data_mut[row * k_packed + word] = I8x4::pack_from_f32(arr);
             }
         }
 

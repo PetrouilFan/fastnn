@@ -895,3 +895,198 @@ impl_binary_minmax_broadcast!(
     min,
     _mm256_min_ps
 );
+
+// ═══════════════════════════════════════════════════════════════
+// Fused binary + activation — single-pass kernels
+// Combines elementwise op (add/mul) + activation (relu/silu/gelu)
+// in one AVX2 pass, halving memory bandwidth vs two separate kernels.
+// ═══════════════════════════════════════════════════════════════
+
+// ── Fused: add + relu ──────────────────────────────────────────
+
+/// add + ReLU: out[i] = max(0, a[i] + b[i])
+#[inline]
+pub fn fused_add_relu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        // SAFETY: AVX2 feature check; valid non-overlapping slices.
+        unsafe { return fused_add_relu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = relu_f32_scalar(a[i] + b[i]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller must ensure slices are valid, non-overlapping, and at least 8 elements.
+pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    while i + 8 <= len {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let vsum = _mm256_add_ps(va, vb);
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(vsum, zero));
+        i += 8;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = relu_f32_scalar(a[j] + b[j]);
+    }
+}
+
+// ── Fused: mul + relu ──────────────────────────────────────────
+
+/// mul + ReLU: out[i] = max(0, a[i] * b[i])
+pub fn fused_mul_relu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_mul_relu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = relu_f32_scalar(a[i] * b[i]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_mul_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    let mut i = 0;
+    let zero = _mm256_setzero_ps();
+    while i + 8 <= len {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let vprod = _mm256_mul_ps(va, vb);
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(vprod, zero));
+        i += 8;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = relu_f32_scalar(a[j] * b[j]);
+    }
+}
+
+// ── Fused: add + silu ──────────────────────────────────────────
+
+/// add + SiLU: out[i] = (a[i] + b[i]) / (1 + exp(-(a[i] + b[i])))
+#[inline]
+fn silu_scalar(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
+
+pub fn fused_add_silu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_add_silu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = silu_scalar(a[i] + b[i]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_add_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    let mut i = 0;
+    let one = _mm256_set1_ps(1.0);
+    let neg_zero = _mm256_set1_ps(-0.0f32);
+    while i + 8 <= len {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let vsum = _mm256_add_ps(va, vb);
+        let vneg = _mm256_xor_ps(vsum, neg_zero);
+        let vexp = exp_avx2_vec(vneg);
+        let vsigmoid = _mm256_div_ps(one, _mm256_add_ps(one, vexp));
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_mul_ps(vsum, vsigmoid));
+        i += 8;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = silu_scalar(a[j] + b[j]);
+    }
+}
+
+// ── Fused: mul + silu ──────────────────────────────────────────
+
+pub fn fused_mul_silu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_mul_silu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = silu_scalar(a[i] * b[i]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_mul_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    let mut i = 0;
+    let one = _mm256_set1_ps(1.0);
+    let neg_zero = _mm256_set1_ps(-0.0f32);
+    while i + 8 <= len {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let vprod = _mm256_mul_ps(va, vb);
+        let vneg = _mm256_xor_ps(vprod, neg_zero);
+        let vexp = exp_avx2_vec(vneg);
+        let vsigmoid = _mm256_div_ps(one, _mm256_add_ps(one, vexp));
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_mul_ps(vprod, vsigmoid));
+        i += 8;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = silu_scalar(a[j] * b[j]);
+    }
+}
+
+// ── Fused: add + gelu ──────────────────────────────────────────
+
+/// add + GELU: out[i] = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+/// where x = a[i] + b[i]
+#[inline]
+fn gelu_scalar(x: f32) -> f32 {
+    let x3 = x * x * x;
+    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+    0.5 * x * (1.0 + tanh_arg.tanh())
+}
+
+pub fn fused_add_gelu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_add_gelu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = gelu_scalar(a[i] + b[i]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_add_gelu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len().min(a.len()).min(b.len());
+    let mut i = 0;
+    let c0 = _mm256_set1_ps(0.7978846);
+    let c1 = _mm256_set1_ps(0.044715);
+    let half = _mm256_set1_ps(0.5);
+    let one = _mm256_set1_ps(1.0);
+    while i + 8 <= len {
+        let va = _mm256_loadu_ps(a.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let x = _mm256_add_ps(va, vb);
+        let x3 = _mm256_mul_ps(_mm256_mul_ps(x, x), x);
+        let tanh_arg = _mm256_mul_ps(c0, _mm256_add_ps(x, _mm256_mul_ps(c1, x3)));
+        let t = tanh_avx2_vec(tanh_arg);
+        _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_mul_ps(half, _mm256_mul_ps(x, _mm256_add_ps(one, t))));
+        i += 8;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = gelu_scalar(a[j] + b[j]);
+    }
+}
