@@ -15,12 +15,36 @@ use super::*;
 use rayon::prelude::*;
 
 // ============================================================
-// GEMM constants
+// Dynamic tile sizing — derived from L2 cache size
 // ============================================================
 
-/// Cache-blocked GEMV for packed types.
-/// Tiles the K dimension to keep activation blocks in L2 cache.
-const K_BLOCK_SIZE: usize = 8192;
+/// Returns the K-tile size (in f32 elements) based on L2 cache size.
+/// For 256 KiB L2 → 8192 (current default), scales proportionally.
+fn k_block_size() -> usize {
+    use std::sync::OnceLock;
+    static K_TILE: OnceLock<usize> = OnceLock::new();
+    *K_TILE.get_or_init(|| {
+        let l2 = crate::backend::cpu::topology::l2_cache_size_bytes();
+        // Use half of L2 cache divided by f32 (4 bytes), rounded to 4096
+        let tile = ((l2 / 2 / 4) / 4096) * 4096;
+        tile.clamp(4096, 65536)
+    })
+}
+
+/// K-tile size for the BLIS-style tiled GEMV (same as k_block_size).
+fn kc() -> usize {
+    k_block_size()
+}
+
+/// Threshold above which the BLIS-tiled GEMV path is used (≈ half of k_block_size).
+fn tiled_k_threshold() -> usize {
+    use std::sync::OnceLock;
+    static THRESH: OnceLock<usize> = OnceLock::new();
+    *THRESH.get_or_init(|| {
+        let kb = k_block_size();
+        (kb / 2 / 4096 * 4096).max(4096)
+    })
+}
 
 // ============================================================
 // Type-dispatched SIMD GEMV entry point
@@ -67,7 +91,7 @@ pub fn gemv_packed_simd<T: PackedWord>(
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
 
-    if k <= K_BLOCK_SIZE {
+    if k <= k_block_size() {
         gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
     } else {
         gemv_packed_blocked::<T>(weights, activation, output, m, k, k_packed);
@@ -683,7 +707,7 @@ pub(crate) fn gemv_generic_fallback<T: PackedWord>(
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
 
-    if k <= K_BLOCK_SIZE {
+    if k <= k_block_size() {
         gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
     } else {
         gemv_packed_blocked::<T>(weights, activation, output, m, k, k_packed);
@@ -729,10 +753,10 @@ pub(crate) fn gemv_packed_blocked<T: PackedWord>(
     let items = T::ITEMS;
     let act_sum = affine_sum_term(activation, k, 1.0);
 
-    with_scratch(K_BLOCK_SIZE, |unpack_buf| {
+    with_scratch(k_block_size(), |unpack_buf| {
         let mut k_offset = 0;
         while k_offset < k {
-            let k_end = (k_offset + K_BLOCK_SIZE).min(k);
+            let k_end = (k_offset + k_block_size()).min(k);
             let k_block = k_end - k_offset;
 
             for row in 0..m {
@@ -741,7 +765,7 @@ pub(crate) fn gemv_packed_blocked<T: PackedWord>(
                 let packed_end = k_end.div_ceil(items);
                 let unpack_len = (packed_end - packed_start) * items;
 
-                if unpack_len <= K_BLOCK_SIZE {
+                if unpack_len <= k_block_size() {
                     for p in packed_start..packed_end {
                         let word = weights.as_packed()[row_offset + p];
                         let unpacked = word.unpack_to_f32();
@@ -761,7 +785,7 @@ pub(crate) fn gemv_packed_blocked<T: PackedWord>(
                 }
             }
 
-            k_offset += K_BLOCK_SIZE;
+            k_offset += k_block_size();
         }
 
         for row in 0..m {
@@ -815,13 +839,12 @@ thread_local! {
 fn with_blas_scratch<R>(f: impl FnOnce(&mut [f32]) -> R) -> R {
     BLAS_SCRATCH.with(|cell| {
         let mut buf = cell.borrow_mut();
-        buf.resize(KC * MR, 0.0);
+        buf.resize(kc() * MR, 0.0);
         f(&mut buf)
     })
 }
 
 const MR: usize = 4;
-const KC: usize = 8192;
 
 #[inline(always)]
 pub fn gemv_packed_tiled<T: PackedWord>(
@@ -842,7 +865,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     with_blas_scratch(|row_bufs| {
         let mut k_offset = 0;
         while k_offset < k {
-            let k_end = (k_offset + KC).min(k);
+            let k_end = (k_offset + kc()).min(k);
             let k_block = k_end - k_offset;
 
             let mut row = 0;
@@ -881,7 +904,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
                 row += 1;
             }
 
-            k_offset += KC;
+            k_offset += kc();
         }
 
         for row in 0..m {
@@ -909,12 +932,12 @@ fn micro_kernel<T: PackedWord>(
     row_bufs: &mut [f32],
 ) {
     debug_assert_eq!(output.len(), MR);
-    debug_assert!(row_bufs.len() >= KC * MR);
+    debug_assert!(row_bufs.len() >= kc() * MR);
 
     for r in 0..MR {
-        let row_start = r * KC;
-        if k_block < KC {
-            row_bufs[row_start + k_block..row_start + KC].fill(0.0);
+        let row_start = r * kc();
+        if k_block < kc() {
+            row_bufs[row_start + k_block..row_start + kc()].fill(0.0);
         }
         let row = start_row + r;
         let row_offset = row * k_packed;
@@ -938,7 +961,7 @@ fn micro_kernel<T: PackedWord>(
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             // SAFETY: Feature check guarantees AVX2+FMA availability; all slices
-            // are valid and correctly sized (row_bufs is KC*MR, activation is k_block).
+            // are valid and correctly sized (row_bufs is kc()*MR, activation is k_block).
             unsafe {
                 micro_kernel_avx2(row_bufs, activation, output, k_block);
             }
@@ -947,7 +970,7 @@ fn micro_kernel<T: PackedWord>(
     }
 
     for r in 0..MR {
-        let row_start = r * KC;
+        let row_start = r * kc();
         let mut acc = 0.0f32;
         for kk in 0..k_block {
             acc += row_bufs[row_start + kk] * activation[kk];
@@ -959,7 +982,7 @@ fn micro_kernel<T: PackedWord>(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-// SAFETY: Caller must ensure `row_bufs` is at least KC * MR elements, `activation`
+// SAFETY: Caller must ensure `row_bufs` is at least kc() * MR elements, `activation`
 // is at least `k` elements, and `output` is at least MR elements. AVX2+FMA is
 // guaranteed by the target_feature attribute.
 unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [f32], k: usize) {
@@ -975,15 +998,15 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
             _mm_prefetch(activation.as_ptr().add(kk + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(row_bufs.as_ptr().add(kk + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(
-                row_bufs.as_ptr().add(KC + kk + 32) as *const i8,
+                row_bufs.as_ptr().add(kc() + kk + 32) as *const i8,
                 _MM_HINT_T0,
             );
             _mm_prefetch(
-                row_bufs.as_ptr().add(2 * KC + kk + 32) as *const i8,
+                row_bufs.as_ptr().add(2 * kc() + kk + 32) as *const i8,
                 _MM_HINT_T0,
             );
             _mm_prefetch(
-                row_bufs.as_ptr().add(3 * KC + kk + 32) as *const i8,
+                row_bufs.as_ptr().add(3 * kc() + kk + 32) as *const i8,
                 _MM_HINT_T0,
             );
         }
@@ -993,13 +1016,13 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
         let row0 = _mm256_loadu_ps(row_bufs.as_ptr().add(kk));
         acc0 = _mm256_fmadd_ps(row0, act, acc0);
 
-        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(KC + kk));
+        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(kc() + kk));
         acc1 = _mm256_fmadd_ps(row1, act, acc1);
 
-        let row2 = _mm256_loadu_ps(row_bufs.as_ptr().add(2 * KC + kk));
+        let row2 = _mm256_loadu_ps(row_bufs.as_ptr().add(2 * kc() + kk));
         acc2 = _mm256_fmadd_ps(row2, act, acc2);
 
-        let row3 = _mm256_loadu_ps(row_bufs.as_ptr().add(3 * KC + kk));
+        let row3 = _mm256_loadu_ps(row_bufs.as_ptr().add(3 * kc() + kk));
         acc3 = _mm256_fmadd_ps(row3, act, acc3);
 
         kk += 8;
@@ -1012,9 +1035,9 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
     while kk < k {
         let act = *activation.as_ptr().add(kk);
         tail0 += *row_bufs.as_ptr().add(kk) * act;
-        tail1 += *row_bufs.as_ptr().add(KC + kk) * act;
-        tail2 += *row_bufs.as_ptr().add(2 * KC + kk) * act;
-        tail3 += *row_bufs.as_ptr().add(3 * KC + kk) * act;
+        tail1 += *row_bufs.as_ptr().add(kc() + kk) * act;
+        tail2 += *row_bufs.as_ptr().add(2 * kc() + kk) * act;
+        tail3 += *row_bufs.as_ptr().add(3 * kc() + kk) * act;
         kk += 1;
     }
 
@@ -1032,12 +1055,10 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
 // Top-level CPU GEMV dispatcher
 // ============================================================
 
-const TILED_K_THRESHOLD: usize = 4096;
-
 #[inline(always)]
 pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], output: &mut [f32]) {
     let k = weights.shape()[1];
-    if k > TILED_K_THRESHOLD {
+    if k > tiled_k_threshold() {
         gemv_packed_tiled(weights, activation, output);
     } else {
         gemv_packed_simd(weights, activation, output);
@@ -1493,7 +1514,7 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
 
     let mut k_start = 0;
     while k_start < k {
-        let k_end = (k_start + K_BLOCK_SIZE).min(k);
+        let k_end = (k_start + k_block_size()).min(k);
         let k_len = k_end - k_start;
         let packed_start = k_start / T::ITEMS;
         let packed_end = k_end.div_ceil(T::ITEMS);
@@ -1534,7 +1555,7 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
             }
         });
 
-        k_start += K_BLOCK_SIZE;
+        k_start += k_block_size();
     }
 
     #[cfg(feature = "parallel")]
