@@ -210,6 +210,9 @@ pub enum PackedWeightStore {
     /// variant stores a row-major `[K, M]` transpose. It is metadata/storage
     /// only until an opt-in prepared runtime path consumes it.
     TransposedFp32 { data: Vec<f32>, m: usize, k: usize },
+    /// Raw byte payload for packed quantized weights (I4, I8, F8, F4, F8R).
+    /// The caller knows the bit width and unpacking scheme.
+    PackedRaw(Vec<u8>),
     /// Reserved discriminant for future packed precision variants. Carries
     /// no payload and is never produced by the current code paths.
     Reserved,
@@ -239,7 +242,9 @@ impl PackedWeightStore {
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         match self {
             PackedWeightStore::Unpacked(data) => Some(data.as_slice()),
-            PackedWeightStore::TransposedFp32 { .. } | PackedWeightStore::Reserved => None,
+            PackedWeightStore::TransposedFp32 { .. }
+            | PackedWeightStore::PackedRaw(_)
+            | PackedWeightStore::Reserved => None,
         }
     }
 
@@ -248,6 +253,7 @@ impl PackedWeightStore {
         match self {
             PackedWeightStore::Unpacked(_) => "unpacked",
             PackedWeightStore::TransposedFp32 { .. } => "transposed_fp32",
+            PackedWeightStore::PackedRaw(_) => "packed_raw",
             PackedWeightStore::Reserved => "reserved",
         }
     }
@@ -422,6 +428,40 @@ impl PreparedConstantArena {
     /// `true` when no constants have been registered.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Fetch the raw byte payload for `id`, if the slot is stored as PackedRaw.
+    pub fn get_raw(&self, id: PackedWeightId) -> Option<&[u8]> {
+        self.entries
+            .get(id.index)
+            .and_then(|entry| match &entry.store {
+                PackedWeightStore::PackedRaw(data) => Some(data.as_slice()),
+                _ => None,
+            })
+    }
+
+    /// Register a constant from raw bytes.
+    /// The `kind` determines the PackedWeightKind and storage variant.
+    /// Returns the id (or existing id if name is duplicate).
+    pub fn insert_raw(&mut self, name: impl Into<String>, data: Vec<u8>, kind: PackedWeightKind) -> PackedWeightId {
+        let name = name.into();
+        if let Some(id) = self.name_to_id.get(&name) {
+            return *id;
+        }
+        let index = self.entries.len();
+        let numel = data.len();
+        let byte_len = data.len();
+        let id = PackedWeightId::with_kind(index, kind, None);
+        self.entries.push(PreparedConstantEntry {
+            id,
+            name: name.clone(),
+            kind,
+            numel,
+            byte_len,
+            store: PackedWeightStore::PackedRaw(data),
+        });
+        self.name_to_id.insert(name, id);
+        id
     }
 
     /// Sum of [`PreparedConstantEntry::byte_len`] across all entries.
@@ -690,6 +730,32 @@ pub fn try_prepare_matmul(
     }))
 }
 
+/// Determine the [`PackedWeightKind`] for a kernel/consumer's weight slot.
+///
+/// Prefers the runtime `weight_meta` bit_width when available (4 → U4,
+/// 8 → I8).  Falls back to kernel-name heuristics for quantized variants
+/// that don't carry metadata.
+fn detect_weight_kind(weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>, kernel_name: &str) -> PackedWeightKind {
+    if let Some(meta) = weight_meta {
+        match meta.bit_width {
+            4 => return PackedWeightKind::U4,
+            8 => return PackedWeightKind::I8,
+            _ => {}
+        }
+    }
+    if kernel_name.contains("i4") {
+        PackedWeightKind::U4
+    } else if kernel_name.contains("i8") {
+        PackedWeightKind::I8
+    } else if kernel_name.contains("f8") {
+        PackedWeightKind::F8
+    } else if kernel_name.contains("f4") {
+        PackedWeightKind::F4
+    } else {
+        PackedWeightKind::Fp32
+    }
+}
+
 /// Walk the [`ExecutablePlan`] and bind every `Conv2d` / `MatMul`
 /// input slot that is fed by an [`Instruction::WriteConst`] producer
 /// into the supplied [`PreparedConstantArena`].
@@ -745,19 +811,22 @@ pub fn detect_static_weights(
     // weight + optional bias input slots.
     let mut bindings: StaticWeightMap = Vec::new();
     for (instruction_index, inst) in plan.instructions.iter().enumerate() {
-        let (input_slices, role) = match inst {
+        let (input_slices, kernel_name, weight_meta, role) = match inst {
             Instruction::CallKernel {
                 kernel_name,
                 input_slices,
+                weight_meta,
                 ..
-            } if kernel_name.starts_with("conv2d") => (input_slices.as_slice(), "conv"),
+            } if kernel_name.starts_with("conv2d") => (input_slices.as_slice(), kernel_name.as_str(), weight_meta, "conv"),
             Instruction::CallKernel {
                 kernel_name,
                 input_slices,
+                weight_meta,
                 ..
-            } if is_matmul_kernel_name(kernel_name) => (input_slices.as_slice(), "matmul"),
+            } if is_matmul_kernel_name(kernel_name) => (input_slices.as_slice(), kernel_name.as_str(), weight_meta, "matmul"),
             _ => continue,
         };
+        let weight_kind = detect_weight_kind(weight_meta, kernel_name);
 
         // input_slices[1] is the weight tensor for both conv2d and
         // matmul-family kernels.
@@ -769,6 +838,7 @@ pub fn detect_static_weights(
                 1,
                 weight_slice,
                 role,
+                weight_kind,
             ) {
                 bindings.push(binding);
             }
@@ -780,7 +850,7 @@ pub fn detect_static_weights(
         // this branch is a no-op.
         if let Some(bias_slice) = input_slices.get(2) {
             if let Some(binding) =
-                bind_consumer_input(&const_slots, arena, instruction_index, 2, bias_slice, role)
+                bind_consumer_input(&const_slots, arena, instruction_index, 2, bias_slice, role, PackedWeightKind::Fp32)
             {
                 bindings.push(binding);
             }
@@ -801,16 +871,21 @@ fn bind_consumer_input(
     input_index: usize,
     slot: &BufferSlice,
     role: &str,
+    kind: PackedWeightKind,
 ) -> Option<StaticWeightBinding> {
     let producer = find_covering_write_const(const_slots, slot)?;
     let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
-    let payload = bytes_to_f32_vec(&producer.data);
-    let weight_id = arena.insert(&name, payload);
+    let weight_id = if kind == PackedWeightKind::Fp32 {
+        let payload = bytes_to_f32_vec(&producer.data);
+        arena.insert(&name, payload)
+    } else {
+        arena.insert_raw(&name, producer.data.clone(), kind)
+    };
     Some(StaticWeightBinding {
         instruction_index,
         input_index,
         weight_id,
-        kind: PackedWeightKind::Fp32,
+        kind,
     })
 }
 
@@ -1311,6 +1386,8 @@ pub type PreparedWeightKey = (usize, usize);
 #[derive(Default, Debug)]
 pub struct PersistentPreparedWeights {
     by_key: HashMap<PreparedWeightKey, Arc<Vec<f32>>>,
+    /// Raw byte payloads for quantized weight slots.
+    by_key_u8: HashMap<PreparedWeightKey, Arc<Vec<u8>>>,
 }
 
 impl PersistentPreparedWeights {
@@ -1341,6 +1418,24 @@ impl PersistentPreparedWeights {
         self.by_key.get(key).map(|arc| arc.as_slice())
     }
 
+    /// Register an immutable u8 payload for the `(offset, size)`
+    /// slot `key`.  Used for quantized weight slots.
+    ///
+    /// Duplicate inserts for the same key return `false` and keep
+    /// the first payload.
+    pub fn insert_u8(&mut self, key: PreparedWeightKey, payload: Arc<Vec<u8>>) -> bool {
+        if self.by_key_u8.contains_key(&key) {
+            return false;
+        }
+        self.by_key_u8.insert(key, payload);
+        true
+    }
+
+    /// Look up an immutable u8 payload registered for `key`.
+    pub fn get_u8(&self, key: &PreparedWeightKey) -> Option<&[u8]> {
+        self.by_key_u8.get(key).map(|arc| arc.as_slice())
+    }
+
     /// Number of registered overrides.
     pub fn len(&self) -> usize {
         self.by_key.len()
@@ -1363,6 +1458,7 @@ impl Clone for PersistentPreparedWeights {
     fn clone(&self) -> Self {
         Self {
             by_key: self.by_key.clone(),
+            by_key_u8: self.by_key_u8.clone(),
         }
     }
 }
@@ -1394,10 +1490,20 @@ pub fn build_persistent_prepared_weights(
     for inst in &prepared.instructions {
         match inst {
             Conv2d(conv) => {
-                register_quantized_slot(&mut view, arena, conv.packed_weight, conv.weight);
+                let is_quantized = conv.packed_weight.map_or(false, |id| id.kind != PackedWeightKind::Fp32);
+                if is_quantized {
+                    register_quantized_slot(&mut view, arena, conv.packed_weight, conv.weight);
+                } else {
+                    register_fp32_slot(&mut view, arena, conv.packed_weight, conv.weight);
+                }
             }
             MatMul(matmul) => {
-                register_fp32_slot(&mut view, arena, matmul.packed_weight, matmul.b);
+                let is_quantized = matmul.packed_weight.map_or(false, |id| id.kind != PackedWeightKind::Fp32);
+                if is_quantized {
+                    register_quantized_slot(&mut view, arena, matmul.packed_weight, matmul.b);
+                } else {
+                    register_fp32_slot(&mut view, arena, matmul.packed_weight, matmul.b);
+                }
                 if let Some(bias_slot) = matmul.bias {
                     register_fp32_slot(&mut view, arena, matmul.packed_bias, bias_slot);
                 }
@@ -1438,22 +1544,18 @@ fn register_quantized_slot(
     packed_id: Option<PackedWeightId>,
     slot: BufferSlice,
 ) {
-    let Some(id) = packed_id else {
-        return;
-    };
-    if !matches!(id.kind, PackedWeightKind::I8 | PackedWeightKind::U4) {
+    let Some(id) = packed_id else { return; };
+    if !matches!(id.kind, PackedWeightKind::I8 | PackedWeightKind::U4 | PackedWeightKind::F8 | PackedWeightKind::F8R | PackedWeightKind::F4) {
         return;
     }
-    let Some(payload) = arena.get(id) else {
-        return;
-    };
+    let Some(payload) = arena.get_raw(id) else { return; };
     let expected_bytes = slot.size;
-    let actual_bytes = payload.len() * id.kind.element_bytes();
+    let actual_bytes = payload.len();
     if expected_bytes != actual_bytes {
         return;
     }
     let key = (slot.offset, slot.size);
-    view.insert(key, Arc::new(payload.to_vec()));
+    view.insert_u8(key, Arc::new(payload.to_vec()));
 }
 
 #[cfg(test)]

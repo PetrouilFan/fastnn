@@ -1213,7 +1213,6 @@ pub struct AotExecutor {
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
-    #[cfg(feature = "prepared-plan")]
     prepared_plan: crate::backend::prepared::PreparedExecutablePlan,
 }
 
@@ -1359,7 +1358,6 @@ impl AotExecutor {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        #[cfg(feature = "prepared-plan")]
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan);
 
         Ok(AotExecutor {
@@ -1369,7 +1367,6 @@ impl AotExecutor {
             executor,
             input_names,
             output_map,
-            #[cfg(feature = "prepared-plan")]
             prepared_plan,
         })
     }
@@ -1394,9 +1391,39 @@ impl AotExecutor {
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
+        #[cfg(feature = "prepared-plan")]
+        let output_data = {
+            if self.prepared_plan.static_weight_binding_count() > 0 {
+                self.executor
+                    .execute_prepared_no_copy(
+                        &self.graph,
+                        &mut self.plan,
+                        &self.memory_plan,
+                        &input_refs,
+                        &self.prepared_plan,
+                    )
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            } else {
+                self.executor
+                    .execute(
+                        &self.graph,
+                        &mut self.plan,
+                        &self.memory_plan,
+                        &input_refs,
+                    )
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            }
+        };
+
+        #[cfg(not(feature = "prepared-plan"))]
         let output_data = self
             .executor
-            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .execute(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+            )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.decode_outputs(output_data)
