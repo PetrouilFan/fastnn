@@ -24,9 +24,10 @@ fn fused_binary_activation_dispatch_slices(
     act: &(impl Fn(f32) -> f32 + Sync),
 ) {
     // Single-pass fused SIMD kernels: combine binary op + activation in one pass.
-    // Only works when a, b, and out are same length (no broadcast needed).
+    // Supports same-shape, scalar broadcast, and tiled broadcast patterns.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if out_f32.len() >= 8 && a.len() == out_f32.len() && b.len() == out_f32.len()
+    if out_f32.len() >= 8
+        && (a.len() == out_f32.len() || b.len() == out_f32.len())
         && microkernels::simd_avx2_available()
     {
         match kernel_name {
