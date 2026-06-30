@@ -566,16 +566,9 @@ pub fn conv2d_f32_im2col_gemm(
         );
     }
 
-    // Fast path for 3×3 stride-1 pad-1 direct convolution
-    // (avoids im2col memory expansion).
-    if kh == 3 && kw == 3 && stride == 1 && padding == 1 && dilation == 1 && groups == 1 {
-        return crate::backend::cpu::microkernels::direct_conv::direct_conv3x3_f32(
-            input, weight, bias, output,
-            n, c, h, w, f, stride, padding, activation,
-        );
-    }
-
     // General case: im2col + GEMM (for non-1x1 convolutions).
+    // Also used for 3×3 s=1 p=1 g=1 — matrixmultiply's tiled GEMM
+    // (~90 GFLOP/s) outperforms direct_conv3x3 (~25 GFLOP/s).
     // im2col is [spatial, col_w] row-major. Run GEMM as
     // C[f, spatial] = W[f, col_w] * Col[col_w, spatial], with
     // Col[col, spatial] = col_matrix[spatial * col_w + col]
