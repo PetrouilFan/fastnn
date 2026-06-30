@@ -8,6 +8,7 @@ use crate::backend::cpu::swar::{
     i4x8_dot_packed, i4x8_packed_to_tensor, i8x4_dot_packed, i8x4_packed_to_tensor,
     quantize_f32_to_i4x8, quantize_f32_to_i8x4,
 };
+use crate::backend::prepared::PreparedActivation;
 use crate::dtypes::f4x8::f4x8_dot_packed;
 use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
@@ -239,7 +240,7 @@ pub fn gemm_packed_f4x8_fused(
     act_packed: &PackedTensor<F4x8>,
     weight_packed: &PackedTensor<F4x8>,
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
@@ -272,13 +273,14 @@ pub fn gemm_packed_f4x8_fused(
                 val += b[col];
             }
 
-            if let Some(act) = activation {
-                val = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-            }
+            val = match activation {
+                PreparedActivation::Relu => val.max(0.0),
+                PreparedActivation::Silu => val / (1.0 + (-val).exp()),
+                PreparedActivation::Gelu => {
+                    val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh())
+                }
+                PreparedActivation::None => val,
+            };
 
             c[row * n + col] = val;
         }
@@ -296,13 +298,13 @@ pub fn gemm_packed_f4x8_fused(
 /// - `act_packed`: [M, K] packed activations (from im2col_packed)
 /// - `weight_packed`: [N, K] packed weights
 /// - `bias`: Optional bias [N] f32
-/// - `activation`: Optional fused activation (None, "relu", "silu")
+/// - `activation`: Optional fused activation (PreparedActivation enum)
 /// - `c`: Output [M, N] f32 (row-major)
 pub fn gemm_packed_i8x4_fused(
     act_packed: &PackedTensor<I8x4>,
     weight_packed: &PackedTensor<I8x4>,
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
@@ -377,13 +379,14 @@ pub fn gemm_packed_i8x4_fused(
                 val += b[col];
             }
 
-            if let Some(act) = activation {
-                val = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-            }
+            val = match activation {
+                PreparedActivation::Relu => val.max(0.0),
+                PreparedActivation::Silu => val / (1.0 + (-val).exp()),
+                PreparedActivation::Gelu => {
+                    val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh())
+                }
+                PreparedActivation::None => val,
+            };
 
             c[row * n + col] = val;
         }
@@ -433,7 +436,7 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
     act_packed: &PackedTensor<T>,
     weight_packed: &PackedTensor<T>,
     bias: Option<&[f32]>,
-    activation: Option<&str>,
+    activation: PreparedActivation,
     c: &mut [f32],
 ) {
     let m = act_packed.shape()[0];
@@ -470,13 +473,14 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
                 val += b[col];
             }
 
-            if let Some(act) = activation {
-                val = match act {
-                    "relu" => val.max(0.0),
-                    "silu" => val / (1.0 + (-val).exp()),
-                    _ => val,
-                };
-            }
+            val = match activation {
+                PreparedActivation::Relu => val.max(0.0),
+                PreparedActivation::Silu => val / (1.0 + (-val).exp()),
+                PreparedActivation::Gelu => {
+                    val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh())
+                }
+                PreparedActivation::None => val,
+            };
 
             c[row * n + col] = val;
         }
