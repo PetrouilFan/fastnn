@@ -7205,8 +7205,26 @@ fn dispatch_conv2d_fp32_with_view(
         &[]
     };
 
-    // Borrow the input tensor from the arena (zero-copy).
-    let input_f32: &[f32] = {
+    // Borrow the input tensor from the arena.  When the input and output
+    // overlap in the arena — which happens with optimized memory plans
+    // that reuse dead regions — we must copy the input to a local Vec
+    // to avoid UB from creating simultaneous &[f32] and &mut [f32]
+    // references to the same arena memory.
+    let input_overlaps = arena::ranges_overlap(
+        input_slice.offset,
+        input_slice.offset + input_slice.size,
+        output_slice.offset,
+        output_slice.offset + output_slice.size,
+    );
+    let input_owned: Vec<f32>;
+    let input_f32: &[f32] = if input_overlaps {
+        let d = arena.data_mut();
+        input_owned = bytemuck::cast_slice::<_, f32>(
+            &d[input_slice.offset..input_slice.offset + input_slice.size],
+        )
+        .to_vec();
+        &input_owned
+    } else {
         let d = arena.data_mut();
         bytemuck::cast_slice::<_, f32>(
             &d[input_slice.offset..input_slice.offset + input_slice.size],
