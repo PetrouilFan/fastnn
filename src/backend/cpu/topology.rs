@@ -1,3 +1,26 @@
+/// Returns the L2 cache size in bytes, or a sensible default if detection fails.
+pub fn l2_cache_size_bytes() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use raw_cpuid::CpuId;
+
+        if let Some(cparams) = CpuId::new().get_cache_parameters() {
+            for cache in cparams {
+                if cache.level() == 2 {
+                    let size = cache.associativity() as u64
+                        * cache.physical_line_partitions() as u64
+                        * cache.coherency_line_size() as u64
+                        * cache.sets() as u64;
+                    let bytes = size.max(128 * 1024); // sanity floor
+                    return bytes.min(8 * 1024 * 1024) as usize; // sanity ceiling
+                }
+            }
+        }
+    }
+    // Conservative default: 256 KiB (common for older / mobile CPUs)
+    256 * 1024
+}
+
 /// Returns the number of physical cores on the current CPU.
 ///
 /// On x86_64, uses CPUID extended topology leaf (0xB) to determine SMT width,
@@ -57,5 +80,12 @@ mod tests {
     fn test_physical_core_ids_not_empty() {
         let ids = physical_core_ids();
         assert!(!ids.is_empty(), "must have at least one core ID");
+    }
+
+    #[test]
+    fn test_l2_cache_size_bytes_is_reasonable() {
+        let l2 = l2_cache_size_bytes();
+        assert!(l2 >= 128 * 1024, "L2 too small: {l2}");
+        assert!(l2 <= 8 * 1024 * 1024, "L2 too large: {l2}");
     }
 }
