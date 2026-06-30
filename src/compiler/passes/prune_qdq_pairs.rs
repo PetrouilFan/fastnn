@@ -18,7 +18,7 @@ use std::collections::HashSet;
 /// Run this pass **after** `quantize_activations()` and **before** memory planning.
 pub fn prune_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     let mut to_remove: HashSet<NodeId> = HashSet::new();
-    let mut rewires: Vec<(NodeId, NodeId)> = Vec::new(); // (consumer_id, new_activation_id)
+    let mut rewires: Vec<(NodeId, NodeId)> = Vec::with_capacity(graph.nodes.len()); // (consumer_id, new_activation_id)
 
     // Collect DequantizeActivations nodes
     let dq_ids: Vec<NodeId> = graph
@@ -95,7 +95,7 @@ pub fn prune_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
 
     // Handle graph outputs: if a DequantizeActivations was a graph output,
     // replace it with its source
-    let mut outputs_to_update: Vec<(usize, NodeId)> = Vec::new();
+    let mut outputs_to_update: Vec<(usize, NodeId)> = Vec::with_capacity(graph.nodes.len());
     for (i, &output_id) in graph.outputs.iter().enumerate() {
         if to_remove.contains(&output_id) {
             if let Some(n) = graph.get_node(output_id) {

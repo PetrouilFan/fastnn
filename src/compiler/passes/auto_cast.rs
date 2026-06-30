@@ -104,7 +104,7 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
         consumer_id: NodeId,
         input_index: usize,
     }
-    let mut rewrites: Vec<DequantRewrite> = Vec::new();
+    let mut rewrites: Vec<DequantRewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {

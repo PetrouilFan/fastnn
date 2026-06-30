@@ -3,7 +3,7 @@ use crate::ir::node::{ComputeGraph, NodeId, Opcode, TensorValue};
 pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
     let mut simplified = 0;
 
-    let mut rewrites: Vec<(NodeId, RewriteAction)> = Vec::new();
+    let mut rewrites: Vec<(NodeId, RewriteAction)> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     let _ = crate::utils::traverse_graph(graph_ref, |_node_id, node| {

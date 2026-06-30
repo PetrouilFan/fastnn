@@ -23,7 +23,7 @@ pub fn eliminate_dead_code(graph: &mut ComputeGraph) -> usize {
 
     // ── Phase 2: Standard dead code elimination ────────────────────────
     let mut reachable: HashSet<usize> = HashSet::new();
-    let mut stack: Vec<usize> = Vec::new();
+    let mut stack: Vec<usize> = Vec::with_capacity(graph.nodes.len());
 
     for &id in &graph.inputs {
         stack.push(id);
@@ -69,7 +69,7 @@ pub fn eliminate_dead_code(graph: &mut ComputeGraph) -> usize {
 /// - Concat with single input → the input itself
 /// - Slice(0..dim) covering the full tensor → x
 fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
-    let mut rewrites: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut rewrites: Vec<(NodeId, NodeId)> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     let _ = crate::utils::traverse_graph(graph_ref, |node_id, node| {

@@ -434,7 +434,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
 
                 let mut executor = GraphExecutor::new(CpuBackend);
                 if let Ok((mut plan, memory_plan, compiled_graph)) =
-                    executor.compile_with_plan_and_quantize(&grad_graph, None, None)
+                    executor.compile_with_plan_and_quantize(grad_graph, None, None)
                 {
                     if let Ok(mut r) =
                         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
@@ -756,10 +756,10 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
 
-    let mut executor = GraphExecutor::new(CpuBackend);
+        let mut executor = GraphExecutor::new(CpuBackend);
     results = match (|| {
         let (mut plan, memory_plan, compiled_graph) =
-            executor.compile_with_plan_and_quantize(&combined, None, None)?;
+            executor.compile_with_plan_and_quantize(combined, None, None)?;
         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
     })() {
         Ok(r) => r,

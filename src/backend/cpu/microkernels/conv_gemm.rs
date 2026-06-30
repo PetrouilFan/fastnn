@@ -14,13 +14,14 @@
 //! to matrixmultiply with zero overhead.
 
 use super::ConvActivation;
+use crate::backend::cpu::microkernels::activations::{exp_avx2_vec, tanh_avx2_vec};
 use crate::backend::cpu::microkernels::conv::apply_conv_activation;
 use crate::backend::cpu::microkernels::simd_avx2_available;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// ── Scalar bias + activation pass ────────────────────────────
+// ── Scalar bias + activation pass (already fused) ────────────
 
 #[inline(never)]
 fn apply_bias_activation_scalar(
@@ -43,71 +44,100 @@ fn apply_bias_activation_scalar(
     }
 }
 
-// ── AVX2 bias + activation pass ──────────────────────────────
+// ── Fused AVX2 bias + activation pass (single load→fma→store) ─
 
-/// Apply bias and activation in-place on C[M, N] using AVX2 for bias
-/// addition and the existing AVX2 activation kernels from `activations.rs`.
+/// Apply bias and activation in a single fused SIMD pass.
 ///
-/// A small stack buffer avoids heap allocation for n ≤ 64.  For larger n a
-/// single heap allocation is made per call (not per row).
+/// No temp buffer, no copy_from_slice, no second pass over the data.
+/// Each 8-element chunk is loaded once, combined with bias, passed
+/// through the activation function, and stored.
 ///
 /// # Safety
 /// Caller must guarantee AVX2+FMA availability and valid pointers to
 /// M × N contiguous f32 values.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn apply_bias_activation_avx2(
+unsafe fn bias_activation_fused_avx2(
     m: usize,
     n: usize,
     c: *mut f32,
     bias: Option<&[f32]>,
     activation: Option<ConvActivation>,
 ) {
-    use crate::backend::cpu::microkernels::activations::*;
-
-    // Temp buffer for safe non-overlapping activation input.
-    // Use stack for n ≤ 64 (common for small spatial sizes).
-    let mut stack_buf = [0.0f32; 64];
-    let mut heap_buf: Vec<f32>;
-    let tmp: &mut [f32] = if n <= 64 {
-        &mut stack_buf[..n]
-    } else {
-        heap_buf = vec![0.0f32; n];
-        &mut heap_buf[..]
-    };
+    let none = activation.is_none();
 
     for oc in 0..m {
         let bv = bias.map(|b| b[oc]).unwrap_or(0.0);
         let vbias = _mm256_set1_ps(bv);
         let row = std::slice::from_raw_parts_mut(c.add(oc * n), n);
-
-        // Add bias via AVX2
         let mut i = 0usize;
-        while i + 8 <= n {
-            let v = _mm256_loadu_ps(row.as_ptr().add(i));
-            _mm256_storeu_ps(row.as_mut_ptr().add(i), _mm256_add_ps(v, vbias));
-            i += 8;
-        }
-        for j in i..n {
-            row[j] += bv;
-        }
 
-        // Apply activation via existing SIMD kernels (require non-overlapping
-        // input/output).  Copy row → tmp → activate → row.
-        match activation {
-            Some(ConvActivation::Silu) => {
-                tmp.copy_from_slice(row);
-                silu_f32_avx2(tmp, row);
+        if none {
+            // Bias only: single add + store
+            while i + 8 <= n {
+                let v = _mm256_loadu_ps(row.as_ptr().add(i));
+                _mm256_storeu_ps(row.as_mut_ptr().add(i), _mm256_add_ps(v, vbias));
+                i += 8;
             }
-            Some(ConvActivation::Relu) => {
-                tmp.copy_from_slice(row);
-                relu_f32_avx2(tmp, row);
+            if i < n {
+                for j in i..n { row[j] += bv; }
             }
-            Some(ConvActivation::Gelu) => {
-                tmp.copy_from_slice(row);
-                gelu_f32_avx2(tmp, row);
+        } else {
+            match activation {
+                Some(ConvActivation::Relu) => {
+                    let zero = _mm256_setzero_ps();
+                    while i + 8 <= n {
+                        let v = _mm256_loadu_ps(row.as_ptr().add(i));
+                        _mm256_storeu_ps(
+                            row.as_mut_ptr().add(i),
+                            _mm256_max_ps(_mm256_add_ps(v, vbias), zero),
+                        );
+                        i += 8;
+                    }
+                    for j in i..n { row[j] = (row[j] + bv).max(0.0); }
+                }
+                Some(ConvActivation::Silu) => {
+                    let one = _mm256_set1_ps(1.0);
+                    let neg_zero = _mm256_set1_ps(-0.0f32);
+                    while i + 8 <= n {
+                        let v = _mm256_loadu_ps(row.as_ptr().add(i));
+                        let x = _mm256_add_ps(v, vbias);
+                        let neg_x = _mm256_xor_ps(x, neg_zero);
+                        let e_neg = exp_avx2_vec(neg_x);
+                        let sig = _mm256_div_ps(one, _mm256_add_ps(one, e_neg));
+                        _mm256_storeu_ps(row.as_mut_ptr().add(i), _mm256_mul_ps(x, sig));
+                        i += 8;
+                    }
+                    for j in i..n { let x = row[j] + bv; row[j] = x / (1.0 + (-x).exp()); }
+                }
+                Some(ConvActivation::Gelu) => {
+                    let half = _mm256_set1_ps(0.5);
+                    let one = _mm256_set1_ps(1.0);
+                    let sqrt_2pi = _mm256_set1_ps(0.7978845608028654f32);
+                    let coeff = _mm256_set1_ps(0.044715f32);
+                    while i + 8 <= n {
+                        let v = _mm256_loadu_ps(row.as_ptr().add(i));
+                        let x = _mm256_add_ps(v, vbias);
+                        let x3 = _mm256_mul_ps(_mm256_mul_ps(x, x), x);
+                        let tanh_arg = _mm256_mul_ps(
+                            sqrt_2pi,
+                            _mm256_add_ps(x, _mm256_mul_ps(coeff, x3)),
+                        );
+                        let t = tanh_avx2_vec(tanh_arg);
+                        _mm256_storeu_ps(
+                            row.as_mut_ptr().add(i),
+                            _mm256_mul_ps(_mm256_mul_ps(half, x), _mm256_add_ps(one, t)),
+                        );
+                        i += 8;
+                    }
+                    for j in i..n {
+                        let x = row[j] + bv;
+                        let x3 = x * x * x;
+                        row[j] = 0.5 * x * (1.0 + (0.7978846 * (x + 0.044715 * x3)).tanh());
+                    }
+                }
+                _ => {}
             }
-            None => {}
         }
     }
 }
@@ -180,7 +210,7 @@ pub fn conv_gemm_f32(
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         if simd_avx2_available() {
             unsafe {
-                apply_bias_activation_avx2(m, n, c, bias, activation);
+                bias_activation_fused_avx2(m, n, c, bias, activation);
             }
             return;
         }

@@ -1349,7 +1349,7 @@ impl AotExecutor {
         let executor =
             crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_weight_dtype(&graph, weight_dtype, None)
+            .compile_with_weight_dtype(graph, weight_dtype, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
@@ -1463,9 +1463,10 @@ impl AotExecutor {
         // Recompile with calibration data - the quantization pass will UPDATE
         // existing QuantizeActivations nodes with new calibration attrs
         eprintln!("[APPLY_CALIB] Recompiling with calibration...");
+        let graph = std::mem::replace(&mut self.graph, crate::ir::node::ComputeGraph::new());
         let (plan, memory_plan, graph) = self
             .executor
-            .compile_with_plan_and_quantize(&self.graph, None, Some(calib))
+            .compile_with_plan_and_quantize(graph, None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.plan = plan;

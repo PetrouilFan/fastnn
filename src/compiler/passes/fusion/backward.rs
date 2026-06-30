@@ -19,7 +19,7 @@ struct BwdPattern {
 }
 
 fn find_bwd_patterns(graph: &ComputeGraph, target_fused_op: &str) -> Vec<BwdPattern> {
-    let mut patterns = Vec::new();
+    let mut patterns = Vec::with_capacity(graph.nodes.len());
 
     let drelu_ids: Vec<NodeId> = graph
         .nodes

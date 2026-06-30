@@ -14,7 +14,7 @@ use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 ///   grad_f32 → QuantizeGradient → grad_f8x4r → DequantizeGradient → grad_f32'
 pub fn quantize_gradients(graph: &mut ComputeGraph) {
     let node_ids = graph.topological_sort();
-    let mut rewrites: Vec<(NodeId, NodeId, f32)> = Vec::new();
+    let mut rewrites: Vec<(NodeId, NodeId, f32)> = Vec::with_capacity(graph.nodes.len());
 
     for &node_id in &node_ids {
         let node = match graph.get_node(node_id) {

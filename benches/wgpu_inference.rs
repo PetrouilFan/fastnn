@@ -24,7 +24,7 @@ fn bench_wgpu_quantized(
 ) -> Option<f64> {
     let gpu_executor = GraphExecutor::new(WgpuBackend);
     let (gpu_plan, gpu_mem, gpu_graph) = gpu_executor
-        .compile_with_plan_and_quantize(graph, Some(4))
+        .compile_with_plan_and_quantize(graph.clone(), Some(4))
         .ok()?;
 
     for _ in 0..10 {
@@ -76,7 +76,7 @@ fn main() {
 
     let cpu_executor = GraphExecutor::new(CpuBackend);
     let (cpu_plan, cpu_mem, cpu_graph) = cpu_executor
-        .compile_with_plan_and_quantize(&graph, Some(4))
+        .compile_with_plan_and_quantize(graph.clone(), Some(4))
         .expect("CPU quantized compile should succeed");
 
     for _ in 0..10 {
