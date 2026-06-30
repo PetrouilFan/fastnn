@@ -11,6 +11,7 @@ use crate::backend::cpu::microkernels::{
     blocked_row_matmul, tls_alloc_f32, tls_alloc_u8, tls_alloc_zeroed_f32,
     tls_alloc_zeroed_i8, tls_alloc_zeroed_i8x4,
 };
+use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
@@ -3687,14 +3688,14 @@ impl Backend for CpuBackend {
                                 let k = c_per_g * kernel_h * kernel_w;
                                 let n = act_i8.len() / (input_c * input_h * input_w).max(1);
 
-                                let fused_act: Option<&str> = if kernel_name.contains("_relu") {
-                                    Some("relu")
+                                let fused_act = if kernel_name.contains("_relu") {
+                                    PreparedActivation::Relu
                                 } else if kernel_name.contains("_gelu") {
-                                    Some("gelu")
+                                    PreparedActivation::Gelu
                                 } else if kernel_name.contains("_silu") {
-                                    Some("silu")
+                                    PreparedActivation::Silu
                                 } else {
-                                    None
+                                    PreparedActivation::None
                                 };
 
                                 let bit_width = meta.bit_width;
@@ -3767,12 +3768,11 @@ impl Backend for CpuBackend {
                                                         val += bias[g_oc_off + f];
                                                     }
                                                 }
-                                                    if let Some(act) = fused_act {
-                                                        val = match act {
-                                                            "relu" => val.max(0.0),
-                                                            "silu" => val / (1.0 + (-val).exp()),
-                                                            _ => val,
-                                                        };
+                                                    match fused_act {
+                                                        PreparedActivation::Relu => val = val.max(0.0),
+                                                        PreparedActivation::Silu => val = val / (1.0 + (-val).exp()),
+                                                        PreparedActivation::Gelu => val = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh()),
+                                                        PreparedActivation::None => {}
                                                     }
                                                     out_f32[out_base
                                                         + (g_oc_off + f) * num_pixels
@@ -3899,15 +3899,15 @@ impl Backend for CpuBackend {
                                             meta.scales.clone(),
                                             meta.zero_points.clone(),
                                         );
-                                        let fused_act: Option<&str> =
+                                        let fused_act =
                                             if kernel_name.contains("_relu") {
-                                                Some("relu")
+                                                PreparedActivation::Relu
                                             } else if kernel_name.contains("_gelu") {
-                                                Some("gelu")
+                                                PreparedActivation::Gelu
                                             } else if kernel_name.contains("_silu") {
-                                                Some("silu")
+                                                PreparedActivation::Silu
                                             } else {
-                                                None
+                                                PreparedActivation::None
                                             };
                                         unsafe {
                                             $fn(
