@@ -120,7 +120,7 @@ fn conv2d_kmajor_im2col_gemm(
                 }
             }
             unsafe {
-                matrixmultiply::sgemm(
+                fastnn::backend::cpu::sgemm::sgemm(
                     f_per_group,
                     col_w,
                     spatial,

@@ -37,7 +37,7 @@ mod openblas_conv_gemm_tests {
         let mut expected = vec![0.0f32; m * n];
         let mut actual = vec![0.0f32; m * n];
         unsafe {
-            matrixmultiply::sgemm(
+            crate::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,
@@ -80,7 +80,7 @@ mod openblas_conv_gemm_tests {
         let mut expected = vec![0.0f32; m * n];
         let mut actual = vec![0.0f32; m * n];
         unsafe {
-            matrixmultiply::sgemm(
+            crate::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,

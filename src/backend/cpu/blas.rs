@@ -80,28 +80,17 @@ pub fn matmul_blas_with_transpose_into(
 
     #[cfg(not(all(feature = "blas", not(target_os = "windows"))))]
     {
-        use matrixmultiply::sgemm;
-
-        // matrixmultiply::sgemm(M, K, N, A, rsa, csa, B, rsb, csb, C, rsc, csc) computes:
-        //   C[i][j] = Σ_{p=0}^{K-1} A[rsa·i + csa·p] · B[rsb·p + csb·j]
-        // where A is M×K, B is K×N, C is M×N.
-        //
-        // For row-major storage: rsa=K, csa=1 (next row = +K, next col = +1)
-        // For transposed (stored as [K][M], accessed as [M][K]): rsa=1, csa=M
-        //   because stored_A[p][i] = base + p·M + i = A[i][p] = base + rsa·i + csa·p
-        //   gives rsa=1, csa=M.
-        //
-        // We keep M=m, K=k, N=n constant and adjust strides for transposition:
+        // matrixmultiply-compatible strides:
+        // A[rsa*i + csa*p] · B[rsb*p + csb*j]
         let rsa: isize = if trans_a { 1 } else { k as isize };
         let csa: isize = if trans_a { m as isize } else { 1 };
         let rsb: isize = if trans_b { 1 } else { n as isize };
         let csb: isize = if trans_b { k as isize } else { 1 };
 
-        // SAFETY: matrixmultiply::sgemm operates on valid slices with correct
-        // dimensions and strides. All pointers are properly aligned and
-        // dereferenceable for the full m×n output region.
+        // SAFETY: sgemm operates on valid slices with correct
+        // dimensions and strides.
         unsafe {
-            sgemm(
+            crate::backend::cpu::sgemm::sgemm(
                 m,
                 k,
                 n,
