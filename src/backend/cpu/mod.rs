@@ -7,7 +7,10 @@
 #![allow(clippy::if_same_then_else)]
 
 use crate::backend::cpu::blas::matmul_blas_into;
-use crate::backend::cpu::microkernels::{blocked_row_matmul, TlsVecPool};
+use crate::backend::cpu::microkernels::{
+    blocked_row_matmul, tls_alloc_f32, tls_alloc_u8, tls_alloc_zeroed_f32,
+    tls_alloc_zeroed_i8, tls_alloc_zeroed_i8x4,
+};
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
@@ -3703,11 +3706,13 @@ impl Backend for CpuBackend {
                                 };
 
                                 let bit_width = meta.bit_width;
-                                let mut col_buf: Vec<i8> = vec![0i8; num_pixels * k];
                                 let inner: usize = meta.shape[1..].iter().product();
-                                let mut payload = Vec::with_capacity(8 + num_pixels * k);
-                                let mut packed_act = vec![I8x4(0); num_pixels * inner.div_ceil(4)];
-                                let mut temp = vec![0.0f32; num_pixels * oc_per_g];
+                                let mut col_buf = tls_alloc_zeroed_i8(num_pixels * k);
+                                let mut payload = tls_alloc_u8(8 + num_pixels * k);
+                                payload.clear();
+                                let mut packed_act =
+                                    tls_alloc_zeroed_i8x4(num_pixels * inner.div_ceil(4));
+                                let mut temp = tls_alloc_zeroed_f32(num_pixels * oc_per_g);
 
                                 for nn in 0..n {
                                     let act_base = nn * input_c * input_h * input_w;
@@ -3728,7 +3733,7 @@ impl Backend for CpuBackend {
                                                 stride,
                                                 padding,
                                                 dilation,
-                                                &mut col_buf,
+                                                col_buf.as_mut_slice(),
                                             );
                                         }
                                         if bit_width == 4 {
@@ -3760,7 +3765,7 @@ impl Backend for CpuBackend {
                                                 local_zps,
                                             );
                                             microkernels::gemm_cpu_flat_i8_i4x8(
-                                                &pt, &payload, &mut temp, num_pixels, k, oc_per_g,
+                                                &pt, &payload, temp.as_mut_slice(), num_pixels, k, oc_per_g,
                                             );
                                             for pixel in 0..num_pixels {
                                                 for f in 0..oc_per_g {
@@ -3805,7 +3810,7 @@ impl Backend for CpuBackend {
                                                 &col_buf,
                                                 num_pixels,
                                                 k,
-                                                &mut packed_act,
+                                                packed_act.as_mut_slice(),
                                             );
                                             let bias_group = bias_data.and_then(|bias| {
                                                 if g_oc_off < bias.len() {
@@ -3827,7 +3832,7 @@ impl Backend for CpuBackend {
                                                 w_zps,
                                                 bias_group,
                                                 fused_act,
-                                                &mut temp,
+                                                temp.as_mut_slice(),
                                             );
                                             for pixel in 0..num_pixels {
                                                 for f in 0..oc_per_g {
@@ -6296,10 +6301,11 @@ impl Backend for CpuBackend {
 
                             if let Some(input_slice) = input_slices.first() {
                                 let d = arena.data_mut();
-                                let f32_data: Vec<f32> = bytemuck::cast_slice::<_, f32>(
+                                let input_f32 = bytemuck::cast_slice::<_, f32>(
                                     &d[input_slice.offset..input_slice.offset + input_slice.size],
-                                )
-                                .to_vec();
+                                );
+                                let mut f32_data = tls_alloc_f32(input_f32.len());
+                                f32_data.copy_from_slice(input_f32);
 
                                 let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
                                 let mut zero_points: Vec<f32> = vec![0.0; num_channels];
@@ -6396,8 +6402,12 @@ impl Backend for CpuBackend {
                                 let format_flag = *params.get(1).unwrap_or(&0); // 0=header, 1=metadata
                                 let in_data = {
                                     let d = arena.data_mut();
-                                    d[input_slice.offset..input_slice.offset + input_slice.size]
-                                        .to_vec()
+                                    let mut buf = tls_alloc_u8(input_slice.size);
+                                    buf.copy_from_slice(
+                                        &d[input_slice.offset..input_slice.offset
+                                            + input_slice.size],
+                                    );
+                                    buf
                                 };
 
                                 let (
