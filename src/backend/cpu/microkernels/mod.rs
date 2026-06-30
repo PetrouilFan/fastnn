@@ -20,6 +20,8 @@ pub mod ops;
 #[cfg(test)]
 pub mod tests;
 
+use crate::dtypes::{F4x8, I4x8, I8x4};
+
 pub use activations::*;
 pub use conv::*;
 pub use gemm::*;
@@ -84,76 +86,100 @@ pub(crate) fn with_scratch<R>(size: usize, f: impl FnOnce(&mut [f32]) -> R) -> R
     })
 }
 
-thread_local! {
-    static TLS_VEC_POOL: std::cell::RefCell<Vec<Vec<f32>>> = const {
-        std::cell::RefCell::new(Vec::new())
+// ============================================================
+// Generic thread-local Vec pool — one pool per element type
+// ============================================================
+
+macro_rules! tls_pool {
+    ($ty:ty, $pool:ident, $scoped:ident, $alloc:ident, $alloc_zeroed:ident) => {
+        thread_local! {
+            static $pool: std::cell::RefCell<Vec<Vec<$ty>>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+
+        pub(crate) struct $scoped {
+            inner: Option<Vec<$ty>>,
+        }
+
+        impl std::ops::Deref for $scoped {
+            type Target = Vec<$ty>;
+            fn deref(&self) -> &Vec<$ty> {
+                self.inner.as_ref().expect("ScopedVec already consumed")
+            }
+        }
+
+        impl std::ops::DerefMut for $scoped {
+            fn deref_mut(&mut self) -> &mut Vec<$ty> {
+                self.inner.as_mut().expect("ScopedVec already consumed")
+            }
+        }
+
+        impl $scoped {
+            pub(crate) fn take(mut self) -> Vec<$ty> {
+                self.inner
+                    .take()
+                    .expect("ScopedVec::take called on already-consumed ScopedVec")
+            }
+        }
+
+        impl Drop for $scoped {
+            fn drop(&mut self) {
+                if let Some(v) = self.inner.take() {
+                    if v.capacity() <= 100_000_000 {
+                        $pool.with(|pool| {
+                            pool.borrow_mut().push(v);
+                        });
+                    }
+                }
+            }
+        }
+
+        pub(crate) fn $alloc(min_capacity: usize) -> $scoped {
+            let pooled = $pool.with(|pool| pool.borrow_mut().pop());
+            let mut v = if let Some(v) = pooled {
+                crate::backend::cpu::telemetry::record_tls_vec_reuse();
+                v
+            } else {
+                crate::backend::cpu::telemetry::record_tls_vec_alloc();
+                Vec::new()
+            };
+            if v.capacity() < min_capacity {
+                v.reserve(min_capacity - v.len());
+            }
+            // SAFETY: `v` was just reserved with sufficient capacity; `set_len` is
+            // safe because the elements are uninitialized but immediately overwritten.
+            unsafe {
+                v.set_len(min_capacity);
+            }
+            $scoped { inner: Some(v) }
+        }
+
+        pub(crate) fn $alloc_zeroed(len: usize) -> $scoped {
+            let mut v = $alloc(len);
+            v.fill(Default::default());
+            v
+        }
     };
 }
 
-pub(crate) struct ScopedVec {
-    inner: Option<Vec<f32>>,
-}
+tls_pool!(f32, TLS_VEC_POOL_F32, ScopedVec, tls_alloc_f32, tls_alloc_zeroed_f32);
+tls_pool!(i8, TLS_VEC_POOL_I8, ScopedVecI8, tls_alloc_i8, tls_alloc_zeroed_i8);
+tls_pool!(u8, TLS_VEC_POOL_U8, ScopedVecU8, tls_alloc_u8, tls_alloc_zeroed_u8);
+tls_pool!(i32, TLS_VEC_POOL_I32, ScopedVecI32, tls_alloc_i32, tls_alloc_zeroed_i32);
+tls_pool!(u32, TLS_VEC_POOL_U32, ScopedVecU32, tls_alloc_u32, tls_alloc_zeroed_u32);
+tls_pool!(I8x4, TLS_VEC_POOL_I8X4, ScopedVecI8x4, tls_alloc_i8x4, tls_alloc_zeroed_i8x4);
+tls_pool!(I4x8, TLS_VEC_POOL_I4X8, ScopedVecI4x8, tls_alloc_i4x8, tls_alloc_zeroed_i4x8);
+tls_pool!(F4x8, TLS_VEC_POOL_F4X8, ScopedVecF4x8, tls_alloc_f4x8, tls_alloc_zeroed_f4x8);
 
-impl std::ops::Deref for ScopedVec {
-    type Target = Vec<f32>;
-    fn deref(&self) -> &Vec<f32> {
-        self.inner.as_ref().expect("ScopedVec already consumed")
-    }
-}
-
-impl std::ops::DerefMut for ScopedVec {
-    fn deref_mut(&mut self) -> &mut Vec<f32> {
-        self.inner.as_mut().expect("ScopedVec already consumed")
-    }
-}
-
-impl ScopedVec {
-    pub(crate) fn take(mut self) -> Vec<f32> {
-        self.inner
-            .take()
-            .expect("ScopedVec::take called on already-consumed ScopedVec")
-    }
-}
-
-impl Drop for ScopedVec {
-    fn drop(&mut self) {
-        if let Some(v) = self.inner.take() {
-            if v.capacity() <= 100_000_000 {
-                TLS_VEC_POOL.with(|pool| {
-                    pool.borrow_mut().push(v);
-                });
-            }
-        }
-    }
-}
-
+/// Backward-compatible alias: `TlsVecPool::alloc(...)` still returns `ScopedVec` (f32).
 pub(crate) struct TlsVecPool;
 
 impl TlsVecPool {
     pub(crate) fn alloc(min_capacity: usize) -> ScopedVec {
-        let pooled = TLS_VEC_POOL.with(|pool| pool.borrow_mut().pop());
-        let mut v = if let Some(v) = pooled {
-            crate::backend::cpu::telemetry::record_tls_vec_reuse();
-            v
-        } else {
-            crate::backend::cpu::telemetry::record_tls_vec_alloc();
-            Vec::new()
-        };
-        if v.capacity() < min_capacity {
-            v.reserve(min_capacity - v.len());
-        }
-        // SAFETY: `v` was just reserved with sufficient capacity; `set_len` is
-        // safe because the elements are uninitialized but immediately overwritten.
-        unsafe {
-            v.set_len(min_capacity);
-        }
-        ScopedVec { inner: Some(v) }
+        tls_alloc_f32(min_capacity)
     }
-
     pub(crate) fn alloc_zeroed(len: usize) -> ScopedVec {
-        let mut v = Self::alloc(len);
-        v.fill(0.0);
-        v
+        tls_alloc_zeroed_f32(len)
     }
 }
 
