@@ -494,7 +494,7 @@ fn cmd_compile(
 
     let executor = GraphExecutor::new(CpuBackend);
     let (plan, memory_plan, _compiled_graph) = executor
-        .compile_with_weight_dtype(&graph, weight_dtype, None)
+        .compile_with_weight_dtype(graph, weight_dtype, None)
         .map_err(|e| format!("Compilation: {e}"))?;
 
     plan.save(output_plan)?;

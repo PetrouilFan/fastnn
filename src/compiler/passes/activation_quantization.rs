@@ -33,7 +33,7 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), FastnnError>
         opcode: Opcode,
     }
 
-    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -136,7 +136,7 @@ pub fn quantize_activations_with_calibration(
         existing_qa_id: Option<NodeId>,
     }
 
-    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -384,7 +384,7 @@ mod tests {
         // Run standard compile without activation quantization
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan_no_q, mem_no_q, _) = executor
-            .compile_with_plan_and_quantize(&graph, None, None)
+            .compile_with_plan_and_quantize(graph.clone(), None, None)
             .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];

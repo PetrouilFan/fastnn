@@ -131,7 +131,11 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                 let mut ow = 0usize;
 
                 // interior 8-column SIMD blocks
-                while ow + 8 <= w_out {
+                // Use strict < to avoid OOB read: kw=2 loads 8 floats starting at
+                // ow+1, so max index = ow+1+7 = ow+8.  When ow+8 == w_out that
+                // reads one past the valid range.  The scalar tail handles the
+                // rightmost column(s).
+                while ow + 8 < w_out {
                     // 8 accumulators, one per output channel in the batch
                     let mut s = [_mm256_setzero_ps(); 8];
                     for i in 0..8 {
@@ -212,7 +216,8 @@ unsafe fn direct_conv3x3_f32_avx2_path(
             for oh in 0..h_out {
                 let mut ow = 0usize;
 
-                while ow + 8 <= w_out {
+                // Strict < for same reason as above — avoid OOB read at right edge.
+                while ow + 8 < w_out {
                     let mut sum = _mm256_set1_ps(bv);
 
                     for ic in 0..c {
