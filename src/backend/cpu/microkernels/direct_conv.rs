@@ -130,6 +130,21 @@ unsafe fn direct_conv3x3_f32_avx2_path(
             for oh in 0..h_out {
                 let mut ow = 0usize;
 
+                // Left-edge scalar pixel: when ow=0 the SIMD loop below would
+                // skip kw=0 entirely (iw_base = -1), dropping the left kernel
+                // column contribution for output columns 1-7.  Process ow=0
+                // via the safe per-pixel scalar function.
+                if w_out > 0 {
+                    for i in 0..8 {
+                        conv3x3_scalar_pixel(
+                            input, weight, bias, output,
+                            img, oc_batch + i, oh, 0,
+                            c, h, w, f, 1, 1, h_out, w_out, activation,
+                        );
+                    }
+                    ow = 1;
+                }
+
                 // interior 8-column SIMD blocks
                 // Use strict < to avoid OOB read: kw=2 loads 8 floats starting at
                 // ow+1, so max index = ow+1+7 = ow+8.  When ow+8 == w_out that
@@ -215,6 +230,16 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 
             for oh in 0..h_out {
                 let mut ow = 0usize;
+
+                // Left-edge scalar pixel — same fix as the batched loop above.
+                if w_out > 0 {
+                    conv3x3_scalar_pixel(
+                        input, weight, bias, output,
+                        img, oc, oh, 0,
+                        c, h, w, f, 1, 1, h_out, w_out, activation,
+                    );
+                    ow = 1;
+                }
 
                 // Strict < for same reason as above — avoid OOB read at right edge.
                 while ow + 8 < w_out {

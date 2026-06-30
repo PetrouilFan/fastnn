@@ -25,9 +25,7 @@ macro_rules! get_conv_buf {
         (*$buf).with(|b| {
             let mut b = b.borrow_mut();
             if b.len() < size {
-                let extra = size - b.len();
-                b.reserve(extra);
-                unsafe { b.set_len(size); }
+                b.resize(size, 0.0);
             }
             unsafe {
                 std::mem::transmute::<
