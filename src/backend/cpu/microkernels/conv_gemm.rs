@@ -119,6 +119,9 @@ unsafe fn apply_bias_activation_avx2(
 /// Delegates the core GEMM to matrixmultiply.  When bias or activation
 /// is present the output pass uses AVX2 (on supported x86_64) or scalar.
 /// When both are absent the call is forwarded directly with zero overhead.
+///
+/// For M=1 (depthwise) a fast-path dot-product is used to avoid
+/// matrixmultiply's per-call overhead.
 pub fn conv_gemm_f32(
     m: usize,
     k: usize,
@@ -135,6 +138,26 @@ pub fn conv_gemm_f32(
     bias: Option<&[f32]>,
     activation: Option<ConvActivation>,
 ) {
+    // ── M=1 fast path: dot product per spatial position ──
+    // Avoids matrixmultiply's per-call overhead for depthwise GEMMs
+    // where a single output channel is computed per group.
+    if m == 1 && rs_c == n as isize && cs_c == 1 {
+        let bv = bias.and_then(|b| b.first().copied()).unwrap_or(0.0);
+        let out = unsafe { std::slice::from_raw_parts_mut(c, n) };
+        let wgt = unsafe { std::slice::from_raw_parts(a, k) };
+        for s in 0..n {
+            let mut sum = bv;
+            for kk in 0..k {
+                sum += wgt[kk] * unsafe { *b.add(kk + s * k) };
+            }
+            out[s] = match activation {
+                Some(act) => apply_conv_activation(sum, act),
+                None => sum,
+            };
+        }
+        return;
+    }
+
     // ── No bias or activation: straight GEMM ──
     if bias.is_none() && activation.is_none() {
         unsafe {
