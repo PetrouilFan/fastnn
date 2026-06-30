@@ -5,8 +5,9 @@ use crate::backend::{BackendError, BufferSlice};
 use crate::dtypes::{I4x8, I8x4, PackedWord};
 use crate::ir::node::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
+use std::sync::Arc;
 
-use super::{aligned_packed_slice, resolve_params, CpuBuffer};
+use super::{get_or_cache_packed, resolve_params, CpuBuffer};
 
 // Runtime dispatch helpers intentionally take the IR/kernel call-site context
 // directly so they do not allocate wrapper structs on hot paths.
@@ -74,7 +75,7 @@ pub(super) fn matmul_activation_dispatch(
 
 /// Validate quantized weight metadata and build a packed tensor.
 pub(super) fn packed_tensor_from_meta<T: PackedWord>(
-    data: Vec<T>,
+    data: Arc<Vec<T>>,
     meta: std::sync::Arc<crate::backend::QuantizedWeightMeta>,
     kernel_name: &str,
 ) -> Result<PackedTensor<T>, BackendError> {
@@ -132,7 +133,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
 
     Ok({
         let scales_len = meta.scales.len();
-        let mut pt = PackedTensor::from_raw(
+        let mut pt = PackedTensor::from_raw_arc(
             data,
             meta.shape.clone(),
             meta.scales.clone(),
@@ -156,7 +157,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
 /// Activations are read directly from the arena via a zero-copy `&[f32]` view.
 /// Weight data is copied into a `PackedTensor` (required by the microkernel API).
 #[inline]
-pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
+pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
     input_slices: &[BufferSlice],
     arena: &CpuBuffer,
     params: &[usize],
@@ -182,7 +183,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord>(
         let typed_data = {
             // SAFETY: weight slice does not overlap with activation or output.
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
-            aligned_packed_slice::<T>(raw)
+            get_or_cache_packed::<T>(w_slice.offset, w_slice.size, raw)
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
@@ -233,7 +234,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
         let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
         let typed_data = {
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
-            aligned_packed_slice::<I8x4>(raw)
+            get_or_cache_packed::<I8x4>(w_slice.offset, w_slice.size, raw)
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
@@ -291,7 +292,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
         let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
         let typed_data = {
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
-            aligned_packed_slice::<I4x8>(raw)
+            get_or_cache_packed::<I4x8>(w_slice.offset, w_slice.size, raw)
         };
         let meta = weight_meta.clone().unwrap_or_else(|| {
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
