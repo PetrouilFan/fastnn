@@ -118,19 +118,100 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 ) {
     let inp_ptr = input.as_ptr();
     let out_ptr = output.as_mut_ptr();
+    let wgt_ptr = weight.as_ptr();
+    let f_main = f / 8 * 8;
+    let nsp = h_out * w_out;
 
     for img in 0..n {
         let inp_img_off = img * (c * h * w);
 
-        for oc in 0..f {
+        // ── Batched output channels (groups of 8) ──
+        for oc_batch in (0..f_main).step_by(8) {
+            for oh in 0..h_out {
+                let mut ow = 0usize;
+
+                // interior 8-column SIMD blocks
+                while ow + 8 <= w_out {
+                    // 8 accumulators, one per output channel in the batch
+                    let mut s = [_mm256_setzero_ps(); 8];
+                    for i in 0..8 {
+                        let bv = if bias.is_empty() { 0.0 } else { bias[oc_batch + i] };
+                        s[i] = _mm256_set1_ps(bv);
+                    }
+
+                    for ic in 0..c {
+                        let ic_off = inp_img_off + ic * (h * w);
+
+                        for kh in 0..3isize {
+                            let ih = oh as isize + kh - 1;
+                            if ih < 0 || (ih as usize) >= h { continue; }
+                            let row_off = ic_off + (ih as usize) * w;
+
+                            for kw in 0..3isize {
+                                let iw_base = ow as isize + kw - 1;
+                                if iw_base < 0 { continue; }
+
+                                let src = inp_ptr.add(row_off + iw_base as usize);
+                                let v = _mm256_loadu_ps(src);
+                                let w_pos = (kh * 3 + kw) as usize;
+
+                                // Load weight for each oc and FMA
+                                // weight[oc][ic][kh][kw] = weight[oc * c * 9 + ic * 9 + kh * 3 + kw]
+                                let w0 = *wgt_ptr.add((oc_batch + 0) * (c * 9) + ic * 9 + w_pos);
+                                let w1 = *wgt_ptr.add((oc_batch + 1) * (c * 9) + ic * 9 + w_pos);
+                                let w2 = *wgt_ptr.add((oc_batch + 2) * (c * 9) + ic * 9 + w_pos);
+                                let w3 = *wgt_ptr.add((oc_batch + 3) * (c * 9) + ic * 9 + w_pos);
+                                let w4 = *wgt_ptr.add((oc_batch + 4) * (c * 9) + ic * 9 + w_pos);
+                                let w5 = *wgt_ptr.add((oc_batch + 5) * (c * 9) + ic * 9 + w_pos);
+                                let w6 = *wgt_ptr.add((oc_batch + 6) * (c * 9) + ic * 9 + w_pos);
+                                let w7 = *wgt_ptr.add((oc_batch + 7) * (c * 9) + ic * 9 + w_pos);
+
+                                s[0] = _mm256_fmadd_ps(_mm256_set1_ps(w0), v, s[0]);
+                                s[1] = _mm256_fmadd_ps(_mm256_set1_ps(w1), v, s[1]);
+                                s[2] = _mm256_fmadd_ps(_mm256_set1_ps(w2), v, s[2]);
+                                s[3] = _mm256_fmadd_ps(_mm256_set1_ps(w3), v, s[3]);
+                                s[4] = _mm256_fmadd_ps(_mm256_set1_ps(w4), v, s[4]);
+                                s[5] = _mm256_fmadd_ps(_mm256_set1_ps(w5), v, s[5]);
+                                s[6] = _mm256_fmadd_ps(_mm256_set1_ps(w6), v, s[6]);
+                                s[7] = _mm256_fmadd_ps(_mm256_set1_ps(w7), v, s[7]);
+                            }
+                        }
+                    }
+
+                    for i in 0..8 {
+                        let sum = match activation {
+                            Some(act) => apply_activation_vec(s[i], act),
+                            None => s[i],
+                        };
+                        let out_base = img * (f * nsp) + (oc_batch + i) * nsp + oh * w_out + ow;
+                        _mm256_storeu_ps(out_ptr.add(out_base), sum);
+                    }
+
+                    ow += 8;
+                }
+
+                // scalar tail for rightmost columns
+                while ow < w_out {
+                    for i in 0..8 {
+                        conv3x3_scalar_pixel(
+                            input, weight, bias, output,
+                            img, oc_batch + i, oh, ow,
+                            c, h, w, f, 1, 1, h_out, w_out, activation,
+                        );
+                    }
+                    ow += 1;
+                }
+            }
+        }
+
+        // ── Tail output channels (f % 8) via single-oc loop ──
+        for oc in f_main..f {
             let bv = if bias.is_empty() { 0.0 } else { bias[oc] };
-            let w_row_off = oc * (c * 9);
-            let w_base = weight.as_ptr().add(w_row_off);
+            let w_base = wgt_ptr.add(oc * (c * 9));
 
             for oh in 0..h_out {
                 let mut ow = 0usize;
 
-                // interior 8-column blocks
                 while ow + 8 <= w_out {
                     let mut sum = _mm256_set1_ps(bv);
 
@@ -148,7 +229,6 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                                 if iw_base < 0 { continue; }
 
                                 let wv = _mm256_set1_ps(*w_ptr.add((kh * 3 + kw) as usize));
-
                                 let src = inp_ptr.add(row_off + iw_base as usize);
                                 let v = _mm256_loadu_ps(src);
                                 sum = _mm256_fmadd_ps(wv, v, sum);
@@ -160,13 +240,11 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                         Some(act) => apply_activation_vec(sum, act),
                         None => sum,
                     };
-
-                    let out_base = img * (f * h_out * w_out) + oc * (h_out * w_out) + oh * w_out + ow;
+                    let out_base = img * (f * nsp) + oc * nsp + oh * w_out + ow;
                     _mm256_storeu_ps(out_ptr.add(out_base), sum);
                     ow += 8;
                 }
 
-                // right tail (scalar)
                 while ow < w_out {
                     conv3x3_scalar_pixel(
                         input, weight, bias, output,
