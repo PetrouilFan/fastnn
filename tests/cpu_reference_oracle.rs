@@ -109,7 +109,7 @@ fn kernel_names(plan: &fastnn::backend::ExecutablePlan) -> Vec<String> {
 }
 
 fn run_single_output_f32(
-    graph: &ComputeGraph,
+    graph: ComputeGraph,
     inputs: &[&[u8]],
     quantize: Option<u8>,
 ) -> (Vec<f32>, Vec<String>) {
@@ -126,15 +126,14 @@ fn run_single_output_f32(
 }
 
 fn run_single_output_f32_with_i8_activations(
-    graph: &ComputeGraph,
+    mut graph: ComputeGraph,
     inputs: &[&[u8]],
     quantize: u8,
 ) -> (Vec<f32>, Vec<String>) {
-    let mut rewritten = graph.clone();
-    shape_inference::infer_shapes(&mut rewritten).expect("shape inference should succeed");
-    activation_quantization::quantize_activations(&mut rewritten)
+    shape_inference::infer_shapes(&mut graph).expect("shape inference should succeed");
+    activation_quantization::quantize_activations(&mut graph)
         .expect("activation quantization rewrite should succeed");
-    run_single_output_f32(&rewritten, inputs, Some(quantize))
+    run_single_output_f32(graph, inputs, Some(quantize))
 }
 
 #[test]
@@ -167,7 +166,7 @@ fn matmul_f32_reference_oracle_covers_batched_gemv_and_gemm() {
 
         let activations = seeded_values(seed, batch * m * k);
         let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-        let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+        let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
         let expected = naive_matmul(&activations, &weights, batch, m, k, n);
 
         assert!(
@@ -212,7 +211,7 @@ fn matmul_u4_reference_oracle_hits_quantized_dispatch_on_tail_k() {
 
         let activations = seeded_values(seed, m * k);
         let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-        let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], Some(4));
+        let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], Some(4));
         let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
         assert!(
@@ -257,7 +256,7 @@ fn matmul_u8_reference_oracle_hits_quantized_dispatch_on_tail_k() {
 
         let activations = seeded_values(seed, m * k);
         let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-        let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], Some(8));
+        let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], Some(8));
         let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
         assert!(
@@ -315,7 +314,7 @@ fn matmul_i8_activation_path_matches_reference_oracle() {
         .map(|value| value * 0.2)
         .collect();
     let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-    let (actual, kernels) = run_single_output_f32_with_i8_activations(&graph, &[&input_bytes], 8);
+    let (actual, kernels) = run_single_output_f32_with_i8_activations(graph, &[&input_bytes], 8);
     let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
     assert!(
@@ -376,7 +375,7 @@ fn matmul_u4_i8_activation_path_matches_reference_oracle() {
         .map(|value| value * 0.14 + 0.35)
         .collect();
     let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-    let (actual, kernels) = run_single_output_f32_with_i8_activations(&graph, &[&input_bytes], 4);
+    let (actual, kernels) = run_single_output_f32_with_i8_activations(graph, &[&input_bytes], 4);
     let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
     assert!(
@@ -410,7 +409,7 @@ fn f16_roundtrip_reference_oracle_uses_cpu_conversion_kernels() {
 
     let source = seeded_values(seed, len);
     let input_bytes = bytemuck::cast_slice(&source).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+    let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
     let expected: Vec<f32> = source
         .iter()
         .map(|&value| f16::from_f32(value).to_f32())
@@ -456,7 +455,7 @@ fn broadcast_add_reference_oracle_covers_negative_values() {
 
     let lhs_values = seeded_values(seed, batch * channels * width);
     let input_bytes = bytemuck::cast_slice(&lhs_values).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+    let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
     let expected = naive_broadcast_add(&lhs_values, &rhs_values, batch, channels, width);
 
     assert!(
@@ -513,7 +512,7 @@ fn run_fp_matmul_test<T, F>(
 
     let activations = seeded_values(seed, m * k);
     let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+    let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
     let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
     assert!(

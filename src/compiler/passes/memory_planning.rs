@@ -340,7 +340,7 @@ pub fn plan_memory_with_env(
         transitive_last_use.insert(node_id, last);
     }
 
-    let mut alloc_infos: Vec<AllocInfo> = Vec::new();
+    let mut alloc_infos: Vec<AllocInfo> = Vec::with_capacity(graph.nodes.len());
 
     crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
@@ -471,7 +471,7 @@ pub fn plan_memory_with_env(
         output_last_use: usize,
         ai_idx: usize,
     }
-    let mut reuse_candidates: Vec<ReuseCandidate> = Vec::new();
+    let mut reuse_candidates: Vec<ReuseCandidate> = Vec::with_capacity(graph.nodes.len());
     for ai_idx in 0..alloc_infos.len() {
         let info = &alloc_infos[ai_idx];
         if info.is_secondary {
@@ -563,7 +563,7 @@ pub fn plan_memory_with_env(
 
     let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
     let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
-    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::new();
+    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::with_capacity(graph.nodes.len());
     let mut free_list = SegFreeList::new();
     let mut arena_top: usize = 0;
 

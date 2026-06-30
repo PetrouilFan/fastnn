@@ -7,6 +7,8 @@
 //!
 //! Supported: 3×3 stride-1 pad-1 (AVX2), generic (scalar fallback).
 
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ConvActivation;
@@ -55,12 +57,14 @@ fn depthwise_conv3x3_scalar_pixel(
     input: &[f32],
     weight: &[f32],
     output: &mut [f32],
+    img: usize,
     g: usize,
     oh: usize,
     ow: usize,
-    _c: usize,
+    c: usize,
     h: usize,
     w: usize,
+    f: usize,
     h_out: usize,
     w_out: usize,
     stride: usize,
@@ -69,7 +73,7 @@ fn depthwise_conv3x3_scalar_pixel(
     activation: Option<ConvActivation>,
 ) {
     let mut sum = bv;
-    let inp_plane = g * h * w;
+    let inp_plane = img * (c * h * w) + g * h * w;
     for kr in 0..3isize {
         let ih = oh as isize * stride as isize - padding as isize + kr;
         if ih < 0 || ih >= h as isize {
@@ -85,7 +89,7 @@ fn depthwise_conv3x3_scalar_pixel(
             sum += input[row_base + (iw as usize)] * wv;
         }
     }
-    let out_idx = g * h_out * w_out + oh * w_out + ow;
+    let out_idx = img * (f * h_out * w_out) + g * h_out * w_out + oh * w_out + ow;
     output[out_idx] = match activation {
         Some(act) => apply_conv_activation(sum, act),
         None => sum,
@@ -135,14 +139,19 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
             let w7 = _mm256_set1_ps(*w_base.add(7));
             let w8 = _mm256_set1_ps(*w_base.add(8));
 
+            // Pre-compute left-edge mask for _mm256_maskload_ps.
+            // Element 0 zeroed (pad value), elements 1-7 loaded normally.
+            let left_mask = _mm256_set_epi32(-1, -1, -1, -1, -1, -1, -1, 0);
+
             let inp_plane_off = inp_img_off + g * hw;
 
             for oh in 0..h_out {
                 let mut ow = 0usize;
 
                 // ── SIMD main loop (8 output columns at a time) ──
-                // Condition: ow + 8 < w_out ensures all input loads are in-bounds.
-                // The scalar tail handles the rightmost columns.
+                // Condition: ow + 8 < w_out ensures all input loads are in-bounds
+                // (kw=2 at the last batch column loads at most ow+8 < w_out = w).
+                // The scalar tail handles the rightmost column(s).
                 while ow + 8 < w_out {
                     let mut acc = vbias;
 
@@ -154,20 +163,12 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
                         let row_off = inp_plane_off + (ih as usize) * w;
 
                         for kw in 0..3isize {
-                            let iw_base = ow as isize + kw - 1;
-
-                            let v = if iw_base < 0 {
-                                // Left edge: kw=0 at ow=0 — load starting at index 0
-                                // and shift right by 1 float, inserting 0 at position 0.
-                                // This way column 0 gets 0 (correct padding value)
-                                // while columns 1..7 get indices 0..6.
-                                let raw = _mm256_loadu_ps(inp_ptr.add(row_off));
-                                _mm256_castsi256_ps(_mm256_alignr_epi8(
-                                    _mm256_castps_si256(raw),
-                                    _mm256_setzero_si256(),
-                                    4,
-                                ))
+                            // Left edge: for kw=0 at ow=0, the input at position -1
+                            // is zero-padded. Load from index 0 and mask out element 0.
+                            let v = if ow == 0 && kw == 0 {
+                                _mm256_maskload_ps(inp_ptr.add(row_off), left_mask)
                             } else {
+                                let iw_base = ow as isize + kw - 1;
                                 _mm256_loadu_ps(inp_ptr.add(row_off + iw_base as usize))
                             };
 
@@ -205,7 +206,7 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
                 while ow < w_out {
                     depthwise_conv3x3_scalar_pixel(
                         input, weight, output,
-                        g, oh, ow, c, h, w, h_out, w_out,
+                        img, g, oh, ow, c, h, w, f, h_out, w_out,
                         1, 1, bv, activation,
                     );
                     ow += 1;
@@ -257,14 +258,14 @@ pub fn direct_depthwise_conv3x3_f32(
     if !DID_SCALAR.swap(true, Ordering::Relaxed) {
         eprintln!("[direct_depthwise_conv] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})", padding, stride, c, h, w, f);
     }
-    for _img in 0..n {
+    for img in 0..n {
         for g in 0..f {
             let bv = if bias.is_empty() { 0.0 } else { bias[g] };
             for oh in 0..h_out {
                 for ow in 0..w_out {
                     depthwise_conv3x3_scalar_pixel(
                         input, weight, output,
-                        g, oh, ow, c, h, w, h_out, w_out,
+                        img, g, oh, ow, c, h, w, f, h_out, w_out,
                         stride, padding, bv, activation,
                     );
                 }

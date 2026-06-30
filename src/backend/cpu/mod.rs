@@ -52,33 +52,25 @@ use matmul::{
 };
 
 /// Global cache for aligned packed weight data, keyed by
-/// `(arena_offset, arena_size, TypeId)`.  Each entry is reference-counted
-/// via `Arc<Vec<T>>`, so the first dispatch allocates and subsequent
-/// dispatches share the same data without copying.
-fn packed_weight_cache() -> &'static Mutex<HashMap<(usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>
-{
-    static CACHE: OnceLock<Mutex<HashMap<(usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Cache-aware version of [`aligned_packed_slice`].  Returns an
-/// `Arc<Vec<T>>` that may be shared across dispatch calls, avoiding
-/// repeated alignment checks and heap copies of constant weight data.
+/// Per-plan packed weight cache keyed by `(raw_ptr, write_offset, raw_len, TypeId)`.
+/// The raw data pointer acts as a unique compilation-session identifier so that
+/// distinct weight values (even at the same arena offset) never collide.
 fn get_or_cache_packed<T: PackedWord + 'static>(
     write_offset: usize,
     write_size: usize,
     raw: &[u8],
 ) -> Arc<Vec<T>> {
-    let key = (write_offset, write_size, TypeId::of::<T>());
-    let mut cache = packed_weight_cache().lock().unwrap();
-    if let Some(arc_any) = cache.get(&key) {
+    let cache_key = (raw.as_ptr() as usize, write_offset, write_size, TypeId::of::<T>());
+    static CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>> =
+        OnceLock::new();
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(arc_any) = cache.get(&cache_key) {
         if let Ok(arc_vec) = arc_any.clone().downcast::<Vec<T>>() {
             return arc_vec;
         }
     }
     let v: Arc<Vec<T>> = Arc::new(aligned_packed_slice::<T>(raw));
-    cache.insert(key, v.clone());
+    cache.insert(cache_key, v.clone());
     v
 }
 
@@ -213,7 +205,7 @@ impl Backend for CpuBackend {
         graph: &ComputeGraph,
         memory_plan: &MemoryPlan,
     ) -> Result<ExecutablePlan, BackendError> {
-        let mut instructions = Vec::new();
+        let mut instructions = Vec::with_capacity(graph.nodes.len());
         let order = graph.topological_sort();
 
         // â”€â”€ Preâ€‘compute topological levels for parallel dispatch â”€â”€â”€â”€â”€â”€
@@ -603,7 +595,7 @@ impl Backend for CpuBackend {
                         Opcode::Mish => "mish_f32",
                         _ => unreachable!(),
                     };
-                    let mut extra_params: Vec<usize> = Vec::new();
+                    let mut extra_params: Vec<usize> = Vec::with_capacity(graph.nodes.len());
                     if let Opcode::LeakyRelu = node.opcode {
                         let slope: f32 = node
                             .attrs

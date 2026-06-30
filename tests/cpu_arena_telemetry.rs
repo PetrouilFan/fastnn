@@ -23,11 +23,11 @@ fn graph_from(builder: &GraphBuilder, output: &GraphTensor) -> ComputeGraph {
 }
 
 fn execute_single_output_f32(graph: &ComputeGraph, inputs: &[&[u8]]) -> Vec<f32> {
-    execute_single_output_f32_with_kernels(graph, inputs).0
+    execute_single_output_f32_with_kernels(graph.clone(), inputs).0
 }
 
 fn execute_single_output_f32_with_kernels(
-    graph: &ComputeGraph,
+    graph: ComputeGraph,
     inputs: &[&[u8]],
 ) -> (Vec<f32>, Vec<String>) {
     let mut executor = GraphExecutor::new(CpuBackend);
@@ -251,7 +251,7 @@ fn fused_binary_activation_broadcast_add_relu_has_zero_arena_temp_copies() {
 
     reset_cpu_telemetry();
     let (actual, kernels) =
-        execute_single_output_f32_with_kernels(&graph, &[&lhs_bytes, &rhs_bytes]);
+        execute_single_output_f32_with_kernels(graph, &[&lhs_bytes, &rhs_bytes]);
     let snapshot = cpu_telemetry_snapshot();
 
     assert!(
@@ -297,7 +297,7 @@ fn reductions_compiled_disjoint_graph_have_zero_arena_temp_copies() {
         let input_bytes = bytemuck::cast_slice(&input_values).to_vec();
 
         reset_cpu_telemetry();
-        let (actual, kernels) = execute_single_output_f32_with_kernels(&graph, &[&input_bytes]);
+        let (actual, kernels) = execute_single_output_f32_with_kernels(graph, &[&input_bytes]);
         let snapshot = cpu_telemetry_snapshot();
 
         assert!(

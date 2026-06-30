@@ -25,7 +25,9 @@ macro_rules! get_conv_buf {
         (*$buf).with(|b| {
             let mut b = b.borrow_mut();
             if b.len() < size {
-                b.resize(size, 0.0);
+                let extra = size - b.len();
+                b.reserve(extra);
+                unsafe { b.set_len(size); }
             }
             unsafe {
                 std::mem::transmute::<
@@ -555,6 +557,17 @@ pub fn conv2d_f32_im2col_gemm(
         );
     }
 
+    // Fast path for depthwise 3×3 stride-1 pad-1 direct convolution
+    // (avoids 9× im2col expansion for mobileNet/YOLO depthwise convs).
+    if kh == 3 && kw == 3 && stride == 1 && padding == 1 && dilation == 1
+        && c_per_group == 1 && f_per_group == 1
+    {
+        return crate::backend::cpu::microkernels::direct_depthwise_conv::direct_depthwise_conv3x3_f32(
+            input, weight, bias, output,
+            n, c, h, w, f, groups, stride, padding, activation,
+        );
+    }
+
     // Fast path for 3×3 stride-1 pad-1 direct convolution
     // (avoids im2col memory expansion).
     if kh == 3 && kw == 3 && stride == 1 && padding == 1 && dilation == 1 && groups == 1 {
@@ -597,6 +610,7 @@ pub fn conv2d_f32_im2col_gemm(
                     padding,
                     dilation,
                     &mut col_matrix[col_start..],
+                    false, // FP32 conv does not need min/max
                 );
             }
             im2col_ms += ti.elapsed().as_secs_f64() * 1000.0;

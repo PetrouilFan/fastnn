@@ -143,6 +143,7 @@ unsafe fn im2col_pack_i8x4(
     with_col_buf(col_size, |col| {
         let (global_min, global_max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
+            true, // I8x4 needs min/max for asym quantization
         );
 
         let range = global_max - global_min;
@@ -253,6 +254,7 @@ unsafe fn im2col_pack_i4x8(
     with_col_buf(col_size, |col| {
         let (global_min, global_max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
+            true, // I4x8 needs min/max for asym quantization
         );
         let range = global_max - global_min;
         let scale = if range > 0.0 { range / 15.0 } else { 1.0 };
@@ -303,6 +305,7 @@ unsafe fn im2col_pack_f4x8(
     with_col_buf(col_size, |col| {
         let (_global_min, _global_max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
+            false, // F4x8 symmetric quant — uses max_abs from separate scan below
         );
 
         let max_abs = col.iter().copied().map(|v| v.abs()).fold(0.0f32, f32::max);
@@ -365,6 +368,7 @@ unsafe fn im2col_pack_float8<T: PackedWord>(
     with_col_buf(col_size, |col| {
         let (_global_min, _global_max) = crate::backend::cpu::im2col::im2col_dispatch(
             input_n, c, h, w, kh, kw, stride, padding, dilation, col,
+            false, // F8x symmetric quant — uses separate max_abs scan below
         );
 
         let max_abs = col.iter().copied().map(|v| v.abs()).fold(0.0f32, f32::max);

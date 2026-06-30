@@ -27,7 +27,7 @@ fn graph_from(builder: &GraphBuilder, output: &fastnn::ir::builder::GraphTensor)
     graph
 }
 
-fn run_single_output_f32(graph: &ComputeGraph, inputs: &[&[u8]]) -> (Vec<f32>, Vec<String>) {
+fn run_single_output_f32(graph: ComputeGraph, inputs: &[&[u8]]) -> (Vec<f32>, Vec<String>) {
     let mut executor = GraphExecutor::new(CpuBackend);
     let (mut plan, memory_plan, compiled_graph) = executor
         .compile_with_plan(graph)
@@ -342,7 +342,7 @@ fn test_cpu_fused_rmsnorm_batched_uses_hidden_row_size() {
     let residual = vec![-0.25, 0.5, -1.5, 2.0, 1.25, -0.75, 2.5, -3.5];
     let main_bytes = bytemuck::cast_slice(&main).to_vec();
     let residual_bytes = bytemuck::cast_slice(&residual).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&main_bytes, &residual_bytes]);
+    let (actual, kernels) = run_single_output_f32(graph, &[&main_bytes, &residual_bytes]);
     let expected = reference_rms_residual_add(&residual, &main, &weight, 4, 1e-5);
 
     assert!(
@@ -377,7 +377,7 @@ fn test_cpu_fused_layernorm_matches_reference() {
     let residual = vec![1.0, 0.25, -0.5, 1.75, -2.0, 0.5, 1.25, -0.25];
     let main_bytes = bytemuck::cast_slice(&main).to_vec();
     let residual_bytes = bytemuck::cast_slice(&residual).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&main_bytes, &residual_bytes]);
+    let (actual, kernels) = run_single_output_f32(graph, &[&main_bytes, &residual_bytes]);
     let expected = reference_layer_residual_add(&residual, &main, &weight, &bias, 4, 1e-5);
 
     assert!(
