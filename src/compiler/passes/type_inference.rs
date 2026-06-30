@@ -69,7 +69,7 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
         target_dtype: IrDType,
     }
 
-    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {

@@ -347,21 +347,21 @@ fn test_compile_with_quantize_rejects_invalid_bit_width() {
     let graph = gb.to_graph();
     let executor = GraphExecutor::new(CpuBackend);
 
-    let result = executor.compile_with_plan_and_quantize(&graph, Some(2), None);
+    let result = executor.compile_with_plan_and_quantize(graph.clone(), Some(2), None);
     assert!(result.is_err(), "Bit width 2 should be rejected");
 
-    let result = executor.compile_with_plan_and_quantize(&graph, Some(16), None);
+    let result = executor.compile_with_plan_and_quantize(graph.clone(), Some(16), None);
     assert!(result.is_err(), "Bit width 16 should be rejected");
 
     // None and Some(4) and Some(8) should succeed
     assert!(executor
-        .compile_with_plan_and_quantize(&graph, None, None)
+        .compile_with_plan_and_quantize(graph.clone(), None, None)
         .is_ok());
     assert!(executor
-        .compile_with_plan_and_quantize(&graph, Some(4), None)
+        .compile_with_plan_and_quantize(graph.clone(), Some(4), None)
         .is_ok());
     assert!(executor
-        .compile_with_plan_and_quantize(&graph, Some(8), None)
+        .compile_with_plan_and_quantize(graph, Some(8), None)
         .is_ok());
 }
 
@@ -746,7 +746,7 @@ fn test_count_quantized_kernel_names() {
     let graph = gb.to_graph();
     let executor = GraphExecutor::new(CpuBackend);
     let (plan, _mem, _compiled_graph) = executor
-        .compile_with_plan_and_quantize(&graph, Some(4), None)
+        .compile_with_plan_and_quantize(graph, Some(4), None)
         .expect("compile_with_plan_and_quantize(4) should succeed");
 
     // Collect and classify kernel names

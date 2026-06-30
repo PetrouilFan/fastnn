@@ -7,7 +7,7 @@ pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
         node_id: NodeId,
         value: TensorValue,
     }
-    let mut folds: Vec<Fold> = Vec::new();
+    let mut folds: Vec<Fold> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     let _ = crate::utils::traverse_graph(graph_ref, |node_id, node| {

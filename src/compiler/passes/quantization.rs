@@ -35,7 +35,7 @@ pub fn quantize_weights(
 ) -> Result<(), FastnnError> {
     // ---- Phase 1: collect (constant_id, consumer_id) pairs to quantize ----
     // We collect first, then mutate, to avoid borrow-checker issues.
-    let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -231,7 +231,7 @@ pub fn quantize_weights_fp(
     graph: &mut ComputeGraph,
     fp_dtype: &FpDtype,
 ) -> Result<(), FastnnError> {
-    let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -382,7 +382,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         opt_inputs: Vec<NodeId>, // remaining inputs (grad, m, v, etc.)
     }
 
-    let mut to_wrap: Vec<OptimizerWrap> = Vec::new();
+    let mut to_wrap: Vec<OptimizerWrap> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -705,7 +705,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (plan, _, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&gb.to_graph(), Some(4), None)
+            .compile_with_plan_and_quantize(gb.to_graph(), Some(4), None)
             .expect("compile with quantization should succeed");
 
         // Verify that the compiled plan contains a matmul_u4 kernel.
@@ -791,7 +791,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (_plan, _memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4), None)
+            .compile_with_plan_and_quantize(graph, Some(4), None)
             .expect("compile with quantization should succeed");
 
         // After compile:
@@ -908,7 +908,7 @@ mod tests {
 
         let executor = GraphExecutor::new(CpuBackend);
         let (_plan, _memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4), None)
+            .compile_with_plan_and_quantize(graph, Some(4), None)
             .expect("compile with quantization should succeed");
 
         // Verify wrapping for Adam
@@ -969,7 +969,7 @@ mod tests {
 
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, Some(4), None)
+            .compile_with_plan_and_quantize(graph, Some(4), None)
             .expect("compile with quantization should succeed");
         // Debug: print output slot size for quantized weight
         let q_node = compiled_graph

@@ -122,12 +122,13 @@ impl<B: Backend> GraphExecutor<B> {
     }
 
     /// Run the full compilation pipeline:
-    /// 1. Clone the graph so the original is not mutated
-    /// 2. Shape inference
-    /// 3. Operator fusion
-    /// 4. Memory planning
-    /// 5. Backend compilation
-    pub fn compile(&self, graph: &ComputeGraph) -> Result<ExecutablePlan, BackendError> {
+    /// 1. Shape inference
+    /// 2. Operator fusion
+    /// 3. Memory planning
+    /// 4. Backend compilation
+    ///
+    /// Takes ownership of the graph to avoid an unnecessary deep clone.
+    pub fn compile(&self, graph: ComputeGraph) -> Result<ExecutablePlan, BackendError> {
         let (plan, _memory_plan, _graph) = self.compile_with_plan(graph)?;
         Ok(plan)
     }
@@ -144,7 +145,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// `4` (I4x8) and `8` (I8x4).
     pub fn compile_with_plan(
         &self,
-        graph: &ComputeGraph,
+        graph: ComputeGraph,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         self.compile_with_plan_and_quantize(graph, None, None)
     }
@@ -161,7 +162,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// instead. This method only supports integer quantization (I4/I8).
     pub fn compile_with_plan_and_quantize(
         &self,
-        graph: &ComputeGraph,
+        graph: ComputeGraph,
         quantize: Option<u8>,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
@@ -192,13 +193,14 @@ impl<B: Backend> GraphExecutor<B> {
     /// If `calib_data` is provided, per-tensor/per-channel activation scales
     /// will be applied after weight quantization (weight-only quant only uses
     /// the weight quant step; activations remain f32).
+    ///
+    /// Takes ownership of `graph` to avoid an unnecessary deep clone.
     pub fn compile_with_weight_dtype(
         &self,
-        graph: &ComputeGraph,
+        mut graph: ComputeGraph,
         weight_dtype: WeightDtype,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let mut graph = graph.clone();
         let do_weight_quant = weight_dtype != WeightDtype::F32;
 
         // ── Phase 1: Shape inference ──────────────────────────────────────
@@ -820,7 +822,7 @@ impl<B: Backend> GraphExecutor<B> {
         graph: &ComputeGraph,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        let (mut plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
+        let (mut plan, memory_plan, compiled_graph) = self.compile_with_plan(graph.clone())?;
         self.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
@@ -909,7 +911,7 @@ impl<B: Backend> GraphExecutor<B> {
 
         // 6. Run the standard compiler pipeline
         let (plan, memory_plan, final_graph) =
-            self.compile_with_plan_and_quantize(&combined_graph, config.quantize, None)?;
+            self.compile_with_plan_and_quantize(combined_graph, config.quantize, None)?;
 
         // 6b. Optionally tighten memory plan using concrete batch shapes.
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.

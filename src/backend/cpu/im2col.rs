@@ -391,6 +391,10 @@ pub unsafe fn im2col_parallel(
 ///
 /// Priority: AVX2 (stride=1,pad=1,3×3) → parallel (when feature enabled) → scalar.
 ///
+/// When `track_minmax` is false the min/max scan over the column buffer is
+/// skipped — the FP32 conv path doesn't need these values.  The packed
+/// (quantized) paths that compute scale/zero-point should pass `true`.
+///
 /// # Safety
 /// `data` and `col` must be valid and non-overlapping slices of sufficient length.
 #[inline]
@@ -405,6 +409,7 @@ pub unsafe fn im2col_dispatch(
     padding: usize,
     dilation: usize,
     col: &mut [f32],
+    track_minmax: bool,
 ) -> (f32, f32) {
     let dh = (kh - 1) * dilation + 1;
     let dw = (kw - 1) * dilation + 1;
@@ -422,9 +427,6 @@ pub unsafe fn im2col_dispatch(
     let col_len = col.len();
     let col_valid = &mut col[..col_elems.min(col_len)];
 
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-
     #[cfg(feature = "parallel")]
     {
         // Use parallel path for large layers even when AVX2 is available:
@@ -432,11 +434,7 @@ pub unsafe fn im2col_dispatch(
         // is large enough that memory-bandwidth-limited scatter dominates.
         if col_elems > 65536 {
             im2col_parallel(data, c, h, w, kh, kw, stride, padding, dilation, col_valid);
-            for &v in col_valid.iter() {
-                min = min.min(v);
-                max = max.max(v);
-            }
-            return (min, max);
+            return minmax_scan(col_valid, track_minmax);
         }
     }
 
@@ -444,19 +442,11 @@ pub unsafe fn im2col_dispatch(
     if kh == 3 && kw == 3 && dilation == 1 && crate::backend::cpu::microkernels::has_avx2() {
         if stride == 1 && padding == 1 {
             im2col_kernel_rect_avx2(data, c, h, w, col_valid);
-            for &v in col_valid.iter() {
-                min = min.min(v);
-                max = max.max(v);
-            }
-            return (min, max);
+            return minmax_scan(col_valid, track_minmax);
         }
         if stride == 2 && padding == 1 {
             im2col_kernel_rect_avx2_stride2(data, c, h, w, col_valid);
-            for &v in col_valid.iter() {
-                min = min.min(v);
-                max = max.max(v);
-            }
-            return (min, max);
+            return minmax_scan(col_valid, track_minmax);
         }
     }
     #[allow(unused_variables)]
@@ -467,16 +457,23 @@ pub unsafe fn im2col_dispatch(
     {
         if col_elems > 4096 && col_elems <= 65536 {
             im2col_parallel(data, c, h, w, kh, kw, stride, padding, dilation, col_valid);
-            for &v in col_valid.iter() {
-                min = min.min(v);
-                max = max.max(v);
-            }
-            return (min, max);
+            return minmax_scan(col_valid, track_minmax);
         }
     }
 
     im2col_kernel_rect(data, c, h, w, kh, kw, stride, padding, dilation, col_valid);
-    for &v in col_valid.iter() {
+    minmax_scan(col_valid, track_minmax)
+}
+
+/// Scan `col` for min/max, or skip when `track_minmax` is false.
+#[inline]
+fn minmax_scan(col: &[f32], track_minmax: bool) -> (f32, f32) {
+    if !track_minmax {
+        return (0.0, 0.0);
+    }
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &v in col.iter() {
         min = min.min(v);
         max = max.max(v);
     }
