@@ -20,15 +20,24 @@ unsafe impl bytemuck::Zeroable for F4x8 {}
 /// FP4 real values indexed by magnitude code (0-7).
 const FP4_MAG: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
 
+/// 16-entry f32 LUT: maps all 4-bit FP4 codes directly to f32.
+/// Eliminates per-nibble branching in hot paths.
+fn fp4_f32_lut() -> &'static [f32; 16] {
+    static LUT: OnceLock<[f32; 16]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [0f32; 16];
+        for code in 0..16u8 {
+            let mag = FP4_MAG[(code & 0x7) as usize];
+            lut[code as usize] = if (code & 0x8) != 0 && (code & 0x7) != 0 { -mag } else { mag };
+        }
+        lut
+    })
+}
+
 /// Decode a single 4-bit FP4 nibble to f32.
 #[inline(always)]
 pub fn fp4_to_f32(code: u8) -> f32 {
-    let mag = FP4_MAG[(code & 0x7) as usize];
-    if (code & 0x8) != 0 && (code & 0x7) != 0 {
-        -mag
-    } else {
-        mag
-    }
+    fp4_f32_lut()[code as usize]
 }
 
 /// Encode an f32 value to the nearest FP4 4-bit code.

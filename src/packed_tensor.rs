@@ -1,5 +1,5 @@
 use crate::dtypes::PackedWord;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     if len == 0 {
@@ -29,6 +29,10 @@ pub struct PackedTensor<T: PackedWord> {
     /// N > 1 = per-N-rows. When set, `scale_for_row(r)` maps to
     /// `scales[r / group_size]`.
     pub(crate) group_size: usize,
+    /// Lazily-computed dequantized f32 weights. Populated on first access,
+    /// then reused for all subsequent forward passes. Eliminates per-call
+    /// unpack_weight_f32 overhead for packed float types (F8x4, F8x4R, F4x8).
+    pub(crate) cached_f32_weights: OnceLock<Vec<f32>>,
 }
 
 impl<T: PackedWord> PackedTensor<T> {
@@ -49,6 +53,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros: vec![0.0],
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -60,6 +65,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros,
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -76,6 +82,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros,
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -93,6 +100,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros,
             block_size,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -160,6 +168,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros: vec![zero],
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -287,6 +296,31 @@ impl<T: PackedWord> PackedTensor<T> {
     #[inline]
     pub fn is_per_channel(&self) -> bool {
         self.scales.len() > 1
+    }
+
+    pub fn get_or_init_f32_weights(&self) -> &[f32] {
+        self.cached_f32_weights.get_or_init(|| {
+            let rows = self.shape[0];
+            let inner: usize = self.shape[1..].iter().product();
+            let k_packed = inner.div_ceil(T::ITEMS);
+            let mut buf = vec![0.0f32; rows * inner];
+            for row in 0..rows {
+                let w_row = &self.as_packed()[row * k_packed..(row + 1) * k_packed];
+                let w_scale = self.scale_for_row(row);
+                let out_row = &mut buf[row * inner..(row + 1) * inner];
+                let mut idx = 0;
+                for kk in 0..k_packed {
+                    let unpacked = w_row[kk].unpack_to_f32();
+                    for i in 0..T::ITEMS {
+                        if idx < inner {
+                            out_row[idx] = unpacked.as_ref()[i] * w_scale;
+                            idx += 1;
+                        }
+                    }
+                }
+            }
+            buf
+        })
     }
 
     /// Compute the packed word index for a given logical element index.
@@ -495,6 +529,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros: vec![0.0; m],
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -674,6 +709,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros,
             block_size: 1,
             group_size,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -752,6 +788,7 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros: self.zeros.clone(),
             block_size,
             group_size: self.group_size,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
@@ -775,6 +812,7 @@ impl<T: PackedWord> Clone for PackedTensor<T> {
             zeros: self.zeros.clone(),
             block_size: self.block_size,
             group_size: self.group_size,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 }

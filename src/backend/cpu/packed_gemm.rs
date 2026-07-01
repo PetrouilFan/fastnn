@@ -13,6 +13,7 @@ use crate::dtypes::f4x8::f4x8_dot_packed;
 use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
+
 /// Packed I8x4 GEMM: C = A × Bᵀ
 ///
 /// A: [M, K] where K is multiple of 4, stored as [M, K/4] packed u32
@@ -430,8 +431,8 @@ pub fn quantize_activations_to_f4x8(data: &[f32]) -> PackedTensor<F4x8> {
 
 /// Generic packed GEMM for float types (F8x4, F8x4R).
 ///
-/// Unpacks both activations and weights to f32, computes the dot product
-/// in f32, then applies dequantization scale, bias, and fused activation.
+/// Unpacks activations to f32, uses cached dequantized f32 weights,
+/// computes GEMM via gemm::gemm::<f32>, then applies bias and fused activation.
 pub fn gemm_packed_float_fused<T: PackedWord>(
     act_packed: &PackedTensor<T>,
     weight_packed: &PackedTensor<T>,
@@ -448,41 +449,99 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
     assert_eq!(c.len(), m * n);
 
     let act_slice = act_packed.as_packed();
-    let weight_slice = weight_packed.as_packed();
 
+    let mut a_buf: Vec<f32> = vec![0.0; m * k];
     for row in 0..m {
         let act_row = &act_slice[row * k_packed..(row + 1) * k_packed];
         let act_scale = act_packed.scale_for_row(row);
-
-        for col in 0..n {
-            let w_row = &weight_slice[col * k_packed..(col + 1) * k_packed];
-            let w_scale = weight_packed.scale_for_row(col);
-
-            let mut acc = 0.0f32;
-            for kk in 0..k_packed {
-                let a_v = act_row[kk].unpack_to_f32();
-                let b_v = w_row[kk].unpack_to_f32();
-                for i in 0..T::ITEMS {
-                    acc += a_v.as_ref()[i] * b_v.as_ref()[i];
+        let out_row = &mut a_buf[row * k..(row + 1) * k];
+        let mut idx = 0;
+        for kk in 0..k_packed {
+            let unpacked = act_row[kk].unpack_to_f32();
+            for i in 0..T::ITEMS {
+                if idx < k {
+                    out_row[idx] = unpacked.as_ref()[i] * act_scale;
+                    idx += 1;
                 }
             }
+        }
+    }
 
-            let mut val = acc * act_scale * w_scale;
+    let b_buf = weight_packed.get_or_init_f32_weights();
 
-            if let Some(b) = bias {
-                val += b[col];
-            }
+    // gemm computes C[m,n] = A[m,k] * B^T[k,n]; stride params encode the transpose
+    unsafe {
+        super::sgemm::sgemm(
+            m, k, n,
+            1.0,
+            a_buf.as_ptr(),
+            k as isize,
+            1,
+            b_buf.as_ptr(),
+            1,
+            k as isize,
+            0.0,
+            c.as_mut_ptr(),
+            n as isize,
+            1,
+        );
+    }
 
-            val = match activation {
-                PreparedActivation::Relu => val.max(0.0),
-                PreparedActivation::Silu => val / (1.0 + (-val).exp()),
-                PreparedActivation::Gelu => {
-                    val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh())
+    match activation {
+        PreparedActivation::None => {
+            for row in 0..m {
+                let c_row = &mut c[row * n..(row + 1) * n];
+                if let Some(b) = bias {
+                    for col in 0..n {
+                        c_row[col] += b[col];
+                    }
                 }
-                PreparedActivation::None => val,
-            };
-
-            c[row * n + col] = val;
+            }
+        }
+        PreparedActivation::Relu => {
+            for row in 0..m {
+                let c_row = &mut c[row * n..(row + 1) * n];
+                if let Some(b) = bias {
+                    for col in 0..n {
+                        c_row[col] = (c_row[col] + b[col]).max(0.0);
+                    }
+                } else {
+                    for v in c_row.iter_mut() {
+                        *v = v.max(0.0);
+                    }
+                }
+            }
+        }
+        PreparedActivation::Silu => {
+            for row in 0..m {
+                let c_row = &mut c[row * n..(row + 1) * n];
+                if let Some(b) = bias {
+                    for col in 0..n {
+                        let val = c_row[col] + b[col];
+                        c_row[col] = val / (1.0 + (-val).exp());
+                    }
+                } else {
+                    for v in c_row.iter_mut() {
+                        *v = *v / (1.0 + (-*v).exp());
+                    }
+                }
+            }
+        }
+        PreparedActivation::Gelu => {
+            for row in 0..m {
+                let c_row = &mut c[row * n..(row + 1) * n];
+                if let Some(b) = bias {
+                    for col in 0..n {
+                        let val = c_row[col] + b[col];
+                        c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                    }
+                } else {
+                    for v in c_row.iter_mut() {
+                        let val = *v;
+                        *v = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                    }
+                }
+            }
         }
     }
 }
