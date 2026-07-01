@@ -680,7 +680,11 @@ impl<B: Backend> GraphExecutor<B> {
             }
         }
 
-        let arena_size = plan.arena_size;
+        // Use the tightened memory plan's total_size instead of the
+        // compile-time plan.arena_size which was sized using
+        // SYMBOL_DIM_MAX=8192 for symbolic dimensions — for batch=1
+        // this can be ~50MB vs ~400MB.
+        let arena_size = tightened_memory_plan.total_size;
         let enough_capacity = self
             .cached_arena
             .as_ref()

@@ -142,6 +142,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
             zeros: vec![0.0],
             block_size: 1,
             group_size: 0,
+            quant_block_size: 0,
             cached_f32_weights: OnceLock::new(),
         }
     }

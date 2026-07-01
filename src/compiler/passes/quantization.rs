@@ -315,34 +315,52 @@ pub fn quantize_weights_fp(
             (f32_data, orig_shape.clone())
         };
 
-        let (packed_bytes, scales) = match fp_dtype {
+        let f4_block_size: usize = 64;
+
+        let (packed_bytes, scales, zeros) = match fp_dtype {
             FpDtype::F8x4 => {
                 let pt = match group_size {
                     Some(gs) => PackedTensor::<F8x4>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
                     None => PackedTensor::<F8x4>::from_f32_per_channel(&quant_data, &quant_shape),
                 };
-                (pt.as_bytes().to_vec(), pt.scales)
+                (pt.as_bytes().to_vec(), pt.scales, vec![])
             }
             FpDtype::F8x4R => {
                 let pt = match group_size {
                     Some(gs) => PackedTensor::<F8x4R>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
                     None => PackedTensor::<F8x4R>::from_f32_per_channel(&quant_data, &quant_shape),
                 };
-                (pt.as_bytes().to_vec(), pt.scales)
+                (pt.as_bytes().to_vec(), pt.scales, vec![])
             }
             FpDtype::F4x8 => {
-                let pt = match group_size {
-                    Some(gs) => PackedTensor::<F4x8>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
-                    None => PackedTensor::<F4x8>::from_f32_per_channel(&quant_data, &quant_shape),
+                let inner = if quant_shape.len() >= 2 {
+                    quant_shape[1..].iter().product::<usize>()
+                } else {
+                    quant_data.len()
                 };
-                (pt.as_bytes().to_vec(), pt.scales)
+                let use_per_block = group_size.is_none() && inner >= f4_block_size && inner % f4_block_size == 0;
+                let pt = if use_per_block {
+                    PackedTensor::<F4x8>::from_f32_per_block_asymmetric(
+                        &quant_data, &quant_shape, f4_block_size,
+                    )
+                } else if let Some(gs) = group_size {
+                    PackedTensor::<F4x8>::from_f32_per_channel_asymmetric_grouped(
+                        &quant_data, &quant_shape, gs,
+                    )
+                } else {
+                    PackedTensor::<F4x8>::from_f32_per_channel_asymmetric(
+                        &quant_data, &quant_shape,
+                    )
+                };
+                let zeros = if pt.quant_block_size > 0 { pt.zeros.clone() } else { vec![] };
+                (pt.as_bytes().to_vec(), pt.scales, zeros)
             }
         };
 
         let new_dtype = match fp_dtype {
             FpDtype::F8x4 => IrDType::F8 { scales },
             FpDtype::F8x4R => IrDType::F8R { scales },
-            FpDtype::F4x8 => IrDType::F4 { scales },
+            FpDtype::F4x8 => IrDType::F4 { scales, zeros },
         };
 
         let new_tensor_type = TensorType {

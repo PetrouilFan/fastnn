@@ -566,6 +566,7 @@ pub enum IrDType {
     /// Uses 256-entry LUT for dot product. Block scales stored in PackedTensor.
     F4 {
         scales: Vec<f32>,
+        zeros: Vec<f32>,
     },
 }
 
