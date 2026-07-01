@@ -43,7 +43,11 @@ pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + 
     fn dot_packed_f32(a: Self, b: Self) -> f32 {
         let a_v = a.unpack_to_f32();
         let b_v = b.unpack_to_f32();
-        a_v.as_ref().iter().zip(b_v.as_ref().iter()).map(|(x, y)| x * y).sum()
+        a_v.as_ref()
+            .iter()
+            .zip(b_v.as_ref().iter())
+            .map(|(x, y)| x * y)
+            .sum()
     }
 
     /// WGSL unpack function body (injected into shader at compile time)

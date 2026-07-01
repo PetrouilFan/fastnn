@@ -15,6 +15,87 @@ fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
     v
 }
 
+fn kmeans_16(values: &[f32], max_iter: usize) -> [f32; 16] {
+    let mut centroids = [0.0f32; 16];
+    if values.is_empty() {
+        return centroids;
+    }
+    let n = values.len();
+    if n == 1 {
+        for c in centroids.iter_mut() {
+            *c = values[0];
+        }
+        return centroids;
+    }
+
+    // Sort data for percentile initialization.
+    // Percentile init places centroids where data is dense (unlike uniform [min, max]
+    // which wastes centroids on empty tails). For bell-curve NN weights, this
+    // naturally puts several centroids near zero where ~60% of values live.
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    for i in 0..16 {
+        let percentile = (i as f32 + 0.5) / 16.0;
+        let idx = (percentile * n as f32) as usize;
+        centroids[i] = sorted[idx.min(n - 1)];
+    }
+
+    // Lloyd-Max iterations (1D k-means)
+    let mut assignments = vec![0usize; n];
+    let mut counts = [0usize; 16];
+    let mut sums = [0.0f32; 16];
+    for _iter in 0..max_iter {
+        for (vi, &v) in values.iter().enumerate() {
+            let mut best_d = (v - centroids[0]).abs();
+            let mut best_c = 0usize;
+            for ci in 1..16 {
+                let d = (v - centroids[ci]).abs();
+                if d < best_d {
+                    best_d = d;
+                    best_c = ci;
+                }
+            }
+            assignments[vi] = best_c;
+        }
+        for c in &mut counts {
+            *c = 0;
+        }
+        for s in &mut sums {
+            *s = 0.0;
+        }
+        for (vi, &c) in assignments.iter().enumerate() {
+            counts[c] += 1;
+            sums[c] += values[vi];
+        }
+        for ci in 0..16 {
+            if counts[ci] > 0 {
+                centroids[ci] = sums[ci] / counts[ci] as f32;
+            }
+        }
+    }
+    centroids.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    centroids
+}
+
+fn nearest_codebook_index(v: f32, codebook: &[f32; 16]) -> usize {
+    let mut best_d = (v - codebook[0]).abs();
+    let mut best_i = 0usize;
+    for (ci, &c) in codebook.iter().enumerate().skip(1) {
+        let d = (v - c).abs();
+        if d < best_d {
+            best_d = d;
+            best_i = ci;
+        }
+    }
+    best_i
+}
+
+fn extract_nibble<T: PackedWord>(word: &T, elem: usize) -> usize {
+    let word_u32: u32 = unsafe { std::mem::transmute_copy(word) };
+    ((word_u32 >> (elem * 4)) & 0xF) as usize
+}
+
 pub struct PackedTensor<T: PackedWord> {
     pub(crate) data: Arc<Vec<T>>,
     pub(crate) shape: Vec<usize>,
@@ -35,6 +116,13 @@ pub struct PackedTensor<T: PackedWord> {
     /// Scale/zero layout: `scales[row * blocks_per_row + col / quant_block_size]`
     /// where `blocks_per_row = inner_dim.div_ceil(quant_block_size)`.
     pub(crate) quant_block_size: usize,
+    /// Per-block codebook for INT4 codebook quantization.  Each block has 16
+    /// f32 entries (normalized K-means centroids in [-1, 1]).
+    /// Per-block scales stored in `self.scales` (one per block).
+    /// Dequant: `scales[blk] * codebooks[0][nibble]` (global codebook, per-block scale).
+    /// Replaces scales/zeros when present (they are ignored).
+    /// Indexed as `codebooks[row * blocks_per_row + col / quant_block_size]`.
+    pub(crate) codebooks: Vec<[f32; 16]>,
     /// Lazily-computed dequantized f32 weights. Populated on first access,
     /// then reused for all subsequent forward passes. Eliminates per-call
     /// unpack_weight_f32 overhead for packed float types (F8x4, F8x4R, F4x8).
@@ -60,6 +148,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size: 0,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -73,6 +162,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size: 0,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -91,6 +181,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size: 0,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -110,6 +201,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size,
             group_size: 0,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -179,6 +271,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size: 0,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -193,6 +286,10 @@ impl<T: PackedWord> PackedTensor<T> {
                 result.push(self.get(i));
             }
             return result;
+        }
+
+        if !self.codebooks.is_empty() {
+            return self.to_f32_vec_codebook();
         }
 
         let inner_stride = if self.shape.len() >= 2 {
@@ -271,6 +368,44 @@ impl<T: PackedWord> PackedTensor<T> {
         result
     }
 
+    fn to_f32_vec_codebook(&self) -> Vec<f32> {
+        let numel = self.numel();
+        let inner_stride = if self.shape.len() >= 2 {
+            self.shape[1..].iter().product()
+        } else {
+            numel
+        };
+        let items = T::ITEMS;
+        let k_packed = inner_stride.div_ceil(items);
+        let m = if self.shape.len() >= 2 {
+            self.shape[0]
+        } else {
+            1
+        };
+        let actual_words = m * k_packed;
+        let bpr = self.blocks_per_row();
+        let qb = self.quant_block_size;
+        let mut result = Vec::with_capacity(numel);
+
+        for (i, word) in self.data[..actual_words].iter().enumerate() {
+            let row = i / k_packed;
+            let word_in_row = i % k_packed;
+            let elem_idx_base = row * inner_stride + word_in_row * items;
+            let row_end = (row + 1) * inner_stride;
+
+            for j in 0..items {
+                let elem_idx = elem_idx_base + j;
+                if elem_idx < numel && elem_idx < row_end {
+                    let col = elem_idx % inner_stride;
+                    let blk = row * bpr + col / qb;
+                    let nibble = extract_nibble(word, j);
+                    result.push(self.scales[blk] * self.codebooks[0][nibble]);
+                }
+            }
+        }
+        result
+    }
+
     #[inline]
     pub fn packed_len(&self) -> usize {
         self.data.len()
@@ -340,8 +475,32 @@ impl<T: PackedWord> PackedTensor<T> {
             let rows = self.shape[0];
             let inner: usize = self.shape[1..].iter().product();
             let k_packed = inner.div_ceil(T::ITEMS);
-            let mut buf = vec![0.0f32; rows * inner];
+
+            // Codebook dequant path
+            if !self.codebooks.is_empty() {
+                let bpr = self.blocks_per_row();
+                let qb = self.quant_block_size;
+                let mut buf = vec![0.0f32; rows * inner];
+                for row in 0..rows {
+                    let w_row = &self.as_packed()[row * k_packed..(row + 1) * k_packed];
+                    let out_row = &mut buf[row * inner..(row + 1) * inner];
+                    let mut idx = 0;
+                    for word in w_row {
+                        for i in 0..T::ITEMS {
+                            if idx < inner {
+                                let blk = row * bpr + idx / qb;
+                                let nibble = extract_nibble(word, i);
+                                out_row[idx] = self.scales[blk] * self.codebooks[0][nibble];
+                                idx += 1;
+                            }
+                        }
+                    }
+                }
+                return buf;
+            }
+
             let per_elem = self.quant_block_size > 0;
+            let mut buf = vec![0.0f32; rows * inner];
             for row in 0..rows {
                 let w_row = &self.as_packed()[row * k_packed..(row + 1) * k_packed];
                 let out_row = &mut buf[row * inner..(row + 1) * inner];
@@ -417,8 +576,6 @@ impl<T: PackedWord> PackedTensor<T> {
     pub fn get(&self, idx: usize) -> f32 {
         assert!(idx < self.numel(), "Index out of bounds");
         let (word_idx, elem_idx) = self.word_index(idx);
-        let unpacked = self.data[word_idx].unpack_to_f32();
-        let val = unpacked.as_ref()[elem_idx];
         let inner_stride = if self.shape.len() >= 2 {
             self.shape[1..].iter().product()
         } else {
@@ -426,6 +583,15 @@ impl<T: PackedWord> PackedTensor<T> {
         };
         let row = idx / inner_stride;
         let col = idx % inner_stride;
+
+        if !self.codebooks.is_empty() {
+            let blk = row * self.blocks_per_row() + col / self.quant_block_size;
+            let nibble = extract_nibble(&self.data[word_idx], elem_idx);
+            return self.scales[blk] * self.codebooks[0][nibble];
+        }
+
+        let word = self.data[word_idx].unpack_to_f32();
+        let val = word.as_ref()[elem_idx];
         let s = self.scale_for_elem(row, col);
         let z = self.zero_for_elem(row, col);
         if s != 1.0 || z != 0.0 {
@@ -574,6 +740,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size: 0,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -581,22 +748,14 @@ impl<T: PackedWord> PackedTensor<T> {
     /// Same as `from_f32_per_channel` but with per-group quantization.
     /// `group_size` divides the output channels (rows) into groups of this size.
     /// Each group shares one scale. Use 0 or 1 for per-channel.
-    pub fn from_f32_per_channel_grouped(
-        data: &[f32],
-        shape: &[usize],
-        group_size: usize,
-    ) -> Self {
+    pub fn from_f32_per_channel_grouped(data: &[f32], shape: &[usize], group_size: usize) -> Self {
         if group_size <= 1 {
             return Self::from_f32_per_channel(data, shape);
         }
         Self::from_f32_per_channel_grouped_impl(data, shape, group_size)
     }
 
-    fn from_f32_per_channel_grouped_impl(
-        data: &[f32],
-        shape: &[usize],
-        group_size: usize,
-    ) -> Self {
+    fn from_f32_per_channel_grouped_impl(data: &[f32], shape: &[usize], group_size: usize) -> Self {
         let numel: usize = shape.iter().product();
         assert_eq!(data.len(), numel);
 
@@ -644,7 +803,11 @@ impl<T: PackedWord> PackedTensor<T> {
         for row in 0..m {
             let gi = row / group_size;
             let row_scale = scales[gi];
-            let inv_s = if row_scale != 0.0 { 1.0 / row_scale } else { 0.0 };
+            let inv_s = if row_scale != 0.0 {
+                1.0 / row_scale
+            } else {
+                0.0
+            };
             for word in 0..k_packed {
                 let chunk_idx = row * k_packed + word;
                 let mut arr = T::Array::default();
@@ -667,6 +830,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -717,12 +881,9 @@ impl<T: PackedWord> PackedTensor<T> {
             }
         }
 
-        // Asymmetric quantization for signed types:
-        //   scale = (max - min) / (2^n - 1)
-        //   zero_point = min + 2^(n-1) * scale
-        // This maps q = -2^(n-1) → x = min  and  q = 2^(n-1)-1 → x = max.
         let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
+        let is_fp4 = T::IS_FLOAT && T::MAX_REPRESENTABLE < signed_bias;
 
         let num_groups = if group_size > 1 {
             m.div_ceil(group_size)
@@ -741,21 +902,35 @@ impl<T: PackedWord> PackedTensor<T> {
                     grp_min = grp_min.min(mins[row]);
                     grp_max = grp_max.max(maxs[row]);
                 }
-                let mut range = grp_max - grp_min;
+                let range = grp_max - grp_min;
                 if range == 0.0 || unsigned_max == 0.0 {
                     scales.push(1.0);
                     zeros.push(0.0);
+                } else if is_fp4 {
+                    let effective_magnitude = 4.0;
+                    let fp4_range = effective_magnitude * 2.0;
+                    let scale = range / fp4_range;
+                    // Mean over all rows in the group — see per-block rationale above.
+                    let mut sum = 0.0f32;
+                    let mut cnt: usize = 0;
+                    for row in start_row..end_row {
+                        for i in 0..inner_stride {
+                            let idx = row * inner_stride + i;
+                            if idx < numel {
+                                sum += data[idx];
+                                cnt += 1;
+                            }
+                        }
+                    }
+                    let zp = if cnt > 0 { sum / cnt as f32 } else { 0.0 };
+                    scales.push(scale);
+                    zeros.push(zp);
                 } else {
-                    // Guard: ensure every parent value maps to a representable
-                    // quantized state and dequantizes with error ≤ 1 step.
-                    // Pad the min/max by one quantization step on each side so
-                    // no value gets clipped by the packer.
                     let init_scale = range / unsigned_max;
-                    grp_min -= init_scale;
-                    grp_max += init_scale;
-                    range = grp_max - grp_min;
-                    let scale = range / unsigned_max;
-                    let zp = grp_min + signed_bias * scale;
+                    let lo = grp_min - init_scale;
+                    let hi = grp_max + init_scale;
+                    let scale = (hi - lo) / unsigned_max;
+                    let zp = lo + signed_bias * scale;
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -766,9 +941,17 @@ impl<T: PackedWord> PackedTensor<T> {
                 if range == 0.0 || unsigned_max == 0.0 {
                     scales.push(1.0);
                     zeros.push(0.0);
+                } else if is_fp4 {
+                    let effective_magnitude = 4.0;
+                    let fp4_range = effective_magnitude * 2.0;
+                    let scale = range / fp4_range;
+                    let row_start = row * inner_stride;
+                    let row_end = row_start + inner_stride;
+                    let mean = data[row_start..row_end.min(numel)].iter().sum::<f32>()
+                        / inner_stride as f32;
+                    scales.push(scale);
+                    zeros.push(mean);
                 } else {
-                    // Guard: pad min/max by one quantization step so the
-                    // dequantization error never exceeds 1 bit.
                     let init_scale = range / unsigned_max;
                     let lo = mins[row] - init_scale;
                     let hi = maxs[row] + init_scale;
@@ -848,6 +1031,7 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size,
             quant_block_size: 0,
+            codebooks: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -895,7 +1079,30 @@ impl<T: PackedWord> PackedTensor<T> {
                 if range == 0.0 || unsigned_max == 0.0 {
                     scales.push(1.0);
                     zeros.push(0.0);
+                } else if T::IS_FLOAT && T::MAX_REPRESENTABLE < signed_bias {
+                    // FP4 non-uniform types: use non-linear clipping to avoid the
+                    // worst FP4 magnitude gap (4.0→6.0 = 2.0). We clamp the effective
+                    // code range to ±4.0 instead of ±6.0, sacrificing the two most
+                    // extreme magnitude entries (±6.0) for uniformly smaller gaps.
+                    //   Full FP4 magnitudes: [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+                    //   Active after clip:  [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+                    //   Max gap: 1.0 (3→4) vs 2.0 (4→6) without clipping
+                    //   Max abs error: range/16 vs range/12 (25% improvement)
+                    //   Exact reconstruction for bmin/bmap at ±4.0 codes.
+                    //
+                    // Use mean as zero-point instead of midpoint — for skewed
+                    // weight distributions the mean better centers the FP4
+                    // non-uniform code space where most values actually lie,
+                    // reducing average quantization error.
+                    let effective_magnitude = 4.0; // clip to ±4, drop ±6
+                    let fp4_range = effective_magnitude * 2.0; // 8.0
+                    let scale = range / fp4_range;
+                    let zp = block_data.iter().sum::<f32>() / qblock as f32;
+                    scales.push(scale);
+                    zeros.push(zp);
                 } else {
+                    // Integer types (I4, I8): uniform code space [0, 2^bits - 1]
+                    // with guard padding to prevent clipping at boundaries.
                     let init_scale = range / unsigned_max;
                     let lo = bmin - init_scale;
                     let hi = bmax + init_scale;
@@ -977,6 +1184,115 @@ impl<T: PackedWord> PackedTensor<T> {
             block_size: 1,
             group_size: 0,
             quant_block_size: qblock,
+            codebooks: vec![],
+            cached_f32_weights: OnceLock::new(),
+        }
+    }
+
+    pub fn from_f32_per_block_codebook(data: &[f32], shape: &[usize], qblock: usize) -> Self {
+        assert!(qblock > 0, "quantization block size must be > 0");
+        let numel: usize = shape.iter().product();
+        assert_eq!(data.len(), numel);
+
+        let m = if shape.len() >= 2 { shape[0] } else { 1 };
+        let inner = if shape.len() >= 2 {
+            shape[1..].iter().product()
+        } else {
+            numel
+        };
+
+        // Handle non-divisible inner dims: last block is partial (fewer than qblock elements).
+        let blocks_per_row = inner.div_ceil(qblock);
+        let num_blocks = m * blocks_per_row;
+        let items = T::ITEMS;
+
+        // Step 1: Compute per-block scales and collect normalized values.
+        // Normalizing each block by its own max_abs separates the problem:
+        // codebook captures distribution SHAPE (where values fall relative to block peak),
+        // scale captures MAGNITUDE (the block's absolute range).
+        let mut block_scales = Vec::with_capacity(num_blocks);
+        let mut normalized_values = Vec::with_capacity(numel);
+        for blk in 0..num_blocks {
+            let row = blk / blocks_per_row;
+            let blk_in_row = blk % blocks_per_row;
+            let base = row * inner + blk_in_row * qblock;
+            let blk_end = (base + qblock).min((row + 1) * inner);
+            let block_len = blk_end - base;
+            let max_abs_block = if block_len > 0 {
+                data[base..blk_end]
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0f32, f32::max)
+            } else {
+                0.0
+            };
+            block_scales.push(max_abs_block);
+            if max_abs_block > 0.0 {
+                let inv = 1.0 / max_abs_block;
+                for &v in data[base..blk_end].iter() {
+                    normalized_values.push(v * inv);
+                }
+            } else {
+                for _ in 0..block_len {
+                    normalized_values.push(0.0);
+                }
+            }
+        }
+
+        // Step 2: Compute codebook on normalized values.
+        // The centroids are in [-1, 1] range but are data-adaptive (learned from actual
+        // normalized weight distribution), not a fixed Gaussian.
+        let codebook = kmeans_16(&normalized_values, 30);
+
+        // Step 3: Packing — nibble = nearest(v / blk_scale, codebook).
+        let k_packed = inner.div_ceil(items);
+        const SIMD_MARGIN: usize = 16;
+        let packed_len = m * k_packed;
+        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+
+        for row in 0..m {
+            for blk in 0..blocks_per_row {
+                let blk_idx = row * blocks_per_row + blk;
+                let blk_scale = block_scales[blk_idx];
+                let inv_blk_scale = if blk_scale > 0.0 {
+                    1.0 / blk_scale
+                } else {
+                    0.0
+                };
+                let base = row * inner + blk * qblock;
+                let blk_end = (base + qblock).min((row + 1) * inner);
+                let block_len = blk_end - base;
+                for elem_in_blk in (0..block_len).step_by(items) {
+                    let word_in_row = (blk * qblock + elem_in_blk) / items;
+                    let chunk_idx = row * k_packed + word_in_row;
+                    let mut w = 0u32;
+                    for i in 0..items {
+                        let elem_idx = base + elem_in_blk + i;
+                        if elem_idx >= blk_end || elem_idx >= numel {
+                            w |= (0u32) << (i * 4);
+                        } else {
+                            let v_normalized = data[elem_idx] * inv_blk_scale;
+                            let idx = nearest_codebook_index(v_normalized, &codebook);
+                            w |= (idx as u32) << (i * 4);
+                        }
+                    }
+                    packed[chunk_idx] = T::default();
+                    let word_ref: &mut T = &mut packed[chunk_idx];
+                    let word_u32: &mut u32 = unsafe { std::mem::transmute(word_ref) };
+                    *word_u32 = w;
+                }
+            }
+        }
+
+        PackedTensor {
+            data: Arc::new(packed),
+            shape: shape.to_vec(),
+            scales: block_scales,
+            zeros: vec![],
+            block_size: 1,
+            group_size: 0,
+            quant_block_size: qblock,
+            codebooks: vec![codebook],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -991,7 +1307,7 @@ impl<T: PackedWord> PackedTensor<T> {
             } else {
                 self.numel()
             };
-            inner / self.quant_block_size
+            inner.div_ceil(self.quant_block_size)
         }
     }
 
@@ -1088,6 +1404,7 @@ impl<T: PackedWord> PackedTensor<T> {
             shape: self.shape.clone(),
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
+            codebooks: self.codebooks.clone(),
             block_size,
             group_size: self.group_size,
             quant_block_size: self.quant_block_size,
@@ -1113,6 +1430,7 @@ impl<T: PackedWord> Clone for PackedTensor<T> {
             shape: self.shape.clone(),
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
+            codebooks: self.codebooks.clone(),
             block_size: self.block_size,
             group_size: self.group_size,
             quant_block_size: self.quant_block_size,
@@ -1483,5 +1801,301 @@ mod tests {
         let v = t.get(0);
         let err = (v - 3.0).abs();
         assert!(err < 0.5 * 3.0f32.max(1.0), "F4x8 set(0, 3.0) got={}", v);
+    }
+
+    #[test]
+    fn test_f4x8_asymmetric_per_block_roundtrip() {
+        let mut data: Vec<f32> = Vec::with_capacity(128);
+        for i in 0..128 {
+            data.push(-6.0 + (i as f32) * 12.0 / 127.0);
+        }
+        let t = PackedTensor::<F4x8>::from_f32_per_block_asymmetric(&data, &[128], 64);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            let s = t.scale_for_elem(0, i);
+            assert!(
+                err <= s + 1e-6,
+                "F4x8 per-block asymmetric err {} exceeds scale {} at i={} orig={} rec={}",
+                err,
+                s,
+                i,
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn test_f4x8_asymmetric_per_block_endpoints() {
+        let mut data: Vec<f32> = Vec::with_capacity(128);
+        for i in 0..128 {
+            data.push(-6.0 + (i as f32) * 12.0 / 127.0);
+        }
+        let t = PackedTensor::<F4x8>::from_f32_per_block_asymmetric(&data, &[128], 64);
+        let recovered = t.to_f32_vec();
+        assert!(
+            (recovered[0] + 6.0).abs() < 0.01,
+            "bmin not exact: got {}",
+            recovered[0]
+        );
+        assert!(
+            (recovered[127] - 6.0).abs() < 0.01,
+            "bmax not exact: got {}",
+            recovered[127]
+        );
+    }
+
+    #[test]
+    fn test_f4x8_asymmetric_per_channel_roundtrip() {
+        let mut data: Vec<f32> = Vec::with_capacity(64);
+        for i in 0..64 {
+            data.push(-6.0 + (i as f32) * 12.0 / 63.0);
+        }
+        let t = PackedTensor::<F4x8>::from_f32_per_channel_asymmetric(&data, &[64]);
+        let recovered = t.to_f32_vec();
+        for (i, (orig, rec)) in data.iter().zip(recovered.iter()).enumerate() {
+            let err = (orig - rec).abs();
+            let s = t.scale_for_elem(0, i);
+            assert!(
+                err <= s + 1e-6,
+                "F4x8 per-channel asymmetric err {} exceeds scale {} at i={} orig={} rec={}",
+                err,
+                s,
+                i,
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn test_f4x8_asymmetric_per_block_zero_range() {
+        let data = vec![1.0f32; 128];
+        let t = PackedTensor::<F4x8>::from_f32_per_block_asymmetric(&data, &[128], 64);
+        let recovered = t.to_f32_vec();
+        for (i, rec) in recovered.iter().enumerate() {
+            assert_eq!(*rec, 1.0, "zero-range block at i={} got {}", i, rec);
+        }
+    }
+
+    #[test]
+    fn test_f4x8_asymmetric_per_block_scale_zp_values() {
+        let mut data: Vec<f32> = Vec::with_capacity(128);
+        for i in 0..64 {
+            data.push(-3.0 + (i as f32) * 6.0 / 63.0);
+        }
+        for i in 0..64 {
+            data.push(0.0 + (i as f32) * 2.0 / 63.0);
+        }
+        let t = PackedTensor::<F4x8>::from_f32_per_block_asymmetric(&data, &[128], 64);
+
+        assert_eq!(t.scales.len(), 2, "should have 2 blocks");
+        assert_eq!(t.zeros.len(), 2);
+
+        let blk0_min = -3.0f32;
+        let blk0_max = 3.0f32;
+        let blk0_range = blk0_max - blk0_min;
+        // FP4 clipped range = 8.0 (±4.0), not 12.0 (±6.0)
+        let expected_scale0 = blk0_range / 8.0;
+        // Mean used as zero-point; for uniform symmetric data mean = midpoint = 0.0
+        let expected_zp0 = (blk0_max + blk0_min) / 2.0;
+        assert!(
+            (t.scales[0] - expected_scale0).abs() < 1e-5,
+            "block 0 scale: got {}, expected {}",
+            t.scales[0],
+            expected_scale0
+        );
+        assert!(
+            (t.zeros[0] - expected_zp0).abs() < 1e-5,
+            "block 0 zero: got {}, expected {}",
+            t.zeros[0],
+            expected_zp0
+        );
+
+        let blk1_min = 0.0f32;
+        let blk1_max = 2.0f32;
+        let blk1_range = blk1_max - blk1_min;
+        let expected_scale1 = blk1_range / 8.0;
+        // Mean = 1.0 for uniform [0, 2]; midpoint = 1.0 — same for symmetric data
+        let expected_zp1 = (blk1_max + blk1_min) / 2.0;
+        assert!(
+            (t.scales[1] - expected_scale1).abs() < 1e-5,
+            "block 1 scale: got {}, expected {}",
+            t.scales[1],
+            expected_scale1
+        );
+        assert!(
+            (t.zeros[1] - expected_zp1).abs() < 1e-5,
+            "block 1 zero: got {}, expected {}",
+            t.zeros[1],
+            expected_zp1
+        );
+
+        let recovered = t.to_f32_vec();
+        let s0 = t.scales[0];
+        let z0 = t.zeros[0];
+        for i in 0..64 {
+            let err = (data[i] - recovered[i]).abs();
+            let target = (data[i] - z0) / s0;
+            let code = crate::dtypes::f4x8::f32_to_fp4(target);
+            let decoded = crate::dtypes::f4x8::fp4_to_f32(code);
+            let expected = decoded * s0 + z0;
+            let expected_err = (data[i] - expected).abs();
+            assert!(
+                (err - expected_err).abs() < 1e-4,
+                "block 0 elem {}: orig={}, recovered={}, err={}, expected_err={}",
+                i,
+                data[i],
+                recovered[i],
+                err,
+                expected_err
+            );
+        }
+    }
+
+    #[test]
+    fn test_f4x8_asymmetric_per_channel_scale_zp_values() {
+        let mut data: Vec<f32> = Vec::with_capacity(128);
+        for i in 0..64 {
+            data.push(-5.0 + (i as f32) * 10.0 / 63.0);
+        }
+        for i in 0..64 {
+            data.push(1.0 + (i as f32) * 4.0 / 63.0);
+        }
+        let t = PackedTensor::<F4x8>::from_f32_per_channel_asymmetric(&data, &[2, 64]);
+
+        assert_eq!(t.scales.len(), 2, "per-channel should have 2 scales");
+
+        let expected_scale0 = 10.0 / 8.0; // FP4 clipped range = 8.0
+        let expected_zp0 = (-5.0 + 5.0) / 2.0; // uniform → mean == 0
+        assert!(
+            (t.scales[0] - expected_scale0).abs() < 1e-5,
+            "row 0 scale: got {}, expected {}",
+            t.scales[0],
+            expected_scale0
+        );
+        assert!(
+            (t.zeros[0] - expected_zp0).abs() < 1e-5,
+            "row 0 zero: got {}, expected {}",
+            t.zeros[0],
+            expected_zp0
+        );
+
+        let expected_scale1 = 4.0 / 8.0; // FP4 clipped range = 8.0
+        let expected_zp1 = (1.0 + 5.0) / 2.0; // uniform → mean == 3.0
+        assert!(
+            (t.scales[1] - expected_scale1).abs() < 1e-5,
+            "row 1 scale: got {}, expected {}",
+            t.scales[1],
+            expected_scale1
+        );
+        assert!(
+            (t.zeros[0] - expected_zp0).abs() < 1e-5,
+            "row 0 zero: got {}, expected {}",
+            t.zeros[0],
+            expected_zp0
+        );
+    }
+
+    #[test]
+    fn test_i4x8_codebook_debug() {
+        // Two rows with different magnitude ranges
+        let data: Vec<f32> = vec![
+            // Row 0: range [-15, 15]
+            -15.0, -10.0, -7.0, -4.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 7.0, 10.0, 15.0, -5.0, 8.0,
+            3.0, 6.0, -12.0, 0.5, -0.5, 11.0, -8.0, 2.5, -3.0, 9.0, -14.0, 13.0, -6.0, 4.5, -1.5,
+            7.5, -9.0, // Row 1: range [-12, 20]
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+            17.0, 18.0, 19.0, 20.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0, -9.0, -10.0,
+            -11.0, -12.0,
+        ];
+
+        let qblock = 8; // 8 elements per block
+        let t = PackedTensor::<I4x8>::from_f32_per_block_codebook(&data, &[2, 32], qblock);
+
+        eprintln!("=== CODEBOOK DEBUG ===");
+        eprintln!("Codebooks count: {}", t.codebooks.len());
+        eprintln!("Codebook[0]: {:?}", t.codebooks[0]);
+        eprintln!("Scales count: {}", t.scales.len());
+        eprintln!("Scales: {:?}", t.scales);
+        eprintln!("Shape: {:?}", t.shape);
+        eprintln!("quant_block_size: {}", t.quant_block_size);
+
+        // Row 0 has 4 blocks of 8, Row 1 has 4 blocks of 8
+        // blocks_per_row = 32 / 8 = 4
+        // scales = [row0_blk0, row0_blk1, row0_blk2, row0_blk3,
+        //          row1_blk0, row1_blk1, row1_blk2, row1_blk3]
+
+        let recovered = t.to_f32_vec();
+
+        eprintln!("\n=== ORIGINAL vs RECOVERED (row 0) ===");
+        let mut max_err = 0.0f32;
+        for i in 0..32 {
+            let err = (data[i] - recovered[i]).abs();
+            if err > max_err {
+                max_err = err;
+            }
+            if i < 16 {
+                eprintln!(
+                    "  [{:2}] orig={:7.3}  rec={:7.3}  err={:.4}",
+                    i, data[i], recovered[i], err
+                );
+            }
+        }
+        eprintln!("\n=== ORIGINAL vs RECOVERED (row 1) ===");
+        for i in 32..64 {
+            let err = (data[i] - recovered[i]).abs();
+            if err > max_err {
+                max_err = err;
+            }
+            if i < 48 {
+                eprintln!(
+                    "  [{:2}] orig={:7.3}  rec={:7.3}  err={:.4}",
+                    i, data[i], recovered[i], err
+                );
+            }
+        }
+        eprintln!("\nMax error: {:.4}", max_err);
+
+        // Also check get_or_init_f32_weights (same path as backend)
+        let f32_weights = t.get_or_init_f32_weights();
+        eprintln!(
+            "\nget_or_init_f32_weights matches to_f32_vec: {}",
+            f32_weights == recovered.as_slice()
+        );
+
+        // Check per-block: each block scale should map the codebook to the right range
+        eprintln!("\n=== BLOCK ANALYSIS ===");
+        let blocks_per_row = 4;
+        for blk in 0..8 {
+            let row = blk / blocks_per_row;
+            let blk_in_row = blk % blocks_per_row;
+            let scale = t.scales[blk];
+            let base = row * 32 + blk_in_row * qblock;
+            let block_orig = &data[base..base + qblock];
+            let block_rec = &recovered[base..base + qblock];
+            let orig_abs_max = block_orig.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let rec_abs_max = block_rec.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let block_err: f32 = block_orig
+                .iter()
+                .zip(block_rec.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f32>()
+                / qblock as f32;
+            eprintln!(
+                "  Block {} (row {}): scale={:.4} orig_max={:.4} rec_max={:.4} avg_err={:.4}",
+                blk, row, scale, orig_abs_max, rec_abs_max, block_err
+            );
+            eprintln!("    orig: {:?}", block_orig);
+            eprintln!("    rec:  {:?}", block_rec);
+        }
+
+        // Assert reasonable quality
+        assert!(
+            max_err < 2.0,
+            "Max error {} is too high for codebook quantization",
+            max_err
+        );
     }
 }

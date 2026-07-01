@@ -8,19 +8,19 @@
 
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::cpu::microkernels::{
-    blocked_row_matmul, tls_alloc_f32, tls_alloc_u8, tls_alloc_zeroed_f32,
-    tls_alloc_zeroed_i8, tls_alloc_zeroed_i8x4,
+    blocked_row_matmul, tls_alloc_f32, tls_alloc_u8, tls_alloc_zeroed_f32, tls_alloc_zeroed_i8,
+    tls_alloc_zeroed_i8x4,
 };
 use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
-use smallvec::{smallvec, SmallVec};
-use std::borrow::Cow;
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
+use smallvec::{smallvec, SmallVec};
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -64,10 +64,19 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
     write_size: usize,
     raw: &[u8],
 ) -> Arc<Vec<T>> {
-    let cache_key = (raw.as_ptr() as usize, write_offset, write_size, TypeId::of::<T>());
-    static CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>> =
-        OnceLock::new();
-    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let cache_key = (
+        raw.as_ptr() as usize,
+        write_offset,
+        write_size,
+        TypeId::of::<T>(),
+    );
+    static CACHE: OnceLock<
+        Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>,
+    > = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     if let Some(arc_any) = cache.get(&cache_key) {
         if let Ok(arc_vec) = arc_any.clone().downcast::<Vec<T>>() {
             return arc_vec;
@@ -86,8 +95,9 @@ type F32WeightCacheKey = (usize, usize, usize, TypeId);
 /// This cache is scoped to the process lifetime but can be cleared between
 /// executor instances (different quantization dtypes) via
 /// [`clear_f32_weight_cache()`] to prevent memory accumulation.
-static F32_WEIGHT_CACHE: OnceLock<Mutex<HashMap<F32WeightCacheKey, Arc<dyn std::any::Any + Send + Sync>>>> =
-    OnceLock::new();
+static F32_WEIGHT_CACHE: OnceLock<
+    Mutex<HashMap<F32WeightCacheKey, Arc<dyn std::any::Any + Send + Sync>>>,
+> = OnceLock::new();
 
 /// Clear the global f32 weight cache, freeing dequantized weight data.
 /// Call this between executor instances (e.g., when switching quantization dtypes)
@@ -111,22 +121,30 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     scales: &[f32],
     zeros: &[f32],
     quant_block_size: usize,
+    codebooks: &[[f32; 16]],
 ) -> Arc<PackedTensor<T>> {
-    let cache_key = (raw.as_ptr() as usize, write_offset, write_size, TypeId::of::<T>());
-    let mut cache = F32_WEIGHT_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let cache_key = (
+        raw.as_ptr() as usize,
+        write_offset,
+        write_size,
+        TypeId::of::<T>(),
+    );
+    let mut cache = F32_WEIGHT_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     if let Some(arc_any) = cache.get(&cache_key) {
         if let Ok(arc_pt) = arc_any.clone().downcast::<PackedTensor<T>>() {
             return arc_pt;
         }
     }
     let packed_data = get_or_cache_packed::<T>(write_offset, write_size, raw);
-    let mut pt = PackedTensor::from_raw_arc(
-        packed_data,
-        shape.to_vec(),
-        scales.to_vec(),
-        zeros.to_vec(),
-    );
+    let mut pt =
+        PackedTensor::from_raw_arc(packed_data, shape.to_vec(), scales.to_vec(), zeros.to_vec());
     pt.quant_block_size = quant_block_size;
+    if !codebooks.is_empty() {
+        pt.codebooks = codebooks.to_vec();
+    }
     let pt = Arc::new(pt);
     pt.get_or_init_f32_weights();
     cache.insert(cache_key, pt.clone());
@@ -484,25 +502,34 @@ impl Backend for CpuBackend {
                     let weight_meta = if is_quantized {
                         node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
-                                let (bit_width, scales, zero_points) = match &wn.output_type.dtype {
+                                let (bit_width, scales, zero_points, codebooks) = match &wn
+                                    .output_type
+                                    .dtype
+                                {
                                     IrDType::I4 {
                                         scales,
                                         zero_points,
-                                    } => (4usize, scales.clone(), zero_points.clone()),
+                                        codebooks,
+                                    } => (
+                                        4usize,
+                                        scales.clone(),
+                                        zero_points.clone(),
+                                        codebooks.clone(),
+                                    ),
                                     IrDType::U8 {
                                         scales,
                                         zero_points,
-                                    } => (8usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales, zeros } => {
-                                        (4usize, scales.clone(), zeros.clone())
+                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                    IrDType::F4 { scales, zeros, .. } => {
+                                        (4usize, scales.clone(), zeros.clone(), vec![])
                                     }
                                     IrDType::F8 { scales } => {
-                                        (8usize, scales.clone(), vec![0.0; scales.len()])
+                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
                                     }
                                     IrDType::F8R { scales } => {
-                                        (8usize, scales.clone(), vec![0.0; scales.len()])
+                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
                                     }
-                                    _ => (0usize, vec![], vec![]),
+                                    _ => (0usize, vec![], vec![], vec![]),
                                 };
                                 let mut w_shape: Vec<usize> = wn
                                     .output_type
@@ -516,19 +543,23 @@ impl Backend for CpuBackend {
                                 if w_shape.len() == 2 {
                                     w_shape.reverse();
                                 }
-                                let quant_block_size = if scales.len() > w_shape[0] && w_shape.len() >= 2 {
-                                    let inner: usize = w_shape[1..].iter().product();
-                                    let blocks_per_row = scales.len() / w_shape[0];
-                                    inner / blocks_per_row
-                                } else {
-                                    0
-                                };
+                                let quant_block_size =
+                                    if let Some(qbs) = wn.attrs.get("quant_block_size") {
+                                        qbs.parse::<usize>().unwrap_or(0)
+                                    } else if scales.len() > w_shape[0] && w_shape.len() >= 2 {
+                                        let inner: usize = w_shape[1..].iter().product();
+                                        let blocks_per_row = scales.len() / w_shape[0];
+                                        inner / blocks_per_row
+                                    } else {
+                                        0
+                                    };
                                 std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width,
                                     scales,
                                     zero_points,
                                     shape: w_shape,
                                     quant_block_size,
+                                    codebooks,
                                 })
                             })
                         })
@@ -796,19 +827,34 @@ impl Backend for CpuBackend {
 
                         let meta = node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
-                                let (bw, scales, zero_points) = match &wn.output_type.dtype {
+                                let (bw, scales, zero_points, codebooks) = match &wn
+                                    .output_type
+                                    .dtype
+                                {
                                     IrDType::I4 {
                                         scales,
                                         zero_points,
-                                    } => (4usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales, zeros } => (4usize, scales.clone(), zeros.clone()),
-                                    IrDType::F8 { scales } => (8usize, scales.clone(), vec![0.0; scales.len()]),
-                                    IrDType::F8R { scales } => (8usize, scales.clone(), vec![0.0; scales.len()]),
+                                        codebooks,
+                                    } => (
+                                        4usize,
+                                        scales.clone(),
+                                        zero_points.clone(),
+                                        codebooks.clone(),
+                                    ),
+                                    IrDType::F4 { scales, zeros, .. } => {
+                                        (4usize, scales.clone(), zeros.clone(), vec![])
+                                    }
+                                    IrDType::F8 { scales } => {
+                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
+                                    }
+                                    IrDType::F8R { scales } => {
+                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
+                                    }
                                     IrDType::U8 {
                                         scales,
                                         zero_points,
-                                    } => (8usize, scales.clone(), zero_points.clone()),
-                                    _ => (bit_width, vec![], vec![]),
+                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                    _ => (bit_width, vec![], vec![], vec![]),
                                 };
                                 let w_shape: Vec<usize> = wn
                                     .output_type
@@ -816,19 +862,23 @@ impl Backend for CpuBackend {
                                     .iter()
                                     .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
-                                let quant_block_size = if scales.len() > w_shape[0] && w_shape.len() >= 2 {
-                                    let inner: usize = w_shape[1..].iter().product();
-                                    let blocks_per_row = scales.len() / w_shape[0];
-                                    inner / blocks_per_row
-                                } else {
-                                    0
-                                };
+                                let quant_block_size =
+                                    if let Some(qbs) = wn.attrs.get("quant_block_size") {
+                                        qbs.parse::<usize>().unwrap_or(0)
+                                    } else if scales.len() > w_shape[0] && w_shape.len() >= 2 {
+                                        let inner: usize = w_shape[1..].iter().product();
+                                        let blocks_per_row = scales.len() / w_shape[0];
+                                        inner / blocks_per_row
+                                    } else {
+                                        0
+                                    };
                                 std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width: bw,
                                     scales,
                                     zero_points,
                                     shape: w_shape,
                                     quant_block_size,
+                                    codebooks,
                                 })
                             })
                         });
@@ -2136,6 +2186,7 @@ impl Backend for CpuBackend {
                             IrDType::I4 {
                                 scales,
                                 zero_points,
+                                ..
                             } => (scales.clone(), zero_points.clone()),
                             IrDType::U8 {
                                 scales,
@@ -2884,9 +2935,8 @@ impl Backend for CpuBackend {
                                             {
                                                 use rayon::prelude::*;
                                                 let out_ptr = out_f32.as_mut_ptr() as usize;
-                                                (0..total_rows)
-                                                    .into_par_iter()
-                                                    .for_each(move |row| {
+                                                (0..total_rows).into_par_iter().for_each(
+                                                    move |row| {
                                                         let op = out_ptr as *mut f32;
                                                         blocked_row_matmul(
                                                             a.as_ptr(),
@@ -2906,43 +2956,34 @@ impl Backend for CpuBackend {
                                                         if apply_fusion {
                                                             let rs = row * n;
                                                             for i in 0..n {
-                                                                    let p = rs + i;
-                                                                    let x = *op.add(p)
-                                                                        + if has_bias {
-                                                                            if let Some(bs) =
-                                                                                bias
-                                                                            {
-                                                                                bs[i]
-                                                                            } else {
-                                                                                0.0
-                                                                            }
+                                                                let p = rs + i;
+                                                                let x = *op.add(p)
+                                                                    + if has_bias {
+                                                                        if let Some(bs) = bias {
+                                                                            bs[i]
                                                                         } else {
                                                                             0.0
-                                                                        };
-                                                                    *op.add(p) = match activation
-                                                                    {
-                                                                        1 => x.max(0.0),
-                                                                        2 => {
-                                                                            let x3 =
-                                                                                x * x * x;
-                                                                            let tanh_arg =
-                                                                                0.797_884_6
-                                                                                    * (x
-                                                                                        + 0.044_715
-                                                                                            * x3);
-                                                                            0.5 * x
-                                                                                * (1.0
-                                                                                    + tanh_arg
-                                                                                        .tanh())
                                                                         }
-                                                                        3 => {
-                                                                            x / (1.0 + (-x).exp())
-                                                                        }
-                                                                        _ => x,
+                                                                    } else {
+                                                                        0.0
                                                                     };
-                                                                }
+                                                                *op.add(p) = match activation {
+                                                                    1 => x.max(0.0),
+                                                                    2 => {
+                                                                        let x3 = x * x * x;
+                                                                        let tanh_arg = 0.797_884_6
+                                                                            * (x + 0.044_715 * x3);
+                                                                        0.5 * x
+                                                                            * (1.0
+                                                                                + tanh_arg.tanh())
+                                                                    }
+                                                                    3 => x / (1.0 + (-x).exp()),
+                                                                    _ => x,
+                                                                };
+                                                            }
                                                         }
-                                                    });
+                                                    },
+                                                );
                                             }
                                         } else {
                                             for row in 0..total_rows {
@@ -2981,8 +3022,7 @@ impl Backend for CpuBackend {
                                                                 let x3 = x * x * x;
                                                                 let tanh_arg = 0.797_884_6
                                                                     * (x + 0.044_715 * x3);
-                                                                0.5 * x
-                                                                    * (1.0 + tanh_arg.tanh())
+                                                                0.5 * x * (1.0 + tanh_arg.tanh())
                                                             }
                                                             3 => x / (1.0 + (-x).exp()),
                                                             _ => x,
@@ -3303,12 +3343,11 @@ impl Backend for CpuBackend {
                                         {
                                             use rayon::prelude::*;
                                             if total >= 4096 {
-                                                out_f32
-                                                    .par_iter_mut()
-                                                    .enumerate()
-                                                    .for_each(|(i, v)| {
+                                                out_f32.par_iter_mut().enumerate().for_each(
+                                                    |(i, v)| {
                                                         *v = input[lookup[i]];
-                                                    });
+                                                    },
+                                                );
                                             } else {
                                                 for (i, &in_idx) in lookup.iter().enumerate() {
                                                     out_f32[i] = input[in_idx];
@@ -3362,7 +3401,9 @@ impl Backend for CpuBackend {
                                     |input, out_f32| {
                                         let softmax_params =
                                             resolve_params(params, param_dims, shape_env, 2)
-                                                .unwrap_or_else(|_| Cow::Owned(vec![input.len(), 1]));
+                                                .unwrap_or_else(|_| {
+                                                    Cow::Owned(vec![input.len(), 1])
+                                                });
                                         let axis_dim_size = softmax_params[0].max(1);
                                         let stride =
                                             softmax_params.get(1).copied().unwrap_or(1).max(1);
@@ -3417,7 +3458,13 @@ impl Backend for CpuBackend {
                                 if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] =
                                     &input_slices[..]
                                 {
-                                    let (data, weight, bias, running_mean, running_var): (&[f32], &[f32], &[f32], &[f32], &[f32]) = {
+                                    let (data, weight, bias, running_mean, running_var): (
+                                        &[f32],
+                                        &[f32],
+                                        &[f32],
+                                        &[f32],
+                                        &[f32],
+                                    ) = {
                                         let d = arena.data_mut();
                                         (
                                             bytemuck::cast_slice::<_, f32>(
@@ -3622,7 +3669,9 @@ impl Backend for CpuBackend {
                             };
                             if let [input_slice, weight_slice] = &input_slices[..2] {
                                 if params.len() < 9 {
-                                    return Err(BackendError::Dispatch("conv2d: expected at least 9 params".into()));
+                                    return Err(BackendError::Dispatch(
+                                        "conv2d: expected at least 9 params".into(),
+                                    ));
                                 }
                                 let stride = params[0];
                                 let padding = params[1];
@@ -3635,8 +3684,10 @@ impl Backend for CpuBackend {
                                 let kw = params[8];
                                 let c_per_group = c / groups.max(1);
                                 let f32_size = std::mem::size_of::<f32>();
-                                let n_in_derived = (input_slice.size / f32_size) / (c * h * w).max(1);
-                                let f_out_derived = (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
+                                let n_in_derived =
+                                    (input_slice.size / f32_size) / (c * h * w).max(1);
+                                let f_out_derived =
+                                    (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
                                 let (n_in, f_out) = if params.len() >= 15 {
                                     (params[9], params[10])
                                 } else {
@@ -3672,11 +3723,12 @@ impl Backend for CpuBackend {
                                 // and avoids the previous per-call `.to_vec()` copies of the input
                                 // and weight tensors.
                                 if let [input_s, weight_s, bias_s @ ..] = &input_slices[..] {
-                                    let inputs_for_kernel: SmallVec<[BufferSlice; 4]> = if bias_s.is_empty() {
-                                        smallvec![*input_s, *weight_s]
-                                    } else {
-                                        smallvec![*input_s, *weight_s, bias_s[0]]
-                                    };
+                                    let inputs_for_kernel: SmallVec<[BufferSlice; 4]> =
+                                        if bias_s.is_empty() {
+                                            smallvec![*input_s, *weight_s]
+                                        } else {
+                                            smallvec![*input_s, *weight_s, bias_s[0]]
+                                        };
                                     arena::with_nary_f32_slices(
                                         arena,
                                         &inputs_for_kernel,
@@ -3709,7 +3761,8 @@ impl Backend for CpuBackend {
                                 let w_slice = &input_slices[1];
                                 let activation_payload: &[u8] =
                                     unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
-                                let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+                                let raw: &[u8] =
+                                    unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
                                 let bias_data: Option<&[f32]> = if input_slices.len() >= 3 {
                                     let b = &input_slices[2];
                                     Some(unsafe { arena.view_f32(b.offset, b.size) })
@@ -3822,7 +3875,11 @@ impl Backend for CpuBackend {
                                             let col_u8: &[u8] = bytemuck::cast_slice(&col_buf);
                                             payload.extend_from_slice(col_u8);
                                             let kp = inner.div_ceil(I4x8::ITEMS);
-                                            let w_sl = get_or_cache_packed::<I4x8>(w_slice.offset, w_slice.size, &raw);
+                                            let w_sl = get_or_cache_packed::<I4x8>(
+                                                w_slice.offset,
+                                                w_slice.size,
+                                                &raw,
+                                            );
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let local_scales = if meta.scales.len() > 1 {
@@ -3843,20 +3900,40 @@ impl Backend for CpuBackend {
                                                 local_zps,
                                             );
                                             microkernels::gemm_cpu_flat_i8_i4x8(
-                                                &pt, &payload, temp.as_mut_slice(), num_pixels, k, oc_per_g,
+                                                &pt,
+                                                &payload,
+                                                temp.as_mut_slice(),
+                                                num_pixels,
+                                                k,
+                                                oc_per_g,
                                             );
                                             for pixel in 0..num_pixels {
                                                 for f in 0..oc_per_g {
                                                     let mut val = temp[pixel * oc_per_g + f];
                                                     if let Some(bias) = bias_data {
-                                                    if g_oc_off + f < bias.len() {
-                                                        val += bias[g_oc_off + f];
+                                                        if g_oc_off + f < bias.len() {
+                                                            val += bias[g_oc_off + f];
+                                                        }
                                                     }
-                                                }
                                                     match fused_act {
-                                                        PreparedActivation::Relu => val = val.max(0.0),
-                                                        PreparedActivation::Silu => val = val / (1.0 + (-val).exp()),
-                                                        PreparedActivation::Gelu => val = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh()),
+                                                        PreparedActivation::Relu => {
+                                                            val = val.max(0.0)
+                                                        }
+                                                        PreparedActivation::Silu => {
+                                                            val = val / (1.0 + (-val).exp())
+                                                        }
+                                                        PreparedActivation::Gelu => {
+                                                            val = val
+                                                                * 0.5
+                                                                * (1.0
+                                                                    + (val
+                                                                        * 0.7978845608
+                                                                        * (1.0
+                                                                            + 0.044715
+                                                                                * val
+                                                                                * val))
+                                                                        .tanh())
+                                                        }
                                                         PreparedActivation::None => {}
                                                     }
                                                     out_f32[out_base
@@ -3867,7 +3944,11 @@ impl Backend for CpuBackend {
                                         } else {
                                             // U8 path: pack i8 â†’ I8x4 (lossless), use fast packed SWAR GEMM
                                             let kp = inner.div_ceil(I8x4::ITEMS);
-                                            let w_sl = get_or_cache_packed::<I8x4>(w_slice.offset, w_slice.size, &raw);
+                                            let w_sl = get_or_cache_packed::<I8x4>(
+                                                w_slice.offset,
+                                                w_slice.size,
+                                                &raw,
+                                            );
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let per_channel_w = meta.scales.len() > 1;
@@ -3937,8 +4018,10 @@ impl Backend for CpuBackend {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];
                                 // Zero-copy views into arena (no to_vec() allocations)
-                                let input_data: &[f32] = unsafe { arena.view_f32(a_slice.offset, a_slice.size) };
-                                let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
+                                let input_data: &[f32] =
+                                    unsafe { arena.view_f32(a_slice.offset, a_slice.size) };
+                                let raw: &[u8] =
+                                    unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
                                 let bias_data: Option<&[f32]> = if input_slices.len() >= 3 {
                                     let b = &input_slices[2];
                                     Some(unsafe { arena.view_f32(b.offset, b.size) })
@@ -3978,20 +4061,21 @@ impl Backend for CpuBackend {
                                 };
                                 let n = input_data.len() / (input_c * input_h * input_w).max(1);
                                 let bias_opt = bias_data.filter(|b| !b.is_empty());
-                                let fused_act =
-                                    if kernel_name.contains("_relu") {
-                                        PreparedActivation::Relu
-                                    } else if kernel_name.contains("_gelu") {
-                                        PreparedActivation::Gelu
-                                    } else if kernel_name.contains("_silu") {
-                                        PreparedActivation::Silu
-                                    } else {
-                                        PreparedActivation::None
-                                    };
+                                let fused_act = if kernel_name.contains("_relu") {
+                                    PreparedActivation::Relu
+                                } else if kernel_name.contains("_gelu") {
+                                    PreparedActivation::Gelu
+                                } else if kernel_name.contains("_silu") {
+                                    PreparedActivation::Silu
+                                } else {
+                                    PreparedActivation::None
+                                };
                                 macro_rules! dispatch_packed_conv {
                                     ($PackedType:ty, $fn:path) => {{
                                         let packed_data = get_or_cache_packed::<$PackedType>(
-                                            w_slice.offset, w_slice.size, &raw,
+                                            w_slice.offset,
+                                            w_slice.size,
+                                            &raw,
                                         );
                                         let mut pt = PackedTensor::from_raw_arc(
                                             packed_data,
@@ -4024,16 +4108,27 @@ impl Backend for CpuBackend {
                                 macro_rules! dispatch_packed_conv_cached {
                                     ($PackedType:ty) => {{
                                         let pt = get_or_cache_f32_weights::<$PackedType>(
-                                            w_slice.offset, w_slice.size, &raw,
-                                            &[oc, inner], &meta.scales, &meta.zero_points,
+                                            w_slice.offset,
+                                            w_slice.size,
+                                            &raw,
+                                            &[oc, inner],
+                                            &meta.scales,
+                                            &meta.zero_points,
                                             meta.quant_block_size,
+                                            &meta.codebooks,
                                         );
                                         let f32_weights = pt.get_or_init_f32_weights();
                                         let conv_act = match fused_act {
                                             PreparedActivation::None => None,
-                                            PreparedActivation::Relu => Some(microkernels::ConvActivation::Relu),
-                                            PreparedActivation::Gelu => Some(microkernels::ConvActivation::Gelu),
-                                            PreparedActivation::Silu => Some(microkernels::ConvActivation::Silu),
+                                            PreparedActivation::Relu => {
+                                                Some(microkernels::ConvActivation::Relu)
+                                            }
+                                            PreparedActivation::Gelu => {
+                                                Some(microkernels::ConvActivation::Gelu)
+                                            }
+                                            PreparedActivation::Silu => {
+                                                Some(microkernels::ConvActivation::Silu)
+                                            }
                                         };
                                         let bias_slice = bias_opt.unwrap_or(&[]);
                                         microkernels::conv::conv2d_f32_im2col_gemm(
@@ -4041,10 +4136,17 @@ impl Backend for CpuBackend {
                                             f32_weights,
                                             bias_slice,
                                             out_f32,
-                                            n, input_c, input_h, input_w,
+                                            n,
+                                            input_c,
+                                            input_h,
+                                            input_w,
                                             oc,
-                                            kernel_h, kernel_w,
-                                            stride, padding, dilation, groups,
+                                            kernel_h,
+                                            kernel_w,
+                                            stride,
+                                            padding,
+                                            dilation,
+                                            groups,
                                             conv_act,
                                         );
                                     }};
@@ -4055,6 +4157,8 @@ impl Backend for CpuBackend {
                                     dispatch_packed_conv_cached!(F8x4R);
                                 } else if kernel_name.starts_with("conv2d_f8") {
                                     dispatch_packed_conv_cached!(F8x4);
+                                } else if meta.bit_width == 4 && !meta.codebooks.is_empty() {
+                                    dispatch_packed_conv_cached!(I4x8);
                                 } else if meta.bit_width == 4 {
                                     dispatch_packed_conv!(I4x8, packed_conv::conv2d_packed_i4x8);
                                 } else {
@@ -4124,9 +4228,8 @@ impl Backend for CpuBackend {
                                 // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
                                 for (_si, slice) in input_slices.iter().enumerate() {
-                                    let input_data = unsafe {
-                                        arena.view_f32(slice.offset, slice.size)
-                                    };
+                                    let input_data =
+                                        unsafe { arena.view_f32(slice.offset, slice.size) };
                                     let out_f32 = unsafe {
                                         arena.view_f32_mut(out_start, out_end - out_start)
                                     };
@@ -4162,8 +4265,10 @@ impl Backend for CpuBackend {
                             if let Some(input_slice) = input_slices.first() {
                                 let input_end = input_slice.offset + input_slice.size;
                                 let overlaps = arena::ranges_overlap(
-                                    input_slice.offset, input_end,
-                                    out_start, out_end,
+                                    input_slice.offset,
+                                    input_end,
+                                    out_start,
+                                    out_end,
                                 );
                                 let mut input_copy;
                                 let input: &[f32] = if overlaps {
@@ -4480,8 +4585,10 @@ impl Backend for CpuBackend {
                         "pad_f32" => {
                             if let Some(input_slice) = input_slices.first() {
                                 // Zero-copy view of input
-                                let input: &[f32] = unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let out_f32 = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                let input: &[f32] =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 // Simple flat copy: the caller right-sizes the output buffer.
                                 // Output includes padding zeros already allocated.
                                 let end = input.len().min(out_f32.len());
@@ -4491,9 +4598,13 @@ impl Backend for CpuBackend {
                         "gather" => {
                             if let [data_slice, indices_slice] = &input_slices[..] {
                                 // Zero-copy views of input and indices
-                                let input: &[f32] = unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
-                                let indices: &[f32] = unsafe { arena.view_f32(indices_slice.offset, indices_slice.size) };
-                                let out_f32 = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                let input: &[f32] =
+                                    unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
+                                let indices: &[f32] = unsafe {
+                                    arena.view_f32(indices_slice.offset, indices_slice.size)
+                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let axis = if !params.is_empty() { params[0] } else { 0 };
                                 let inner = if axis == 0 {
                                     input.len() / out_f32.len().max(1)
@@ -4502,7 +4613,8 @@ impl Backend for CpuBackend {
                                 };
                                 for i in 0..out_f32.len() {
                                     let idx_idx = i.checked_div(inner).unwrap_or(i);
-                                    let idx = indices[idx_idx.min(indices.len().saturating_sub(1))] as usize;
+                                    let idx = indices[idx_idx.min(indices.len().saturating_sub(1))]
+                                        as usize;
                                     let src = idx * inner + (i % inner);
                                     out_f32[i] = if src < input.len() { input[src] } else { 0.0 };
                                 }
@@ -4510,14 +4622,16 @@ impl Backend for CpuBackend {
                         }
                         "slice_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input: &[f32] = unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let input: &[f32] =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
                                 let &[_dim, start, end, stride] = &params[..] else {
                                     return Err(BackendError::Dispatch(
                                         "slice_f32: expected params [dim, start, end, stride]"
                                             .into(),
                                     ));
                                 };
-                                let out_f32 = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 // General strided slice along dimension `dim`.
                                 // input layout (row-major): outer * dim_size * stride
                                 // output layout:             outer * (end-start) * stride
@@ -4549,10 +4663,16 @@ impl Backend for CpuBackend {
                         }
                         "scatter_nd" => {
                             if let [data_slice, indices_slice, updates_slice] = &input_slices[..] {
-                                let data: &[f32] = unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
-                                let indices_f32: &[f32] = unsafe { arena.view_f32(indices_slice.offset, indices_slice.size) };
-                                let updates: &[f32] = unsafe { arena.view_f32(updates_slice.offset, updates_slice.size) };
-                                let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                let data: &[f32] =
+                                    unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
+                                let indices_f32: &[f32] = unsafe {
+                                    arena.view_f32(indices_slice.offset, indices_slice.size)
+                                };
+                                let updates: &[f32] = unsafe {
+                                    arena.view_f32(updates_slice.offset, updates_slice.size)
+                                };
+                                let out_f32: &mut [f32] =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 out_f32.copy_from_slice(data);
                                 if let Some((&index_depth, data_dims)) = params.split_first() {
                                     let data_rank = data_dims.len();
@@ -4590,8 +4710,11 @@ impl Backend for CpuBackend {
                         }
                         "conv1d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
-                                let input: &[f32] = unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let weight: &[f32] = unsafe { arena.view_f32(weight_slice.offset, weight_slice.size) };
+                                let input: &[f32] =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let weight: &[f32] = unsafe {
+                                    arena.view_f32(weight_slice.offset, weight_slice.size)
+                                };
                                 let &[stride, padding, c, w, kw] = &params[..] else {
                                     return Err(BackendError::Dispatch(
                                         "conv1d: expected params [stride, padding, input_c, input_w, kernel_w]".into(),
@@ -4600,7 +4723,8 @@ impl Backend for CpuBackend {
                                 let n = input.len() / (c * w).max(1);
                                 let f = weight.len() / (c * kw).max(1);
                                 let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
-                                let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                let out_f32: &mut [f32] =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 for nn in 0..n {
                                     for ff in 0..f {
                                         for ww in 0..w_out {
@@ -4654,9 +4778,8 @@ impl Backend for CpuBackend {
                                     .saturating_sub(dilation * (kw - 1) + 1)
                                     / stride
                                     + 1;
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 for nn in 0..n {
                                     for ff in 0..f {
                                         for dd in 0..d_out {
@@ -4740,9 +4863,8 @@ impl Backend for CpuBackend {
                                 let f = weight.len() / (c * kh * kw).max(1);
                                 let h_out = ((hin - 1) * stride + kh).saturating_sub(2 * padding);
                                 let w_out = ((win - 1) * stride + kw).saturating_sub(2 * padding);
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 out_f32.fill(0.0f32);
                                 for nn in 0..n {
                                     for cc in 0..c {
@@ -4803,9 +4925,8 @@ impl Backend for CpuBackend {
                                         arena.view_f32(weight_slice.offset, weight_slice.size),
                                     )
                                 };
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let channel_stride =
                                     if !weight.is_empty() && input.len() > weight.len() {
                                         input.len() / weight.len()
@@ -5007,9 +5128,8 @@ impl Backend for CpuBackend {
                                         arena.view_f32(indices_slice.offset, indices_slice.size),
                                     )
                                 };
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let dim = if !weight.is_empty() && !indices.is_empty() {
                                     out_f32.len() / indices.len()
                                 } else {
@@ -5037,9 +5157,8 @@ impl Backend for CpuBackend {
                                         arena.view_f32(exp_slice.offset, exp_slice.size),
                                     )
                                 };
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let len = out_f32.len().min(data.len());
                                 #[cfg(not(feature = "parallel"))]
                                 {
@@ -5057,17 +5176,16 @@ impl Backend for CpuBackend {
                                     use rayon::prelude::*;
                                     let exponent = &exponent;
                                     if len >= 4096 {
-                                        out_f32[..len]
-                                            .par_iter_mut()
-                                            .enumerate()
-                                            .for_each(|(i, o)| {
+                                        out_f32[..len].par_iter_mut().enumerate().for_each(
+                                            |(i, o)| {
                                                 let e = if i < exponent.len() {
                                                     exponent[i]
                                                 } else {
                                                     exponent[exponent.len().saturating_sub(1)]
                                                 };
                                                 *o = data[i].powf(e);
-                                            });
+                                            },
+                                        );
                                     } else {
                                         for i in 0..len {
                                             let e = if i < exponent.len() {
@@ -5616,11 +5734,12 @@ impl Backend for CpuBackend {
                         }
                         "quantize_gradient_f32_to_f8x4r" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let in_f32 = unsafe {
-                                    arena.view_f32(input_slice.offset, input_slice.size)
-                                };
+                                let in_f32 =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
                                 let out = unsafe {
-                                    bytemuck::cast_slice_mut(arena.view_f32_mut(out_start, out_end - out_start))
+                                    bytemuck::cast_slice_mut(
+                                        arena.view_f32_mut(out_start, out_end - out_start),
+                                    )
                                 };
                                 let num_words = out.len() / 4;
                                 for w in 0..num_words {
@@ -5640,15 +5759,19 @@ impl Backend for CpuBackend {
                                 let numel = *params.first().unwrap_or(&0);
                                 let in_u32 = unsafe {
                                     std::slice::from_raw_parts(
-                                        arena.view_f32(input_slice.offset, input_slice.size)
-                                            .as_ptr() as *const u32,
+                                        arena
+                                            .view_f32(input_slice.offset, input_slice.size)
+                                            .as_ptr()
+                                            as *const u32,
                                         input_slice.size / 4,
                                     )
                                 };
                                 let out_bytes = unsafe {
                                     std::slice::from_raw_parts_mut(
-                                        arena.view_f32_mut(out_start, out_end - out_start)
-                                            .as_mut_ptr() as *mut u8,
+                                        arena
+                                            .view_f32_mut(out_start, out_end - out_start)
+                                            .as_mut_ptr()
+                                            as *mut u8,
                                         out_end - out_start,
                                     )
                                 };
@@ -5675,12 +5798,10 @@ impl Backend for CpuBackend {
                             if let Some(input_slice) = input_slices.first() {
                                 let numel = *params.first().unwrap_or(&0);
                                 let scale = f32::from_bits(*params.get(1).unwrap_or(&0) as u32);
-                                let in_f32 = unsafe {
-                                    arena.view_f32(input_slice.offset, input_slice.size)
-                                };
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let in_f32 =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let len = out_f32.len().min(in_f32.len()).min(numel);
                                 #[cfg(not(feature = "parallel"))]
                                 {
@@ -6003,7 +6124,8 @@ impl Backend for CpuBackend {
                                         .zip(v_new_f32.par_iter_mut())
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
-                                            let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                            let g =
+                                                grad.get(i % grad.len()).copied().unwrap_or(0.0);
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                             let m_hat = *m / bias_corr1;
@@ -6127,7 +6249,8 @@ impl Backend for CpuBackend {
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
                                             *w -= lr * wd * w_init[i];
-                                            let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                            let g =
+                                                grad.get(i % grad.len()).copied().unwrap_or(0.0);
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                             let m_hat = *m / bias_corr1;
@@ -6236,13 +6359,11 @@ impl Backend for CpuBackend {
                             let data_numel = data_slice.size / 4; // f32 = 4 bytes
                             let out_numel = output_slice.size / 4;
 
-                            let in_f32 = unsafe {
-                                arena.view_f32(data_slice.offset, data_slice.size)
-                            };
+                            let in_f32 =
+                                unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
 
-                            let out_f32 = unsafe {
-                                arena.view_f32_mut(out_start, output_slice.size)
-                            };
+                            let out_f32 =
+                                unsafe { arena.view_f32_mut(out_start, output_slice.size) };
 
                             // Broadcast: for each output element, map back to input coords
                             #[cfg(not(feature = "parallel"))]
@@ -6514,8 +6635,8 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     let mut buf = tls_alloc_u8(input_slice.size);
                                     buf.copy_from_slice(
-                                        &d[input_slice.offset..input_slice.offset
-                                            + input_slice.size],
+                                        &d[input_slice.offset
+                                            ..input_slice.offset + input_slice.size],
                                     );
                                     buf
                                 };
@@ -6671,12 +6792,10 @@ impl Backend for CpuBackend {
                         }
                         "to_f16" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let f32_data = unsafe {
-                                    arena.view_f32(input_slice.offset, input_slice.size)
-                                };
-                                let out_bytes = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let f32_data =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let out_bytes =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let out_bytes: &mut [u8] = bytemuck::cast_slice_mut(out_bytes);
                                 for (i, &v) in f32_data.iter().enumerate() {
                                     let f16_val = half::f16::from_f32(v);
@@ -6692,12 +6811,10 @@ impl Backend for CpuBackend {
                         }
                         "to_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let in_data = unsafe {
-                                    arena.view_u8(input_slice.offset, input_slice.size)
-                                };
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let in_data =
+                                    unsafe { arena.view_u8(input_slice.offset, input_slice.size) };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 let max_out = out_f32.len().min(in_data.len() / 2);
                                 for i in 0..max_out {
                                     let start = i * 2;
@@ -6715,11 +6832,12 @@ impl Backend for CpuBackend {
                             let is_per_channel = params.get(1).copied().unwrap_or(0) == 1;
                             let num_channels = params.get(2).copied().unwrap_or(0);
                             if let Some(input_slice) = input_slices.first() {
-                                let f32_data = unsafe {
-                                    arena.view_f32(input_slice.offset, input_slice.size)
-                                };
+                                let f32_data =
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
                                 let out_bytes = unsafe {
-                                    bytemuck::cast_slice_mut(arena.view_f32_mut(out_start, out_end - out_start))
+                                    bytemuck::cast_slice_mut(
+                                        arena.view_f32_mut(out_start, out_end - out_start),
+                                    )
                                 };
 
                                 if is_per_channel && num_channels > 0 {
@@ -6804,9 +6922,8 @@ impl Backend for CpuBackend {
                                     arena.view_f32(input_slice.offset, input_slice.size)
                                 });
 
-                                let out_f32 = unsafe {
-                                    arena.view_f32_mut(out_start, out_end - out_start)
-                                };
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
 
                                 if is_per_channel && num_channels > 0 {
                                     // Per-channel format:
@@ -7268,7 +7385,7 @@ fn dispatch_conv2d_fp32_with_view(
     // WriteConst running and the arena bytes are valid).
     let weight_f32: Vec<f32>;
     let weight_slice_ref: &[f32] = match view.get(&(weight_slice.offset, weight_slice.size)) {
-        Some(payload) => payload,  // borrow directly, no copy
+        Some(payload) => payload, // borrow directly, no copy
         None => {
             let d = arena.data_mut();
             weight_f32 = bytemuck::cast_slice::<_, f32>(
@@ -7357,7 +7474,7 @@ fn dispatch_matmul_fp32_with_view(
     view: &crate::backend::prepared::PersistentPreparedWeights,
 ) -> Result<(), BackendError> {
     use crate::backend::cpu::blas::matmul_blas_into;
-    
+
     if input_slices.len() < 2 {
         return Err(BackendError::Dispatch(format!(
             "matmul_persistent: expected â‰¥ 2 input slices, got {}",
@@ -7371,11 +7488,12 @@ fn dispatch_matmul_fp32_with_view(
     // Resolve the B (weight) / bias f32 slices.
     let b_f32: Vec<f32>;
     let b_slice_ref: &[f32] = match view.get(&(b_slice.offset, b_slice.size)) {
-        Some(payload) => payload,  // borrow directly, no copy
+        Some(payload) => payload, // borrow directly, no copy
         None => {
             let d = arena.data_mut();
-            b_f32 = bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
-                .to_vec();
+            b_f32 =
+                bytemuck::cast_slice::<_, f32>(&d[b_slice.offset..b_slice.offset + b_slice.size])
+                    .to_vec();
             &b_f32
         }
     };
@@ -7440,5 +7558,3 @@ fn dispatch_matmul_fp32_with_view(
     }
     Ok(())
 }
-
-

@@ -15,6 +15,7 @@ pub enum FpDtype {
     F8x4,
     F8x4R,
     F4x8,
+    I4Codebook,
 }
 
 /// Quantize all f32 weight constants feeding MatMul / Conv2d nodes to the
@@ -171,6 +172,7 @@ pub fn quantize_weights(
                 IrDType::I4 {
                     scales: pt.scales,
                     zero_points: pt.zeros,
+                    codebooks: vec![],
                 },
             )
         } else {
@@ -315,22 +317,30 @@ pub fn quantize_weights_fp(
             (f32_data, orig_shape.clone())
         };
 
-        let f4_block_size: usize = 64;
+        let f4_block_size: usize = 32;
 
-        let (packed_bytes, scales, zeros) = match fp_dtype {
+        let (packed_bytes, scales, zeros, codebooks) = match fp_dtype {
             FpDtype::F8x4 => {
                 let pt = match group_size {
-                    Some(gs) => PackedTensor::<F8x4>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
+                    Some(gs) => PackedTensor::<F8x4>::from_f32_per_channel_grouped(
+                        &quant_data,
+                        &quant_shape,
+                        gs,
+                    ),
                     None => PackedTensor::<F8x4>::from_f32_per_channel(&quant_data, &quant_shape),
                 };
-                (pt.as_bytes().to_vec(), pt.scales, vec![])
+                (pt.as_bytes().to_vec(), pt.scales, vec![], vec![])
             }
             FpDtype::F8x4R => {
                 let pt = match group_size {
-                    Some(gs) => PackedTensor::<F8x4R>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
+                    Some(gs) => PackedTensor::<F8x4R>::from_f32_per_channel_grouped(
+                        &quant_data,
+                        &quant_shape,
+                        gs,
+                    ),
                     None => PackedTensor::<F8x4R>::from_f32_per_channel(&quant_data, &quant_shape),
                 };
-                (pt.as_bytes().to_vec(), pt.scales, vec![])
+                (pt.as_bytes().to_vec(), pt.scales, vec![], vec![])
             }
             FpDtype::F4x8 => {
                 let inner = if quant_shape.len() >= 2 {
@@ -338,29 +348,55 @@ pub fn quantize_weights_fp(
                 } else {
                     quant_data.len()
                 };
-                let use_per_block = group_size.is_none() && inner >= f4_block_size && inner % f4_block_size == 0;
+                let use_per_block =
+                    group_size.is_none() && inner >= f4_block_size && inner % f4_block_size == 0;
                 let pt = if use_per_block {
                     PackedTensor::<F4x8>::from_f32_per_block_asymmetric(
-                        &quant_data, &quant_shape, f4_block_size,
+                        &quant_data,
+                        &quant_shape,
+                        f4_block_size,
                     )
                 } else if let Some(gs) = group_size {
                     PackedTensor::<F4x8>::from_f32_per_channel_asymmetric_grouped(
-                        &quant_data, &quant_shape, gs,
+                        &quant_data,
+                        &quant_shape,
+                        gs,
                     )
                 } else {
-                    PackedTensor::<F4x8>::from_f32_per_channel_asymmetric(
-                        &quant_data, &quant_shape,
-                    )
+                    PackedTensor::<F4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
                 };
-                let zeros = if pt.quant_block_size > 0 { pt.zeros.clone() } else { vec![] };
-                (pt.as_bytes().to_vec(), pt.scales, zeros)
+                // Always pass zeros for F4: both per-channel asymmetric and
+                // per-block asymmetric packing use non-zero zero points.
+                (pt.as_bytes().to_vec(), pt.scales, pt.zeros.clone(), vec![])
+            }
+            FpDtype::I4Codebook => {
+                let pt = PackedTensor::<I4x8>::from_f32_per_block_codebook(
+                    &quant_data,
+                    &quant_shape,
+                    f4_block_size,
+                );
+                (
+                    pt.as_bytes().to_vec(),
+                    pt.scales,
+                    vec![],
+                    pt.codebooks.clone(),
+                )
             }
         };
 
         let new_dtype = match fp_dtype {
             FpDtype::F8x4 => IrDType::F8 { scales },
             FpDtype::F8x4R => IrDType::F8R { scales },
-            FpDtype::F4x8 => IrDType::F4 { scales, zeros },
+            FpDtype::F4x8 => IrDType::F4 {
+                scales,
+                zeros,
+                codebooks: vec![],
+            },
+            FpDtype::I4Codebook => IrDType::I4 {
+                scales,
+                zero_points: vec![],
+                codebooks,
+            },
         };
 
         let new_tensor_type = TensorType {
@@ -379,6 +415,13 @@ pub fn quantize_weights_fp(
         if let Some(node_mut) = graph.get_node_mut(const_id) {
             node_mut.opcode = Opcode::Constant(new_value);
             node_mut.output_type = new_tensor_type;
+            // Store the block size so the backend can reconstruct PackedTensor correctly.
+            // This is critical when inner dim is not divisible by the block size.
+            if matches!(fp_dtype, FpDtype::I4Codebook | FpDtype::F4x8) {
+                node_mut
+                    .attrs
+                    .insert("quant_block_size".to_string(), f4_block_size.to_string());
+            }
         }
     }
 
@@ -512,6 +555,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
                 4 => IrDType::I4 {
                     scales: orig_scales,
                     zero_points: orig_zeros,
+                    codebooks: vec![],
                 },
                 8 => IrDType::U8 {
                     scales: orig_scales,
@@ -623,6 +667,7 @@ mod tests {
         if let IrDType::I4 {
             scales,
             zero_points,
+            ..
         } = &u4_node.output_type.dtype
         {
             assert_eq!(
@@ -688,6 +733,7 @@ mod tests {
             IrDType::I4 {
                 scales: vec![1.0],
                 zero_points: vec![0.0],
+                codebooks: vec![],
             },
         );
         let weight = gb.constant(&weight_data, weight_tt);
@@ -1083,6 +1129,7 @@ mod tests {
             IrDType::I4 {
                 scales: vec![1.0; 4],
                 zero_points: vec![0.0; 4],
+                codebooks: vec![],
             },
         );
         // Gradient is F32

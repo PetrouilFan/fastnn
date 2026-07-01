@@ -69,11 +69,11 @@ The IR is the core data structure. Key types in `ir/node.rs`:
 | `ComputeGraph` | DAG of `IRNode`s with named inputs and outputs |
 | `IRNode` | Single operation: opcode, inputs, outputs, metadata |
 | `Opcode` | 91 variants (MatMul, Conv2d, ReLU, optimizer updates, etc.) |
-| `IrDType` | Tensor dtype including U4/U8 with `QuantizedWeightMeta` |
+| `IrDType` | Tensor dtype including U4/U8/I4 with `QuantizedWeightMeta`; I4 supports optional `codebooks` for per-block K-means quantization |
 | `DimExpr` | Symbolic dimension expressions for shape inference |
 | `TensorType` | Tensor shape + dtype descriptor |
 | `ShapeEnv` | Maps symbolic dims to concrete values |
-| `QuantizedWeightMeta` | Per-channel scale, zero-point, axis |
+| `QuantizedWeightMeta` | Per-channel scale, zero-point, axis; optional `codebooks: Vec<[f32; 16]>` for I4Codebook |
 
 `GraphBuilder` in `ir/builder.rs` is the recommended entry point:
 
@@ -97,7 +97,7 @@ Orchestrated by `compile_with_plan_and_quantize` in `backend/executor.rs`.
 |------|-------------|
 | `ShapeInferencePass` | Resolves `DimExpr` symbols via `ShapeEnv` |
 | `OperatorFusionPass` | Fuses MatMul+Add, Conv2d+Add+ReLU, residual+add+norm |
-| `QuantizationPass` | Replaces weight ops with U4/U8 quantized variants |
+| `QuantizationPass` | Replaces weight ops with U4/U8/I4Codebook quantized variants |
 | `MemoryPlanningPass` | Arena-based planning with live-range analysis |
 | `inject_optimizer()` | Inserts optimizer update nodes (all 6 optimizers) |
 
@@ -169,9 +169,9 @@ Use `ShapeInferencePass` or `DeadCodeEliminationPass` as reference.
 Quantization is a **compiler pass**, not a layer-level operation:
 
 1. Build a `ComputeGraph` via `GraphBuilder` or `OnnxConverter`.
-2. Call `compile_with_quantize(bit_width)` which runs the full pipeline including `QuantizationPass`.
-3. The pass identifies eligible `MatMul`/`Conv2d` nodes, replaces weight inputs with quantized variants carrying `QuantizedWeightMeta` (per-channel scales, zero-points, axis), and inserts `Dequantize` nodes where needed.
-4. Backends dispatch to specialized `matmul_u4`/`matmul_u8` and `conv2d_u4`/`conv2d_u8` kernels that consume the quantized weights directly.
+2. Call `compile_with_quantize(bit_width)` which runs the full pipeline including `QuantizationPass`. Use `"i4cb"` for codebook quantization.
+3. The pass identifies eligible `MatMul`/`Conv2d` nodes, replaces weight inputs with quantized variants carrying `QuantizedWeightMeta` (per-channel scales, zero-points, axis; optionally `codebooks` for I4Codebook), and inserts `Dequantize` nodes where needed.
+4. Backends dispatch to specialized `matmul_u4`/`matmul_u8` and `conv2d_u4`/`conv2d_u8` kernels that consume the quantized weights directly. I4Codebook quantizes via `from_f32_per_block_codebook` and dequantizes in the GEMM fallback path (dequant to f32, then plain matmul).
 
 ## GPU Synchronization Policy
 

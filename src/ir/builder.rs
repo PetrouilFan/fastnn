@@ -1230,6 +1230,7 @@ impl GraphBuilder {
             4 => IrDType::I4 {
                 scales: vec![],
                 zero_points: vec![],
+                codebooks: vec![],
             },
             8 => IrDType::U8 {
                 scales: vec![],

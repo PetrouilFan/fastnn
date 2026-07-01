@@ -179,12 +179,20 @@ fn detect_qlinear_patterns(
             IrDType::I4 {
                 scales,
                 zero_points,
+                ..
             } => (scales.clone(), zero_points.clone()),
             IrDType::U8 {
                 scales,
                 zero_points,
             } => (scales.clone(), zero_points.clone()),
-            IrDType::F4 { scales, zeros } => (scales.clone(), if zeros.is_empty() { vec![0.0f32] } else { zeros.clone() }),
+            IrDType::F4 { scales, zeros, .. } => (
+                scales.clone(),
+                if zeros.is_empty() {
+                    vec![0.0f32]
+                } else {
+                    zeros.clone()
+                },
+            ),
             IrDType::F8 { scales } | IrDType::F8R { scales } => (scales.clone(), vec![0.0f32]),
             _ => continue,
         };
@@ -281,6 +289,7 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         IrDType::I4 {
             scales,
             zero_points,
+            ..
         } => {
             let s = scales.first().copied().unwrap_or(1.0);
             let zp = zero_points.first().copied().unwrap_or(0.0) as i32;

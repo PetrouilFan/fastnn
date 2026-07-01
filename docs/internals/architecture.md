@@ -24,7 +24,7 @@ Model (ONNX / GraphBuilder API)
 │   2. Auto-Cast          ─── Insert type conversion      │
 │   3. Type Inference     ─── Propagate dtypes            │
 │   4. Operator Fusion    ─── Merge adjacent op patterns  │
-│   5. Quantization       ─── Replace weights with U4/U8  │
+│   5. Quantization       ─── Replace weights with U4/U8/I4Codebook  │
 │   6. Constant Folding   ─── Evaluate at compile time    │
 │   7. Dead Code Elim.    ─── Remove unused nodes         │
 │   8. Memory Planning    ─── Arena offsets via live-range│
@@ -84,7 +84,7 @@ Fusion eliminates intermediate tensor materialization and reduces kernel launch 
 
 ### Stage 2.5 — Weight Quantization (Optional)
 
-When enabled, `quantize_weights` transforms `F32` weight tensors into `U4` or `U8` per-channel quantized format. This is a compiler pass: the weights are packed at compile time and embedded directly into the `ExecutablePlan`.
+When enabled, `quantize_weights` transforms `F32` weight tensors into `U4`, `U8`, or `I4Codebook` per-channel quantized format. `I4Codebook` uses per-block codebook INT4 quantization: each block is normalized by its max_abs, a single data-adaptive K-means codebook (16 centroids in [-1,1]) is learned across all normalized values, and weights are packed as 4-bit codebook indices. Dequant: `scales[blk] * codebook[nibble]`. This is a compiler pass: the weights are packed at compile time and embedded directly into the `ExecutablePlan`.
 
 ### Additional Passes
 
@@ -106,7 +106,7 @@ For models with symbolic dimensions, `tighten()` recomputes arena offsets from a
 
 Each `IRNode` is mapped to a concrete backend implementation:
 
-- **CpuBackend** (7326-line `mod.rs`) — Handles all opcodes including quantized matmul/conv (U4/U8) with runtime ISA dispatch: AVX-512 → AVX2 → NEON → scalar fallback. Leverages BLAS (`blas.rs`), im2col (`im2col.rs`), microkernels (`microkernels.rs`), optimized reductions (`reductions_fast.rs`), and FlashAttention SIMD (`flash_attn.rs`).
+- **CpuBackend** (7326-line `mod.rs`) — Handles all opcodes including quantized matmul/conv (U4/U8, I4Codebook) with runtime ISA dispatch: AVX-512 → AVX2 → NEON → scalar fallback. I4Codebook dequantizes to f32 before GEMM. Leverages BLAS (`blas.rs`), im2col (`im2col.rs`), microkernels (`microkernels.rs`), optimized reductions (`reductions_fast.rs`), and FlashAttention SIMD (`flash_attn.rs`).
 - **WgpuBackend** (experimental) — Handles f32 ops and U4/U8 quantized ops via WGSL compute shaders. Manages a pipeline cache (`pipeline.rs`) and GPU context (`context.rs`).
 
 Both backends receive an `ExecutablePlan` with pre-planned arena offsets, eliminating runtime allocation.
@@ -144,15 +144,17 @@ Backend kernel selection (e.g., `matmul_u4`, `matmul_u8`, `conv2d_u4`) happens a
 | `I64` | 64-bit signed integer |
 | `I8` | 8-bit signed integer |
 | `Bool` | Boolean |
-| `U4{scales,zero_points}` | 4-bit quantized with per-channel metadata |
-| `U8{scales,zero_points}` | 8-bit quantized with per-channel metadata |
+| `U4{scales,zero_points}` | 4-bit unsigned quantized with per-channel metadata |
+| `U8{scales,zero_points}` | 8-bit unsigned quantized with per-channel metadata |
+| `I4{scales,zero_points,codebooks}` | 4-bit signed quantized with optional per-block codebook |
 
-`U4` and `U8` carry per-channel `Vec<f32>` for `scales` and `zero_points`. During dequantization, each output channel is reconstructed as `value = (packed_value - zero_point[channel]) * scale[channel]`.
+`U4` and `U8` carry per-channel `Vec<f32>` for `scales` and `zero_points`. `I4` can additionally carry `codebooks: Vec<[f32; 16]>` for per-block K-means codebook quantization. During dequantization: standard I4 uses `(packed_value - zero_point) * scale`; I4 codebook uses `scales[blk] * codebooks[0][nibble]`.
 
 ### PackedTensor Layout
 
 - **U4**: 8 values packed per `u32` word (`I4x8`)
 - **U8**: 4 values packed per `u32` word (`I8x4`)
+- **I4Codebook**: Same as U4 layout (8×4-bit nibbles per `u32`), but nibbles index a 16-entry f32 codebook instead of quantizing directly. Codebook and per-block scales stored alongside packed data.
 
 The packed layout eliminates wasted padding and enables SIMD-friendly access patterns.
 
