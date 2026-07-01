@@ -72,6 +72,10 @@ cli = ["dep:clap"]
 name = "gemm_bench"
 path = "examples/gemm_bench.rs"
 
+[[example]]
+name = "packed_bench"
+path = "benches/packed_bench.rs"
+
 [[bin]]
 name = "fastnn-runtime"
 path = "src/bin/runtime.rs"

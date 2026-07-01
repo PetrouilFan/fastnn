@@ -86,7 +86,7 @@ fn f32_to_e5m2(v: f32) -> u8 {
     sign_bit | ((biased_exp) << 2) | mant
 }
 
-fn f8r_lut() -> &'static [f32; 256] {
+pub(crate) fn f8r_lut() -> &'static [f32; 256] {
     static LUT: OnceLock<[f32; 256]> = OnceLock::new();
     LUT.get_or_init(|| {
         let mut lut = [0.0f32; 256];

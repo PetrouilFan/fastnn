@@ -3,7 +3,7 @@
 mod bench_util;
 
 use bench_util::{bench_gemv, bench_relu, print_comparison_header, print_result_row, speedup};
-use fastnn::dtypes::{F16x2, F32x1, I4x8, I8x4, PackedWord};
+use fastnn::dtypes::{F16x2, F32x1, F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 
 fn main() {
     println!("=== fastnn Native Packed Precision Benchmark ===\n");
@@ -60,6 +60,42 @@ fn main() {
             u4_bytes,
             speedup(f32_ms, u4_ms),
             speedup(f32_bytes as f64, u4_bytes as f64)
+        );
+
+        let (f4_ms, f4_bytes) = bench_gemv::<F4x8>(m, k, iters);
+        let gflops = (2.0 * m as f64 * k as f64) / (f4_ms / 1000.0) / 1e9;
+        println!(
+            "{:<10} {:>10.3} {:>10.2} {:>12} {:>10.1}x {:>9.1}x",
+            "F4x8",
+            f4_ms,
+            gflops,
+            f4_bytes,
+            speedup(f32_ms, f4_ms),
+            speedup(f32_bytes as f64, f4_bytes as f64)
+        );
+
+        let (f8_ms, f8_bytes) = bench_gemv::<F8x4>(m, k, iters);
+        let gflops = (2.0 * m as f64 * k as f64) / (f8_ms / 1000.0) / 1e9;
+        println!(
+            "{:<10} {:>10.3} {:>10.2} {:>12} {:>10.1}x {:>9.1}x",
+            "F8x4",
+            f8_ms,
+            gflops,
+            f8_bytes,
+            speedup(f32_ms, f8_ms),
+            speedup(f32_bytes as f64, f8_bytes as f64)
+        );
+
+        let (f8r_ms, f8r_bytes) = bench_gemv::<F8x4R>(m, k, iters);
+        let gflops = (2.0 * m as f64 * k as f64) / (f8r_ms / 1000.0) / 1e9;
+        println!(
+            "{:<10} {:>10.3} {:>10.2} {:>12} {:>10.1}x {:>9.1}x",
+            "F8x4R",
+            f8r_ms,
+            gflops,
+            f8r_bytes,
+            speedup(f32_ms, f8r_ms),
+            speedup(f32_bytes as f64, f8r_bytes as f64)
         );
 
         println!();

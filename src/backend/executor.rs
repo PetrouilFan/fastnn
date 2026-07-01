@@ -254,15 +254,15 @@ impl<B: Backend> GraphExecutor<B> {
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
                     WeightDtype::F8x4 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4)
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
                     WeightDtype::F8x4R => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R)
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
                     WeightDtype::F4x8 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8)
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
                     WeightDtype::F32 => {}
