@@ -116,6 +116,7 @@ fn quantize_node_output(
         IrDType::I4 {
             scales: vec![scale],
             zero_points: vec![zero_point],
+            codebooks: vec![],
         }
     } else {
         IrDType::U8 {
