@@ -573,9 +573,6 @@ pub fn conv2d_f32_im2col_gemm(
     // C[f, spatial] = W[f, col_w] * Col[col_w, spatial], with
     // Col[col, spatial] = col_matrix[spatial * col_w + col]
     // (rs_b=1, cs_b=col_w), so C lands directly in NCHW output order.
-    let t_grp = std::time::Instant::now();
-    let mut im2col_ms = 0.0f64;
-    let mut gemm_ms = 0.0f64;
     for g in 0..groups {
         let f_start = g * f_per_group;
         let input_group_off = g * c_per_group * (h * w);
@@ -588,7 +585,6 @@ pub fn conv2d_f32_im2col_gemm(
             let col_start = nn * spatial_size * col_w;
             // SAFETY: slice pointers and offsets are valid per the tensor dimensions;
             // `im2col_dispatch` only writes within the provided slice bounds.
-            let ti = std::time::Instant::now();
             unsafe {
                 crate::backend::cpu::im2col::im2col_dispatch(
                     &input[nn * (c * h * w) + input_group_off..],
@@ -604,7 +600,6 @@ pub fn conv2d_f32_im2col_gemm(
                     false, // FP32 conv does not need min/max
                 );
             }
-            im2col_ms += ti.elapsed().as_secs_f64() * 1000.0;
         }
 
         let weight_off = f_start * col_w;
@@ -613,7 +608,6 @@ pub fn conv2d_f32_im2col_gemm(
 
         for nn in 0..n {
             let col_start = nn * spatial_size * col_w;
-            let tg = std::time::Instant::now();
             if !bias.is_empty() || activation.is_some() {
                 let group_bias = if !bias.is_empty() {
                     Some(&bias[f_start..f_start + f_per_group])
@@ -658,15 +652,6 @@ pub fn conv2d_f32_im2col_gemm(
                     );
                 }
             }
-            gemm_ms += tg.elapsed().as_secs_f64() * 1000.0;
-        }
-    }
-    if groups > 1 {
-        let total_ms = t_grp.elapsed().as_secs_f64() * 1000.0;
-        if total_ms > 5.0 {
-            eprintln!("  [im2col+gemm] groups={} cpg={} fpg={} h={} w={} sp={} kh={} kw={}: im2col={:.1}ms gemm={:.1}ms total={:.1}ms",
-                groups, c_per_group, f_per_group, h, w, spatial_size, kh, kw,
-                im2col_ms, gemm_ms, total_ms);
         }
     }
 }

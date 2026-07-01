@@ -3549,20 +3549,27 @@ impl Backend for CpuBackend {
                                 _ => None,
                             };
                             if let [input_slice, weight_slice] = &input_slices[..2] {
-                                let &[stride, padding, dilation, groups, c, h, w, kh, kw] =
-                                    &params[..]
-                                else {
-                                    return Err(BackendError::Dispatch("conv2d: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]".into()));
-                                };
+                                if params.len() < 9 {
+                                    return Err(BackendError::Dispatch("conv2d: expected at least 9 params".into()));
+                                }
+                                let stride = params[0];
+                                let padding = params[1];
+                                let dilation = params[2];
+                                let groups = params[3];
+                                let c = params[4];
+                                let h = params[5];
+                                let w = params[6];
+                                let kh = params[7];
+                                let kw = params[8];
                                 let c_per_group = c / groups.max(1);
-                                // Recover batch (n) and output-channel (f) counts from the input
-                                // and weight byte counts: each f32 is 4 bytes. The previous code
-                                // computed these from copied `Vec<f32>::len()` which was the
-                                // whole point of the per-call copy.
                                 let f32_size = std::mem::size_of::<f32>();
-                                let n_in = (input_slice.size / f32_size) / (c * h * w).max(1);
-                                let f_out =
-                                    (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
+                                let n_in_derived = (input_slice.size / f32_size) / (c * h * w).max(1);
+                                let f_out_derived = (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
+                                let (n_in, f_out) = if params.len() >= 15 {
+                                    (params[9], params[10])
+                                } else {
+                                    (n_in_derived, f_out_derived)
+                                };
                                 let _h_out = (h + 2 * padding)
                                     .saturating_sub(dilation * (kh - 1) + 1)
                                     / stride
@@ -7046,16 +7053,29 @@ fn dispatch_conv2d_fp32_with_view(
     let weight_slice = input_slices[1];
     let bias_slice = input_slices.get(2).copied();
 
-    let &[stride, padding, dilation, groups, c, h, w, kh, kw] = params else {
+    if params.len() < 9 {
         return Err(BackendError::Dispatch(
-            "conv2d_persistent: expected params [stride, padding, dilation, groups, c, h, w, kh, kw]"
-                .into(),
+            "conv2d_persistent: expected at least 9 params".into(),
         ));
-    };
+    }
+    let stride = params[0];
+    let padding = params[1];
+    let dilation = params[2];
+    let groups = params[3];
+    let c = params[4];
+    let h = params[5];
+    let w = params[6];
+    let kh = params[7];
+    let kw = params[8];
     let c_per_group = c / groups.max(1);
-    let f32_size = std::mem::size_of::<f32>();
-    let n_in = (input_slice.size / f32_size) / (c * h * w).max(1);
-    let f_out = (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
+    let (n_in, f_out) = if params.len() >= 15 {
+        (params[9], params[10])
+    } else {
+        let f32_size = std::mem::size_of::<f32>();
+        let n_in = (input_slice.size / f32_size) / (c * h * w).max(1);
+        let f_out = (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
+        (n_in, f_out)
+    };
     let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
     let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
 
