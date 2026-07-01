@@ -108,7 +108,8 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     };
     let valid_meta_len = meta.scales.len() == 1
         || meta.scales.len() == rows
-        || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0);
+        || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0)
+        || (meta.quant_block_size > 0 && meta.scales.len() > rows && meta.scales.len() % rows == 0);
     if !valid_meta_len {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1, {}, or a divisor of {})",
@@ -143,6 +144,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             meta.scales.clone(),
             zero_points,
         );
+        pt.quant_block_size = meta.quant_block_size;
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;
         }
@@ -195,6 +197,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
+                quant_block_size: 0,
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
@@ -246,6 +249,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
+                quant_block_size: 0,
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
@@ -304,6 +308,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
                 scales: vec![1.0],
                 zero_points: vec![0.0],
                 shape: vec![m, k],
+                quant_block_size: 0,
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;

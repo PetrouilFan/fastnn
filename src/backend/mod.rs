@@ -50,6 +50,8 @@ pub struct QuantizedWeightMeta {
     pub zero_points: Vec<f32>,
     /// Logical shape of the weight tensor.
     pub shape: Vec<usize>,
+    /// Per-element quantization block size within each row. 0 = per-channel.
+    pub quant_block_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

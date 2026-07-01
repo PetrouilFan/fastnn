@@ -721,6 +721,16 @@ fn gemv_f4x8_dispatch(weights: &PackedTensor<F4x8>, activation: &[f32], output: 
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
+
+    if weights.quant_block_size > 0 {
+        let f32_weights = weights.get_or_init_f32_weights();
+        for row in 0..m {
+            let row_data = &f32_weights[row * k..(row + 1) * k];
+            output[row] = fma_f32_slice(row_data, activation);
+        }
+        return;
+    }
+
     let k_packed = k.div_ceil(8);
     let weights_u32 = weights.as_u32();
     let act_sum = affine_sum_term(activation, k, 1.0);

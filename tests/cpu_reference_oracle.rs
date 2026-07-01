@@ -535,7 +535,7 @@ fn matmul_f4_reference_oracle() {
             m,
             k,
             n,
-            |scales| IrDType::F4 { scales },
+            |scales| IrDType::F4 { scales, zeros: vec![] },
             "matmul_f4",
             Tolerance {
                 abs: 2.0,

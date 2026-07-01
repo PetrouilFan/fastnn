@@ -78,9 +78,31 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
     v
 }
 
-/// Cache for unpacked f32 weights, keyed by the same cache key as `get_or_cache_packed`.
-/// Stores `Arc<PackedTensor<T>>` so the internal OnceLock f32 cache persists,
-/// eliminating per-call `to_vec()` clones.
+type F32WeightCacheKey = (usize, usize, usize, TypeId);
+
+/// Global cache for unpacked f32 weights, keyed by `(raw_ptr, write_offset, write_size, TypeId)`.
+/// The raw data pointer acts as a unique compilation-session identifier so that
+/// distinct weight values (even at the same arena offset) never collide.
+/// This cache is scoped to the process lifetime but can be cleared between
+/// executor instances (different quantization dtypes) via
+/// [`clear_f32_weight_cache()`] to prevent memory accumulation.
+static F32_WEIGHT_CACHE: OnceLock<Mutex<HashMap<F32WeightCacheKey, Arc<dyn std::any::Any + Send + Sync>>>> =
+    OnceLock::new();
+
+/// Clear the global f32 weight cache, freeing dequantized weight data.
+/// Call this between executor instances (e.g., when switching quantization dtypes)
+/// to prevent unbounded memory growth.
+pub fn clear_f32_weight_cache() {
+    if let Some(cache) = F32_WEIGHT_CACHE.get() {
+        cache.lock().unwrap().clear();
+    }
+}
+
+/// Retrieve or create a [`PackedTensor<T>`] with cached f32 dequantized weights.
+/// The packed data is obtained from the per-plan packed-data cache, and the
+/// dequantized f32 copy is stored in the module-level [`F32_WEIGHT_CACHE`] so
+/// that repeated dispatch of the same conv layer reuses the f32 weights without
+/// re-dequantization.
 fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     write_offset: usize,
     write_size: usize,
@@ -88,23 +110,24 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     shape: &[usize],
     scales: &[f32],
     zeros: &[f32],
+    quant_block_size: usize,
 ) -> Arc<PackedTensor<T>> {
     let cache_key = (raw.as_ptr() as usize, write_offset, write_size, TypeId::of::<T>());
-    static F32_CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>> =
-        OnceLock::new();
-    let mut cache = F32_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut cache = F32_WEIGHT_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
     if let Some(arc_any) = cache.get(&cache_key) {
         if let Ok(arc_pt) = arc_any.clone().downcast::<PackedTensor<T>>() {
             return arc_pt;
         }
     }
     let packed_data = get_or_cache_packed::<T>(write_offset, write_size, raw);
-    let pt = Arc::new(PackedTensor::from_raw_arc(
+    let mut pt = PackedTensor::from_raw_arc(
         packed_data,
         shape.to_vec(),
         scales.to_vec(),
         zeros.to_vec(),
-    ));
+    );
+    pt.quant_block_size = quant_block_size;
+    let pt = Arc::new(pt);
     pt.get_or_init_f32_weights();
     cache.insert(cache_key, pt.clone());
     pt
@@ -470,8 +493,8 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (8usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales } => {
-                                        (4usize, scales.clone(), vec![0.0; scales.len()])
+                                    IrDType::F4 { scales, zeros } => {
+                                        (4usize, scales.clone(), zeros.clone())
                                     }
                                     IrDType::F8 { scales } => {
                                         (8usize, scales.clone(), vec![0.0; scales.len()])
@@ -493,11 +516,19 @@ impl Backend for CpuBackend {
                                 if w_shape.len() == 2 {
                                     w_shape.reverse();
                                 }
+                                let quant_block_size = if scales.len() > w_shape[0] && w_shape.len() >= 2 {
+                                    let inner: usize = w_shape[1..].iter().product();
+                                    let blocks_per_row = scales.len() / w_shape[0];
+                                    inner / blocks_per_row
+                                } else {
+                                    0
+                                };
                                 std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width,
                                     scales,
                                     zero_points,
                                     shape: w_shape,
+                                    quant_block_size,
                                 })
                             })
                         })
@@ -770,7 +801,7 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (4usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![0.0; scales.len()]),
+                                    IrDType::F4 { scales, zeros } => (4usize, scales.clone(), zeros.clone()),
                                     IrDType::F8 { scales } => (8usize, scales.clone(), vec![0.0; scales.len()]),
                                     IrDType::F8R { scales } => (8usize, scales.clone(), vec![0.0; scales.len()]),
                                     IrDType::U8 {
@@ -785,11 +816,19 @@ impl Backend for CpuBackend {
                                     .iter()
                                     .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
                                     .collect();
+                                let quant_block_size = if scales.len() > w_shape[0] && w_shape.len() >= 2 {
+                                    let inner: usize = w_shape[1..].iter().product();
+                                    let blocks_per_row = scales.len() / w_shape[0];
+                                    inner / blocks_per_row
+                                } else {
+                                    0
+                                };
                                 std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width: bw,
                                     scales,
                                     zero_points,
                                     shape: w_shape,
+                                    quant_block_size,
                                 })
                             })
                         });
@@ -3954,12 +3993,13 @@ impl Backend for CpuBackend {
                                         let packed_data = get_or_cache_packed::<$PackedType>(
                                             w_slice.offset, w_slice.size, &raw,
                                         );
-                                        let pt = PackedTensor::from_raw_arc(
+                                        let mut pt = PackedTensor::from_raw_arc(
                                             packed_data,
                                             vec![oc, inner],
                                             meta.scales.clone(),
                                             meta.zero_points.clone(),
                                         );
+                                        pt.quant_block_size = meta.quant_block_size;
                                         unsafe {
                                             $fn(
                                                 &input_data,
@@ -3986,6 +4026,7 @@ impl Backend for CpuBackend {
                                         let pt = get_or_cache_f32_weights::<$PackedType>(
                                             w_slice.offset, w_slice.size, &raw,
                                             &[oc, inner], &meta.scales, &meta.zero_points,
+                                            meta.quant_block_size,
                                         );
                                         let f32_weights = pt.get_or_init_f32_weights();
                                         let conv_act = match fused_act {

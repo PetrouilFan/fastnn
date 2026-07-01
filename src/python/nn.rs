@@ -1229,6 +1229,12 @@ impl AotExecutor {
         input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
         quantize: Option<pyo3::Bound<'_, pyo3::PyAny>>,
     ) -> pyo3::PyResult<Self> {
+        // Clear the global f32 weight cache to prevent unbounded memory
+        // accumulation across executor instances (e.g., when the benchmark
+        // script creates a new AotExecutor for a different quantization dtype).
+        // Without this, dequantized f32 weights from all dtypes persist
+        // in the global cache for the lifetime of the Python process.
+        crate::backend::cpu::clear_f32_weight_cache();
         // Convert Python node dicts to OnnxNodes
         let onnx_nodes: Vec<crate::onnx::converter::OnnxNode> = nodes
             .into_iter()
