@@ -28,7 +28,11 @@ pub(crate) fn fp4_f32_lut() -> &'static [f32; 16] {
         let mut lut = [0f32; 16];
         for code in 0..16u8 {
             let mag = FP4_MAG[(code & 0x7) as usize];
-            lut[code as usize] = if (code & 0x8) != 0 && (code & 0x7) != 0 { -mag } else { mag };
+            lut[code as usize] = if (code & 0x8) != 0 && (code & 0x7) != 0 {
+                -mag
+            } else {
+                mag
+            };
         }
         lut
     })

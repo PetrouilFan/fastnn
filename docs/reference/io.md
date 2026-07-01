@@ -60,7 +60,7 @@ Custom binary with magic bytes (`b"FNN\x00"` for models, `b"FNO\x00"` for optimi
 |---------|------|------|----------|
 | v1 | -- | Yes | Basic f32 parameters |
 | v2 | Yes | Yes | f32 + optional gradient storage |
-| v3 | Yes | Yes | Dtype-tagged packed tensors (F32, F16, U8, U4) |
+| v3 | Yes | Yes | Dtype-tagged packed tensors (F32, F16, U8, U4, I4Codebook) |
 
 ### Version 2 (fnn-v2)
 
@@ -68,7 +68,7 @@ All parameters stored as float32 with optional per-parameter gradient storage. B
 
 ### Version 3 (fnn-v3)
 
-Dtype-tagged tensors: each parameter carries a precision tag (F32=0, F16=1, U8=2, U4=3) with per-channel scale and zero-point arrays. Packed U4/U8/F16 data stored as raw bytes, reducing file size by up to 8x. Enables direct loading of quantized models without re-quantization.
+Dtype-tagged tensors: each parameter carries a precision tag (F32=0, F16=1, U8=2, U4=3, I4Codebook=4) with per-channel scale and zero-point arrays. I4Codebook additionally stores the 64-byte codebook and per-block scales. Packed U4/U8/F16 data stored as raw bytes, reducing file size by up to 8x. Enables direct loading of quantized models without re-quantization.
 
 ## ONNX Import and Export
 

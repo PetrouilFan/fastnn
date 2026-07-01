@@ -138,13 +138,10 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
 
     Ok({
         let scales_len = meta.scales.len();
-        let mut pt = PackedTensor::from_raw_arc(
-            data,
-            meta.shape.clone(),
-            meta.scales.clone(),
-            zero_points,
-        );
+        let mut pt =
+            PackedTensor::from_raw_arc(data, meta.shape.clone(), meta.scales.clone(), zero_points);
         pt.quant_block_size = meta.quant_block_size;
+        pt.codebooks = meta.codebooks.clone();
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;
         }
@@ -198,6 +195,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
                 zero_points: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
+                codebooks: vec![],
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
@@ -250,6 +248,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
                 zero_points: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
+                codebooks: vec![],
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
@@ -309,6 +308,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
                 zero_points: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
+                codebooks: vec![],
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;

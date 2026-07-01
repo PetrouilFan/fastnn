@@ -20,7 +20,7 @@ fastnn is an ahead-of-time compiled neural network runtime with eager-mode train
 ## Highlights
 
 - **AOT-compiled graphs** — Write with an eager-like API, deploy with compiled graph performance. Shape inference, fusion, quantization, and memory planning happen at compile time.
-- **90+ IR ops, 6 compiler passes** — Operator fusion (ReLU, GELU, SiLU, MatMul+Add), weight quantization (I4/I8, FP4/FP8), constant folding, dead code elimination, and arena memory planning.
+- **90+ IR ops, 6 compiler passes** — Operator fusion (ReLU, GELU, SiLU, MatMul+Add), weight quantization (I4/I8/FP4/FP8, I4Codebook per-block), constant folding, dead code elimination, and arena memory planning.
 - **CPU + GPU backends** — ARM NEON and x86 SIMD CPU kernels with runtime dispatch, plus an experimental WGPU backend (Vulkan, Metal, DX12).
 - **ONNX import/export** — Import 90+ ONNX ops, export trained models. Full YOLOv5/v8/v10/v11 pipeline with NMS post-processing.
 - **Python bindings (PyO3) + Rust native API** — Use from Python with numpy interop, or embed directly in Rust projects.
@@ -67,7 +67,7 @@ executor = AotExecutor(
     params=model_params,
     input_names=["input"],
     output_names=["output"],
-    quantize=4,                    # 4-bit weight quantization
+    quantize=4,                    # 4-bit weight quantization (or "i4cb" for codebook)
 )
 outputs = executor.forward({"input": input_tensor})
 ```

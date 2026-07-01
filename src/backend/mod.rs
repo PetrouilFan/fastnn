@@ -52,6 +52,9 @@ pub struct QuantizedWeightMeta {
     pub shape: Vec<usize>,
     /// Per-element quantization block size within each row. 0 = per-channel.
     pub quant_block_size: usize,
+    /// Per-block codebooks for I4 codebook quantization (16 centroids per block, normalized to [-1, 1]).
+    /// Empty when not using codebook quantization.
+    pub codebooks: Vec<[f32; 16]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

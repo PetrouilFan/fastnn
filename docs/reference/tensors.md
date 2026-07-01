@@ -55,7 +55,7 @@ f = fnn.full_like(x, 3.0)
 | `u8` | Unsigned 8-bit integer | 1 byte |
 | `bool` | Boolean | 1 byte |
 
-Dtype values live under `fastnn.dtypes`. See the [performance roadmap](../internals/performance-roadmap.md) for packed precision types (`I4x8`, `I8x4`, `F16x2`, `F32x1`) used in the Rust API.
+Dtype values live under `fastnn.dtypes`. See the [performance roadmap](../internals/performance-roadmap.md) for packed precision types (`I4x8`, `I8x4`, `F16x2`, `F32x1`) used in the Rust API. For codebook INT4 quantization, use the `"i4cb"` string when calling the AOT executor (e.g., `AotExecutor(..., quantize="i4cb")`).
 
 ## Tensor Operations
 

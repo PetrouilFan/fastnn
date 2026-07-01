@@ -21,7 +21,7 @@ model = fnn.compile_train_model(
     beta1=None,             # Adam/AdamW/Lion beta1
     beta2=None,             # Adam/AdamW/Lion beta2
     eps=None,               # Adam/AdamW/RMSprop epsilon
-    quantize=None,          # Quantization bit-width (4 or 8)
+    quantize=None,          # Quantization: 4 or 8 for standard, "i4cb" for codebook INT4
 ) -> PyCompiledTrainingModel
 ```
 

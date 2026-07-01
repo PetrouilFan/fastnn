@@ -42,6 +42,8 @@ pub enum WeightDtype {
     F8x4R,
     /// Float 4-bit E2M1 (F4x8).
     F4x8,
+    /// Integer 4-bit codebook quantization (I4x8).
+    I4Codebook,
 }
 
 /// Cached state for an all-Known-shape model so that every forward call
@@ -263,6 +265,10 @@ impl<B: Backend> GraphExecutor<B> {
                     }
                     WeightDtype::F4x8 => {
                         quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8, None)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::I4Codebook => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::I4Codebook, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
                     WeightDtype::F32 => {}
@@ -596,14 +602,21 @@ impl<B: Backend> GraphExecutor<B> {
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         // ── Preamble: shape env, tighten, safety, arena, input write ──
         let (tightened_memory_plan, shape_env, cached_filtered_plan) =
-            if let Some(StaticShapeCache { ref tightened_memory_plan, ref shape_env, ref filtered_plan }) =
-                self.static_shape_cache
+            if let Some(StaticShapeCache {
+                ref tightened_memory_plan,
+                ref shape_env,
+                ref filtered_plan,
+            }) = self.static_shape_cache
             {
                 // Fast path: the plan was already tightened on the first
                 // inference.  Reuse the cached tightened memory plan and
                 // shape env, skipping the O(N_nodes) resolve + tighten
                 // + tighten_slices steps entirely.
-                (tightened_memory_plan.clone(), shape_env.clone(), Some(filtered_plan.clone()))
+                (
+                    tightened_memory_plan.clone(),
+                    shape_env.clone(),
+                    Some(filtered_plan.clone()),
+                )
             } else {
                 let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
                     .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
@@ -653,23 +666,24 @@ impl<B: Backend> GraphExecutor<B> {
         if cached_filtered_plan.is_none() {
             for (&node_id, slot) in &tightened_memory_plan.slots {
                 if let Some(node) = graph.get_node(node_id) {
-                    let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
-                        let numel: u64 = shape.iter().product();
-                        let raw = numel as usize * node.output_type.dtype.byte_size();
-                        match &node.output_type.dtype {
-                            IrDType::I4 { .. }
-                            | IrDType::U8 { .. }
-                            | IrDType::F8 { .. }
-                            | IrDType::F8R { .. }
-                            | IrDType::F4 { .. } => {
-                                node.output_type.dtype.packed_byte_size(numel as usize)
+                    let needed =
+                        if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
+                            let numel: u64 = shape.iter().product();
+                            let raw = numel as usize * node.output_type.dtype.byte_size();
+                            match &node.output_type.dtype {
+                                IrDType::I4 { .. }
+                                | IrDType::U8 { .. }
+                                | IrDType::F8 { .. }
+                                | IrDType::F8R { .. }
+                                | IrDType::F4 { .. } => {
+                                    node.output_type.dtype.packed_byte_size(numel as usize)
+                                }
+                                IrDType::I8 => numel as usize + 8,
+                                _ => raw,
                             }
-                            IrDType::I8 => numel as usize + 8,
-                            _ => raw,
-                        }
-                    } else {
-                        continue;
-                    };
+                        } else {
+                            continue;
+                        };
                     if needed > slot.size {
                         return Err(BackendError::Dispatch(format!(
                             "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
@@ -2149,8 +2163,14 @@ mod prepared_fallback_tests {
         );
 
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0], second[0], "second call (cache path) must match first");
-        assert_eq!(second[0], third[0], "third call (cache path) must match first");
+        assert_eq!(
+            first[0], second[0],
+            "second call (cache path) must match first"
+        );
+        assert_eq!(
+            second[0], third[0],
+            "third call (cache path) must match first"
+        );
         assert_eq!(
             read_f32(&first[0]),
             vec![11.0, 22.0, 33.0, 44.0],

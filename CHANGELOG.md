@@ -9,6 +9,7 @@
 - **WGPU conv2d dispatch** for all 5 packed types (I4x8, I8x4, F4x8, F8x4, F8x4R)
 - **F8x4/F8x4R conv2d dispatch** — generic `im2col_pack_float8<T>` and
   `conv2d_packed_float<T>` in packed_conv + `gemm_packed_float_fused<T>` in packed_gemm
+- **I4Codebook quantization**: Per-block codebook INT4 quantization with data-adaptive K-means centroids. Codebook captures distribution shape, per-block scale captures magnitude. 4-bit weight-only quantization for YOLO/edge deployment.
 - **Fusion pass stubs enabled**: `OpGelu`, `MatMulAddGelu`, `MatMulAddSilu`
 - **Welford single-pass variance** for scalar LayerNorm and fused residual+layernorm
   (~33% fewer memory passes per row)

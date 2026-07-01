@@ -194,17 +194,40 @@ impl MemoryPlan {
                     let c_per_group = c / groups;
                     let f_out = weight_shape.first().copied().unwrap_or(1) as usize;
                     let h_out = if stride > 0 {
-                        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1
-                    } else { 1 };
+                        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
+                            / stride
+                            + 1
+                    } else {
+                        1
+                    };
                     let w_out = if stride > 0 {
-                        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1
-                    } else { 1 };
+                        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
+                            / stride
+                            + 1
+                    } else {
+                        1
+                    };
                     let spatial_size = h_out * w_out;
                     let col_w = c_per_group * kh * kw;
                     // Layout: [stride, padding, dilation, groups, c, h, w, kh, kw,
                     //          n_in, f_out, h_out, w_out, spatial_size, col_w]
-                    vec![stride, padding, dilation, groups, c, h, w, kh, kw,
-                         n_in, f_out, h_out, w_out, spatial_size, col_w]
+                    vec![
+                        stride,
+                        padding,
+                        dilation,
+                        groups,
+                        c,
+                        h,
+                        w,
+                        kh,
+                        kw,
+                        n_in,
+                        f_out,
+                        h_out,
+                        w_out,
+                        spatial_size,
+                        col_w,
+                    ]
                 }
                 _ => return Ok(()),
             };

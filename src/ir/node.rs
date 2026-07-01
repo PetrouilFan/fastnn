@@ -543,9 +543,13 @@ pub enum IrDType {
     I8,
     /// Packed 4-bit (I4x8): 8 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
+    /// When `codebooks` is non-empty, bits 0-3 are an unsigned 4-bit index
+    /// (0-15) into `codebook[block_idx]`.  Dequant: `codebook[blk][nibble]`.
+    /// Replaces scales/zeros when present (they are ignored).
     I4 {
         scales: Vec<f32>,
         zero_points: Vec<f32>,
+        codebooks: Vec<[f32; 16]>,
     },
     /// Packed 8-bit (I8x4): 4 values per u32 word.
     /// `scales` and `zero_points` are per-output-channel vectors.
@@ -564,9 +568,13 @@ pub enum IrDType {
     },
     /// FP4 E2M1 (NVFP4-style), 8 values per u32 word.
     /// Uses 256-entry LUT for dot product. Block scales stored in PackedTensor.
+    /// When `codebooks` is non-empty, bits 0-2 are a magnitude index into
+    /// `codebook[block_idx]` and bit 3 is the sign.
+    /// Dequant: `sign * codebook[block][magnitude]`. Overrides scales/zeros.
     F4 {
         scales: Vec<f32>,
         zeros: Vec<f32>,
+        codebooks: Vec<[f32; 16]>,
     },
 }
 
@@ -1153,8 +1161,11 @@ impl ComputeGraph {
     /// they can be cached after the first inference and skipped on
     /// subsequent calls.
     pub fn has_static_shapes(&self) -> bool {
-        self.nodes
-            .iter()
-            .all(|n| n.output_type.shape.iter().all(|d| matches!(d, DimExpr::Known(_))))
+        self.nodes.iter().all(|n| {
+            n.output_type
+                .shape
+                .iter()
+                .all(|d| matches!(d, DimExpr::Known(_)))
+        })
     }
 }

@@ -1337,9 +1337,10 @@ impl AotExecutor {
                         "f8" => crate::backend::executor::WeightDtype::F8x4,
                         "f8r" => crate::backend::executor::WeightDtype::F8x4R,
                         "f4" => crate::backend::executor::WeightDtype::F4x8,
+                        "i4cb" => crate::backend::executor::WeightDtype::I4Codebook,
                         _ => {
                             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unsupported quantize string: '{}' (expected f32, f8, f8r, f4, 4, or 8)",
+                                "unsupported quantize string: '{}' (expected f32, f8, f8r, f4, i4cb, 4, or 8)",
                                 s
                             )))
                         }
@@ -1411,12 +1412,7 @@ impl AotExecutor {
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             } else {
                 self.executor
-                    .execute(
-                        &self.graph,
-                        &mut self.plan,
-                        &self.memory_plan,
-                        &input_refs,
-                    )
+                    .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             }
         };
@@ -1424,12 +1420,7 @@ impl AotExecutor {
         #[cfg(not(feature = "prepared-plan"))]
         let output_data = self
             .executor
-            .execute(
-                &self.graph,
-                &mut self.plan,
-                &self.memory_plan,
-                &input_refs,
-            )
+            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.decode_outputs(output_data)
@@ -2322,6 +2313,7 @@ impl AotExecutor {
                     crate::ir::node::IrDType::I4 {
                         scales,
                         zero_points,
+                        ..
                     }
                     | crate::ir::node::IrDType::U8 {
                         scales,
