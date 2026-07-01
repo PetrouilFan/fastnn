@@ -78,6 +78,35 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
     v
 }
 
+/// Cache for unpacked f32 weights, keyed by the same cache key as `get_or_cache_packed`.
+/// Avoids re-unpacking on every forward pass when `PackedTensor` is transient.
+fn get_or_cache_f32_weights<T: PackedWord + 'static>(
+    write_offset: usize,
+    write_size: usize,
+    raw: &[u8],
+    shape: &[usize],
+    scales: &[f32],
+    zeros: &[f32],
+) -> Arc<Vec<f32>> {
+    let cache_key = (raw.as_ptr() as usize, write_offset, write_size, TypeId::of::<T>());
+    static F32_CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize, TypeId), Arc<Vec<f32>>>>> =
+        OnceLock::new();
+    let mut cache = F32_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(arc) = cache.get(&cache_key) {
+        return arc.clone();
+    }
+    let packed_data = get_or_cache_packed::<T>(write_offset, write_size, raw);
+    let pt = PackedTensor::from_raw_arc(
+        packed_data,
+        shape.to_vec(),
+        scales.to_vec(),
+        zeros.to_vec(),
+    );
+    let f32_weights = Arc::new(pt.get_or_init_f32_weights().to_vec());
+    cache.insert(cache_key, f32_weights.clone());
+    f32_weights
+}
+
 #[allow(clippy::cognitive_complexity)]
 /// Align-packed-weight helper: cast raw bytes to &[PackedType] when the
 /// pointer is 4-byte aligned (the common case for arena-backed data),
@@ -3899,15 +3928,23 @@ impl Backend for CpuBackend {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let flat_shape = if meta.shape.len() >= 4 {
-                                    let oc = meta.shape[0];
-                                    let inner: usize = meta.shape[1..].iter().product();
-                                    vec![oc, inner]
+                                let (oc, inner) = if meta.shape.len() >= 4 {
+                                    (meta.shape[0], meta.shape[1..].iter().product::<usize>())
                                 } else {
-                                    meta.shape.clone()
+                                    (meta.shape[0], meta.shape[1..].iter().product::<usize>())
                                 };
                                 let n = input_data.len() / (input_c * input_h * input_w).max(1);
                                 let bias_opt = bias_data.filter(|b| !b.is_empty());
+                                let fused_act =
+                                    if kernel_name.contains("_relu") {
+                                        PreparedActivation::Relu
+                                    } else if kernel_name.contains("_gelu") {
+                                        PreparedActivation::Gelu
+                                    } else if kernel_name.contains("_silu") {
+                                        PreparedActivation::Silu
+                                    } else {
+                                        PreparedActivation::None
+                                    };
                                 macro_rules! dispatch_packed_conv {
                                     ($PackedType:ty, $fn:path) => {{
                                         let packed_data = get_or_cache_packed::<$PackedType>(
@@ -3915,20 +3952,10 @@ impl Backend for CpuBackend {
                                         );
                                         let pt = PackedTensor::from_raw_arc(
                                             packed_data,
-                                            flat_shape,
+                                            vec![oc, inner],
                                             meta.scales.clone(),
                                             meta.zero_points.clone(),
                                         );
-                                        let fused_act =
-                                            if kernel_name.contains("_relu") {
-                                                PreparedActivation::Relu
-                                            } else if kernel_name.contains("_gelu") {
-                                                PreparedActivation::Gelu
-                                            } else if kernel_name.contains("_silu") {
-                                                PreparedActivation::Silu
-                                            } else {
-                                                PreparedActivation::None
-                                            };
                                         unsafe {
                                             $fn(
                                                 &input_data,
@@ -3950,18 +3977,40 @@ impl Backend for CpuBackend {
                                         }
                                     }};
                                 }
+                                macro_rules! dispatch_packed_conv_cached {
+                                    ($PackedType:ty) => {{
+                                        let f32_weights = get_or_cache_f32_weights::<$PackedType>(
+                                            w_slice.offset, w_slice.size, &raw,
+                                            &[oc, inner], &meta.scales, &meta.zero_points,
+                                        );
+                                        let conv_act = match fused_act {
+                                            PreparedActivation::None => None,
+                                            PreparedActivation::Relu => Some(microkernels::ConvActivation::Relu),
+                                            PreparedActivation::Gelu => Some(microkernels::ConvActivation::Gelu),
+                                            PreparedActivation::Silu => Some(microkernels::ConvActivation::Silu),
+                                        };
+                                        let bias_slice = bias_opt.unwrap_or(&[]);
+                                        unsafe {
+                                            microkernels::conv::conv2d_f32_im2col_gemm(
+                                                &input_data,
+                                                &f32_weights,
+                                                bias_slice,
+                                                out_f32,
+                                                n, input_c, input_h, input_w,
+                                                oc,
+                                                kernel_h, kernel_w,
+                                                stride, padding, dilation, groups,
+                                                conv_act,
+                                            );
+                                        }
+                                    }};
+                                }
                                 if kernel_name.starts_with("conv2d_f4") {
-                                    dispatch_packed_conv!(F4x8, packed_conv::conv2d_packed_f4x8);
+                                    dispatch_packed_conv_cached!(F4x8);
                                 } else if kernel_name.starts_with("conv2d_f8r") {
-                                    dispatch_packed_conv!(
-                                        F8x4R,
-                                        packed_conv::conv2d_packed_float::<F8x4R>
-                                    );
+                                    dispatch_packed_conv_cached!(F8x4R);
                                 } else if kernel_name.starts_with("conv2d_f8") {
-                                    dispatch_packed_conv!(
-                                        F8x4,
-                                        packed_conv::conv2d_packed_float::<F8x4>
-                                    );
+                                    dispatch_packed_conv_cached!(F8x4);
                                 } else if meta.bit_width == 4 {
                                     dispatch_packed_conv!(I4x8, packed_conv::conv2d_packed_i4x8);
                                 } else {

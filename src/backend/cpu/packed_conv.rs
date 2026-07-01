@@ -14,7 +14,6 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::backend::cpu::packed_gemm::gemm_packed_float_fused;
 use crate::backend::cpu::swar::{
     i4x8_dot_packed, i8x4_dot_packed, sum_i4x8_packed, sum_i8x4_packed,
 };
@@ -341,75 +340,10 @@ unsafe fn im2col_pack_f4x8(
     })
 }
 
-// ── FP8 im2col + pack (generic for F8x4 and F8x4R) ─────────────
-
-/// Generic im2col + pack for 8-bit float types (F8x4, F8x4R — both have 4 items per word).
-///
-/// Symmetric quantization: values are scaled so max_abs maps to T::MAX_REPRESENTABLE.
-/// Zero point is always 0.0.
-unsafe fn im2col_pack_float8<T: PackedWord>(
-    input_n: &[f32],
-    c: usize,
-    h: usize,
-    w: usize,
-    kh: usize,
-    kw: usize,
-    stride: usize,
-    padding: usize,
-    dilation: usize,
-) -> PackedTensor<T> {
-    debug_assert_eq!(T::ITEMS, 4);
-    let h_out = conv_out_size(h, kh, stride, padding, dilation);
-    let w_out = conv_out_size(w, kw, stride, padding, dilation);
-    let m = h_out * w_out;
-    let k = c * kh * kw;
-    let k_packed = k.div_ceil(4);
-    let col_size = m * k;
-
-    with_col_buf(col_size, |col| {
-        let (_global_min, _global_max) = crate::backend::cpu::im2col::im2col_dispatch(
-            input_n, c, h, w, kh, kw, stride, padding, dilation, col,
-            false, // F8x symmetric quant — uses separate max_abs scan below
-        );
-
-        let max_abs = col.iter().copied().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let inv_scale = if max_abs > 0.0 {
-            T::MAX_REPRESENTABLE / max_abs
-        } else {
-            1.0
-        };
-
-        let mut packed: Vec<T> = Vec::with_capacity(m * k_packed);
-        for row in 0..m {
-            let row_start = row * k;
-            for word in 0..k_packed {
-                let mut arr: T::Array = Default::default();
-                let slice = arr.as_mut();
-                let base = row_start + word * 4;
-                for i in 0..4 {
-                    let elem_idx = base + i;
-                    slice[i] = if elem_idx < row_start + k {
-                        col[elem_idx] * inv_scale
-                    } else {
-                        0.0
-                    };
-                }
-                packed.push(T::pack_from_f32(arr));
-            }
-        }
-
-        let scale = if max_abs > 0.0 {
-            max_abs / T::MAX_REPRESENTABLE
-        } else {
-            1.0
-        };
-        PackedTensor::from_raw(packed, vec![m, k], vec![scale], vec![0.0])
-    })
-}
-
 /// Generic conv2d for 8-bit float packed types (F8x4, F8x4R).
 ///
-/// Uses im2col_pack_float8 for activation packing and gemm_packed_float_fused for the GEMM.
+/// Fast path: does im2col in f32, unpacks weights to f32 via LUT, calls gemm::gemm::<f32>.
+/// Skips the wasteful f32→packed→f32 quantize/dequantize cycle on activations.
 pub unsafe fn conv2d_packed_float<T: PackedWord>(
     input: &[f32],
     n: usize,
@@ -428,57 +362,31 @@ pub unsafe fn conv2d_packed_float<T: PackedWord>(
     output: &mut [f32],
 ) {
     let oc = weight.shape()[0];
-    let c_per_g = c / groups;
-    let oc_per_g = oc / groups;
-    let h_out = conv_out_size(h, kh, stride, padding, dilation);
-    let w_out = conv_out_size(w, kw, stride, padding, dilation);
-    let num_pixels = h_out * w_out;
 
-    for nn in 0..n {
-        let input_base = nn * c * h * w;
-        let out_base = nn * oc * h_out * w_out;
+    let f32_weights = weight.get_or_init_f32_weights();
 
-        for g in 0..groups {
-            let g_c_off = g * c_per_g;
-            let g_oc_off = g * oc_per_g;
+    let conv_act = prepared_to_conv_activation(activation);
+    let bias_slice = bias.unwrap_or(&[]);
 
-            let act_packed = im2col_pack_float8::<T>(
-                &input[input_base + g_c_off * h * w..],
-                c_per_g,
-                h,
-                w,
-                kh,
-                kw,
-                stride,
-                padding,
-                dilation,
-            );
+    super::microkernels::conv::conv2d_f32_im2col_gemm(
+        input,
+        f32_weights,
+        bias_slice,
+        output,
+        n, c, h, w, oc,
+        kh, kw, stride, padding, dilation, groups,
+        conv_act,
+    );
+}
 
-            let w_slice = if groups > 1 {
-                slice_packed(weight, g_oc_off, oc_per_g)
-            } else {
-                slice_packed(weight, 0, oc)
-            };
-
-            let local_oc = w_slice.shape()[0];
-            let b = bias.map(|b| {
-                if groups > 1 {
-                    &b[g_oc_off..g_oc_off + oc_per_g]
-                } else {
-                    b
-                }
-            });
-
-            with_col_buf(num_pixels * local_oc, |temp| {
-                gemm_packed_float_fused(&act_packed, &w_slice, b, activation, temp);
-                for pixel in 0..num_pixels {
-                    for f in 0..local_oc {
-                        output[out_base + (g_oc_off + f) * num_pixels + pixel] =
-                            temp[pixel * local_oc + f];
-                    }
-                }
-            });
-        }
+#[inline(always)]
+fn prepared_to_conv_activation(a: PreparedActivation) -> Option<super::microkernels::ConvActivation> {
+    use super::microkernels::ConvActivation;
+    match a {
+        PreparedActivation::None => None,
+        PreparedActivation::Relu => Some(ConvActivation::Relu),
+        PreparedActivation::Gelu => Some(ConvActivation::Gelu),
+        PreparedActivation::Silu => Some(ConvActivation::Silu),
     }
 }
 
