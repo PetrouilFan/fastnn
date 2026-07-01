@@ -169,6 +169,43 @@ impl MemoryPlan {
                     };
                     vec![group_size, is_mean, is_max]
                 }
+                Opcode::Conv2d => {
+                    let get_attr_usize = |name: &str| -> usize {
+                        node.attrs
+                            .get(name)
+                            .and_then(|a| a.parse().ok())
+                            .unwrap_or(0)
+                    };
+                    let stride = get_attr_usize("stride");
+                    let padding = get_attr_usize("padding");
+                    let dilation = get_attr_usize("dilation");
+                    let groups = get_attr_usize("groups").max(1);
+
+                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
+                    let weight_shape = resolved_input_shapes.get(1).cloned().unwrap_or_default();
+
+                    let n_in = input_shape.first().copied().unwrap_or(1) as usize;
+                    let c = input_shape.get(1).copied().unwrap_or(1) as usize;
+                    let h = input_shape.get(2).copied().unwrap_or(1) as usize;
+                    let w = input_shape.get(3).copied().unwrap_or(1) as usize;
+                    // kernel_h/kw come from weight shape, not attrs (matches compile-time code)
+                    let kh = weight_shape.get(2).copied().unwrap_or(0) as usize;
+                    let kw = weight_shape.get(3).copied().unwrap_or(0) as usize;
+                    let c_per_group = c / groups;
+                    let f_out = weight_shape.first().copied().unwrap_or(1) as usize;
+                    let h_out = if stride > 0 {
+                        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1) / stride + 1
+                    } else { 1 };
+                    let w_out = if stride > 0 {
+                        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1) / stride + 1
+                    } else { 1 };
+                    let spatial_size = h_out * w_out;
+                    let col_w = c_per_group * kh * kw;
+                    // Layout: [stride, padding, dilation, groups, c, h, w, kh, kw,
+                    //          n_in, f_out, h_out, w_out, spatial_size, col_w]
+                    vec![stride, padding, dilation, groups, c, h, w, kh, kw,
+                         n_in, f_out, h_out, w_out, spatial_size, col_w]
+                }
                 _ => return Ok(()),
             };
             mp.tightened_params.insert(node_id, tightened);
