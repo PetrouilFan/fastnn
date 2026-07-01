@@ -8,6 +8,7 @@ use crate::dtypes::PackedWord;
 use crate::packed_tensor::PackedTensor;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// A quantizable tensor that stores data in blocks with independent scale/zero.
 /// Each block has independent scale/zero for better accuracy.
@@ -141,6 +142,7 @@ impl<T: PackedWord> QuantizedTensor<T> {
             zeros: vec![0.0],
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
         }
     }
 
