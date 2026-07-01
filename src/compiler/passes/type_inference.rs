@@ -393,6 +393,7 @@ mod tests {
                 IrDType::I4 {
                     scales: vec![],
                     zero_points: vec![],
+                    codebooks: vec![],
                 },
             ),
         );
