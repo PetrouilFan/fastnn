@@ -103,7 +103,7 @@ fn fused_binary_activation_dispatch_slices(
         }
     }
     #[cfg(feature = "parallel")]
-    {
+    if out_len >= 4096 {
         use rayon::prelude::*;
         out_f32[..out_len]
             .par_iter_mut()
@@ -112,6 +112,11 @@ fn fused_binary_activation_dispatch_slices(
                 let x = op(a[i % a_len], b[i % b_len]);
                 *o = act(x);
             });
+    } else {
+        for i in 0..out_len {
+            let x = op(a[i % a_len], b[i % b_len]);
+            out_f32[i] = act(x);
+        }
     }
 }
 

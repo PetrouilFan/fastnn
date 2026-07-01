@@ -106,6 +106,9 @@ tests/test_threading.py
 ARCHITECTURE_PLAN.md
 BENCHMARKS.md
 
+# AGENTS.md knowledge base files (internal artifacts)
+**/AGENTS.md
+
 # Temporary analysis/documentation files
 *ARCHITECTURE_ANALYSIS.md
 *FINAL_REPORT.md

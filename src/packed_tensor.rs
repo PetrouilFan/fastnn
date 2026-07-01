@@ -263,17 +263,27 @@ impl<T: PackedWord> PackedTensor<T> {
 
     #[inline]
     pub fn scale(&self) -> f32 {
-        self.scales[0]
+        if self.scales.is_empty() {
+            1.0
+        } else {
+            self.scales[0]
+        }
     }
 
     #[inline]
     pub fn zero(&self) -> f32 {
-        self.zeros[0]
+        if self.zeros.is_empty() {
+            0.0
+        } else {
+            self.zeros[0]
+        }
     }
 
     #[inline]
     pub fn scale_for_row(&self, row: usize) -> f32 {
-        if self.scales.len() == 1 {
+        if self.scales.is_empty() {
+            1.0
+        } else if self.scales.len() == 1 {
             self.scales[0]
         } else if self.group_size > 1 {
             self.scales[row / self.group_size]
@@ -284,7 +294,9 @@ impl<T: PackedWord> PackedTensor<T> {
 
     #[inline]
     pub fn zero_for_row(&self, row: usize) -> f32 {
-        if self.zeros.len() == 1 {
+        if self.zeros.is_empty() {
+            0.0
+        } else if self.zeros.len() == 1 {
             self.zeros[0]
         } else if self.group_size > 1 {
             self.zeros[row / self.group_size]
@@ -311,9 +323,10 @@ impl<T: PackedWord> PackedTensor<T> {
                 let mut idx = 0;
                 for kk in 0..k_packed {
                     let unpacked = w_row[kk].unpack_to_f32();
+                    let w_zero = self.zero_for_row(row);
                     for i in 0..T::ITEMS {
                         if idx < inner {
-                            out_row[idx] = unpacked.as_ref()[i] * w_scale;
+                            out_row[idx] = unpacked.as_ref()[i] * w_scale + w_zero;
                             idx += 1;
                         }
                     }
@@ -529,6 +542,98 @@ impl<T: PackedWord> PackedTensor<T> {
             zeros: vec![0.0; m],
             block_size: 1,
             group_size: 0,
+            cached_f32_weights: OnceLock::new(),
+        }
+    }
+
+    /// Same as `from_f32_per_channel` but with per-group quantization.
+    /// `group_size` divides the output channels (rows) into groups of this size.
+    /// Each group shares one scale. Use 0 or 1 for per-channel.
+    pub fn from_f32_per_channel_grouped(
+        data: &[f32],
+        shape: &[usize],
+        group_size: usize,
+    ) -> Self {
+        if group_size <= 1 {
+            return Self::from_f32_per_channel(data, shape);
+        }
+        Self::from_f32_per_channel_grouped_impl(data, shape, group_size)
+    }
+
+    fn from_f32_per_channel_grouped_impl(
+        data: &[f32],
+        shape: &[usize],
+        group_size: usize,
+    ) -> Self {
+        let numel: usize = shape.iter().product();
+        assert_eq!(data.len(), numel);
+
+        let m = if shape.len() >= 2 { shape[0] } else { 1 };
+        let inner_stride = if shape.len() >= 2 {
+            shape[1..].iter().product()
+        } else {
+            numel
+        };
+
+        let mut row_max_abs = vec![0.0f32; m];
+        for row in 0..m {
+            let start = row * inner_stride;
+            let end = (start + inner_stride).min(numel);
+            let max_abs = data[start..end]
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0f32, f32::max);
+            row_max_abs[row] = max_abs;
+        }
+
+        let num_groups = m.div_ceil(group_size);
+        let max_val = T::MAX_REPRESENTABLE;
+        let mut scales = Vec::with_capacity(num_groups);
+        for g in 0..num_groups {
+            let start_row = g * group_size;
+            let end_row = (start_row + group_size).min(m);
+            let grp_max_abs = row_max_abs[start_row..end_row]
+                .iter()
+                .copied()
+                .fold(0.0f32, f32::max);
+            scales.push(if grp_max_abs == 0.0 {
+                1.0
+            } else {
+                grp_max_abs / max_val
+            });
+        }
+
+        let k_packed = inner_stride.div_ceil(T::ITEMS);
+        let packed_len = m * k_packed;
+        // Safety margin for SIMD kernels that may read beyond the logical word boundary
+        const SIMD_MARGIN: usize = 16;
+        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+
+        for row in 0..m {
+            let gi = row / group_size;
+            let row_scale = scales[gi];
+            let inv_s = if row_scale != 0.0 { 1.0 / row_scale } else { 0.0 };
+            for word in 0..k_packed {
+                let chunk_idx = row * k_packed + word;
+                let mut arr = T::Array::default();
+                let arr_ref = arr.as_mut();
+                for i in 0..T::ITEMS {
+                    let elem_idx = row * inner_stride + word * T::ITEMS + i;
+                    if elem_idx < (row + 1) * inner_stride && elem_idx < numel {
+                        arr_ref[i] = data[elem_idx] * inv_s;
+                    }
+                }
+                packed[chunk_idx] = T::pack_from_f32(arr);
+            }
+        }
+
+        PackedTensor {
+            data: Arc::new(packed),
+            shape: shape.to_vec(),
+            scales,
+            zeros: vec![0.0; m],
+            block_size: 1,
+            group_size,
             cached_f32_weights: OnceLock::new(),
         }
     }

@@ -20,11 +20,15 @@ macro_rules! impl_simd_unary_wrapper {
             }
             let len = output.len().min(input.len());
             #[cfg(feature = "parallel")]
-            {
+            if len >= 4096 {
                 use rayon::prelude::*;
                 output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
                     *o = $scalar(input[i]);
                 });
+            } else {
+                for i in 0..len {
+                    output[i] = $scalar(input[i]);
+                }
             }
             #[cfg(not(feature = "parallel"))]
             for i in 0..len {
@@ -46,13 +50,19 @@ macro_rules! impl_simd_binary_wrapper {
             }
             let len = output.len().min(a.len().max(b.len()));
             #[cfg(feature = "parallel")]
-            {
+            if len >= 4096 {
                 use rayon::prelude::*;
                 let a_len = a.len();
                 let b_len = b.len();
                 output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
                     *o = $op(a[i % a_len], b[i % b_len]);
                 });
+            } else {
+                let a_len = a.len();
+                let b_len = b.len();
+                for i in 0..len {
+                    output[i] = $op(a[i % a_len], b[i % b_len]);
+                }
             }
             #[cfg(not(feature = "parallel"))]
             $scalar(a, b, output);
@@ -70,11 +80,15 @@ macro_rules! impl_simd_scalar_wrapper {
             }
             let len = output.len().min(data.len());
             #[cfg(feature = "parallel")]
-            {
+            if len >= 4096 {
                 use rayon::prelude::*;
                 output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
                     *o = $op(data[i], s);
                 });
+            } else {
+                for i in 0..len {
+                    output[i] = $op(data[i], s);
+                }
             }
             #[cfg(not(feature = "parallel"))]
             $scalar(data, s, output);

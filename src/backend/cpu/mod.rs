@@ -79,7 +79,8 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
 }
 
 /// Cache for unpacked f32 weights, keyed by the same cache key as `get_or_cache_packed`.
-/// Avoids re-unpacking on every forward pass when `PackedTensor` is transient.
+/// Stores `Arc<PackedTensor<T>>` so the internal OnceLock f32 cache persists,
+/// eliminating per-call `to_vec()` clones.
 fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     write_offset: usize,
     write_size: usize,
@@ -87,24 +88,26 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     shape: &[usize],
     scales: &[f32],
     zeros: &[f32],
-) -> Arc<Vec<f32>> {
+) -> Arc<PackedTensor<T>> {
     let cache_key = (raw.as_ptr() as usize, write_offset, write_size, TypeId::of::<T>());
-    static F32_CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize, TypeId), Arc<Vec<f32>>>>> =
+    static F32_CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>> =
         OnceLock::new();
     let mut cache = F32_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
-    if let Some(arc) = cache.get(&cache_key) {
-        return arc.clone();
+    if let Some(arc_any) = cache.get(&cache_key) {
+        if let Ok(arc_pt) = arc_any.clone().downcast::<PackedTensor<T>>() {
+            return arc_pt;
+        }
     }
     let packed_data = get_or_cache_packed::<T>(write_offset, write_size, raw);
-    let pt = PackedTensor::from_raw_arc(
+    let pt = Arc::new(PackedTensor::from_raw_arc(
         packed_data,
         shape.to_vec(),
         scales.to_vec(),
         zeros.to_vec(),
-    );
-    let f32_weights = Arc::new(pt.get_or_init_f32_weights().to_vec());
-    cache.insert(cache_key, f32_weights.clone());
-    f32_weights
+    ));
+    pt.get_or_init_f32_weights();
+    cache.insert(cache_key, pt.clone());
+    pt
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -767,9 +770,9 @@ impl Backend for CpuBackend {
                                         scales,
                                         zero_points,
                                     } => (4usize, scales.clone(), zero_points.clone()),
-                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![]),
-                                    IrDType::F8 { scales } => (8usize, scales.clone(), vec![]),
-                                    IrDType::F8R { scales } => (8usize, scales.clone(), vec![]),
+                                    IrDType::F4 { scales } => (4usize, scales.clone(), vec![0.0; scales.len()]),
+                                    IrDType::F8 { scales } => (8usize, scales.clone(), vec![0.0; scales.len()]),
+                                    IrDType::F8R { scales } => (8usize, scales.clone(), vec![0.0; scales.len()]),
                                     IrDType::U8 {
                                         scales,
                                         zero_points,
@@ -3220,13 +3223,11 @@ impl Backend for CpuBackend {
                         "transpose_perm_f32" => {
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                // params: [rank, d0..dN, p0..pN]
                                 let rank = params.first().copied().unwrap_or(2);
                                 let nd_params =
                                     resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
                                 let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
                                 let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
-                                // Pre-compute input and output strides
                                 let mut in_strides = vec![1usize; rank];
                                 let mut out_strides = vec![1usize; rank];
                                 for i in (0..rank - 1).rev() {
@@ -3241,36 +3242,39 @@ impl Backend for CpuBackend {
                                     *input_slice,
                                     output_slice,
                                     |input, out_f32| {
+                                        let total = out_f32.len();
+                                        let mut lookup = Vec::with_capacity(total);
+                                        for out_idx in 0..total {
+                                            let mut in_idx = 0usize;
+                                            let mut remaining = out_idx;
+                                            for k in 0..rank {
+                                                let coord = remaining / out_strides[perm[k]];
+                                                remaining %= out_strides[perm[k]];
+                                                in_idx += coord * in_strides[perm[k]];
+                                            }
+                                            lookup.push(in_idx);
+                                        }
                                         #[cfg(not(feature = "parallel"))]
                                         {
-                                            let total = out_f32.len();
-                                            for out_idx in 0..total {
-                                                let mut in_idx = 0usize;
-                                                let mut remaining = out_idx;
-                                                for k in 0..rank {
-                                                    let coord = remaining / out_strides[perm[k]];
-                                                    remaining %= out_strides[perm[k]];
-                                                    in_idx += coord * in_strides[perm[k]];
-                                                }
-                                                out_f32[out_idx] = input[in_idx];
+                                            for (i, &in_idx) in lookup.iter().enumerate() {
+                                                out_f32[i] = input[in_idx];
                                             }
                                         }
                                         #[cfg(feature = "parallel")]
                                         {
                                             use rayon::prelude::*;
-                                            out_f32.par_iter_mut().enumerate().for_each(
-                                                |(out_idx, v)| {
-                                                    let mut in_idx = 0usize;
-                                                    let mut remaining = out_idx;
-                                                    for k in 0..rank {
-                                                        let coord =
-                                                            remaining / out_strides[perm[k]];
-                                                        remaining %= out_strides[perm[k]];
-                                                        in_idx += coord * in_strides[perm[k]];
-                                                    }
-                                                    *v = input[in_idx];
-                                                },
-                                            );
+                                            if total >= 4096 {
+                                                out_f32
+                                                    .par_iter_mut()
+                                                    .enumerate()
+                                                    .for_each(|(i, v)| {
+                                                        *v = input[lookup[i]];
+                                                    });
+                                            } else {
+                                                for (i, &in_idx) in lookup.iter().enumerate() {
+                                                    out_f32[i] = input[in_idx];
+                                                }
+                                            }
                                         }
                                     },
                                 );
@@ -3979,10 +3983,11 @@ impl Backend for CpuBackend {
                                 }
                                 macro_rules! dispatch_packed_conv_cached {
                                     ($PackedType:ty) => {{
-                                        let f32_weights = get_or_cache_f32_weights::<$PackedType>(
+                                        let pt = get_or_cache_f32_weights::<$PackedType>(
                                             w_slice.offset, w_slice.size, &raw,
                                             &[oc, inner], &meta.scales, &meta.zero_points,
                                         );
+                                        let f32_weights = pt.get_or_init_f32_weights();
                                         let conv_act = match fused_act {
                                             PreparedActivation::None => None,
                                             PreparedActivation::Relu => Some(microkernels::ConvActivation::Relu),
@@ -3990,19 +3995,17 @@ impl Backend for CpuBackend {
                                             PreparedActivation::Silu => Some(microkernels::ConvActivation::Silu),
                                         };
                                         let bias_slice = bias_opt.unwrap_or(&[]);
-                                        unsafe {
-                                            microkernels::conv::conv2d_f32_im2col_gemm(
-                                                &input_data,
-                                                &f32_weights,
-                                                bias_slice,
-                                                out_f32,
-                                                n, input_c, input_h, input_w,
-                                                oc,
-                                                kernel_h, kernel_w,
-                                                stride, padding, dilation, groups,
-                                                conv_act,
-                                            );
-                                        }
+                                        microkernels::conv::conv2d_f32_im2col_gemm(
+                                            &input_data,
+                                            f32_weights,
+                                            bias_slice,
+                                            out_f32,
+                                            n, input_c, input_h, input_w,
+                                            oc,
+                                            kernel_h, kernel_w,
+                                            stride, padding, dilation, groups,
+                                            conv_act,
+                                        );
                                     }};
                                 }
                                 if kernel_name.starts_with("conv2d_f4") {
@@ -4035,14 +4038,12 @@ impl Backend for CpuBackend {
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
                                 let mut output_offset = 0;
+                                let d = arena.data_mut();
                                 for outer_pos in 0..outer_count {
                                     for (si, slice) in input_slices.iter().enumerate() {
-                                        let input_data = {
-                                            let d = arena.data_mut();
-                                            bytemuck::cast_slice::<_, f32>(
-                                                &d[slice.offset..slice.offset + slice.size],
-                                            )
-                                        };
+                                        let input_data = bytemuck::cast_slice::<_, f32>(
+                                            &d[slice.offset..slice.offset + slice.size],
+                                        );
                                         let bs = block_sizes[si];
                                         let src_start = outer_pos * bs;
                                         let src_end = (src_start + bs).min(input_data.len());
@@ -4118,15 +4119,22 @@ impl Backend for CpuBackend {
 
                         "pool_f32" => {
                             if let Some(input_slice) = input_slices.first() {
-                                let input = {
+                                let input_end = input_slice.offset + input_slice.size;
+                                let overlaps = arena::ranges_overlap(
+                                    input_slice.offset, input_end,
+                                    out_start, out_end,
+                                );
+                                let mut input_copy;
+                                let input: &[f32] = if overlaps {
                                     let d = arena.data_mut();
                                     let src = bytemuck::cast_slice::<_, f32>(
-                                        &d[input_slice.offset
-                                            ..input_slice.offset + input_slice.size],
+                                        &d[input_slice.offset..input_end],
                                     );
-                                    let mut copy = tls_alloc_f32(src.len());
-                                    copy.copy_from_slice(src);
-                                    copy
+                                    input_copy = tls_alloc_f32(src.len());
+                                    input_copy.copy_from_slice(src);
+                                    &input_copy
+                                } else {
+                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) }
                                 };
                                 // params: [kernel, stride, padding, is_max, N, C, H, W]
                                 let &[kernel, stride_val, padding_val, is_max, n, c, h, w] =
@@ -5007,17 +5015,28 @@ impl Backend for CpuBackend {
                                 {
                                     use rayon::prelude::*;
                                     let exponent = &exponent;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| {
+                                    if len >= 4096 {
+                                        out_f32[..len]
+                                            .par_iter_mut()
+                                            .enumerate()
+                                            .for_each(|(i, o)| {
+                                                let e = if i < exponent.len() {
+                                                    exponent[i]
+                                                } else {
+                                                    exponent[exponent.len().saturating_sub(1)]
+                                                };
+                                                *o = data[i].powf(e);
+                                            });
+                                    } else {
+                                        for i in 0..len {
                                             let e = if i < exponent.len() {
                                                 exponent[i]
                                             } else {
                                                 exponent[exponent.len().saturating_sub(1)]
                                             };
-                                            *o = data[i].powf(e);
-                                        });
+                                            out_f32[i] = data[i].powf(e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -5631,10 +5650,16 @@ impl Backend for CpuBackend {
                                 #[cfg(feature = "parallel")]
                                 {
                                     use rayon::prelude::*;
-                                    out_f32[..len]
-                                        .par_iter_mut()
-                                        .enumerate()
-                                        .for_each(|(i, o)| *o = in_f32[i] * scale);
+                                    if len >= 4096 {
+                                        out_f32[..len]
+                                            .par_iter_mut()
+                                            .enumerate()
+                                            .for_each(|(i, o)| *o = in_f32[i] * scale);
+                                    } else {
+                                        for i in 0..len {
+                                            out_f32[i] = in_f32[i] * scale;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -5930,19 +5955,30 @@ impl Backend for CpuBackend {
                             #[cfg(feature = "parallel")]
                             {
                                 use rayon::prelude::*;
-                                w_new
-                                    .par_iter_mut()
-                                    .zip(m_new_f32.par_iter_mut())
-                                    .zip(v_new_f32.par_iter_mut())
-                                    .enumerate()
-                                    .for_each(|(i, ((w, m), v))| {
+                                if len >= 4096 {
+                                    w_new
+                                        .par_iter_mut()
+                                        .zip(m_new_f32.par_iter_mut())
+                                        .zip(v_new_f32.par_iter_mut())
+                                        .enumerate()
+                                        .for_each(|(i, ((w, m), v))| {
+                                            let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                            *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                            let m_hat = *m / bias_corr1;
+                                            let v_hat = *v / bias_corr2;
+                                            *w -= lr * m_hat / (v_hat.sqrt() + eps);
+                                        });
+                                } else {
+                                    for i in 0..len {
                                         let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                        let m_hat = *m / bias_corr1;
-                                        let v_hat = *v / bias_corr2;
-                                        *w -= lr * m_hat / (v_hat.sqrt() + eps);
-                                    });
+                                        m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                        v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                        let m_hat = m_new_f32[i] / bias_corr1;
+                                        let v_hat = v_new_f32[i] / bias_corr2;
+                                        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                                    }
+                                }
                             }
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6042,20 +6078,32 @@ impl Backend for CpuBackend {
                             #[cfg(feature = "parallel")]
                             {
                                 use rayon::prelude::*;
-                                w_new
-                                    .par_iter_mut()
-                                    .zip(m_new_f32.par_iter_mut())
-                                    .zip(v_new_f32.par_iter_mut())
-                                    .enumerate()
-                                    .for_each(|(i, ((w, m), v))| {
-                                        *w -= lr * wd * w_init[i];
+                                if len >= 4096 {
+                                    w_new
+                                        .par_iter_mut()
+                                        .zip(m_new_f32.par_iter_mut())
+                                        .zip(v_new_f32.par_iter_mut())
+                                        .enumerate()
+                                        .for_each(|(i, ((w, m), v))| {
+                                            *w -= lr * wd * w_init[i];
+                                            let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                            *m = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                            *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                            let m_hat = *m / bias_corr1;
+                                            let v_hat = *v / bias_corr2;
+                                            *w -= lr * m_hat / (v_hat.sqrt() + eps);
+                                        });
+                                } else {
+                                    for i in 0..len {
+                                        w_new[i] -= lr * wd * w_init[i];
                                         let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
-                                        *m = beta1 * m_init[i] + (1.0 - beta1) * g;
-                                        *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
-                                        let m_hat = *m / bias_corr1;
-                                        let v_hat = *v / bias_corr2;
-                                        *w -= lr * m_hat / (v_hat.sqrt() + eps);
-                                    });
+                                        m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
+                                        v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
+                                        let m_hat = m_new_f32[i] / bias_corr1;
+                                        let v_hat = v_new_f32[i] / bias_corr2;
+                                        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+                                    }
+                                }
                             }
                             let d = arena.data_mut();
                             bytemuck::cast_slice_mut::<_, f32>(
@@ -6190,35 +6238,64 @@ impl Backend for CpuBackend {
                                 use rayon::prelude::*;
                                 let max_rank = max_rank;
                                 let out_addr = out_f32.as_mut_ptr() as usize;
-                                (0..out_numel).into_par_iter().for_each(|out_linear| {
-                                    let mut out_coord = vec![0usize; max_rank];
-                                    let mut remaining = out_linear;
-                                    for i in (0..max_rank).rev() {
-                                        out_coord[i] = remaining % out_dims[i];
-                                        remaining /= out_dims[i];
-                                    }
-                                    let mut in_linear: usize = 0;
-                                    let mut in_stride = 1usize;
-                                    for i in (0..max_rank).rev() {
-                                        let in_dim = in_dims[i];
-                                        let out_dim = out_dims[i];
-                                        let in_coord = if in_dim == out_dim {
-                                            out_coord[i]
-                                        } else if in_dim == 1 {
-                                            0
-                                        } else {
-                                            panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
-                                        };
-                                        in_linear += in_coord * in_stride;
-                                        in_stride *= in_dim;
-                                    }
-                                    if in_linear < data_numel {
-                                        unsafe {
-                                            *(out_addr as *mut f32).add(out_linear) =
-                                                in_f32[in_linear];
+                                if out_numel >= 4096 {
+                                    (0..out_numel).into_par_iter().for_each(|out_linear| {
+                                        let mut out_coord = vec![0usize; max_rank];
+                                        let mut remaining = out_linear;
+                                        for i in (0..max_rank).rev() {
+                                            out_coord[i] = remaining % out_dims[i];
+                                            remaining /= out_dims[i];
+                                        }
+                                        let mut in_linear: usize = 0;
+                                        let mut in_stride = 1usize;
+                                        for i in (0..max_rank).rev() {
+                                            let in_dim = in_dims[i];
+                                            let out_dim = out_dims[i];
+                                            let in_coord = if in_dim == out_dim {
+                                                out_coord[i]
+                                            } else if in_dim == 1 {
+                                                0
+                                            } else {
+                                                panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
+                                            };
+                                            in_linear += in_coord * in_stride;
+                                            in_stride *= in_dim;
+                                        }
+                                        if in_linear < data_numel {
+                                            unsafe {
+                                                *(out_addr as *mut f32).add(out_linear) =
+                                                    in_f32[in_linear];
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    for out_linear in 0..out_numel {
+                                        let mut out_coord = [0usize; 8];
+                                        let mut remaining = out_linear;
+                                        for i in (0..max_rank).rev() {
+                                            out_coord[i] = remaining % out_dims[i];
+                                            remaining /= out_dims[i];
+                                        }
+                                        let mut in_linear: usize = 0;
+                                        let mut in_stride = 1usize;
+                                        for i in (0..max_rank).rev() {
+                                            let in_dim = in_dims[i];
+                                            let out_dim = out_dims[i];
+                                            let in_coord = if in_dim == out_dim {
+                                                out_coord[i]
+                                            } else if in_dim == 1 {
+                                                0
+                                            } else {
+                                                panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
+                                            };
+                                            in_linear += in_coord * in_stride;
+                                            in_stride *= in_dim;
+                                        }
+                                        if in_linear < data_numel {
+                                            out_f32[out_linear] = in_f32[in_linear];
                                         }
                                     }
-                                });
+                                }
                             }
                         }
                         "range_f32" => {

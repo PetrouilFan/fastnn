@@ -74,6 +74,10 @@ pub(super) fn matmul_activation_dispatch(
 }
 
 /// Validate quantized weight metadata and build a packed tensor.
+///
+/// FP8 types (F8x4/F8x4R/F4x8) use symmetric quantization with zero point = 0.
+/// When `zero_points` is empty (because the IR dtype only stores scales for FP8),
+/// we synthesize a matching zeros vector of 0.0 values.
 pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     data: Arc<Vec<T>>,
     meta: std::sync::Arc<crate::backend::QuantizedWeightMeta>,
@@ -84,16 +88,16 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             "{kernel_name}: quantized weight metadata missing scales"
         )));
     }
-    if meta.zero_points.is_empty() {
-        return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: quantized weight metadata missing zero_points"
-        )));
-    }
-    if meta.scales.len() != meta.zero_points.len() {
+    let zero_points = if meta.zero_points.is_empty() {
+        vec![0.0; meta.scales.len()]
+    } else {
+        meta.zero_points.clone()
+    };
+    if meta.scales.len() != zero_points.len() {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: quantized weight metadata length mismatch: {} scales vs {} zero_points",
             meta.scales.len(),
-            meta.zero_points.len()
+            zero_points.len()
         )));
     }
 
@@ -137,7 +141,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             data,
             meta.shape.clone(),
             meta.scales.clone(),
-            meta.zero_points.clone(),
+            zero_points,
         );
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;

@@ -359,10 +359,36 @@ pub unsafe fn im2col_parallel(
 
     // Parallelize over output rows. Each row writes `row_elems` elements
     // at offset `oh * row_elems`. Split the prefix into row-size chunks.
-    col_prefix
-        .par_chunks_mut(row_elems)
-        .enumerate()
-        .for_each(|(oh, row_col)| {
+    if h_out >= crate::backend::cpu::topology::physical_core_count() {
+        col_prefix
+            .par_chunks_mut(row_elems)
+            .enumerate()
+            .for_each(|(oh, row_col)| {
+                for ow in 0..w_out {
+                    for ic in 0..c {
+                        for kkh in 0..kh {
+                            for kkw in 0..kw {
+                                let ih = oh * stride + kkh * dilation;
+                                let iw = ow * stride + kkw * dilation;
+                                let dst = ow * col_w + ic * kh * kw + kkh * kw + kkw;
+                                if ih < h + padding
+                                    && iw < w + padding
+                                    && ih >= padding
+                                    && iw >= padding
+                                {
+                                    let src = (ic * h + (ih - padding)) * w + (iw - padding);
+                                    row_col[dst] = data[src];
+                                } else {
+                                    row_col[dst] = 0.0;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+    } else {
+        for oh in 0..h_out {
+            let row_col = &mut col_prefix[oh * row_elems..(oh + 1) * row_elems];
             for ow in 0..w_out {
                 for ic in 0..c {
                     for kkh in 0..kh {
@@ -384,7 +410,8 @@ pub unsafe fn im2col_parallel(
                     }
                 }
             }
-        });
+        }
+    }
 }
 
 /// Dispatch: calls the SIMD, parallel, or scalar im2col as appropriate.

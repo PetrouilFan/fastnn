@@ -230,6 +230,7 @@ pub fn quantize_weights(
 pub fn quantize_weights_fp(
     graph: &mut ComputeGraph,
     fp_dtype: &FpDtype,
+    group_size: Option<usize>,
 ) -> Result<(), FastnnError> {
     let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::with_capacity(graph.nodes.len());
 
@@ -316,15 +317,24 @@ pub fn quantize_weights_fp(
 
         let (packed_bytes, scales) = match fp_dtype {
             FpDtype::F8x4 => {
-                let pt = PackedTensor::<F8x4>::from_f32_per_channel(&quant_data, &quant_shape);
+                let pt = match group_size {
+                    Some(gs) => PackedTensor::<F8x4>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
+                    None => PackedTensor::<F8x4>::from_f32_per_channel(&quant_data, &quant_shape),
+                };
                 (pt.as_bytes().to_vec(), pt.scales)
             }
             FpDtype::F8x4R => {
-                let pt = PackedTensor::<F8x4R>::from_f32_per_channel(&quant_data, &quant_shape);
+                let pt = match group_size {
+                    Some(gs) => PackedTensor::<F8x4R>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
+                    None => PackedTensor::<F8x4R>::from_f32_per_channel(&quant_data, &quant_shape),
+                };
                 (pt.as_bytes().to_vec(), pt.scales)
             }
             FpDtype::F4x8 => {
-                let pt = PackedTensor::<F4x8>::from_f32_per_channel(&quant_data, &quant_shape);
+                let pt = match group_size {
+                    Some(gs) => PackedTensor::<F4x8>::from_f32_per_channel_grouped(&quant_data, &quant_shape, gs),
+                    None => PackedTensor::<F4x8>::from_f32_per_channel(&quant_data, &quant_shape),
+                };
                 (pt.as_bytes().to_vec(), pt.scales)
             }
         };
