@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use super::PackedWord;
 
 /// FP8 E5M2 (5 exponent, 2 mantissa, bias=15), 4 values packed per u32 word.
@@ -84,6 +86,28 @@ fn f32_to_e5m2(v: f32) -> u8 {
     sign_bit | ((biased_exp) << 2) | mant
 }
 
+fn f8r_lut() -> &'static [f32; 256] {
+    static LUT: OnceLock<[f32; 256]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [0.0f32; 256];
+        for i in 0..256u16 {
+            lut[i as usize] = e5m2_to_f32(i as u8);
+        }
+        lut
+    })
+}
+
+#[inline(always)]
+pub fn f8x4r_dot_packed_f32(a: u32, b: u32) -> f32 {
+    let lut = f8r_lut();
+    let bytes_a = a.to_le_bytes();
+    let bytes_b = b.to_le_bytes();
+    lut[bytes_a[0] as usize] * lut[bytes_b[0] as usize]
+        + lut[bytes_a[1] as usize] * lut[bytes_b[1] as usize]
+        + lut[bytes_a[2] as usize] * lut[bytes_b[2] as usize]
+        + lut[bytes_a[3] as usize] * lut[bytes_b[3] as usize]
+}
+
 impl PackedWord for F8x4R {
     const ITEMS: usize = 4;
     const BIT_WIDTH: usize = 8;
@@ -93,12 +117,13 @@ impl PackedWord for F8x4R {
 
     #[inline]
     fn unpack_to_f32(self) -> [f32; 4] {
+        let lut = f8r_lut();
         let bytes = self.0.to_le_bytes();
         [
-            e5m2_to_f32(bytes[0]),
-            e5m2_to_f32(bytes[1]),
-            e5m2_to_f32(bytes[2]),
-            e5m2_to_f32(bytes[3]),
+            lut[bytes[0] as usize],
+            lut[bytes[1] as usize],
+            lut[bytes[2] as usize],
+            lut[bytes[3] as usize],
         ]
     }
 
@@ -109,6 +134,11 @@ impl PackedWord for F8x4R {
         let b2 = f32_to_e5m2(vals[2]) as u32;
         let b3 = f32_to_e5m2(vals[3]) as u32;
         F8x4R(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+    }
+
+    #[inline(always)]
+    fn dot_packed_f32(a: Self, b: Self) -> f32 {
+        f8x4r_dot_packed_f32(a.0, b.0)
     }
 
     fn wgsl_unpack_body() -> &'static str {
