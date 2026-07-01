@@ -3644,11 +3644,18 @@ impl Backend for CpuBackend {
                                 } else {
                                     None
                                 };
-                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
-                                    &params[..]
-                                else {
-                                    return Err(BackendError::Dispatch("conv2d_i4_i8/u8_i8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
-                                };
+                                if params.len() < 9 {
+                                    return Err(BackendError::Dispatch("conv2d_i4_i8/u8_i8: expected at least 9 params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                                }
+                                let stride = params[0];
+                                let padding = params[1];
+                                let dilation = params[2];
+                                let groups = params[3];
+                                let input_c = params[4];
+                                let input_h = params[5];
+                                let input_w = params[6];
+                                let kernel_h = params[7];
+                                let kernel_w = params[8];
                                 let meta = weight_meta.clone().ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "conv2d_i4_i8/u8_i8: missing weight_meta".into(),
@@ -3866,11 +3873,18 @@ impl Backend for CpuBackend {
                                 } else {
                                     None
                                 };
-                                let &[stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w] =
-                                    &params[..]
-                                else {
-                                    return Err(BackendError::Dispatch("conv2d_i4/u8: expected params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
-                                };
+                                if params.len() < 9 {
+                                    return Err(BackendError::Dispatch("conv2d_i4/u8: expected at least 9 params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                                }
+                                let stride = params[0];
+                                let padding = params[1];
+                                let dilation = params[2];
+                                let groups = params[3];
+                                let input_c = params[4];
+                                let input_h = params[5];
+                                let input_w = params[6];
+                                let kernel_h = params[7];
+                                let kernel_w = params[8];
                                 if groups == 0 {
                                     return Err(BackendError::Dispatch(
                                         "conv2d_i4/u8: groups=0".into(),
