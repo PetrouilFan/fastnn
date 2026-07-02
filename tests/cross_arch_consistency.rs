@@ -82,7 +82,7 @@ fn test_relu_consistency() {
     let b = a.relu();
     let data = b.to_numpy();
 
-    let expected = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 2.0, 3.0];
+    let expected = [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 2.0, 3.0];
     for (i, (&got, &exp)) in data.iter().zip(expected.iter()).enumerate() {
         assert!(
             (got - exp).abs() < 1e-6,

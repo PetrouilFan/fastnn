@@ -5,8 +5,8 @@
 
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::backend::{Backend, Instruction};
 use fastnn::backend::executor::WeightDtype;
+use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
 use fastnn::compiler::passes::quantization::quantize_weights;
@@ -51,6 +51,7 @@ fn run_matmul(
 
 /// Helper: build a Conv2d graph and run through the full pipeline.
 /// Returns output as Vec<f32>.
+#[allow(clippy::too_many_arguments)]
 fn run_conv2d(
     batch: usize,
     in_channels: usize,
@@ -613,7 +614,7 @@ fn test_matmul_u4_i8_dispatch_path() {
         })
         .collect();
     assert!(
-        kernel_names.iter().any(|name| *name == "matmul_i4_i8"),
+        kernel_names.contains(&"matmul_i4_i8"),
         "expected compiled plan to select matmul_u4_i8, got {:?}",
         kernel_names
     );
@@ -824,16 +825,20 @@ fn test_count_quantized_kernel_names() {
 #[test]
 fn test_matmul_i4codebook_roundtrip() {
     let weight_data: Vec<f32> = vec![
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
     let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
-    let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::I4Codebook));
+    let result = run_matmul_fp(
+        1,
+        4,
+        4,
+        &weight_data,
+        &input_data,
+        Some(WeightDtype::I4Codebook),
+    );
     assert_eq!(result.len(), 4, "output shape mismatch");
-    let expected = vec![1.0f32, 2.0, 3.0, 4.0];
+    let expected = [1.0f32, 2.0, 3.0, 4.0];
     for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
         let err = (got - exp).abs();
         assert!(
@@ -847,16 +852,13 @@ fn test_matmul_i4codebook_roundtrip() {
 #[test]
 fn test_matmul_f4x8_roundtrip() {
     let weight_data: Vec<f32> = vec![
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
     let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
     let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::F4x8));
     assert_eq!(result.len(), 4, "output shape mismatch");
-    let expected = vec![1.0f32, 2.0, 3.0, 4.0];
+    let expected = [1.0f32, 2.0, 3.0, 4.0];
     for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
         let err = (got - exp).abs();
         assert!(
@@ -989,7 +991,10 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     let act_node = graph.get_node(mm_node.inputs[0]).unwrap();
     assert_eq!(act_node.opcode, Opcode::QuantizeActivations);
     let weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    assert!(matches!(weight_node.output_type.dtype, IrDType::I8Scaled { .. }));
+    assert!(matches!(
+        weight_node.output_type.dtype,
+        IrDType::I8Scaled { .. }
+    ));
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
     let mut plan = CpuBackend.compile(&graph, &mem).unwrap();
@@ -1002,7 +1007,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
         .unwrap();
     let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
 
-    let expected = vec![2.0f32, 4.0, 6.0, 8.0];
+    let expected = [2.0f32, 4.0, 6.0, 8.0];
     assert_eq!(result_f32.len(), expected.len());
     for (i, (&got, &exp)) in result_f32.iter().zip(expected.iter()).enumerate() {
         let err = (got - exp).abs();

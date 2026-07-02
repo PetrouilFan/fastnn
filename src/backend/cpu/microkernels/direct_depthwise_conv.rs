@@ -30,9 +30,7 @@ static DID_SCALAR: AtomicBool = AtomicBool::new(false);
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn apply_activation_vec(v: __m256, act: ConvActivation) -> __m256 {
     match act {
-        ConvActivation::Relu => {
-            _mm256_max_ps(v, _mm256_setzero_ps())
-        }
+        ConvActivation::Relu => _mm256_max_ps(v, _mm256_setzero_ps()),
         ConvActivation::Silu => {
             let neg_v = _mm256_xor_ps(v, _mm256_set1_ps(-0.0f32));
             let e_neg = exp_avx2_vec(neg_v);
@@ -43,7 +41,7 @@ unsafe fn apply_activation_vec(v: __m256, act: ConvActivation) -> __m256 {
         ConvActivation::Gelu => {
             let half = _mm256_set1_ps(0.5);
             let one = _mm256_set1_ps(1.0);
-            let sqrt_2pi = _mm256_set1_ps(0.7978845608028654f32);
+            let sqrt_2pi = _mm256_set1_ps(0.797_884_6_f32);
             let coeff = _mm256_set1_ps(0.044715f32);
             let v3 = _mm256_mul_ps(_mm256_mul_ps(v, v), v);
             let tanh_arg = _mm256_mul_ps(sqrt_2pi, _mm256_add_ps(v, _mm256_mul_ps(coeff, v3)));
@@ -152,9 +150,8 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
                 // Process ow=0 via safe per-pixel scalar, then SIMD from ow=1.
                 if w_out > 0 {
                     depthwise_conv3x3_scalar_pixel(
-                        input, weight, output,
-                        img, g, oh, 0, c, h, w, f, h_out, w_out,
-                        1, 1, bv, activation,
+                        input, weight, output, img, g, oh, 0, c, h, w, f, h_out, w_out, 1, 1, bv,
+                        activation,
                     );
                     ow = 1;
                 }
@@ -210,9 +207,8 @@ unsafe fn depthwise_conv3x3_f32_avx2_path(
                 // ── Scalar tail (rightmost columns) ──
                 while ow < w_out {
                     depthwise_conv3x3_scalar_pixel(
-                        input, weight, output,
-                        img, g, oh, ow, c, h, w, f, h_out, w_out,
-                        1, 1, bv, activation,
+                        input, weight, output, img, g, oh, ow, c, h, w, f, h_out, w_out, 1, 1, bv,
+                        activation,
                     );
                     ow += 1;
                 }
@@ -250,12 +246,14 @@ pub fn direct_depthwise_conv3x3_f32(
     if padding == 1 && stride == 1 && is_x86_feature_detected!("avx2") {
         #[cfg(feature = "debug_canary")]
         if !DID_AVX2.swap(true, Ordering::Relaxed) {
-            eprintln!("[direct_depthwise_conv] AVX2 PATH ACTIVE (c={} h={} w={} f={} groups={})", c, h, w, f, groups);
+            eprintln!(
+                "[direct_depthwise_conv] AVX2 PATH ACTIVE (c={} h={} w={} f={} groups={})",
+                c, h, w, f, groups
+            );
         }
         unsafe {
             depthwise_conv3x3_f32_avx2_path(
-                input, weight, bias, output,
-                n, c, h, w, f, h_out, w_out, activation,
+                input, weight, bias, output, n, c, h, w, f, h_out, w_out, activation,
             );
         }
         return;
@@ -264,7 +262,10 @@ pub fn direct_depthwise_conv3x3_f32(
     // Scalar path (handles stride-2, any padding)
     #[cfg(feature = "debug_canary")]
     if !DID_SCALAR.swap(true, Ordering::Relaxed) {
-        eprintln!("[direct_depthwise_conv] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})", padding, stride, c, h, w, f);
+        eprintln!(
+            "[direct_depthwise_conv] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})",
+            padding, stride, c, h, w, f
+        );
     }
     for img in 0..n {
         for g in 0..f {
@@ -272,9 +273,8 @@ pub fn direct_depthwise_conv3x3_f32(
             for oh in 0..h_out {
                 for ow in 0..w_out {
                     depthwise_conv3x3_scalar_pixel(
-                        input, weight, output,
-                        img, g, oh, ow, c, h, w, f, h_out, w_out,
-                        stride, padding, bv, activation,
+                        input, weight, output, img, g, oh, ow, c, h, w, f, h_out, w_out, stride,
+                        padding, bv, activation,
                     );
                 }
             }

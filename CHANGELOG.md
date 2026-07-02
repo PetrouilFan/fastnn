@@ -1,5 +1,46 @@
 # Changelog
 
+## [2.5.0] - 2026-07-02
+
+### Added
+- **Unsigned quantization types**: `U4x8`, `U8x4` — full pipeline through storage,
+  serialization, ONNX import/export, CPU dispatch, Python bindings, CLI, and
+  `PrecisionConfig`
+- **I4Codebook quantization**: Per-block codebook INT4 with data-adaptive K-means
+  centroids and asymmetric F4 support
+- **F4/F8 packed GEMV+GEMM**: F4x8, F8x4, F8x4R kernels with fused conv and
+  per-channel quantization
+- **WeightDtype enum**: Type-safe weight dispatch for FP packed quantization
+- **Documentation rewrite** (PR #41): new structure with guides, reference, internals,
+  models, and roadmap sections; added CONTRIBUTING.md
+
+### Performance
+- **gemm crate** replaces matrixmultiply for parallel GEMM
+- **Zero-copy arena**: fused SIMD kernels, weight prepacking with Arc cache
+- **Tiled SIMD broadcasting** for add/sub/mul/div/max/min with fused kernels
+- **Generic TLS Vec pool** for f32/i8/u8/i32/u32/I8x4/I4x8/F4x8
+- **Dynamic tile sizing** from CPUID L2 cache detection
+- **Conv2d 3x3 s=1 p=1** routed through im2col+GEMM
+- **Direct Conv3x3 AVX2** ic-outer batched loop + M=1 depthwise GEMM fast path
+- **im2col min/max scan** fix (-74% latency: 1350ms→350ms)
+- **Graph ownership optimization**: Vec pre-allocation, fused bias-activation,
+  WriteConst/Fill skip on cached path, matmul Vec alloc elimination
+- **Conv2d params** precomputed at compile time
+
+### Fixed
+- **I8x4 im2col SIMD panic** and direct_conv3x3 bound optimization
+- **Quantization robustness** and FP4 scale formula
+- **Quantized weight dispatch** in persistent-view path + I4Codebook MatMul dequant
+- **Depthwise conv** left-edge shift + arena aliasing in prepared path
+- **Conv microkernel speed regression** and correctness bugs
+- **Non-x86_64 compile error** in norm dispatch
+
+### Changed
+- Version bumped to 2.5.0
+- Replaced matrixmultiply with gemm crate for GEMM operations
+- Standardized CI to use `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`
+- All clippy warnings resolved (0 errors across lib, tests, benches, examples)
+
 ## [2.4.0] - 2026-06-29
 
 ### Added

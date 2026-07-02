@@ -309,7 +309,7 @@ mod neon_tests {
         let sum: f32 = result.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5, "softmax sum={} != 1.0", sum);
         for &v in &result {
-            assert!(v >= 0.0 && v <= 1.0, "softmax value {} out of range", v);
+            assert!((0.0..=1.0).contains(&v), "softmax value {} out of range", v);
         }
     }
 
@@ -517,7 +517,7 @@ mod neon_tests {
         gemm_cpu_flat::<I8x4>(&packed, &input, &mut output, m, k, n);
 
         let expected0 = 12.0 * 1.0 + 14.0 * 2.0 + 16.0 * 3.0 + 18.0 * 4.0;
-        let expected1 = 12.0 * -1.0 + 14.0 * 0.5 + 16.0 * 2.0 + 18.0 * -3.0;
+        let expected1 = -12.0 + 14.0 * 0.5 + 16.0 * 2.0 + 18.0 * -3.0;
         assert!(
             (output[0] - expected0).abs() < 1e-4,
             "row0 got {}, expected {}",

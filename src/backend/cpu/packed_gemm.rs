@@ -13,7 +13,6 @@ use crate::dtypes::f4x8::f4x8_dot_packed;
 use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
-
 /// Packed I8x4 GEMM: C = A × Bᵀ
 ///
 /// A: [M, K] where K is multiple of 4, stored as [M, K/4] packed u32
@@ -278,7 +277,7 @@ pub fn gemm_packed_f4x8_fused(
                 PreparedActivation::Relu => val.max(0.0),
                 PreparedActivation::Silu => val / (1.0 + (-val).exp()),
                 PreparedActivation::Gelu => {
-                    val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh())
+                    val * 0.5 * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh())
                 }
                 PreparedActivation::None => val,
             };
@@ -384,7 +383,7 @@ pub fn gemm_packed_i8x4_fused(
                 PreparedActivation::Relu => val.max(0.0),
                 PreparedActivation::Silu => val / (1.0 + (-val).exp()),
                 PreparedActivation::Gelu => {
-                    val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh())
+                    val * 0.5 * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh())
                 }
                 PreparedActivation::None => val,
             };
@@ -472,7 +471,9 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
     // gemm computes C[m,n] = A[m,k] * B^T[k,n]; stride params encode the transpose
     unsafe {
         super::sgemm::sgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             1.0,
             a_buf.as_ptr(),
             k as isize,
@@ -533,12 +534,16 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
                 if let Some(b) = bias {
                     for col in 0..n {
                         let val = c_row[col] + b[col];
-                        c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                        c_row[col] = val
+                            * 0.5
+                            * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh());
                     }
                 } else {
                     for v in c_row.iter_mut() {
                         let val = *v;
-                        *v = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                        *v = val
+                            * 0.5
+                            * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh());
                     }
                 }
             }

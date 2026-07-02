@@ -360,7 +360,7 @@ pub enum ConvActivation {
 pub(crate) fn apply_conv_activation(x: f32, activation: ConvActivation) -> f32 {
     match activation {
         ConvActivation::Relu => x.max(0.0),
-        ConvActivation::Gelu => 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh()),
+        ConvActivation::Gelu => 0.5 * x * (1.0 + (x * 0.797_884_6_f32).tanh()),
         ConvActivation::Silu => x / (1.0 + (-x).exp()),
     }
 }
@@ -550,15 +550,19 @@ pub fn conv2d_f32_im2col_gemm(
     // (no im2col expansion needed).
     if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 {
         return crate::backend::cpu::microkernels::direct_conv::direct_conv1x1_f32(
-            input, weight, bias, output,
-            n, c, h, w, f, groups, activation,
+            input, weight, bias, output, n, c, h, w, f, groups, activation,
         );
     }
 
     // Fast path for depthwise 3×3 stride-1 pad-1 direct convolution
     // (avoids 9× im2col expansion for mobileNet/YOLO depthwise convs).
-    if kh == 3 && kw == 3 && stride == 1 && padding == 1 && dilation == 1
-        && c_per_group == 1 && f_per_group == 1
+    if kh == 3
+        && kw == 3
+        && stride == 1
+        && padding == 1
+        && dilation == 1
+        && c_per_group == 1
+        && f_per_group == 1
     {
         return crate::backend::cpu::microkernels::direct_depthwise_conv::direct_depthwise_conv3x3_f32(
             input, weight, bias, output,

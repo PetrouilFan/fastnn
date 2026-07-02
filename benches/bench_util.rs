@@ -72,6 +72,7 @@ pub fn bench_gemv_with_metrics<T: PackedWord>(
 }
 
 pub fn bench_relu<T: PackedWord>(_data: &[f32], _shape: &[usize], _iters: usize) -> f64 {
+    let _ = std::marker::PhantomData::<T>;
     0.0
 }
 

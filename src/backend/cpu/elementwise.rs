@@ -31,11 +31,21 @@ fn fused_binary_activation_dispatch_slices(
         && microkernels::simd_avx2_available()
     {
         match kernel_name {
-            "add_relu_f32" => return unsafe { microkernels::fused_add_relu_f32_avx2(a, b, out_f32) },
-            "mul_relu_f32" => return unsafe { microkernels::fused_mul_relu_f32_avx2(a, b, out_f32) },
-            "add_silu_f32" => return unsafe { microkernels::fused_add_silu_f32_avx2(a, b, out_f32) },
-            "mul_silu_f32" => return unsafe { microkernels::fused_mul_silu_f32_avx2(a, b, out_f32) },
-            "add_gelu_f32" => return unsafe { microkernels::fused_add_gelu_f32_avx2(a, b, out_f32) },
+            "add_relu_f32" => {
+                return unsafe { microkernels::fused_add_relu_f32_avx2(a, b, out_f32) }
+            }
+            "mul_relu_f32" => {
+                return unsafe { microkernels::fused_mul_relu_f32_avx2(a, b, out_f32) }
+            }
+            "add_silu_f32" => {
+                return unsafe { microkernels::fused_add_silu_f32_avx2(a, b, out_f32) }
+            }
+            "mul_silu_f32" => {
+                return unsafe { microkernels::fused_mul_silu_f32_avx2(a, b, out_f32) }
+            }
+            "add_gelu_f32" => {
+                return unsafe { microkernels::fused_add_gelu_f32_avx2(a, b, out_f32) }
+            }
             _ => {}
         }
     }

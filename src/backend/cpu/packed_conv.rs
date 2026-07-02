@@ -344,6 +344,11 @@ unsafe fn im2col_pack_f4x8(
 ///
 /// Fast path: does im2col in f32, unpacks weights to f32 via LUT, calls gemm::gemm::<f32>.
 /// Skips the wasteful f32→packed→f32 quantize/dequantize cycle on activations.
+///
+/// # Safety
+///
+/// Caller must ensure `input` and `output` are valid, non-overlapping,
+/// and sized according to the convolution parameters (n, c, h, w, oc, kh, kw, ...).
 pub unsafe fn conv2d_packed_float<T: PackedWord>(
     input: &[f32],
     n: usize,
@@ -373,14 +378,25 @@ pub unsafe fn conv2d_packed_float<T: PackedWord>(
         f32_weights,
         bias_slice,
         output,
-        n, c, h, w, oc,
-        kh, kw, stride, padding, dilation, groups,
+        n,
+        c,
+        h,
+        w,
+        oc,
+        kh,
+        kw,
+        stride,
+        padding,
+        dilation,
+        groups,
         conv_act,
     );
 }
 
 #[inline(always)]
-fn prepared_to_conv_activation(a: PreparedActivation) -> Option<super::microkernels::ConvActivation> {
+fn prepared_to_conv_activation(
+    a: PreparedActivation,
+) -> Option<super::microkernels::ConvActivation> {
     use super::microkernels::ConvActivation;
     match a {
         PreparedActivation::None => None,
@@ -585,7 +601,9 @@ pub fn gemm_packed_i8x4_fused_raw(
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
                         + zp_prod_col[col] * k_f32;
-                    c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                    c_row[col] = val
+                        * 0.5
+                        * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh());
                 }
             };
             #[cfg(feature = "parallel")]
@@ -797,7 +815,9 @@ pub fn gemm_packed_i4x8_fused_raw(
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
                         + zp_prod_col[col] * k_f32;
-                    c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                    c_row[col] = val
+                        * 0.5
+                        * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh());
                 }
             };
             #[cfg(feature = "parallel")]
@@ -977,7 +997,9 @@ pub fn gemm_packed_f4x8_fused_raw(
                         acc += f4x8_dot_packed(a_row[kk].0, w_row[kk].0);
                     }
                     let val = (acc as f32) * scale_ab_col[col] + bias_col[col];
-                    c_row[col] = val * 0.5 * (1.0 + (val * 0.7978845608 * (1.0 + 0.044715 * val * val)).tanh());
+                    c_row[col] = val
+                        * 0.5
+                        * (1.0 + (val * 0.797_884_6 * (1.0 + 0.044715 * val * val)).tanh());
                 }
             };
             #[cfg(feature = "parallel")]
@@ -1033,7 +1055,11 @@ pub fn gemm_packed_f4x8_fused(
 #[inline]
 pub fn pack_i8_col_to_i8x4(col: &[i8], m: usize, k: usize, packed: &mut [I8x4]) {
     let k_packed = k.div_ceil(4);
-    let full_words = if k % 4 == 0 { k_packed } else { k_packed - 1 };
+    let full_words = if k.is_multiple_of(4) {
+        k_packed
+    } else {
+        k_packed - 1
+    };
     for row in 0..m {
         let row_start = row * k;
         let word_base = row * k_packed;
@@ -1046,7 +1072,7 @@ pub fn pack_i8_col_to_i8x4(col: &[i8], m: usize, k: usize, packed: &mut [I8x4]) 
             packed[word_base + w] = I8x4(word);
         }
         // Tail: handle the last partial word when k is not a multiple of 4
-        if k % 4 != 0 {
+        if !k.is_multiple_of(4) {
             let mut word = 0u32;
             let byte_base = row_start + full_words * 4;
             for i in 0..(k % 4) {
@@ -1085,8 +1111,10 @@ pub fn pack_i8_col_to_i4x8(col: &[i8], m: usize, k: usize, packed: &mut [I4x8]) 
 
 // ── Public Conv2d entry points ──────────────────────────────────
 
-// SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
-// and sized according to the convolution parameters (n, c, h, w, oc, kh, kw, ...).
+/// # Safety
+///
+/// Caller must ensure `input` and `output` are valid, non-overlapping,
+/// and sized according to the convolution parameters (n, c, h, w, oc, kh, kw, ...).
 pub unsafe fn conv2d_packed_i8x4(
     input: &[f32],
     n: usize,
@@ -1167,8 +1195,10 @@ pub unsafe fn conv2d_packed_i8x4(
     }
 }
 
-// SAFETY: Same as conv2d_packed_i8x4 — caller ensures valid, non-overlapping
-// input/output buffers sized for the convolution parameters.
+/// # Safety
+///
+/// Same as conv2d_packed_i8x4 — caller ensures valid, non-overlapping
+/// input/output buffers sized for the convolution parameters.
 pub unsafe fn conv2d_packed_i4x8(
     input: &[f32],
     n: usize,
@@ -1249,7 +1279,9 @@ pub unsafe fn conv2d_packed_i4x8(
     }
 }
 
-// SAFETY: Same as conv2d_packed_i4x8 — caller ensures valid, non-overlapping buffers.
+/// # Safety
+///
+/// Same as conv2d_packed_i4x8 — caller ensures valid, non-overlapping buffers.
 pub unsafe fn conv2d_packed_f4x8(
     input: &[f32],
     n: usize,
@@ -1530,11 +1562,18 @@ mod tests {
         unsafe {
             conv2d_packed_i8x4(
                 &input,
-                n, c, h, w,
+                n,
+                c,
+                h,
+                w,
                 &weight,
                 None,
-                stride, padding, dilation, groups,
-                kh, kw,
+                stride,
+                padding,
+                dilation,
+                groups,
+                kh,
+                kw,
                 PreparedActivation::None,
                 &mut output,
             );

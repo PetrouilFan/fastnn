@@ -18,7 +18,7 @@ fn test_matmul_shape_inference() {
         let mm_node = graph.get_node(mm.node_id()).unwrap();
         assert_eq!(
             mm_node.output_type.shape,
-            vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+            vec![DimExpr::Known(m), DimExpr::Known(n)],
             "MatMul [{}x{}] @ [{}x{}] should produce [{}x{}]",
             m,
             k,

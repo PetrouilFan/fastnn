@@ -82,7 +82,10 @@ fn quantize_weight_constants(
         .iter()
         .filter(|n| {
             matches!(n.opcode, Opcode::Constant(_))
-                && matches!(n.output_type.dtype, IrDType::I4 { .. } | IrDType::I8Scaled { .. })
+                && matches!(
+                    n.output_type.dtype,
+                    IrDType::I4 { .. } | IrDType::I8Scaled { .. }
+                )
         })
         .count();
     let _ = count_before;

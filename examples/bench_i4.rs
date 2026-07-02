@@ -9,7 +9,9 @@ use std::time::Instant;
 use fastnn::backend::cpu::microkernels::gemv_cpu;
 use fastnn::backend::cpu::packed_conv::gemm_packed_i4x8_fused;
 use fastnn::backend::cpu::packed_gemm::gemm_packed_i4x8;
-use fastnn::backend::cpu::swar::{i4x8_dot_packed, i4x8_dot_packed_slice as i4x8_dot_packed_simd_slice};
+use fastnn::backend::cpu::swar::{
+    i4x8_dot_packed, i4x8_dot_packed_slice as i4x8_dot_packed_simd_slice,
+};
 use fastnn::backend::prepared::PreparedActivation;
 use fastnn::dtypes::I4x8;
 use fastnn::packed_tensor::PackedTensor;

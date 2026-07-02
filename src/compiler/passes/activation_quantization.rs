@@ -70,7 +70,7 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), FastnnError>
             .unwrap_or_default();
 
         rewrites.push(Rewrite {
-            node_id: node_id,
+            node_id,
             act_id,
             node_shape,
             act_shape,
@@ -353,7 +353,7 @@ mod tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
     use crate::backend::Backend;
-    use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
+    use crate::compiler::passes::calibration::CalibrationData;
     use crate::compiler::passes::{memory_planning, shape_inference};
     use crate::ir::node::DimExpr;
 
@@ -784,7 +784,7 @@ mod tests {
         shape_inference::infer_shapes(&mut graph).unwrap();
 
         // Create calibration data with per-channel stats for the Relu output
-        let mut calib = CalibrationData::new();
+        let mut calib;
         // The Relu activation has shape [1, 4, 4, 4] → 4 input channels, 16 spatial elements each
         let relu_name = "relu"; // must match the Relu node name (default is empty, so we set it)
                                 // We need to name the relu node for calibration matching

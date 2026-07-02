@@ -109,7 +109,9 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     let valid_meta_len = meta.scales.len() == 1
         || meta.scales.len() == rows
         || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0)
-        || (meta.quant_block_size > 0 && meta.scales.len() > rows && meta.scales.len() % rows == 0);
+        || (meta.quant_block_size > 0
+            && meta.scales.len() > rows
+            && meta.scales.len().is_multiple_of(rows));
     if !valid_meta_len {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: quantized weight metadata length {} incompatible with shape {:?} (expected 1, {}, or a divisor of {})",
@@ -207,9 +209,16 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
             // path which uses `dispatch_packed_conv_cached!` → `get_or_init_f32_weights()`
             // → `conv2d_f32_im2col_gemm`.
             let f32_weights = pt.get_or_init_f32_weights();
-            matmul_blas_into(activations, &f32_weights, out_f32, m, k, n);
+            matmul_blas_into(activations, f32_weights, out_f32, m, k, n);
         } else {
-            crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
+            crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(
+                &pt,
+                activations,
+                out_f32,
+                m,
+                k,
+                n,
+            );
         }
     }
     Ok(())

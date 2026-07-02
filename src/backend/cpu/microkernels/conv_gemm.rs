@@ -80,7 +80,9 @@ unsafe fn bias_activation_fused_avx2(
                 i += 8;
             }
             if i < n {
-                for j in i..n { row[j] += bv; }
+                for j in i..n {
+                    row[j] += bv;
+                }
             }
         } else {
             match activation {
@@ -94,7 +96,9 @@ unsafe fn bias_activation_fused_avx2(
                         );
                         i += 8;
                     }
-                    for j in i..n { row[j] = (row[j] + bv).max(0.0); }
+                    for j in i..n {
+                        row[j] = (row[j] + bv).max(0.0);
+                    }
                 }
                 Some(ConvActivation::Silu) => {
                     let one = _mm256_set1_ps(1.0);
@@ -108,21 +112,22 @@ unsafe fn bias_activation_fused_avx2(
                         _mm256_storeu_ps(row.as_mut_ptr().add(i), _mm256_mul_ps(x, sig));
                         i += 8;
                     }
-                    for j in i..n { let x = row[j] + bv; row[j] = x / (1.0 + (-x).exp()); }
+                    for j in i..n {
+                        let x = row[j] + bv;
+                        row[j] = x / (1.0 + (-x).exp());
+                    }
                 }
                 Some(ConvActivation::Gelu) => {
                     let half = _mm256_set1_ps(0.5);
                     let one = _mm256_set1_ps(1.0);
-                    let sqrt_2pi = _mm256_set1_ps(0.7978845608028654f32);
+                    let sqrt_2pi = _mm256_set1_ps(0.797_884_6_f32);
                     let coeff = _mm256_set1_ps(0.044715f32);
                     while i + 8 <= n {
                         let v = _mm256_loadu_ps(row.as_ptr().add(i));
                         let x = _mm256_add_ps(v, vbias);
                         let x3 = _mm256_mul_ps(_mm256_mul_ps(x, x), x);
-                        let tanh_arg = _mm256_mul_ps(
-                            sqrt_2pi,
-                            _mm256_add_ps(x, _mm256_mul_ps(coeff, x3)),
-                        );
+                        let tanh_arg =
+                            _mm256_mul_ps(sqrt_2pi, _mm256_add_ps(x, _mm256_mul_ps(coeff, x3)));
                         let t = tanh_avx2_vec(tanh_arg);
                         _mm256_storeu_ps(
                             row.as_mut_ptr().add(i),
@@ -152,7 +157,7 @@ unsafe fn bias_activation_fused_avx2(
 ///
 /// For M=1 (depthwise) a fast-path dot-product is used to avoid
 /// matrixmultiply's per-call overhead.
-pub fn conv_gemm_f32(
+pub unsafe fn conv_gemm_f32(
     m: usize,
     k: usize,
     n: usize,
@@ -171,9 +176,13 @@ pub fn conv_gemm_f32(
     // ── M=1 fast path: dot product per spatial position ──
     // Avoids matrixmultiply's per-call overhead for depthwise GEMMs
     // where a single output channel is computed per group.
-    if m == 1 && rs_c == n as isize && cs_c == 1
-        && rs_a == k as isize && cs_a == 1
-        && rs_b == 1 && cs_b == k as isize
+    if m == 1
+        && rs_c == n as isize
+        && cs_c == 1
+        && rs_a == k as isize
+        && cs_a == 1
+        && rs_b == 1
+        && cs_b == k as isize
     {
         let bv = bias.and_then(|b| b.first().copied()).unwrap_or(0.0);
         let out = unsafe { std::slice::from_raw_parts_mut(c, n) };

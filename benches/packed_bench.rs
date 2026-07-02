@@ -2,8 +2,8 @@
 #[path = "bench_util.rs"]
 mod bench_util;
 
-use bench_util::{bench_gemv, bench_relu, print_comparison_header, print_result_row, speedup};
-use fastnn::dtypes::{F16x2, F32x1, F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
+use bench_util::{bench_gemv, bench_relu, speedup};
+use fastnn::dtypes::{F16x2, F32x1, F4x8, F8x4, F8x4R, I4x8, I8x4};
 
 fn main() {
     println!("=== fastnn Native Packed Precision Benchmark ===\n");

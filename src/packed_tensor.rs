@@ -58,12 +58,8 @@ fn kmeans_16(values: &[f32], max_iter: usize) -> [f32; 16] {
             }
             assignments[vi] = best_c;
         }
-        for c in &mut counts {
-            *c = 0;
-        }
-        for s in &mut sums {
-            *s = 0.0;
-        }
+        counts.fill(0);
+        sums.fill(0.0);
         for (vi, &c) in assignments.iter().enumerate() {
             counts[c] += 1;
             sums[c] += values[vi];
@@ -927,7 +923,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     // on the distant side.  max_dev guarantees all values fit within
                     // FP4's active [-4, +4] code range after quantization.
                     let dev_from_zp = (zp - grp_min).abs().max((grp_max - zp).abs());
-                    let max_dev = if dev_from_zp == 0.0 { 1e-10 } else { dev_from_zp };
+                    let max_dev = if dev_from_zp == 0.0 {
+                        1e-10
+                    } else {
+                        dev_from_zp
+                    };
                     let scale = max_dev / effective_magnitude;
                     scales.push(scale);
                     zeros.push(zp);
@@ -955,7 +955,11 @@ impl<T: PackedWord> PackedTensor<T> {
                         / inner_stride as f32;
                     // max_dev guarantees all values fit within FP4 [-4,+4] after quant
                     let dev_from_zp = (mean - mins[row]).abs().max((maxs[row] - mean).abs());
-                    let max_dev = if dev_from_zp == 0.0 { 1e-10 } else { dev_from_zp };
+                    let max_dev = if dev_from_zp == 0.0 {
+                        1e-10
+                    } else {
+                        dev_from_zp
+                    };
                     let scale = max_dev / effective_magnitude;
                     scales.push(scale);
                     zeros.push(mean);
@@ -1105,7 +1109,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let effective_magnitude = 4.0; // clip to ±4, drop ±6
                     let zp = block_data.iter().sum::<f32>() / qblock as f32;
                     let dev_from_zp = (zp - bmin).abs().max((bmax - zp).abs());
-                    let max_dev = if dev_from_zp == 0.0 { 1e-10 } else { dev_from_zp };
+                    let max_dev = if dev_from_zp == 0.0 {
+                        1e-10
+                    } else {
+                        dev_from_zp
+                    };
                     let scale = max_dev / effective_magnitude;
                     scales.push(scale);
                     zeros.push(zp);
@@ -1242,9 +1250,7 @@ impl<T: PackedWord> PackedTensor<T> {
                     normalized_values.push(v * inv);
                 }
             } else {
-                for _ in 0..block_len {
-                    normalized_values.push(0.0);
-                }
+                normalized_values.extend(std::iter::repeat_n(0.0, block_len));
             }
         }
 
@@ -1322,9 +1328,9 @@ impl<T: PackedWord> PackedTensor<T> {
 
     #[inline]
     pub fn scale_for_elem(&self, row: usize, col: usize) -> f32 {
-        if self.quant_block_size > 0 {
+        if let Some(block_idx) = col.checked_div(self.quant_block_size) {
             let bpr = self.blocks_per_row();
-            self.scales[row * bpr + col / self.quant_block_size]
+            self.scales[row * bpr + block_idx]
         } else {
             self.scale_for_row(row)
         }
@@ -1332,9 +1338,9 @@ impl<T: PackedWord> PackedTensor<T> {
 
     #[inline]
     pub fn zero_for_elem(&self, row: usize, col: usize) -> f32 {
-        if self.quant_block_size > 0 {
+        if let Some(block_idx) = col.checked_div(self.quant_block_size) {
             let bpr = self.blocks_per_row();
-            self.zeros[row * bpr + col / self.quant_block_size]
+            self.zeros[row * bpr + block_idx]
         } else {
             self.zero_for_row(row)
         }
@@ -1526,7 +1532,7 @@ mod tests {
 
     #[test]
     fn test_packed_tensor_f32x1() {
-        let data: Vec<f32> = vec![3.14, -2.71, 1.41];
+        let data: Vec<f32> = vec![std::f32::consts::PI, -2.71, 1.41];
         let t = PackedTensor::<F32x1>::from_f32_auto(&data, &[3]);
         let recovered = t.to_f32_vec();
         for (orig, rec) in data.iter().zip(recovered.iter()) {
@@ -1992,7 +1998,7 @@ mod tests {
         );
 
         let expected_scale1 = 4.0 / 8.0; // FP4 clipped range = 8.0
-        let expected_zp1 = (1.0 + 5.0) / 2.0; // uniform → mean == 3.0
+        let _expected_zp1 = (1.0 + 5.0) / 2.0; // uniform → mean == 3.0
         assert!(
             (t.scales[1] - expected_scale1).abs() < 1e-5,
             "row 1 scale: got {}, expected {}",

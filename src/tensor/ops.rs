@@ -643,10 +643,7 @@ impl Tensor {
             }
             DType::I64 => {
                 let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i64>(data)
-                    .iter()
-                    .copied()
-                    .collect()
+                bytemuck::cast_slice::<_, i64>(data).to_vec()
             }
             DType::F32 => {
                 let data = src.as_f32_slice();

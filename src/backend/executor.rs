@@ -90,7 +90,7 @@ fn read_execution_outputs<B: Backend>(
             })?;
         let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
             let resolved_shape =
-                resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
+                resolve_shape(&node.output_type.shape, shape_env).map_err(|e| {
                     BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
                 })?;
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
@@ -347,10 +347,6 @@ impl<B: Backend> GraphExecutor<B> {
                         conv2d_quant_u8 += 1;
                     } else if kernel_name.starts_with("conv2d") {
                         conv2d_fp32 += 1;
-                    } else if kernel_name.starts_with("quantize_activations")
-                        || kernel_name.starts_with("dequantize_activations")
-                    {
-                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     } else {
                         other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     }
@@ -714,7 +710,7 @@ impl<B: Backend> GraphExecutor<B> {
         let enough_capacity = self
             .cached_arena
             .as_ref()
-            .map_or(false, |(cap, _)| *cap >= arena_size);
+            .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
         }

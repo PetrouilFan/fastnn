@@ -434,9 +434,9 @@ impl PyTensor {
         let (start, stop, step) = if let Ok(slice) = idx.cast::<PySlice>() {
             let indices = slice.indices(dim0)?;
             (
-                indices.start as isize,
-                indices.stop as isize,
-                indices.step as isize,
+                indices.start,
+                indices.stop,
+                indices.step,
             )
         } else {
             let idx_val: isize = idx.extract()?;

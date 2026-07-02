@@ -158,9 +158,9 @@ fn reduce_max(input: &[f32]) -> f32 {
 }
 
 fn rowwise_sum(input: &[f32], out: &mut [f32], batch: usize, hidden: usize) {
-    for row in 0..batch {
+    for (row, out_val) in out.iter_mut().enumerate().take(batch) {
         let start = row * hidden;
-        out[row] = input[start..start + hidden].iter().copied().sum();
+        *out_val = input[start..start + hidden].iter().copied().sum();
     }
 }
 
@@ -428,6 +428,7 @@ fn bench_elementwise(c: &mut Criterion) {
             len: 1_048_576,
         },
     ];
+    #[allow(clippy::type_complexity)]
     let binary_ops: [(&str, fn(f32, f32) -> f32); 3] = [
         ("add", |x, y| x + y),
         ("mul", |x, y| x * y),

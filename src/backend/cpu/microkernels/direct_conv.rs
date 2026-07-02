@@ -28,9 +28,7 @@ static DID_SCALAR: AtomicBool = AtomicBool::new(false);
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn apply_activation_vec(v: __m256, act: ConvActivation) -> __m256 {
     match act {
-        ConvActivation::Relu => {
-            _mm256_max_ps(v, _mm256_setzero_ps())
-        }
+        ConvActivation::Relu => _mm256_max_ps(v, _mm256_setzero_ps()),
         ConvActivation::Silu => {
             let neg_v = _mm256_xor_ps(v, _mm256_set1_ps(-0.0f32));
             let e_neg = exp_avx2_vec(neg_v);
@@ -41,7 +39,7 @@ unsafe fn apply_activation_vec(v: __m256, act: ConvActivation) -> __m256 {
         ConvActivation::Gelu => {
             let half = _mm256_set1_ps(0.5);
             let one = _mm256_set1_ps(1.0);
-            let sqrt_2pi = _mm256_set1_ps(0.7978845608028654f32);
+            let sqrt_2pi = _mm256_set1_ps(0.797_884_6_f32);
             let coeff = _mm256_set1_ps(0.044715f32);
             let v3 = _mm256_mul_ps(_mm256_mul_ps(v, v), v);
             let tanh_arg = _mm256_mul_ps(sqrt_2pi, _mm256_add_ps(v, _mm256_mul_ps(coeff, v3)));
@@ -139,9 +137,23 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                 if w_out > 0 {
                     for i in 0..8 {
                         conv3x3_scalar_pixel(
-                            input, weight, bias, output,
-                            img, oc_batch + i, oh, 0,
-                            c, h, w, f, 1, 1, h_out, w_out, activation,
+                            input,
+                            weight,
+                            bias,
+                            output,
+                            img,
+                            oc_batch + i,
+                            oh,
+                            0,
+                            c,
+                            h,
+                            w,
+                            f,
+                            1,
+                            1,
+                            h_out,
+                            w_out,
+                            activation,
                         );
                     }
                     ow = 1;
@@ -152,7 +164,11 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                     // 8 accumulators, one per output channel in the batch
                     let mut s = [_mm256_setzero_ps(); 8];
                     for i in 0..8 {
-                        let bv = if bias.is_empty() { 0.0 } else { bias[oc_batch + i] };
+                        let bv = if bias.is_empty() {
+                            0.0
+                        } else {
+                            bias[oc_batch + i]
+                        };
                         s[i] = _mm256_set1_ps(bv);
                     }
 
@@ -161,12 +177,16 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 
                         for kh in 0..3isize {
                             let ih = oh as isize + kh - 1;
-                            if ih < 0 || (ih as usize) >= h { continue; }
+                            if ih < 0 || (ih as usize) >= h {
+                                continue;
+                            }
                             let row_off = ic_off + (ih as usize) * w;
 
                             for kw in 0..3isize {
                                 let iw_base = ow as isize + kw - 1;
-                                if iw_base < 0 { continue; }
+                                if iw_base < 0 {
+                                    continue;
+                                }
 
                                 let src = inp_ptr.add(row_off + iw_base as usize);
                                 let v = _mm256_loadu_ps(src);
@@ -174,7 +194,7 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 
                                 // Load weight for each oc and FMA
                                 // weight[oc][ic][kh][kw] = weight[oc * c * 9 + ic * 9 + kh * 3 + kw]
-                                let w0 = *wgt_ptr.add((oc_batch + 0) * (c * 9) + ic * 9 + w_pos);
+                                let w0 = *wgt_ptr.add(oc_batch * (c * 9) + ic * 9 + w_pos);
                                 let w1 = *wgt_ptr.add((oc_batch + 1) * (c * 9) + ic * 9 + w_pos);
                                 let w2 = *wgt_ptr.add((oc_batch + 2) * (c * 9) + ic * 9 + w_pos);
                                 let w3 = *wgt_ptr.add((oc_batch + 3) * (c * 9) + ic * 9 + w_pos);
@@ -211,9 +231,23 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                 while ow < w_out {
                     for i in 0..8 {
                         conv3x3_scalar_pixel(
-                            input, weight, bias, output,
-                            img, oc_batch + i, oh, ow,
-                            c, h, w, f, 1, 1, h_out, w_out, activation,
+                            input,
+                            weight,
+                            bias,
+                            output,
+                            img,
+                            oc_batch + i,
+                            oh,
+                            ow,
+                            c,
+                            h,
+                            w,
+                            f,
+                            1,
+                            1,
+                            h_out,
+                            w_out,
+                            activation,
                         );
                     }
                     ow += 1;
@@ -232,9 +266,8 @@ unsafe fn direct_conv3x3_f32_avx2_path(
                 // Left-edge scalar pixel — same fix as the batched loop above.
                 if w_out > 0 {
                     conv3x3_scalar_pixel(
-                        input, weight, bias, output,
-                        img, oc, oh, 0,
-                        c, h, w, f, 1, 1, h_out, w_out, activation,
+                        input, weight, bias, output, img, oc, oh, 0, c, h, w, f, 1, 1, h_out,
+                        w_out, activation,
                     );
                     ow = 1;
                 }
@@ -249,12 +282,16 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 
                         for kh in 0..3isize {
                             let ih = oh as isize + kh - 1;
-                            if ih < 0 || (ih as usize) >= h { continue; }
+                            if ih < 0 || (ih as usize) >= h {
+                                continue;
+                            }
                             let row_off = ic_off + (ih as usize) * w;
 
                             for kw in 0..3isize {
                                 let iw_base = ow as isize + kw - 1;
-                                if iw_base < 0 { continue; }
+                                if iw_base < 0 {
+                                    continue;
+                                }
 
                                 let wv = _mm256_set1_ps(*w_ptr.add((kh * 3 + kw) as usize));
                                 let src = inp_ptr.add(row_off + iw_base as usize);
@@ -275,9 +312,8 @@ unsafe fn direct_conv3x3_f32_avx2_path(
 
                 while ow < w_out {
                     conv3x3_scalar_pixel(
-                        input, weight, bias, output,
-                        img, oc, oh, ow,
-                        c, h, w, f, 1, 1, h_out, w_out, activation,
+                        input, weight, bias, output, img, oc, oh, ow, c, h, w, f, 1, 1, h_out,
+                        w_out, activation,
                     );
                     ow += 1;
                 }
@@ -312,12 +348,14 @@ pub fn direct_conv3x3_f32(
     if padding == 1 && stride == 1 && is_x86_feature_detected!("avx2") {
         #[cfg(feature = "debug_canary")]
         if !DID_AVX2.swap(true, Ordering::Relaxed) {
-            eprintln!("[direct_conv3x3] AVX2 PATH ACTIVE (c={} h={} w={} f={})", c, h, w, f);
+            eprintln!(
+                "[direct_conv3x3] AVX2 PATH ACTIVE (c={} h={} w={} f={})",
+                c, h, w, f
+            );
         }
         unsafe {
             direct_conv3x3_f32_avx2_path(
-                input, weight, bias, output,
-                n, c, h, w, f, h_out, w_out, activation,
+                input, weight, bias, output, n, c, h, w, f, h_out, w_out, activation,
             );
         }
         return;
@@ -326,16 +364,17 @@ pub fn direct_conv3x3_f32(
     // Scalar path (unsupported stride/padding combos)
     #[cfg(feature = "debug_canary")]
     if !DID_SCALAR.swap(true, Ordering::Relaxed) {
-        eprintln!("[direct_conv3x3] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})", padding, stride, c, h, w, f);
+        eprintln!(
+            "[direct_conv3x3] SCALAR PATH (padding={} stride={} c={} h={} w={} f={})",
+            padding, stride, c, h, w, f
+        );
     }
     for img in 0..n {
         for oc in 0..f {
             for oh in 0..h_out {
                 for ow in 0..w_out {
                     conv3x3_scalar_pixel(
-                        input, weight, bias, output,
-                        img, oc, oh, ow,
-                        c, h, w, f, stride, padding,
+                        input, weight, bias, output, img, oc, oh, ow, c, h, w, f, stride, padding,
                         h_out, w_out, activation,
                     );
                 }

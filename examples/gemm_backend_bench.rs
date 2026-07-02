@@ -88,6 +88,7 @@ fn mean(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
 }
 
+#[allow(clippy::type_complexity)]
 fn bench_fn(
     f: fn(usize, usize, usize, &[f32], &[f32], &mut [f32]),
     shape: GemmShape,
