@@ -18,16 +18,19 @@ class Precision(IntEnum):
     """
     F32 = 0  # Full float32, no quantization
     F16 = 1  # PackedTensor<F16x2> (2 × f16 per u32 word)
-    I8 = 2   # PackedTensor<I8x4>  (4 × i8 per u32 word)
-    I4 = 3   # PackedTensor<I4x8>  (8 × i4 per u32 word)
+    I8 = 2   # PackedTensor<I8x4>  (4 × i8 per u32 word, symmetric signed)
+    I4 = 3   # PackedTensor<I4x8>  (8 × i4 per u32 word, symmetric signed)
     F8 = 4   # PackedTensor<F8x4>  (4 × FP8 E4M3 per u32 word)
     F8R = 5  # PackedTensor<F8x4R> (4 × FP8 E5M2 per u32 word)
     F4 = 6   # PackedTensor<F4x8>  (8 × FP4 E2M1 per u32 word)
+    U8 = 7   # PackedTensor<U8x4>  (4 × u8 per u32 word, unsigned per-channel)
+    U4 = 8   # PackedTensor<U4x8>  (8 × u4 per u32 word, unsigned per-channel)
 
     @property
     def bit_width(self) -> int:
         return {Precision.F32: 32, Precision.F16: 16,
                 Precision.I8: 8, Precision.I4: 4,
+                Precision.U8: 8, Precision.U4: 4,
                 Precision.F8: 8, Precision.F8R: 8, Precision.F4: 4}[self]
 
     @property
@@ -37,11 +40,12 @@ class Precision(IntEnum):
 
     @property
     def is_quantized(self) -> bool:
-        return self in (Precision.I8, Precision.I4)
+        return self in (Precision.I8, Precision.I4, Precision.U8, Precision.U4)
 
     @property
     def is_packed(self) -> bool:
         return self in (Precision.F16, Precision.I8, Precision.I4,
+                        Precision.U8, Precision.U4,
                         Precision.F8, Precision.F8R, Precision.F4)
 
     @staticmethod
@@ -56,8 +60,10 @@ class Precision(IntEnum):
         mapping = {
             "f32": Precision.F32, "float32": Precision.F32,
             "f16": Precision.F16, "float16": Precision.F16,
-            "i8": Precision.I8, "u8": Precision.I8, "uint8": Precision.I8,
-            "i4": Precision.I4, "u4": Precision.I4, "uint4": Precision.I4,
+            "i8": Precision.I8, "s8": Precision.I8, "signed8": Precision.I8,
+            "i4": Precision.I4, "s4": Precision.I4, "signed4": Precision.I4,
+            "u8": Precision.U8, "uint8": Precision.U8,
+            "u4": Precision.U4, "uint4": Precision.U4,
             "f8": Precision.F8, "fp8": Precision.F8, "e4m3": Precision.F8,
             "f8r": Precision.F8R, "fp8r": Precision.F8R, "e5m2": Precision.F8R,
             "f4": Precision.F4, "fp4": Precision.F4, "e2m1": Precision.F4,

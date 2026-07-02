@@ -1334,13 +1334,17 @@ impl AotExecutor {
                 } else if let Ok(s) = obj.extract::<String>() {
                     match s.as_str() {
                         "f32" => crate::backend::executor::WeightDtype::F32,
+                        "i4" => crate::backend::executor::WeightDtype::I4,
+                        "i8" => crate::backend::executor::WeightDtype::I8,
+                        "u4" => crate::backend::executor::WeightDtype::U4,
+                        "u8" => crate::backend::executor::WeightDtype::U8,
                         "f8" => crate::backend::executor::WeightDtype::F8x4,
                         "f8r" => crate::backend::executor::WeightDtype::F8x4R,
                         "f4" => crate::backend::executor::WeightDtype::F4x8,
                         "i4cb" => crate::backend::executor::WeightDtype::I4Codebook,
                         _ => {
                             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unsupported quantize string: '{}' (expected f32, f8, f8r, f4, i4cb, 4, or 8)",
+                                "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, 4, or 8)",
                                 s
                             )))
                         }
@@ -2315,7 +2319,7 @@ impl AotExecutor {
                         zero_points,
                         ..
                     }
-                    | crate::ir::node::IrDType::U8 {
+                    | crate::ir::node::IrDType::I8Scaled {
                         scales,
                         zero_points,
                     } => (scales.clone(), zero_points.clone()),
@@ -2423,7 +2427,7 @@ impl AotExecutor {
                         }
                         Tensor::from_vec(f32_vals, shape)
                     }
-                    crate::storage::DType::U8 => {
+                    crate::storage::DType::I8Scaled => {
                         let words: Vec<u32> = data
                             .chunks_exact(4)
                             .map(|chunk| {
@@ -2486,6 +2490,58 @@ impl AotExecutor {
                             for byte in 0..4 {
                                 let val = ((word >> (byte * 8)) & 0xFF) as u8;
                                 f32_vals.push(crate::dtypes::f8x4r::e5m2_to_f32(val));
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::U4Scaled => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect();
+                        let num_elements = words.len() * 8; // 8 nibbles per u32
+                        let mut f32_vals = Vec::with_capacity(num_elements);
+                        for (word_idx, &word) in words.iter().enumerate() {
+                            for nibble in 0..8 {
+                                let val = (word >> (nibble * 4)) & 0xF;
+                                let ch = word_idx * 8 + nibble;
+                                let s = q_scales
+                                    .get(ch % q_scales.len().max(1))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                let zp = q_zero_points
+                                    .get(ch % q_zero_points.len().max(1))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                f32_vals.push(val as f32 * s + zp);
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::U8Scaled => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect();
+                        let num_elements = words.len() * 4; // 4 bytes per u32
+                        let mut f32_vals = Vec::with_capacity(num_elements);
+                        for (word_idx, &word) in words.iter().enumerate() {
+                            for byte in 0..4 {
+                                let val = (word >> (byte * 8)) & 0xFF;
+                                let ch = word_idx * 4 + byte;
+                                let s = q_scales
+                                    .get(ch % q_scales.len().max(1))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                let zp = q_zero_points
+                                    .get(ch % q_zero_points.len().max(1))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                f32_vals.push(val as f32 * s + zp);
                             }
                         }
                         Tensor::from_vec(f32_vals, shape)

@@ -481,12 +481,14 @@ fn cmd_compile(
         None => WeightDtype::F32,
         Some("4") | Some("i4") => WeightDtype::I4,
         Some("8") | Some("i8") => WeightDtype::I8,
+        Some("u4") => WeightDtype::U4,
+        Some("u8") => WeightDtype::U8,
         Some("f8") => WeightDtype::F8x4,
         Some("f8r") => WeightDtype::F8x4R,
         Some("f4") => WeightDtype::F4x8,
         Some(other) => {
             return Err(format!(
-                "unsupported quantize value: '{other}' (expected 4, 8, f8, f8r, or f4)"
+                "unsupported quantize value: '{other}' (expected 4, 8, u4, u8, f8, f8r, or f4)"
             )
             .into())
         }
