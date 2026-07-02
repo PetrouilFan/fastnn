@@ -6,6 +6,7 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::{Backend, Instruction};
+use fastnn::backend::executor::WeightDtype;
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
 use fastnn::compiler::passes::quantization::quantize_weights;
@@ -623,6 +624,7 @@ fn test_matmul_u4_i8_dispatch_path() {
         IrDType::I4 {
             scales,
             zero_points,
+            ..
         } => (scales.clone(), zero_points.clone()),
         other => panic!("expected U4 weight node, got {:?}", other),
     };
@@ -815,6 +817,112 @@ fn test_count_quantized_kernel_names() {
         "Expected all 3 conv kernels to be conv2d_u4*, but got conv2d_u4={}",
         conv2d_quant_u4,
     );
+}
+
+/// I4Codebook quantize→dequant roundtrip: MatMul with small known weights.
+/// Verifies that the codebook path produces correct dequantized output.
+#[test]
+fn test_matmul_i4codebook_roundtrip() {
+    let weight_data: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+
+    let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::I4Codebook));
+    assert_eq!(result.len(), 4, "output shape mismatch");
+    let expected = vec![1.0f32, 2.0, 3.0, 4.0];
+    for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+        let err = (got - exp).abs();
+        assert!(
+            err <= 1.0,
+            "i4cb matmul output[{i}] got {got}, expected {exp}, err={err}"
+        );
+    }
+}
+
+/// F4x8 quantize→dequant roundtrip: MatMul with small known weights.
+#[test]
+fn test_matmul_f4x8_roundtrip() {
+    let weight_data: Vec<f32> = vec![
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+
+    let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::F4x8));
+    assert_eq!(result.len(), 4, "output shape mismatch");
+    let expected = vec![1.0f32, 2.0, 3.0, 4.0];
+    for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+        let err = (got - exp).abs();
+        assert!(
+            err <= 1.5,
+            "f4x8 matmul output[{i}] got {got}, expected {exp}, err={err}"
+        );
+    }
+}
+
+/// Helper: build a MatMul graph and run with compile_with_weight_dtype.
+/// Returns output as Vec<f32>.
+fn run_matmul_fp(
+    batch: usize,
+    k: usize,
+    n: usize,
+    weight_data: &[f32],
+    input_data: &[f32],
+    weight_dtype: Option<WeightDtype>,
+) -> Vec<f32> {
+    let mut graph = ComputeGraph::new();
+
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(batch as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+
+    let weight_bytes: Vec<u8> = bytemuck::cast_slice(weight_data).to_vec();
+    let weight_tt = TensorType::new(
+        vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: weight_bytes,
+            tensor_type: weight_tt.clone(),
+        }),
+        vec![],
+        weight_tt,
+    );
+
+    let out_tt = TensorType::new(
+        vec![DimExpr::Known(batch as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let mm_id = graph.add_node(Opcode::MatMul, vec![input_id, weight_id], out_tt);
+
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![mm_id]);
+
+    let input_bytes: Vec<u8> = bytemuck::cast_slice(input_data).to_vec();
+
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let weight_dt = weight_dtype.unwrap_or(WeightDtype::F32);
+    let (mut plan, mem, compiled_graph) = executor
+        .compile_with_weight_dtype(graph, weight_dt, None)
+        .expect("compile_with_weight_dtype should succeed");
+
+    let result = executor
+        .execute(&compiled_graph, &mut plan, &mem, &[&input_bytes])
+        .expect("execute should succeed");
+
+    bytemuck::cast_slice(&result[0]).to_vec()
 }
 
 /// End-to-end CPU auto-cast path: a non-input activation is quantized to I8,
