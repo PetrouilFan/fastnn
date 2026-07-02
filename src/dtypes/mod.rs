@@ -5,6 +5,8 @@ pub mod f8x4;
 pub mod f8x4r;
 pub mod i4x8;
 pub mod i8x4;
+pub mod u4x8;
+pub mod u8x4;
 
 pub use f16x2::F16x2;
 pub use f32x1::F32x1;
@@ -13,6 +15,8 @@ pub use f8x4::F8x4;
 pub use f8x4r::F8x4R;
 pub use i4x8::I4x8;
 pub use i8x4::I8x4;
+pub use u4x8::U4x8;
+pub use u8x4::U8x4;
 
 /// Core trait for packed multi-precision types.
 /// Each implementor packs N values into a single u32 word.
