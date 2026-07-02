@@ -1104,7 +1104,7 @@ impl<'a> OnnxConverter<'a> {
                 // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
                 let y = self.graph.cast_op(
                     &y_f32,
-                    IrDType::U8 {
+                    IrDType::I8Scaled {
                         scales: vec![],
                         zero_points: vec![],
                     },
@@ -1664,7 +1664,7 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
             zero_points: vec![0.0],
             codebooks: vec![],
         },
-        DType::U8 => IrDType::U8 {
+        DType::I8Scaled => IrDType::I8Scaled {
             scales: vec![1.0],
             zero_points: vec![0.0],
         },
@@ -1674,6 +1674,14 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
             scales: vec![1.0],
             zeros: vec![],
             codebooks: vec![],
+        },
+        DType::U4Scaled => IrDType::U4Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::U8Scaled => IrDType::U8Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
         },
     }
 }
