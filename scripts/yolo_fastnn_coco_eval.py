@@ -54,7 +54,7 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
-VALID_DTYPES = ("f32", "u4", "u8", "f8", "f8r", "f4")
+VALID_DTYPES = ("f32", "u4", "u8", "i4", "i8", "f8", "f8r", "f4")
 COCO_CATEGORIES = [
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
@@ -197,10 +197,12 @@ def detections_to_coco_json(
 def _dtype_to_quantize(dtype: str) -> int | str | None:
     if dtype == "f32":
         return None
-    if dtype == "u4":
-        return 4
-    if dtype == "u8":
-        return 8
+    if dtype == "u4" or dtype == "u8":
+        return dtype  # unsigned → pass as string for WeightDtype::U4/U8
+    if dtype == "i4":
+        return 4  # signed → pass as int for WeightDtype::I4
+    if dtype == "i8":
+        return 8  # signed → pass as int for WeightDtype::I8
     return dtype
 
 

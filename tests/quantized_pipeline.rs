@@ -404,7 +404,7 @@ fn test_graph_builder_compile_with_quantize() {
     let has_u8 = u8_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::U8 { .. }));
+        .any(|n| matches!(&n.output_type.dtype, IrDType::I8Scaled { .. }));
     assert!(has_u8, "U8-compiled graph should contain a U8 weight node");
 
     // No-quantize graph should have no U4/U8 nodes
@@ -412,7 +412,7 @@ fn test_graph_builder_compile_with_quantize() {
     let has_packed = f32_graph.nodes.iter().any(|n| {
         matches!(
             &n.output_type.dtype,
-            IrDType::I4 { .. } | IrDType::U8 { .. }
+            IrDType::I4 { .. } | IrDType::I8Scaled { .. }
         )
     });
     assert!(
@@ -524,7 +524,7 @@ fn test_matmul_u8_i8_dispatch_path() {
 
     // Apply weight quantization (U8) to convert the f32 weight constant.
     infer_shapes(&mut graph).unwrap();
-    quantize_weights(&mut graph, 8, None).unwrap();
+    quantize_weights(&mut graph, 8, true, None).unwrap();
     eliminate_dead_code(&mut graph);
 
     // Now the MatMul should see [I8, U8] and select "matmul_i8_i8".
@@ -599,7 +599,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     graph.set_outputs(vec![mm_id]);
 
     infer_shapes(&mut graph).unwrap();
-    quantize_weights(&mut graph, 4, None).unwrap();
+    quantize_weights(&mut graph, 4, true, None).unwrap();
     eliminate_dead_code(&mut graph);
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
@@ -989,7 +989,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     let act_node = graph.get_node(mm_node.inputs[0]).unwrap();
     assert_eq!(act_node.opcode, Opcode::QuantizeActivations);
     let weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    assert!(matches!(weight_node.output_type.dtype, IrDType::U8 { .. }));
+    assert!(matches!(weight_node.output_type.dtype, IrDType::I8Scaled { .. }));
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
     let mut plan = CpuBackend.compile(&graph, &mem).unwrap();

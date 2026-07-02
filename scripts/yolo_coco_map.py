@@ -32,7 +32,7 @@ from PIL import Image
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_DTYPES = ("f32", "u4", "u8", "f8", "f8r", "f4", "i4cb")
+VALID_DTYPES = ("f32", "u4", "u8", "i4", "i8", "f8", "f8r", "f4", "i4cb")
 DEFAULT_COCO_DIR = "/home/petrouil/Projects/YOLO_Validation/coco"
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "yolo11n": {"pt_name": "yolo11n.pt"},
@@ -260,11 +260,13 @@ def _format_attr_value(value: Any) -> str:
 def _dtype_to_quantize(dtype: str) -> int | str | None:
     if dtype == "f32":
         return None
-    if dtype == "u4":
-        return 4
-    if dtype == "u8":
-        return 8
-    return dtype  # "f8", "f8r", "f4"
+    if dtype == "u4" or dtype == "u8":
+        return dtype  # unsigned → pass as string for WeightDtype::U4/U8
+    if dtype == "i4":
+        return 4  # signed → pass as int for WeightDtype::I4
+    if dtype == "i8":
+        return 8  # signed → pass as int for WeightDtype::I8
+    return dtype  # "f8", "f8r", "f4" — passed as string
 
 def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
     """Load ONNX, constant-fold (Shape/Gather/Add/Sub/Mul/Div for DFL paths),
