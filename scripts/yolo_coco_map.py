@@ -3,9 +3,12 @@
 
 Usage::
 
-    python scripts/yolo_coco_map.py
+    # Default: stream COCO from HuggingFace (no local download needed):
+    python scripts/yolo_coco_map.py --max-images 10
     python scripts/yolo_coco_map.py --models yolo11n --dtypes f32,f8,f8r,f4
-    python scripts/yolo_coco_map.py --max-images 100
+    python scripts/yolo_coco_map.py --models yolo11l --max-images 100
+
+    # Local COCO directory (if you have it downloaded):
     python scripts/yolo_coco_map.py --coco-dir /path/to/coco
 """
 from __future__ import annotations
@@ -15,7 +18,6 @@ import gc
 import io
 import json
 import os
-import resource
 import statistics
 import sys
 import time
@@ -24,22 +26,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-
-# ---------------------------------------------------------------------------
-# Memory helpers
-# ---------------------------------------------------------------------------
-
-def _get_rss_mb() -> float:
-    """Current process RSS in MB (Linux /proc/self/status)."""
-    try:
-        with open(f"/proc/{os.getpid()}/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024.0
-    except Exception:
-        pass
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    return usage.ru_maxrss / 1024.0
+from PIL import Image
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -79,6 +66,148 @@ def _coco80_to_coco91(coco) -> dict[int, int]:
         76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90,
     ]
     return {i: cat_id for i, cat_id in enumerate(coco80_indices)}
+
+# ---------------------------------------------------------------------------
+# HuggingFace streaming COCO loader
+# ---------------------------------------------------------------------------
+
+# COCO category names for 80 classes (index 0-79 → category_id 1-90)
+COCO_80_NAMES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+
+
+def _preprocess_pil(img: Image.Image, imgsz: int) -> tuple[np.ndarray, float, tuple[int, int]]:
+    """Preprocess a PIL Image: letterbox, normalize to [0,1] float32 CHW."""
+    # Convert to RGB first (handles grayscale, RGBA, palette, etc.)
+    img = img.convert("RGB")
+    img_np = np.array(img)[:, :, ::-1]  # RGB→BGR for cv2 compatibility
+    img_np, gain, pad = _letterbox(img_np, (imgsz, imgsz))
+    img_np = img_np[:, :, ::-1].transpose(2, 0, 1)  # BGR→RGB, HWC→CHW
+    img_np = np.ascontiguousarray(img_np, dtype=np.float32) / 255.0
+    return img_np, gain, pad
+
+
+def _load_coco_hf(max_images: int = 0) -> tuple[Any, list[dict], dict[int, int], list[Any]]:
+    """Load COCO val2017 via HuggingFace streaming. Returns (coco, images, cat_map, pil_images).
+
+    Uses ``detection-datasets/coco`` which stores:
+      - ``objects["category"]``: 0-indexed ClassLabel (0=person … 79=toothbrush)
+      - ``objects["bbox"]``: ``[x1, y1, x2, y2]`` (xyxy format)
+      - ``objects["area"]``: float area per object
+
+    We convert to COCO-JSON format:
+      - ``category_id``: original COCO IDs (1-90 with gaps) via ``coco80_indices``
+      - ``bbox``: ``[x, y, w, h]`` (xywh) as required by pycocotools
+    """
+    from datasets import load_dataset
+    import math
+    import tempfile
+
+    print("  Streaming COCO from HuggingFace...")
+    dataset = load_dataset("detection-datasets/coco", split="val", streaming=True)
+
+    # Original COCO category IDs for the 80 detection classes
+    # Index i in ClassLabel → coco80_indices[i] = COCO category_id
+    coco80_indices = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19,
+        20, 21, 22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36, 37, 38,
+        39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75,
+        76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90,
+    ]
+    coco80_set = set(coco80_indices)
+    cat_map = {i: cat_id for i, cat_id in enumerate(coco80_indices)}
+
+    # Collect images and annotations
+    images: list[dict] = []
+    pil_images: list[Any] = []
+    annotations: list[dict] = []
+    ann_id_counter = 0
+
+    iterator = dataset.take(max_images) if max_images > 0 else dataset
+
+    for sample in iterator:
+        img_id = int(sample["image_id"])
+        height = int(sample["height"])
+        width = int(sample["width"])
+
+        images.append({
+            "id": img_id,
+            "file_name": f"{img_id:012d}.jpg",
+            "height": height,
+            "width": width,
+        })
+        pil_images.append(sample["image"])
+
+        objects = sample["objects"]
+        if not objects:
+            continue
+
+        categories = objects.get("category", [])
+        bboxes = objects.get("bbox", [])
+        areas = objects.get("area", [])
+
+        for i, cls_idx in enumerate(categories):
+            cls_idx = int(cls_idx)
+            cat_id = coco80_indices[cls_idx]
+            if cat_id not in coco80_set:
+                continue
+
+            # Convert xyxy → xywh for COCO format
+            x1, y1, x2, y2 = [float(bboxes[i][j]) for j in range(4)]
+            x, y = x1, y1
+            w, h = x2 - x1, y2 - y1
+            if w < 0:
+                w = 0.0
+            if h < 0:
+                h = 0.0
+
+            area = float(areas[i]) if i < len(areas) else w * h
+            if not math.isfinite(area) or area <= 0:
+                area = w * h
+
+            annotations.append({
+                "id": ann_id_counter,
+                "image_id": img_id,
+                "category_id": cat_id,
+                "bbox": [x, y, w, h],
+                "area": area,
+                "iscrowd": 0,
+            })
+            ann_id_counter += 1
+
+    # Build synthetic COCO object for pycocotools
+    coco_data = {
+        "images": images,
+        "annotations": annotations,
+        "categories": [{"id": cat_id, "name": COCO_80_NAMES[i]}
+                       for i, cat_id in enumerate(coco80_indices)],
+    }
+
+    from pycocotools.coco import COCO
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(coco_data, f, allow_nan=False)
+        json_path = f.name
+    try:
+        coco = COCO(json_path)
+    finally:
+        os.unlink(json_path)
+
+    return coco, images, cat_map, pil_images
 
 # ---------------------------------------------------------------------------
 # Preprocessing (shared ultralytics LetterBox)
@@ -397,7 +526,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="YOLO COCO val2017 mAP: PyTorch vs fastnn across dtypes")
     ap.add_argument("--models", default="yolo11n", help="Comma-separated model names")
     ap.add_argument("--dtypes", default="f32,f8,f8r,f4", help=f"Dtypes ({','.join(VALID_DTYPES)})")
-    ap.add_argument("--coco-dir", default=DEFAULT_COCO_DIR, help="COCO dataset root")
+    ap.add_argument("--coco-dir", default=None, help="Local COCO dataset root (disables HF streaming)")
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--max-images", type=int, default=0, help="Limit images (0 = all)")
     ap.add_argument("--warmup", type=int, default=5)
@@ -409,14 +538,9 @@ def main() -> int:
                      help="Collect structural memory stats (default: on)")
     ap.add_argument("--no-memory-stats", dest="memory_stats", action="store_false",
                      help="Disable structural memory stats")
-    ap.add_argument("--rss-memory", action="store_true", default=False, help=argparse.SUPPRESS)
-    ap.add_argument("--memory", action="store_true", default=False, help=argparse.SUPPRESS)
     ap.add_argument("--short", action="store_true", help="Minimal output: summary table only")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    if args.memory:
-        print("warning: --memory is deprecated, use --rss-memory for RSS tracking or --memory-stats for structural stats", file=sys.stderr)
-        args.rss_memory = True
 
     model_names = [m.strip() for m in args.models.split(",")]
     dtypes = [d.strip() for d in args.dtypes.split(",")]
@@ -425,14 +549,28 @@ def main() -> int:
             print(f"error: unknown dtype '{d}' (valid: {','.join(VALID_DTYPES)})")
             return 1
 
-    # Phase 0: Load COCO
-    print(f"Loading COCO from {args.coco_dir} ...")
-    coco, images, cat_map = _load_coco(args.coco_dir)
-    if args.max_images > 0:
-        images = images[: args.max_images]
+    # Phase 0: Load COCO (HF streaming by default, local if --coco-dir given)
+    pil_images: list[Any] | None = None
+    use_hf = args.coco_dir is None
+    if use_hf:
+        print("Loading COCO via HuggingFace streaming...")
+        coco, images, cat_map, pil_images = _load_coco_hf(args.max_images)
+    else:
+        print(f"Loading COCO from {args.coco_dir} ...")
+        coco, images, cat_map = _load_coco(args.coco_dir)
+        if args.max_images > 0:
+            images = images[: args.max_images]
     print(f"  {len(images)} images, {len(cat_map)} classes")
     img_id_to_idx = {img["id"]: idx for idx, img in enumerate(images)}
     all_results: dict[str, dict[str, Any]] = {}
+
+    def _get_preprocessed(img_idx: int) -> tuple[np.ndarray, float, tuple[int, int]]:
+        """Get preprocessed image from either local file or PIL cache."""
+        if pil_images is not None:
+            return _preprocess_pil(pil_images[img_idx], args.imgsz)
+        else:
+            return _preprocess(
+                str(Path(args.coco_dir) / "val2017" / images[img_idx]["file_name"]), args.imgsz)
 
     for model_name in model_names:
         print(f"\n{'=' * 70}\n  MODEL: {model_name}\n{'=' * 70}")
@@ -455,8 +593,7 @@ def main() -> int:
         import torch
         torch.set_num_threads(1)
         pt_model.model.eval()
-        x_first, _, _ = _preprocess(
-            str(Path(args.coco_dir) / "val2017" / images[0]["file_name"]), args.imgsz)
+        x_first, _, _ = _get_preprocessed(0)
         pt_x = torch.from_numpy(x_first[np.newaxis])
         for _ in range(args.warmup):
             _run_pytorch(pt_model, pt_x)
@@ -471,9 +608,8 @@ def main() -> int:
 
         # --- PyTorch: Accuracy (NOT timed) ---
         pytorch_dets: list[tuple[int, np.ndarray]] = []
-        for img_info in images:
-            x_np, gain, pad = _preprocess(
-                str(Path(args.coco_dir) / "val2017" / img_info["file_name"]), args.imgsz)
+        for idx, img_info in enumerate(images):
+            x_np, gain, pad = _get_preprocessed(idx)
             y_pt = _run_pytorch(pt_model, torch.from_numpy(x_np[np.newaxis]))
             dets_list = _postprocess(y_pt, args.conf_thres, args.iou_thres)
             dets = dets_list[0] if dets_list else np.empty((0, 6))
@@ -506,9 +642,8 @@ def main() -> int:
                 speed = _benchmark_inference(executor, input_name, fx, args.warmup, args.iters)
                 # Phase 4: Accuracy (NOT timed)
                 fastnn_dets: list[tuple[int, np.ndarray]] = []
-                for img_info in images:
-                    x_np, gain, pad = _preprocess(
-                        str(Path(args.coco_dir) / "val2017" / img_info["file_name"]), args.imgsz)
+                for idx, img_info in enumerate(images):
+                    x_np, gain, pad = _get_preprocessed(idx)
                     fx_img = fnn.tensor(x_np[np.newaxis], list(x_np[np.newaxis].shape))
                     result = executor.forward({input_name: fx_img})
                     y_fn = result[output_name].numpy()
