@@ -14,7 +14,7 @@ use crate::backend::cpu::microkernels::{
 use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
+use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4, PackedWord};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -393,7 +393,9 @@ impl Backend for CpuBackend {
                         matches!(
                             d,
                             IrDType::I4 { .. }
-                                | IrDType::U8 { .. }
+                                | IrDType::I8Scaled { .. }
+                                | IrDType::U4Scaled { .. }
+                                | IrDType::U8Scaled { .. }
                                 | IrDType::F4 { .. }
                                 | IrDType::F8 { .. }
                                 | IrDType::F8R { .. }
@@ -425,7 +427,7 @@ impl Backend for CpuBackend {
                             if input_dtypes
                                 .first()
                                 .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. })) =>
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })) =>
                         {
                             "matmul_i4_i8"
                         }
@@ -434,18 +436,24 @@ impl Backend for CpuBackend {
                             if input_dtypes
                                 .first()
                                 .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| matches!(d, IrDType::U8 { .. }))
+                                && input_dtypes.iter().any(|d| matches!(d, IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. }))
                                 && !input_dtypes
                                     .iter()
-                                    .any(|d| matches!(d, IrDType::I4 { .. })) =>
+                                    .any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })) =>
                         {
                             "matmul_i8_i8"
                         }
-                        // Quantized: F32 (or non-I8) activation + U4 weight
+                        // Quantized: F32 activation + Signed I4 weight
                         (_, true)
                             if input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. })) =>
                         {
                             "matmul_i4"
+                        }
+                        // Quantized: F32 activation + Unsigned U4 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::U4Scaled { .. })) =>
+                        {
+                            "matmul_u4"
                         }
                         // Quantized: F32 activation + FP4 weight
                         (_, true)
@@ -467,7 +475,13 @@ impl Backend for CpuBackend {
                         {
                             "matmul_f8r"
                         }
-                        // Quantized: F32 (or non-I8) activation + U8 weight
+                        // Quantized: F32 activation + Unsigned U8 weight
+                        (_, true)
+                            if input_dtypes.iter().any(|d| matches!(d, IrDType::U8Scaled { .. })) =>
+                        {
+                            "matmul_u8"
+                        }
+                        // Quantized: F32 activation + Signed I8 weight
                         (_, true) => "matmul_i8",
                     };
                     // Extract M, K, N from input shapes
@@ -516,7 +530,15 @@ impl Backend for CpuBackend {
                                         zero_points.clone(),
                                         codebooks.clone(),
                                     ),
-                                    IrDType::U8 {
+                                    IrDType::U8Scaled {
+                                        scales,
+                                        zero_points,
+                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                    IrDType::U4Scaled {
+                                        scales,
+                                        zero_points,
+                                    } => (4usize, scales.clone(), zero_points.clone(), vec![]),
+                                    IrDType::I8Scaled {
                                         scales,
                                         zero_points,
                                     } => (8usize, scales.clone(), zero_points.clone(), vec![]),
@@ -773,7 +795,9 @@ impl Backend for CpuBackend {
                         matches!(
                             d,
                             IrDType::I4 { .. }
-                                | IrDType::U8 { .. }
+                                | IrDType::I8Scaled { .. }
+                                | IrDType::U4Scaled { .. }
+                                | IrDType::U8Scaled { .. }
                                 | IrDType::F4 { .. }
                                 | IrDType::F8 { .. }
                                 | IrDType::F8R { .. }
@@ -787,20 +811,26 @@ impl Backend for CpuBackend {
                             "conv2d_f8".to_string()
                         } else if matches!(dtype, IrDType::F8R { .. }) {
                             "conv2d_f8r".to_string()
+                        } else if matches!(dtype, IrDType::U4Scaled { .. }) {
+                            "conv2d_u4".to_string()
+                        } else if matches!(dtype, IrDType::U8Scaled { .. }) {
+                            "conv2d_u8".to_string()
                         } else if matches!(dtype, IrDType::I4 { .. }) {
                             "conv2d_i4".to_string()
                         } else {
                             "conv2d_i8".to_string()
                         };
-                        let bit_width = if matches!(dtype, IrDType::I4 { .. } | IrDType::F4 { .. })
-                        {
+                        let bit_width = if matches!(
+                            dtype,
+                            IrDType::I4 { .. } | IrDType::U4Scaled { .. } | IrDType::F4 { .. }
+                        ) {
                             4usize
                         } else {
                             8usize
                         };
 
                         // Detect signed INT8 activations from QuantizeActivations and append suffix.
-                        // Treat both IrDType::I8 and IrDType::U8 as i8-activation sources, because the
+                        // Treat both IrDType::I8 and IrDType::I8Scaled as i8-activation sources, because the
                         // activation-quantization compiler pass currently emits U8 payloads.
                         let act_dtype = node
                             .inputs
@@ -809,7 +839,7 @@ impl Backend for CpuBackend {
                             .map(|an| an.output_type.dtype.clone());
                         if act_dtype
                             .as_ref()
-                            .is_some_and(|d| matches!(d, IrDType::I8 | IrDType::U8 { .. }))
+                            .is_some_and(|d| matches!(d, IrDType::I8 | IrDType::I8Scaled { .. }))
                         {
                             kernel = format!("{}_i8", kernel);
                         }
@@ -841,6 +871,14 @@ impl Backend for CpuBackend {
                                         zero_points.clone(),
                                         codebooks.clone(),
                                     ),
+                                    IrDType::U8Scaled {
+                                        scales,
+                                        zero_points,
+                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                    IrDType::U4Scaled {
+                                        scales,
+                                        zero_points,
+                                    } => (4usize, scales.clone(), zero_points.clone(), vec![]),
                                     IrDType::F4 { scales, zeros, .. } => {
                                         (4usize, scales.clone(), zeros.clone(), vec![])
                                     }
@@ -850,7 +888,7 @@ impl Backend for CpuBackend {
                                     IrDType::F8R { scales } => {
                                         (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
                                     }
-                                    IrDType::U8 {
+                                    IrDType::I8Scaled {
                                         scales,
                                         zero_points,
                                     } => (8usize, scales.clone(), zero_points.clone(), vec![]),
@@ -2138,7 +2176,17 @@ impl Backend for CpuBackend {
                                 zero_points,
                                 ..
                             }
-                            | IrDType::U8 {
+                            | IrDType::U4Scaled {
+                                scales,
+                                zero_points,
+                                ..
+                            }
+                            | IrDType::I8Scaled {
+                                scales,
+                                zero_points,
+                                ..
+                            }
+                            | IrDType::U8Scaled {
                                 scales,
                                 zero_points,
                                 ..
@@ -2188,7 +2236,16 @@ impl Backend for CpuBackend {
                                 zero_points,
                                 ..
                             } => (scales.clone(), zero_points.clone()),
-                            IrDType::U8 {
+                            IrDType::U4Scaled {
+                                scales,
+                                zero_points,
+                                ..
+                            } => (scales.clone(), zero_points.clone()),
+                            IrDType::I8Scaled {
+                                scales,
+                                zero_points,
+                            } => (scales.clone(), zero_points.clone()),
+                            IrDType::U8Scaled {
                                 scales,
                                 zero_points,
                             } => (scales.clone(), zero_points.clone()),
@@ -3137,6 +3194,20 @@ impl Backend for CpuBackend {
                                 "matmul_i4",
                             )?;
                         }
+                        "matmul_u4" => {
+                            quantized_matmul_dispatch::<U4x8>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                4,
+                                "matmul_u4",
+                            )?;
+                        }
                         "matmul_i4_i8" => {
                             quantized_matmul_dispatch_i8_u4(
                                 input_slices,
@@ -3175,6 +3246,20 @@ impl Backend for CpuBackend {
                                 out_end,
                                 8,
                                 "matmul_i8",
+                            )?;
+                        }
+                        "matmul_u8" => {
+                            quantized_matmul_dispatch::<U8x4>(
+                                input_slices,
+                                arena,
+                                params,
+                                param_dims,
+                                shape_env,
+                                weight_meta,
+                                out_start,
+                                out_end,
+                                8,
+                                "matmul_u8",
                             )?;
                         }
                         "matmul_f4" => {
@@ -4006,6 +4091,8 @@ impl Backend for CpuBackend {
                         }
                         // â”€â”€ Conv2d Quantized (u4/u8) â€” FP32 activation path (arena) â”€â”€
                         "conv2d_f4" | "conv2d_f4_relu" | "conv2d_f4_gelu" | "conv2d_f4_silu"
+                        | "conv2d_u4" | "conv2d_u4_relu" | "conv2d_u4_gelu" | "conv2d_u4_silu"
+                        | "conv2d_u8" | "conv2d_u8_relu" | "conv2d_u8_gelu" | "conv2d_u8_silu"
                         | "conv2d_f8" | "conv2d_f8_relu" | "conv2d_f8_gelu" | "conv2d_f8_silu"
                         | "conv2d_f8r" | "conv2d_f8r_relu" | "conv2d_f8r_gelu"
                         | "conv2d_f8r_silu" | "conv2d_i4" | "conv2d_i4_relu" | "conv2d_i4_gelu"
@@ -4151,7 +4238,11 @@ impl Backend for CpuBackend {
                                         );
                                     }};
                                 }
-                                if kernel_name.starts_with("conv2d_f4") {
+                                if kernel_name.starts_with("conv2d_u4") {
+                                    dispatch_packed_conv_cached!(U4x8);
+                                } else if kernel_name.starts_with("conv2d_u8") {
+                                    dispatch_packed_conv_cached!(U8x4);
+                                } else if kernel_name.starts_with("conv2d_f4") {
                                     dispatch_packed_conv_cached!(F4x8);
                                 } else if kernel_name.starts_with("conv2d_f8r") {
                                     dispatch_packed_conv_cached!(F8x4R);

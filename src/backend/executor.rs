@@ -36,6 +36,10 @@ pub enum WeightDtype {
     I4,
     /// Integer 8-bit symmetric quantization (I8x4/U8).
     I8,
+    /// Unsigned integer 4-bit quantization (U4x8).
+    U4,
+    /// Unsigned integer 8-bit quantization (U8x4).
+    U8,
     /// Float 8-bit E4M3 (F8x4).
     F8x4,
     /// Float 8-bit E5M2 (F8x4R).
@@ -92,7 +96,7 @@ fn read_execution_outputs<B: Backend>(
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
             let computed = match &node.output_type.dtype {
                 IrDType::I4 { .. }
-                | IrDType::U8 { .. }
+                | IrDType::I8Scaled { .. }
                 | IrDType::F8 { .. }
                 | IrDType::F8R { .. }
                 | IrDType::F4 { .. } => node.output_type.dtype.packed_byte_size(actual_numel),
@@ -248,11 +252,19 @@ impl<B: Backend> GraphExecutor<B> {
                 use quantization::FpDtype;
                 match weight_dtype {
                     WeightDtype::I4 => {
-                        quantization::quantize_weights(&mut graph, 4, None)
+                        quantization::quantize_weights(&mut graph, 4, true, None)
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
                     WeightDtype::I8 => {
-                        quantization::quantize_weights(&mut graph, 8, None)
+                        quantization::quantize_weights(&mut graph, 8, true, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::U4 => {
+                        quantization::quantize_weights(&mut graph, 4, false, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::U8 => {
+                        quantization::quantize_weights(&mut graph, 8, false, None)
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
                     WeightDtype::F8x4 => {
@@ -672,7 +684,7 @@ impl<B: Backend> GraphExecutor<B> {
                             let raw = numel as usize * node.output_type.dtype.byte_size();
                             match &node.output_type.dtype {
                                 IrDType::I4 { .. }
-                                | IrDType::U8 { .. }
+                                | IrDType::I8Scaled { .. }
                                 | IrDType::F8 { .. }
                                 | IrDType::F8R { .. }
                                 | IrDType::F4 { .. } => {
