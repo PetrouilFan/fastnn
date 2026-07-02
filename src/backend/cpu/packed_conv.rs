@@ -156,7 +156,7 @@ unsafe fn im2col_pack_i8x4(
         let inv_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
 
         // Pack each row independently for correct row-wise alignment
-        let mut packed: Vec<I8x4> = Vec::with_capacity(m * k_packed);
+        let mut packed: Vec<I8x4> = vec![I8x4(0); m * k_packed];
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             use std::arch::x86_64::*;
@@ -1485,6 +1485,56 @@ mod tests {
                 groups,
                 kh,
                 kw,
+                PreparedActivation::None,
+                &mut output,
+            );
+        }
+        for (i, &v) in output.iter().enumerate() {
+            assert!(v.is_finite(), "Non-finite value at output[{}]: {}", i, v);
+        }
+        let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_i8x4_simd_path() {
+        // k_packed >= 8 exercises the SIMD fast path (AVX2) that was
+        // panicking before the fix — Vec::with_capacity gave len==0
+        // while the SIMD loop did direct index assignment.
+        let n = 1;
+        let c = 8; // c*kh*kw = 8*3*3 = 72, k_packed = 18 >= 8
+        let h = 4;
+        let w = 4;
+        let kh = 3;
+        let kw = 3;
+        let stride = 1;
+        let padding = 1;
+        let dilation = 1;
+        let oc = 4;
+        let groups = 1;
+
+        let input: Vec<f32> = (0..(c * h * w)).map(|i| (i as f32 - 32.0) * 0.1).collect();
+        let k = c * kh * kw;
+        let mut wdata = vec![0.0f32; oc * k];
+        for i in 0..c {
+            wdata[i * kh * kw + kh * kw / 2] = 1.0 / c as f32;
+        }
+        for i in 0..c {
+            wdata[k + i * kh * kw + kh * kw / 2] = 0.5 / c as f32;
+        }
+
+        let weight = PackedTensor::<I8x4>::from_f32_per_channel(&wdata, &[oc, k]);
+        let h_out = h;
+        let w_out = w;
+        let mut output = vec![0.0f32; oc * h_out * w_out];
+        unsafe {
+            conv2d_packed_i8x4(
+                &input,
+                n, c, h, w,
+                &weight,
+                None,
+                stride, padding, dilation, groups,
+                kh, kw,
                 PreparedActivation::None,
                 &mut output,
             );
