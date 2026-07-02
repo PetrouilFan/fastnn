@@ -1232,7 +1232,7 @@ impl GraphBuilder {
                 zero_points: vec![],
                 codebooks: vec![],
             },
-            8 => IrDType::U8 {
+            8 => IrDType::I8Scaled {
                 scales: vec![],
                 zero_points: vec![],
             },
@@ -1241,6 +1241,38 @@ impl GraphBuilder {
         let output_type = TensorType::new(output_shape, output_dtype);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("bit_width".to_string(), bit_width.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Quantize,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Quantize F32 → unsigned packed U4/U8 (U4x8 or U8x4).
+    /// Use signed `quantize()` for I4/I8.
+    pub fn quantize_unsigned(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_dtype = match bit_width {
+            4 => IrDType::U4Scaled {
+                scales: vec![],
+                zero_points: vec![],
+            },
+            8 => IrDType::U8Scaled {
+                scales: vec![],
+                zero_points: vec![],
+            },
+            _ => panic!(
+                "quantize_unsigned: bit_width must be 4 or 8, got {}",
+                bit_width
+            ),
+        };
+        let output_type = TensorType::new(output_shape, output_dtype);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("bit_width".to_string(), bit_width.to_string());
+        attrs.insert("signed".to_string(), "false".to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Quantize,
@@ -1971,14 +2003,20 @@ impl GraphBuilder {
 
     /// Detect if a tensor has a packed quantized dtype (U4 or U8).
     fn is_packed_dtype(dtype: &IrDType) -> bool {
-        matches!(dtype, IrDType::I4 { .. } | IrDType::U8 { .. })
+        matches!(
+            dtype,
+            IrDType::I4 { .. }
+                | IrDType::I8Scaled { .. }
+                | IrDType::U4Scaled { .. }
+                | IrDType::U8Scaled { .. }
+        )
     }
 
     /// Extract the bit width from a packed dtype (4 for U4, 8 for U8).
     fn packed_bit_width(dtype: &IrDType) -> usize {
         match dtype {
-            IrDType::I4 { .. } => 4,
-            IrDType::U8 { .. } => 8,
+            IrDType::I4 { .. } | IrDType::U4Scaled { .. } => 4,
+            IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. } => 8,
             _ => panic!("packed_bit_width called on non-packed dtype: {:?}", dtype),
         }
     }
