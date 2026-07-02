@@ -118,7 +118,7 @@ jobs:
           components: llvm-tools
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-llvm-cov
-      - run: cargo llvm-cov --lib --no-default-features --features "simd,parallel,fusion-forward" --lcov --output-path lcov.info
+      - run: cargo llvm-cov --lib --no-default-features --features "simd,parallel,fusion-forward" --lcov --output-path lcov.info -- --test-threads=1
       - uses: codecov/codecov-action@v4
         with:
           files: lcov.info
