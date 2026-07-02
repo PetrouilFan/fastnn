@@ -28,6 +28,14 @@ macro_rules! impl_weight_decay {
     };
 }
 
+/// Internal helper to check if an identifier is in a list
+#[macro_export]
+macro_rules! __impl_optim_has_field {
+    ($field:ident, $($list:ident),*) => {
+        false $(|| stringify!($field) == stringify!($list))*
+    };
+}
+
 /// Generate the `add_param_group`, `state_dict`, and `load_state_dict` methods
 /// for an `Optimizer` impl.
 ///
@@ -73,16 +81,14 @@ macro_rules! impl_optim_boilerplate {
         fn state_dict(&self) -> $crate::optim::OptimizerState {
             let mut state = ::std::collections::HashMap::new();
             for (i, _) in self.params.iter().enumerate() {
-                state.insert(
-                    i,
-                    $crate::optim::ParamState {
-                        step: self.step[i],
-                        $(
-                            $state_field: Some(self.$state_field[i].clone()),
-                        )*
-                        ..Default::default()
-                    },
-                );
+                let mut param_state = $crate::optim::ParamState {
+                    step: self.step[i],
+                    ..Default::default()
+                };
+                $(
+                    param_state.$state_field = Some(self.$state_field[i].clone());
+                )*
+                state.insert(i, param_state);
             }
             $crate::optim::OptimizerState {
                 param_groups: vec![$crate::optim::ParamGroup {

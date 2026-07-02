@@ -42,11 +42,13 @@ use crate::ir::node::*;
 // executed with the same input shapes.
 // ============================================================
 
+#[allow(clippy::type_complexity)]
+type PlanCache =
+    std::sync::LazyLock<Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>>;
+
 /// Key: hash of (graph topological structure + input byte lengths).
 /// Value: cached (ExecutablePlan, MemoryPlan, compiled_graph).
-static PLAN_CACHE: std::sync::LazyLock<
-    Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>,
-> = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
+static PLAN_CACHE: PlanCache = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
 
 /// Compute a ~unique hash for a graph + its input shapes.
 fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]], quantize: Option<u8>) -> u64 {
@@ -1222,16 +1224,17 @@ impl GraphBuilder {
 
     /// Quantize F32 → U4/U8 with per-channel scales/zero_points.
     ///
-    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::U4` or
-    /// `IrDType::U8` with per-channel scale/zero-point metadata.
+    /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::I4` or
+    /// `IrDType::I8` packed weight type with per-channel scale/zero-point metadata.
     pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
-            4 => IrDType::U4 {
+            4 => IrDType::I4 {
                 scales: vec![],
                 zero_points: vec![],
+                codebooks: vec![],
             },
-            8 => IrDType::U8 {
+            8 => IrDType::I8Scaled {
                 scales: vec![],
                 zero_points: vec![],
             },
@@ -1240,6 +1243,38 @@ impl GraphBuilder {
         let output_type = TensorType::new(output_shape, output_dtype);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("bit_width".to_string(), bit_width.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Quantize,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Quantize F32 → unsigned packed U4/U8 (U4x8 or U8x4).
+    /// Use signed `quantize()` for I4/I8.
+    pub fn quantize_unsigned(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_dtype = match bit_width {
+            4 => IrDType::U4Scaled {
+                scales: vec![],
+                zero_points: vec![],
+            },
+            8 => IrDType::U8Scaled {
+                scales: vec![],
+                zero_points: vec![],
+            },
+            _ => panic!(
+                "quantize_unsigned: bit_width must be 4 or 8, got {}",
+                bit_width
+            ),
+        };
+        let output_type = TensorType::new(output_shape, output_dtype);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("bit_width".to_string(), bit_width.to_string());
+        attrs.insert("signed".to_string(), "false".to_string());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Quantize,
@@ -1902,7 +1937,7 @@ impl GraphBuilder {
     ) -> GraphTensor {
         let x_shape = x.shape();
         let y_shape = y.shape();
-        let output_shape = broadcast_shape(&x_shape, &y_shape);
+        let output_shape = broadcast_shape(x_shape, y_shape);
         let out_tt = TensorType::new(output_shape, IrDType::F32);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
@@ -1932,18 +1967,58 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
+    pub fn quantize_gradient(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(
+            output_shape,
+            IrDType::F8R {
+                scales: vec![scale],
+            },
+        );
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("scale".to_string(), scale.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::QuantizeGradient,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Dequantize gradient F8x4R -> F32 for optimizer consumption.
+    pub fn dequantize_gradient(&self, input: &GraphTensor) -> GraphTensor {
+        let output_shape = input.shape().to_vec();
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node(
+            Opcode::DequantizeGradient,
+            vec![input.node_id],
+            output_type.clone(),
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
 
     /// Detect if a tensor has a packed quantized dtype (U4 or U8).
     fn is_packed_dtype(dtype: &IrDType) -> bool {
-        matches!(dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+        matches!(
+            dtype,
+            IrDType::I4 { .. }
+                | IrDType::I8Scaled { .. }
+                | IrDType::U4Scaled { .. }
+                | IrDType::U8Scaled { .. }
+        )
     }
 
     /// Extract the bit width from a packed dtype (4 for U4, 8 for U8).
     fn packed_bit_width(dtype: &IrDType) -> usize {
         match dtype {
-            IrDType::U4 { .. } => 4,
-            IrDType::U8 { .. } => 8,
+            IrDType::I4 { .. } | IrDType::U4Scaled { .. } => 4,
+            IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. } => 8,
             _ => panic!("packed_bit_width called on non-packed dtype: {:?}", dtype),
         }
     }
@@ -2264,7 +2339,7 @@ impl GraphBuilder {
 
     /// Compile the graph with optional quantization.
     ///
-    /// Pass `quantize = Some(4)` for 4-bit (U4x8) or `Some(8)` for 8-bit (U8x4) quantization.
+    /// Pass `quantize = Some(4)` for 4-bit (I4x8) or `Some(8)` for 8-bit (I8x4) quantization.
     /// Pass `None` for no quantization (default f32).
     pub fn compile_with_quantize<B: Backend>(
         &self,
@@ -2286,7 +2361,7 @@ impl GraphBuilder {
 
         let executor = GraphExecutor::new(backend);
         let (plan, memory_plan, compiled_graph) =
-            executor.compile_with_plan_and_quantize(&graph, quantize, None)?;
+            executor.compile_with_plan_and_quantize(graph, quantize, None)?;
 
         Ok((plan, memory_plan, compiled_graph))
     }
@@ -2335,7 +2410,7 @@ impl GraphBuilder {
 
         let mut executor = GraphExecutor::new(backend);
         let (mut plan, memory_plan, compiled_graph) =
-            executor.compile_with_plan_and_quantize(&graph, quantize, None)?;
+            executor.compile_with_plan_and_quantize(graph, quantize, None)?;
 
         // Cache the compiled plan (clone only what's needed for reuse)
         cache_plan(
@@ -2742,7 +2817,7 @@ mod tests {
         // Verify the actual values are correct by computing manually for batch=1
         // x = [0,1,2,...,63], w column j = [j%10, j%10, ..., j%10] (64 times)
         // logits[0,j] = sum_{k=0}^{63} k * (j%10)
-        let expected_0 = (0..64).map(|k| k as f32 * (0 % 10) as f32).sum::<f32>();
+        let expected_0 = (0..64).map(|k| k as f32 * 0 as f32).sum::<f32>();
         assert!(
             (out_1[0] - expected_0).abs() < 1e-3,
             "expected logit[0,0]={}, got {}",
@@ -3007,12 +3082,12 @@ mod tests {
         assert!((sig_out[1] - 0.7310586).abs() < 1e-5);
         // tanh
         assert!((tan_out[0] - 0.0).abs() < 1e-5);
-        assert!((tan_out[1] - 0.76159416).abs() < 1e-5);
+        assert!((tan_out[1] - 0.761_594_2).abs() < 1e-5);
         // exp
         assert!((exp_out[0] - 1.0).abs() < 1e-5);
-        assert!((exp_out[1] - 2.7182818).abs() < 1e-5);
+        assert!((exp_out[1] - std::f32::consts::E).abs() < 1e-5);
         // sqrt
-        assert!((sqrt_out[3] - 1.4142135).abs() < 1e-5);
+        assert!((sqrt_out[3] - std::f32::consts::SQRT_2).abs() < 1e-5);
         // abs
         assert!((abs_out[2] - 1.0).abs() < 1e-5);
     }

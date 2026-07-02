@@ -106,7 +106,7 @@ impl MemoryPlan {
                         // The perm comes from node attrs (e.g. "0,3,1,2")
                         let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
                         let mut params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
-                        params.push(rank as usize);
+                        params.push(rank);
                         params.extend(input_shape.iter().map(|&d| d as usize));
                         if perm_str.is_empty() {
                             // Default: reverse
@@ -168,6 +168,62 @@ impl MemoryPlan {
                         _ => (0, 0), // ReduceSum
                     };
                     vec![group_size, is_mean, is_max]
+                }
+                Opcode::Conv2d => {
+                    let get_attr_usize = |name: &str| -> usize {
+                        node.attrs
+                            .get(name)
+                            .and_then(|a| a.parse().ok())
+                            .unwrap_or(0)
+                    };
+                    let stride = get_attr_usize("stride");
+                    let padding = get_attr_usize("padding");
+                    let dilation = get_attr_usize("dilation");
+                    let groups = get_attr_usize("groups").max(1);
+
+                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
+                    let weight_shape = resolved_input_shapes.get(1).cloned().unwrap_or_default();
+
+                    let n_in = input_shape.first().copied().unwrap_or(1) as usize;
+                    let c = input_shape.get(1).copied().unwrap_or(1) as usize;
+                    let h = input_shape.get(2).copied().unwrap_or(1) as usize;
+                    let w = input_shape.get(3).copied().unwrap_or(1) as usize;
+                    // kernel_h/kw come from weight shape, not attrs (matches compile-time code)
+                    let kh = weight_shape.get(2).copied().unwrap_or(0) as usize;
+                    let kw = weight_shape.get(3).copied().unwrap_or(0) as usize;
+                    let c_per_group = c / groups;
+                    let f_out = weight_shape.first().copied().unwrap_or(1) as usize;
+                    let h_out = (h + 2 * padding)
+                        .saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
+                        .checked_div(stride)
+                        .map(|v| v + 1)
+                        .unwrap_or(1);
+                    let w_out = (w + 2 * padding)
+                        .saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
+                        .checked_div(stride)
+                        .map(|v| v + 1)
+                        .unwrap_or(1);
+                    let spatial_size = h_out * w_out;
+                    let col_w = c_per_group * kh * kw;
+                    // Layout: [stride, padding, dilation, groups, c, h, w, kh, kw,
+                    //          n_in, f_out, h_out, w_out, spatial_size, col_w]
+                    vec![
+                        stride,
+                        padding,
+                        dilation,
+                        groups,
+                        c,
+                        h,
+                        w,
+                        kh,
+                        kw,
+                        n_in,
+                        f_out,
+                        h_out,
+                        w_out,
+                        spatial_size,
+                        col_w,
+                    ]
                 }
                 _ => return Ok(()),
             };
@@ -340,7 +396,7 @@ pub fn plan_memory_with_env(
         transitive_last_use.insert(node_id, last);
     }
 
-    let mut alloc_infos: Vec<AllocInfo> = Vec::new();
+    let mut alloc_infos: Vec<AllocInfo> = Vec::with_capacity(graph.nodes.len());
 
     crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
@@ -471,7 +527,7 @@ pub fn plan_memory_with_env(
         output_last_use: usize,
         ai_idx: usize,
     }
-    let mut reuse_candidates: Vec<ReuseCandidate> = Vec::new();
+    let mut reuse_candidates: Vec<ReuseCandidate> = Vec::with_capacity(graph.nodes.len());
     for ai_idx in 0..alloc_infos.len() {
         let info = &alloc_infos[ai_idx];
         if info.is_secondary {
@@ -563,7 +619,7 @@ pub fn plan_memory_with_env(
 
     let mut slots: HashMap<NodeId, AllocSlot> = HashMap::new();
     let mut secondary_slots: HashMap<(NodeId, usize), AllocSlot> = HashMap::new();
-    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::new();
+    let mut active: Vec<(usize, NodeId, usize, bool)> = Vec::with_capacity(graph.nodes.len());
     let mut free_list = SegFreeList::new();
     let mut arena_top: usize = 0;
 

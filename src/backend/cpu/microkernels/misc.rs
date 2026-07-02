@@ -2,7 +2,7 @@
 
 #![allow(dead_code, unused_imports)]
 
-use crate::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 use super::*;
@@ -34,18 +34,15 @@ pub fn matmul_blas_with_transpose_into(
     trans_a: bool,
     trans_b: bool,
 ) {
-    use matrixmultiply::sgemm;
-
     let rsa: isize = if trans_a { 1 } else { k as isize };
     let csa: isize = if trans_a { m as isize } else { 1 };
     let rsb: isize = if trans_b { 1 } else { n as isize };
     let csb: isize = if trans_b { k as isize } else { 1 };
 
-    // SAFETY: matrixmultiply::sgemm operates on valid slices with correct
-    // dimensions and strides. All pointers are properly aligned and
-    // dereferenceable for the full m×n output region.
+    // SAFETY: sgemm operates on valid slices with correct
+    // dimensions and strides.
     unsafe {
-        sgemm(
+        crate::backend::cpu::sgemm::sgemm(
             m,
             k,
             n,
@@ -415,8 +412,8 @@ pub unsafe fn upsample_nearest2d_f32_avx2(
                             *input.get_unchecked(in_base + 2),
                             *input.get_unchecked(in_base + 1),
                             *input.get_unchecked(in_base + 1),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
                         )
                     }
                     4 => {
@@ -426,10 +423,10 @@ pub unsafe fn upsample_nearest2d_f32_avx2(
                             *input.get_unchecked(in_base + 1),
                             *input.get_unchecked(in_base + 1),
                             *input.get_unchecked(in_base + 1),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
                         )
                     }
                     _ => unreachable!(),
@@ -533,7 +530,7 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
         let mut j = 0;
         while j + 8 <= n {
             // Load 8 rows of 8 elements each
-            let r0 = _mm256_loadu_ps(input.as_ptr().add((i + 0) * n + j));
+            let r0 = _mm256_loadu_ps(input.as_ptr().add(i * n + j));
             let r1 = _mm256_loadu_ps(input.as_ptr().add((i + 1) * n + j));
             let r2 = _mm256_loadu_ps(input.as_ptr().add((i + 2) * n + j));
             let r3 = _mm256_loadu_ps(input.as_ptr().add((i + 3) * n + j));
@@ -574,7 +571,7 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
             let out7 = _mm256_permute2f128_ps(q3, q7, 0x31);
 
             // Store 8 cols × 8 rows in transposed position
-            _mm256_storeu_ps(output.as_mut_ptr().add((j + 0) * m + i), out0);
+            _mm256_storeu_ps(output.as_mut_ptr().add(j * m + i), out0);
             _mm256_storeu_ps(output.as_mut_ptr().add((j + 1) * m + i), out1);
             _mm256_storeu_ps(output.as_mut_ptr().add((j + 2) * m + i), out2);
             _mm256_storeu_ps(output.as_mut_ptr().add((j + 3) * m + i), out3);

@@ -3,7 +3,7 @@
 #![allow(dead_code, unused_imports)]
 
 use super::*;
-use crate::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 use std::sync::OnceLock;
 
@@ -357,10 +357,10 @@ pub enum ConvActivation {
 }
 
 #[inline]
-fn apply_conv_activation(x: f32, activation: ConvActivation) -> f32 {
+pub(crate) fn apply_conv_activation(x: f32, activation: ConvActivation) -> f32 {
     match activation {
         ConvActivation::Relu => x.max(0.0),
-        ConvActivation::Gelu => 0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh()),
+        ConvActivation::Gelu => 0.5 * x * (1.0 + (x * 0.797_884_6_f32).tanh()),
         ConvActivation::Silu => x / (1.0 + (-x).exp()),
     }
 }
@@ -469,12 +469,12 @@ pub(crate) unsafe fn conv_sgemm(
                 n as i32,
             );
         } else {
-            matrixmultiply::sgemm(
+            crate::backend::cpu::sgemm::sgemm(
                 m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
             );
         }
     } else {
-        matrixmultiply::sgemm(
+        crate::backend::cpu::sgemm::sgemm(
             m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
         );
     }
@@ -498,7 +498,7 @@ pub(crate) unsafe fn conv_sgemm(
     rs_c: isize,
     cs_c: isize,
 ) {
-    matrixmultiply::sgemm(
+    crate::backend::cpu::sgemm::sgemm(
         m, k, n, 1.0, a, rs_a, cs_a, b, rs_b, cs_b, 0.0, c, rs_c, cs_c,
     );
 }
@@ -546,74 +546,33 @@ pub fn conv2d_f32_im2col_gemm(
         return;
     }
 
-    // Fast path for 1x1 convolutions (no im2col, no weight transpose).
-    // Run GEMM as C[f, hw] = W[f, c] * X[c, hw] so the result lands directly
-    // in NCHW output order. This avoids the previous temp_out[faster-NHWC]
-    // buffer plus per-element scatter back to NCHW. The important NCHW stride:
-    // B[ch, spatial] = input[ch * hw + spatial], so rs_b=hw and cs_b=1.
-    if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 {
-        let col_w = c_per_group; // = c since groups == 1
-        let hw_per_img = h * w;
+    // Fast path for 1x1 convolutions: GEMM directly on the NCHW views
+    // (no im2col expansion needed).
+    if kh == 1 && kw == 1 && stride == 1 && padding == 0 && dilation == 1 {
+        return crate::backend::cpu::microkernels::direct_conv::direct_conv1x1_f32(
+            input, weight, bias, output, n, c, h, w, f, groups, activation,
+        );
+    }
 
-        for g in 0..groups {
-            let f_start = g * f_per_group;
-            let input_group_off = g * col_w * hw_per_img;
-            let weight_off = f_start * col_w;
-            let group_out_off = g * f_per_group * hw_per_img;
-            let batch_stride = f * hw_per_img;
-
-            for nn in 0..n {
-                // SAFETY: slice pointers are valid and correctly offset; dimensions
-                // match the actual matrix sizes for the 1x1 conv.
-                unsafe {
-                    conv_sgemm(
-                        f_per_group,
-                        col_w,
-                        hw_per_img,
-                        weight.as_ptr().add(weight_off),
-                        col_w as isize,
-                        1isize,
-                        input
-                            .as_ptr()
-                            .add(input_group_off + nn * col_w * hw_per_img),
-                        hw_per_img as isize,
-                        1isize,
-                        output.as_mut_ptr().add(group_out_off + nn * batch_stride),
-                        hw_per_img as isize,
-                        1isize,
-                    );
-                }
-            }
-
-            // Bias + activation in contiguous per-output-channel rows.
-            if !bias.is_empty() || activation.is_some() {
-                for nn in 0..n {
-                    let out_base = group_out_off + nn * batch_stride;
-                    for oc in 0..f_per_group {
-                        let bias_val = if !bias.is_empty() {
-                            bias[f_start + oc]
-                        } else {
-                            0.0
-                        };
-                        let row_start = out_base + oc * hw_per_img;
-                        if let Some(act) = activation {
-                            for s in 0..hw_per_img {
-                                let v = output[row_start + s] + bias_val;
-                                output[row_start + s] = apply_conv_activation(v, act);
-                            }
-                        } else if bias_val != 0.0 {
-                            for s in 0..hw_per_img {
-                                output[row_start + s] += bias_val;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return;
+    // Fast path for depthwise 3×3 stride-1 pad-1 direct convolution
+    // (avoids 9× im2col expansion for mobileNet/YOLO depthwise convs).
+    if kh == 3
+        && kw == 3
+        && stride == 1
+        && padding == 1
+        && dilation == 1
+        && c_per_group == 1
+        && f_per_group == 1
+    {
+        return crate::backend::cpu::microkernels::direct_depthwise_conv::direct_depthwise_conv3x3_f32(
+            input, weight, bias, output,
+            n, c, h, w, f, groups, stride, padding, activation,
+        );
     }
 
     // General case: im2col + GEMM (for non-1x1 convolutions).
+    // Also used for 3×3 s=1 p=1 g=1 — matrixmultiply's tiled GEMM
+    // (~90 GFLOP/s) outperforms direct_conv3x3 (~25 GFLOP/s).
     // im2col is [spatial, col_w] row-major. Run GEMM as
     // C[f, spatial] = W[f, col_w] * Col[col_w, spatial], with
     // Col[col, spatial] = col_matrix[spatial * col_w + col]
@@ -642,6 +601,7 @@ pub fn conv2d_f32_im2col_gemm(
                     padding,
                     dilation,
                     &mut col_matrix[col_start..],
+                    false, // FP32 conv does not need min/max
                 );
             }
         }
@@ -652,47 +612,48 @@ pub fn conv2d_f32_im2col_gemm(
 
         for nn in 0..n {
             let col_start = nn * spatial_size * col_w;
-            // SAFETY: slice pointers and strides match the GEMM dimensions
-            // (f_per_group Ã— col_w Ã— spatial_size) for the general conv case.
-            unsafe {
-                conv_sgemm(
-                    f_per_group,
-                    col_w,
-                    spatial_size,
-                    weight.as_ptr().add(weight_off),
-                    col_w as isize,
-                    1isize,
-                    col_matrix.as_ptr().add(col_start),
-                    1isize,
-                    col_w as isize,
-                    output.as_mut_ptr().add(group_out_off + nn * batch_stride),
-                    spatial_size as isize,
-                    1isize,
-                );
-            }
-        }
-
-        // Bias + activation in contiguous per-output-channel rows.
-        if !bias.is_empty() || activation.is_some() {
-            for nn in 0..n {
-                let out_base = group_out_off + nn * batch_stride;
-                for oc in 0..f_per_group {
-                    let bias_val = if !bias.is_empty() {
-                        bias[f_start + oc]
-                    } else {
-                        0.0
-                    };
-                    let row_start = out_base + oc * spatial_size;
-                    if let Some(act) = activation {
-                        for s in 0..spatial_size {
-                            let v = output[row_start + s] + bias_val;
-                            output[row_start + s] = apply_conv_activation(v, act);
-                        }
-                    } else if bias_val != 0.0 {
-                        for s in 0..spatial_size {
-                            output[row_start + s] += bias_val;
-                        }
-                    }
+            if !bias.is_empty() || activation.is_some() {
+                let group_bias = if !bias.is_empty() {
+                    Some(&bias[f_start..f_start + f_per_group])
+                } else {
+                    None
+                };
+                // SAFETY: all pointer offsets stay within their allocated slices
+                unsafe {
+                    crate::backend::cpu::microkernels::conv_gemm::conv_gemm_f32(
+                        f_per_group,
+                        col_w,
+                        spatial_size,
+                        weight.as_ptr().add(weight_off),
+                        col_w as isize,
+                        1isize,
+                        col_matrix.as_ptr().add(col_start),
+                        1isize,
+                        col_w as isize,
+                        output.as_mut_ptr().add(group_out_off + nn * batch_stride),
+                        spatial_size as isize,
+                        1isize,
+                        group_bias,
+                        activation,
+                    );
+                }
+            } else {
+                // SAFETY: slice pointers and strides match the GEMM dimensions
+                unsafe {
+                    conv_sgemm(
+                        f_per_group,
+                        col_w,
+                        spatial_size,
+                        weight.as_ptr().add(weight_off),
+                        col_w as isize,
+                        1isize,
+                        col_matrix.as_ptr().add(col_start),
+                        1isize,
+                        col_w as isize,
+                        output.as_mut_ptr().add(group_out_off + nn * batch_stride),
+                        spatial_size as isize,
+                        1isize,
+                    );
                 }
             }
         }

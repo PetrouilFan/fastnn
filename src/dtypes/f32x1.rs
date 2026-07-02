@@ -15,6 +15,7 @@ impl PackedWord for F32x1 {
     const ITEMS: usize = 1;
     const BIT_WIDTH: usize = 32;
     const IS_FLOAT: bool = true;
+    const MAX_REPRESENTABLE: f32 = 1.0;
     type Array = [f32; 1];
 
     #[inline]
@@ -42,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_pack_unpack_roundtrip_f32x1() {
-        let vals = [3.14159f32];
+        let vals = [std::f32::consts::PI];
         let packed = F32x1::pack_from_f32(vals);
         let unpacked = packed.unpack_to_f32();
         assert_eq!(unpacked[0], vals[0]);

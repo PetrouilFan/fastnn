@@ -10,6 +10,9 @@ thread_local! {
     static FLASH_SCRATCH: std::cell::RefCell<Vec<f32>> = const {
         std::cell::RefCell::new(Vec::new())
     };
+    static MATMUL_SCRATCH: std::cell::RefCell<Vec<f32>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
 const TILE_SIZE: usize = 32;
@@ -88,6 +91,11 @@ fn flash_attention_single(
         buf.resize(TILE_SIZE * TILE_SIZE, 0.0f32);
         std::mem::take(&mut *buf)
     });
+    let mut matmul_buf = MATMUL_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.resize(TILE_SIZE * TILE_SIZE, 0.0f32);
+        std::mem::take(&mut *buf)
+    });
     let mut m = [f32::NEG_INFINITY; TILE_SIZE];
     let mut l = [0.0f32; TILE_SIZE];
     let mut o_tile = vec![0.0f32; TILE_SIZE * dv];
@@ -107,10 +115,18 @@ fn flash_attention_single(
             let k_tile = &k[kv_start * dk..kv_end * dk];
             let v_tile = &v[kv_start * dv..kv_end * dv];
 
-            let s = matmul_tile(q_tile, k_tile, br, dk, bc, scale);
+            matmul_tile(
+                q_tile,
+                k_tile,
+                br,
+                dk,
+                bc,
+                scale,
+                &mut matmul_buf[..br * bc],
+            );
 
             for i in 0..br {
-                let s_row = &s[i * bc..(i + 1) * bc];
+                let s_row = &matmul_buf[i * bc..(i + 1) * bc];
                 let mut m_new = m[i];
                 for j in 0..bc {
                     let val = if causal && kv_start + j > q_start + i {
@@ -175,28 +191,29 @@ fn flash_attention_single(
     FLASH_SCRATCH.with(|cell| {
         *cell.borrow_mut() = s_buf;
     });
+    MATMUL_SCRATCH.with(|cell| {
+        *cell.borrow_mut() = matmul_buf;
+    });
 }
 
-fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -> Vec<f32> {
-    let mut s = vec![0.0f32; m * n];
-
+fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32, out: &mut [f32]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx512f") {
-            // SAFETY: AVX512F feature check passed; `a`, `b`, and `s` are valid
+            // SAFETY: AVX512F feature check passed; `a`, `b`, and `out` are valid
             // slices with dimensions m×k, k×n, and m×n respectively.
             unsafe {
-                matmul_tile_avx512(a, b, &mut s, m, k, n, scale);
+                matmul_tile_avx512(a, b, out, m, k, n, scale);
             }
-            return s;
+            return;
         }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: AVX2+FMA feature check passed; `a`, `b`, and `s` are valid
+            // SAFETY: AVX2+FMA feature check passed; `a`, `b`, and `out` are valid
             // slices with dimensions m×k, k×n, and m×n respectively.
             unsafe {
-                matmul_tile_avx2(a, b, &mut s, m, k, n, scale);
+                matmul_tile_avx2(a, b, out, m, k, n, scale);
             }
-            return s;
+            return;
         }
     }
 
@@ -206,10 +223,9 @@ fn matmul_tile(a: &[f32], b: &[f32], m: usize, k: usize, n: usize, scale: f32) -
             for kk in 0..k {
                 dot += a[i * k + kk] * b[j * k + kk];
             }
-            s[i * n + j] = dot * scale;
+            out[i * n + j] = dot * scale;
         }
     }
-    s
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]

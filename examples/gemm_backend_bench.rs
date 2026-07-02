@@ -41,7 +41,7 @@ fn fill(len: usize, seed: u64) -> Vec<f32> {
 
 fn matrixmultiply_sgemm(m: usize, k: usize, n: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
     unsafe {
-        matrixmultiply::sgemm(
+        fastnn::backend::cpu::sgemm::sgemm(
             m,
             k,
             n,
@@ -88,6 +88,7 @@ fn mean(xs: &[f64]) -> f64 {
     xs.iter().sum::<f64>() / xs.len() as f64
 }
 
+#[allow(clippy::type_complexity)]
 fn bench_fn(
     f: fn(usize, usize, usize, &[f32], &[f32], &mut [f32]),
     shape: GemmShape,

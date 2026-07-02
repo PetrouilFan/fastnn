@@ -33,7 +33,7 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), FastnnError>
         opcode: Opcode,
     }
 
-    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -70,7 +70,7 @@ pub fn quantize_activations(graph: &mut ComputeGraph) -> Result<(), FastnnError>
             .unwrap_or_default();
 
         rewrites.push(Rewrite {
-            node_id: node_id,
+            node_id,
             act_id,
             node_shape,
             act_shape,
@@ -136,7 +136,7 @@ pub fn quantize_activations_with_calibration(
         existing_qa_id: Option<NodeId>,
     }
 
-    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -353,7 +353,7 @@ mod tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
     use crate::backend::Backend;
-    use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
+    use crate::compiler::passes::calibration::CalibrationData;
     use crate::compiler::passes::{memory_planning, shape_inference};
     use crate::ir::node::DimExpr;
 
@@ -384,7 +384,7 @@ mod tests {
         // Run standard compile without activation quantization
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan_no_q, mem_no_q, _) = executor
-            .compile_with_plan_and_quantize(&graph, None, None)
+            .compile_with_plan_and_quantize(graph.clone(), None, None)
             .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];
@@ -784,7 +784,7 @@ mod tests {
         shape_inference::infer_shapes(&mut graph).unwrap();
 
         // Create calibration data with per-channel stats for the Relu output
-        let mut calib = CalibrationData::new();
+        let mut calib;
         // The Relu activation has shape [1, 4, 4, 4] → 4 input channels, 16 spatial elements each
         let relu_name = "relu"; // must match the Relu node name (default is empty, so we set it)
                                 // We need to name the relu node for calibration matching

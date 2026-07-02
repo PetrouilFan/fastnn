@@ -1,6 +1,6 @@
 //! Auto-cast insertion compiler pass.
 //!
-//! When a user specifies `model.to("u4")`, this pass:
+//! When a user specifies `model.to("i4")`, this pass:
 //!
 //! 1. Finds all f32 weight constants feeding MatMul/Conv ops and replaces them
 //!    with `Quantize(f32_weight, bit_width)` sub-graphs (or directly updates
@@ -72,7 +72,7 @@ fn quantize_weight_constants(
     // The existing quantize_weights pass does exactly what we need:
     // it finds f32 Constants feeding MatMul/Conv and packs them.
     let count_before = graph.node_count();
-    super::quantization::quantize_weights(graph, bit_width, None)?;
+    super::quantization::quantize_weights(graph, bit_width, true, None)?;
     let count_after = graph.node_count();
     // quantize_weights modifies nodes in-place (no new nodes), so the
     // count stays the same.  We track the number of modified nodes by
@@ -82,7 +82,10 @@ fn quantize_weight_constants(
         .iter()
         .filter(|n| {
             matches!(n.opcode, Opcode::Constant(_))
-                && matches!(n.output_type.dtype, IrDType::U4 { .. } | IrDType::U8 { .. })
+                && matches!(
+                    n.output_type.dtype,
+                    IrDType::I4 { .. } | IrDType::I8Scaled { .. }
+                )
         })
         .count();
     let _ = count_before;
@@ -104,7 +107,7 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
         consumer_id: NodeId,
         input_index: usize,
     }
-    let mut rewrites: Vec<DequantRewrite> = Vec::new();
+    let mut rewrites: Vec<DequantRewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -128,7 +131,7 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
             };
 
             // Check if input is quantized (U4/U8) but consumer expects f32
-            let is_quantized = matches!(input_dtype, IrDType::U4 { .. } | IrDType::U8 { .. });
+            let is_quantized = matches!(input_dtype, IrDType::I4 { .. } | IrDType::I8Scaled { .. });
 
             if is_quantized && !accepts_quantized {
                 rewrites.push(DequantRewrite {
@@ -230,7 +233,7 @@ mod tests {
         // Check that the weight Constant now has U4 dtype
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
             "weight should be quantized to U4 after auto_cast"
         );
     }
@@ -285,7 +288,7 @@ mod tests {
         // shared_weight should be quantized
         let shared_weight_node = graph.get_node(shared_weight_id).unwrap();
         assert!(
-            matches!(shared_weight_node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(shared_weight_node.output_type.dtype, IrDType::I4 { .. }),
             "shared_weight should be quantized"
         );
 
@@ -394,7 +397,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::U8 { .. }),
+            matches!(weight_node.output_type.dtype, IrDType::I8Scaled { .. }),
             "weight should be quantized to U8 after auto_cast with bit_width=8"
         );
     }
@@ -510,7 +513,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::U4 { .. }),
+            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
             "Conv2d weight should be quantized after auto_cast"
         );
     }

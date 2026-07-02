@@ -20,11 +20,15 @@ macro_rules! impl_simd_unary_wrapper {
             }
             let len = output.len().min(input.len());
             #[cfg(feature = "parallel")]
-            {
+            if len >= 4096 {
                 use rayon::prelude::*;
                 output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
                     *o = $scalar(input[i]);
                 });
+            } else {
+                for i in 0..len {
+                    output[i] = $scalar(input[i]);
+                }
             }
             #[cfg(not(feature = "parallel"))]
             for i in 0..len {
@@ -46,13 +50,19 @@ macro_rules! impl_simd_binary_wrapper {
             }
             let len = output.len().min(a.len().max(b.len()));
             #[cfg(feature = "parallel")]
-            {
+            if len >= 4096 {
                 use rayon::prelude::*;
                 let a_len = a.len();
                 let b_len = b.len();
                 output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
                     *o = $op(a[i % a_len], b[i % b_len]);
                 });
+            } else {
+                let a_len = a.len();
+                let b_len = b.len();
+                for i in 0..len {
+                    output[i] = $op(a[i % a_len], b[i % b_len]);
+                }
             }
             #[cfg(not(feature = "parallel"))]
             $scalar(a, b, output);
@@ -70,11 +80,15 @@ macro_rules! impl_simd_scalar_wrapper {
             }
             let len = output.len().min(data.len());
             #[cfg(feature = "parallel")]
-            {
+            if len >= 4096 {
                 use rayon::prelude::*;
                 output[..len].par_iter_mut().enumerate().for_each(|(i, o)| {
                     *o = $op(data[i], s);
                 });
+            } else {
+                for i in 0..len {
+                    output[i] = $op(data[i], s);
+                }
             }
             #[cfg(not(feature = "parallel"))]
             $scalar(data, s, output);
@@ -334,6 +348,39 @@ pub(super) fn biasadd_f32(data: &[f32], bias: &[f32], output: &mut [f32], channe
 
 #[inline]
 pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    let num_rows = input.len() / row_size;
+
+    #[cfg(feature = "parallel")]
+    if num_rows > 1 {
+        use rayon::prelude::*;
+        #[allow(unused_variables)]
+        let has_avx2 = {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                microkernels::simd_avx2_available()
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                false
+            }
+        };
+        let input_ref: &[f32] = input;
+        output
+            .par_chunks_mut(row_size)
+            .enumerate()
+            .for_each(|(r, out)| {
+                let start = r * row_size;
+                let inp = &input_ref[start..start + row_size];
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if has_avx2 {
+                    unsafe { microkernels::norm_layernorm_f32_avx2(inp, out, row_size, eps) };
+                    return;
+                }
+                microkernels::norm_layernorm_f32_scalar(inp, out, row_size, eps);
+            });
+        return;
+    }
+
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::norm_layernorm_f32_avx2(input, output, row_size, eps) };
@@ -349,6 +396,40 @@ pub(super) fn rms_norm_f32(
     row_size: usize,
     eps: f32,
 ) {
+    let num_rows = input.len() / row_size;
+
+    #[cfg(feature = "parallel")]
+    if num_rows > 1 {
+        use rayon::prelude::*;
+        #[allow(unused_variables)]
+        let has_avx2 = {
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                microkernels::simd_avx2_available()
+            }
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            {
+                false
+            }
+        };
+        let input_ref: &[f32] = input;
+        let weight_ref: &[f32] = weight;
+        output
+            .par_chunks_mut(row_size)
+            .enumerate()
+            .for_each(|(r, out)| {
+                let start = r * row_size;
+                let inp = &input_ref[start..start + row_size];
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if has_avx2 {
+                    unsafe { microkernels::rms_norm_f32_avx2(inp, weight_ref, out, row_size, eps) };
+                    return;
+                }
+                microkernels::rms_norm_f32_scalar(inp, weight_ref, out, row_size, eps);
+            });
+        return;
+    }
+
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::rms_norm_f32_avx2(input, weight, output, row_size, eps) };
@@ -367,6 +448,7 @@ pub(super) fn softmax_f32(
     #[cfg(feature = "parallel")]
     if num_rows > 1 && stride == 1 {
         use rayon::prelude::*;
+        #[allow(unused_variables)]
         let has_avx2 = {
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
@@ -377,24 +459,22 @@ pub(super) fn softmax_f32(
                 false
             }
         };
-        let mut row_slices: Vec<(&[f32], &mut [f32])> = Vec::with_capacity(num_rows);
-        for row in 0..num_rows {
-            let offset = row * axis_dim_size;
-            let inp = &input[offset..offset + axis_dim_size];
-            // SAFETY: Each row writes to a unique non-overlapping region of output.
-            let out = unsafe {
-                std::slice::from_raw_parts_mut(output.as_mut_ptr().add(offset), axis_dim_size)
-            };
-            row_slices.push((inp, out));
-        }
-        row_slices.par_iter_mut().for_each(|(inp, out)| {
-            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-            if has_avx2 {
-                unsafe { microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1) };
-                return;
-            }
-            microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
-        });
+        let input_ref: &[f32] = input;
+        output
+            .par_chunks_mut(axis_dim_size)
+            .enumerate()
+            .for_each(|(row, out)| {
+                let offset = row * axis_dim_size;
+                let inp = &input_ref[offset..offset + axis_dim_size];
+                #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                if has_avx2 {
+                    unsafe {
+                        microkernels::softmax_f32_avx2_strided(inp, out, axis_dim_size, 1, 1)
+                    };
+                    return;
+                }
+                microkernels::softmax_f32_scalar_strided(inp, out, axis_dim_size, 1, 1);
+            });
         return;
     }
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -481,15 +561,45 @@ pub(super) fn adam_update_f32(
     bias_corr1: f32,
     bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut w_new = w.to_vec();
+    let mut m_new = m.to_vec();
+    let mut v_new = v.to_vec();
+    adam_update_f32_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
+    (w_new, m_new, v_new)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn adam_update_f32_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() {
-        return unsafe {
-            microkernels::adam_update_f32_avx2(
-                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2,
-            )
-        };
+        unsafe {
+            microkernels::adam_update_f32_avx2_into(
+                w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, w_out, m_out, v_out,
+            );
+        }
+        return;
     }
-    microkernels::adam_update_f32_scalar(w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2)
+    microkernels::adam_update_f32_scalar_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, w_out, m_out, v_out,
+    );
 }
 
 #[inline]

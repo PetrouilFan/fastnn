@@ -57,6 +57,8 @@ const TRAINING_ONLY_OPCODES: &[fn(&Opcode) -> bool] = &[
     |op| matches!(op, Opcode::LionUpdate),
     |op| matches!(op, Opcode::RmspropUpdate),
     |op| matches!(op, Opcode::GradientScale),
+    |op| matches!(op, Opcode::QuantizeGradient),
+    |op| matches!(op, Opcode::DequantizeGradient),
 ];
 
 /// Detect training-only opcodes present in the graph.
@@ -162,7 +164,7 @@ fn detect_qlinear_patterns(
             _ => continue,
         };
 
-        // The Dequantize consumes a packed tensor (Constant with U4/U8 dtype).
+        // The Dequantize consumes a packed tensor (Constant with I4/I8/F4/F8/F8R dtype).
         let packed_id = match deq_node.inputs.first() {
             Some(&id) => id,
             None => continue,
@@ -174,14 +176,24 @@ fn detect_qlinear_patterns(
 
         // Extract scales/zero_points from the packed weight's dtype.
         let (weight_scales, weight_zero_points) = match &packed_node.output_type.dtype {
-            IrDType::U4 {
+            IrDType::I4 {
+                scales,
+                zero_points,
+                ..
+            } => (scales.clone(), zero_points.clone()),
+            IrDType::I8Scaled {
                 scales,
                 zero_points,
             } => (scales.clone(), zero_points.clone()),
-            IrDType::U8 {
-                scales,
-                zero_points,
-            } => (scales.clone(), zero_points.clone()),
+            IrDType::F4 { scales, zeros, .. } => (
+                scales.clone(),
+                if zeros.is_empty() {
+                    vec![0.0f32]
+                } else {
+                    zeros.clone()
+                },
+            ),
+            IrDType::F8 { scales } | IrDType::F8R { scales } => (scales.clone(), vec![0.0f32]),
             _ => continue,
         };
 
@@ -274,21 +286,20 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         None => return (1.0, 0),
     };
     match &q_node.output_type.dtype {
-        IrDType::U4 {
+        IrDType::I4 {
             scales,
             zero_points,
+            ..
         } => {
             let s = scales.first().copied().unwrap_or(1.0);
             let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
-            // If scales is empty, try computing from bit_width
             if scales.is_empty() {
-                // Default U4 scale: max_val = 15, symmetric → scale = 1.0
                 (1.0, 0)
             } else {
                 (s, zp)
             }
         }
-        IrDType::U8 {
+        IrDType::I8Scaled {
             scales,
             zero_points,
         } => {
@@ -298,6 +309,15 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
                 (1.0, 0)
             } else {
                 (s, zp)
+            }
+        }
+        IrDType::F8 { .. } | IrDType::F8R { .. } => (1.0, 0),
+        IrDType::F4 { scales, .. } => {
+            let s = scales.first().copied().unwrap_or(1.0);
+            if scales.is_empty() {
+                (1.0, 0)
+            } else {
+                (s, 0)
             }
         }
         _ => (1.0, 0),
@@ -528,8 +548,14 @@ pub fn export_to_onnx_json_with_config(
                 // Constant nodes become weight params, not ONNX ops
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
-                        let is_packed =
-                            matches!(&tensor_type.dtype, IrDType::U4 { .. } | IrDType::U8 { .. });
+                        let is_packed = matches!(
+                            &tensor_type.dtype,
+                            IrDType::I4 { .. }
+                                | IrDType::I8Scaled { .. }
+                                | IrDType::F4 { .. }
+                                | IrDType::F8 { .. }
+                                | IrDType::F8R { .. }
+                        );
                         if is_packed {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
@@ -545,8 +571,11 @@ pub fn export_to_onnx_json_with_config(
                                     data: serde_json::json!(data),
                                     shape,
                                     dtype: match &tensor_type.dtype {
-                                        IrDType::U4 { .. } => "u4".to_string(),
-                                        IrDType::U8 { .. } => "u8".to_string(),
+                                        IrDType::I4 { .. } => "u4".to_string(),
+                                        IrDType::I8Scaled { .. } => "i8".to_string(),
+                                        IrDType::F4 { .. } => "f4".to_string(),
+                                        IrDType::F8 { .. } => "f8".to_string(),
+                                        IrDType::F8R { .. } => "f8r".to_string(),
                                         _ => unreachable!(),
                                     },
                                 },
@@ -616,6 +645,8 @@ pub fn export_to_onnx_json_with_config(
                                 | Opcode::LionUpdate
                                 | Opcode::RmspropUpdate
                                 | Opcode::GradientScale
+                                | Opcode::QuantizeGradient
+                                | Opcode::DequantizeGradient
                                 | Opcode::Quantize
                                 | Opcode::Dequantize
                                 | Opcode::QuantizeActivations

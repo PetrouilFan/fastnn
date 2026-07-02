@@ -343,8 +343,8 @@ pub fn tanh_f32_scalar(x: f32) -> f32 {
 // from within a function that guarantees AVX2+FMA availability.
 pub(crate) unsafe fn exp_avx2_vec(x: __m256) -> __m256 {
     let vlog2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
-    let vln2_hi = _mm256_set1_ps(0.693359375f32);
-    let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);
+    let vln2_hi = _mm256_set1_ps(0.693_359_4_f32);
+    let vln2_lo = _mm256_set1_ps(-2.121_944_4e-4_f32);
     let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
     let v_24 = _mm256_set1_ps(1.0f32 / 24.0f32);
     let v_6 = _mm256_set1_ps(1.0f32 / 6.0f32);
@@ -570,7 +570,7 @@ pub unsafe fn gelu_f32_avx2(input: &[f32], output: &mut [f32]) {
     let mut i = 0;
     let vhalf = _mm256_set1_ps(0.5f32);
     let vone = _mm256_set1_ps(1.0f32);
-    let vsqrt2pi = _mm256_set1_ps(0.7978845608028654f32); // √(2/π)
+    let vsqrt2pi = _mm256_set1_ps(0.797_884_6_f32); // √(2/π)
     let vcoeff = _mm256_set1_ps(0.044715f32);
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
@@ -822,6 +822,40 @@ macro_rules! impl_binary_arith_broadcast {
                     _mm256_storeu_ps(output.as_mut_ptr().add(i), $avx2_intrin(va, vb));
                     i += 8;
                 }
+            } else if b_len == len && a_len > 1 && len % a_len == 0 {
+                let tile = a_len;
+                let num_tiles = len / tile;
+                for t in 0..num_tiles {
+                    let chunk_start = t * tile;
+                    let mut j = chunk_start;
+                    while j + 8 <= chunk_start + tile {
+                        let va = _mm256_loadu_ps(a.as_ptr().add(j - chunk_start));
+                        let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                        _mm256_storeu_ps(output.as_mut_ptr().add(j), $avx2_intrin(va, vb));
+                        j += 8;
+                    }
+                    for r in j..chunk_start + tile {
+                        *output.as_mut_ptr().add(r) = a[r - chunk_start] $op b[r];
+                    }
+                }
+                i = len;
+            } else if a_len == len && b_len > 1 && len % b_len == 0 {
+                let tile = b_len;
+                let num_tiles = len / tile;
+                for t in 0..num_tiles {
+                    let chunk_start = t * tile;
+                    let mut j = chunk_start;
+                    while j + 8 <= chunk_start + tile {
+                        let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                        let vb = _mm256_loadu_ps(b.as_ptr().add(j - chunk_start));
+                        _mm256_storeu_ps(output.as_mut_ptr().add(j), $avx2_intrin(va, vb));
+                        j += 8;
+                    }
+                    for r in j..chunk_start + tile {
+                        *output.as_mut_ptr().add(r) = a[r] $op b[r - chunk_start];
+                    }
+                }
+                i = len;
             }
             for j in i..len {
                 *output.as_mut_ptr().add(j) = a[j % a_len] $op b[j % b_len];
@@ -871,6 +905,40 @@ macro_rules! impl_binary_minmax_broadcast {
                     _mm256_storeu_ps(output.as_mut_ptr().add(i), $avx2_intrin(va, vb));
                     i += 8;
                 }
+            } else if b_len == len && a_len > 1 && len % a_len == 0 {
+                let tile = a_len;
+                let num_tiles = len / tile;
+                for t in 0..num_tiles {
+                    let chunk_start = t * tile;
+                    let mut j = chunk_start;
+                    while j + 8 <= chunk_start + tile {
+                        let va = _mm256_loadu_ps(a.as_ptr().add(j - chunk_start));
+                        let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                        _mm256_storeu_ps(output.as_mut_ptr().add(j), $avx2_intrin(va, vb));
+                        j += 8;
+                    }
+                    for r in j..chunk_start + tile {
+                        *output.as_mut_ptr().add(r) = a[r - chunk_start].$method(b[r]);
+                    }
+                }
+                i = len;
+            } else if a_len == len && b_len > 1 && len % b_len == 0 {
+                let tile = b_len;
+                let num_tiles = len / tile;
+                for t in 0..num_tiles {
+                    let chunk_start = t * tile;
+                    let mut j = chunk_start;
+                    while j + 8 <= chunk_start + tile {
+                        let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                        let vb = _mm256_loadu_ps(b.as_ptr().add(j - chunk_start));
+                        _mm256_storeu_ps(output.as_mut_ptr().add(j), $avx2_intrin(va, vb));
+                        j += 8;
+                    }
+                    for r in j..chunk_start + tile {
+                        *output.as_mut_ptr().add(r) = a[r].$method(b[r - chunk_start]);
+                    }
+                }
+                i = len;
             }
             for j in i..len {
                 *output.as_mut_ptr().add(j) = a[j % a_len].$method(b[j % b_len]);
@@ -895,3 +963,520 @@ impl_binary_minmax_broadcast!(
     min,
     _mm256_min_ps
 );
+
+// ═══════════════════════════════════════════════════════════════
+// Fused binary + activation — single-pass kernels
+// Combines elementwise op (add/mul) + activation (relu/silu/gelu)
+// in one AVX2 pass, halving memory bandwidth vs two separate kernels.
+// ═══════════════════════════════════════════════════════════════
+
+// ── Fused: add + relu ──────────────────────────────────────────
+
+/// add + ReLU: out[i] = max(0, a[i % a_len] + b[i % b_len])
+#[inline]
+pub fn fused_add_relu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    let len = out.len();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_add_relu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = relu_f32_scalar(a[i % a_len] + b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller must ensure slices are valid, non-overlapping, and at least 8 elements.
+pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let zero = _mm256_setzero_ps();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+            );
+            i += 8;
+        }
+    } else if a_len == 1 && b_len == len {
+        let va = _mm256_broadcast_ss(&a[0]);
+        while i + 8 <= len {
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+            );
+            i += 8;
+        }
+    } else if a_len == len && b_len == 1 {
+        let vb = _mm256_broadcast_ss(&b[0]);
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+            );
+            i += 8;
+        }
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
+        let tile = a_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+                );
+                j += 8;
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = relu_f32_scalar(a[r - cs] + b[r]);
+            }
+        }
+        i = len;
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
+        let tile = b_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+                );
+                j += 8;
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = relu_f32_scalar(a[r] + b[r - cs]);
+            }
+        }
+        i = len;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = relu_f32_scalar(a[j % a_len] + b[j % b_len]);
+    }
+}
+
+// ── Fused: mul + relu ──────────────────────────────────────────
+
+/// mul + ReLU: out[i] = max(0, a[i % a_len] * b[i % b_len])
+pub fn fused_mul_relu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    let len = out.len();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_mul_relu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = relu_f32_scalar(a[i % a_len] * b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_mul_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let zero = _mm256_setzero_ps();
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+            );
+            i += 8;
+        }
+    } else if a_len == 1 && b_len == len {
+        let va = _mm256_broadcast_ss(&a[0]);
+        while i + 8 <= len {
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+            );
+            i += 8;
+        }
+    } else if a_len == len && b_len == 1 {
+        let vb = _mm256_broadcast_ss(&b[0]);
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+            );
+            i += 8;
+        }
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
+        let tile = a_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+                );
+                j += 8;
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = relu_f32_scalar(a[r - cs] * b[r]);
+            }
+        }
+        i = len;
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
+        let tile = b_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+                );
+                j += 8;
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = relu_f32_scalar(a[r] * b[r - cs]);
+            }
+        }
+        i = len;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = relu_f32_scalar(a[j % a_len] * b[j % b_len]);
+    }
+}
+
+// ── Fused: add + silu ──────────────────────────────────────────
+
+/// add + SiLU: out[i] = (a[i] + b[i]) / (1 + exp(-(a[i] + b[i])))
+#[inline]
+fn silu_scalar(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
+
+pub fn fused_add_silu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    let len = out.len();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_add_silu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = silu_scalar(a[i % a_len] + b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_add_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let one = _mm256_set1_ps(1.0);
+    let neg_zero = _mm256_set1_ps(-0.0f32);
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            silu_avx2_core(va, vb, one, neg_zero, out, &mut i);
+        }
+    } else if a_len == 1 && b_len == len {
+        let va = _mm256_broadcast_ss(&a[0]);
+        while i + 8 <= len {
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            silu_avx2_core(va, vb, one, neg_zero, out, &mut i);
+        }
+    } else if a_len == len && b_len == 1 {
+        let vb = _mm256_broadcast_ss(&b[0]);
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            silu_avx2_core(va, vb, one, neg_zero, out, &mut i);
+        }
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
+        let tile = a_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                silu_avx2_core(va, vb, one, neg_zero, out, &mut j);
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = silu_scalar(a[r - cs] + b[r]);
+            }
+        }
+        i = len;
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
+        let tile = b_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
+                silu_avx2_core(va, vb, one, neg_zero, out, &mut j);
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = silu_scalar(a[r] + b[r - cs]);
+            }
+        }
+        i = len;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = silu_scalar(a[j % a_len] + b[j % b_len]);
+    }
+}
+
+/// Core AVX2 SiLU computation: out[i] = silu(va + vb), advances i by 8
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+unsafe fn silu_avx2_core(
+    va: __m256,
+    vb: __m256,
+    one: __m256,
+    neg_zero: __m256,
+    out: &mut [f32],
+    i: &mut usize,
+) {
+    let vsum = _mm256_add_ps(va, vb);
+    let vneg = _mm256_xor_ps(vsum, neg_zero);
+    let vexp = exp_avx2_vec(vneg);
+    let vsigmoid = _mm256_div_ps(one, _mm256_add_ps(one, vexp));
+    _mm256_storeu_ps(out.as_mut_ptr().add(*i), _mm256_mul_ps(vsum, vsigmoid));
+    *i += 8;
+}
+
+// ── Fused: mul + silu ──────────────────────────────────────────
+
+pub fn fused_mul_silu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    let len = out.len();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_mul_silu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = silu_scalar(a[i % a_len] * b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_mul_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let one = _mm256_set1_ps(1.0);
+    let neg_zero = _mm256_set1_ps(-0.0f32);
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            silu_mul_avx2_core(va, vb, one, neg_zero, out, &mut i);
+        }
+    } else if a_len == 1 && b_len == len {
+        let va = _mm256_broadcast_ss(&a[0]);
+        while i + 8 <= len {
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            silu_mul_avx2_core(va, vb, one, neg_zero, out, &mut i);
+        }
+    } else if a_len == len && b_len == 1 {
+        let vb = _mm256_broadcast_ss(&b[0]);
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            silu_mul_avx2_core(va, vb, one, neg_zero, out, &mut i);
+        }
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
+        let tile = a_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                silu_mul_avx2_core(va, vb, one, neg_zero, out, &mut j);
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = silu_scalar(a[r - cs] * b[r]);
+            }
+        }
+        i = len;
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
+        let tile = b_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
+                silu_mul_avx2_core(va, vb, one, neg_zero, out, &mut j);
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = silu_scalar(a[r] * b[r - cs]);
+            }
+        }
+        i = len;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = silu_scalar(a[j % a_len] * b[j % b_len]);
+    }
+}
+
+/// Core AVX2 mul+SiLU computation: out[i] = silu(va * vb), advances i by 8
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+unsafe fn silu_mul_avx2_core(
+    va: __m256,
+    vb: __m256,
+    one: __m256,
+    neg_zero: __m256,
+    out: &mut [f32],
+    i: &mut usize,
+) {
+    let vprod = _mm256_mul_ps(va, vb);
+    let vneg = _mm256_xor_ps(vprod, neg_zero);
+    let vexp = exp_avx2_vec(vneg);
+    let vsigmoid = _mm256_div_ps(one, _mm256_add_ps(one, vexp));
+    _mm256_storeu_ps(out.as_mut_ptr().add(*i), _mm256_mul_ps(vprod, vsigmoid));
+    *i += 8;
+}
+
+// ── Fused: add + gelu ──────────────────────────────────────────
+
+/// add + GELU: out[i] = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+/// where x = a[i] + b[i]
+#[inline]
+fn gelu_scalar(x: f32) -> f32 {
+    let x3 = x * x * x;
+    let tanh_arg = 0.7978846 * (x + 0.044715 * x3);
+    0.5 * x * (1.0 + tanh_arg.tanh())
+}
+
+pub fn fused_add_gelu_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let a_len = a.len();
+    let b_len = b.len();
+    let len = out.len();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if len >= 8 {
+        unsafe { return fused_add_gelu_f32_avx2(a, b, out) };
+    }
+    for i in 0..len {
+        out[i] = gelu_scalar(a[i % a_len] + b[i % b_len]);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fused_add_gelu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
+    let len = out.len();
+    let a_len = a.len();
+    let b_len = b.len();
+    let c0 = _mm256_set1_ps(0.7978846);
+    let c1 = _mm256_set1_ps(0.044715);
+    let half = _mm256_set1_ps(0.5);
+    let one = _mm256_set1_ps(1.0);
+    let mut i = 0;
+    if a_len == len && b_len == len {
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            add_gelu_avx2_core(va, vb, c0, c1, half, one, out, &mut i);
+        }
+    } else if a_len == 1 && b_len == len {
+        let va = _mm256_broadcast_ss(&a[0]);
+        while i + 8 <= len {
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+            add_gelu_avx2_core(va, vb, c0, c1, half, one, out, &mut i);
+        }
+    } else if a_len == len && b_len == 1 {
+        let vb = _mm256_broadcast_ss(&b[0]);
+        while i + 8 <= len {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i));
+            add_gelu_avx2_core(va, vb, c0, c1, half, one, out, &mut i);
+        }
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
+        let tile = a_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j));
+                add_gelu_avx2_core(va, vb, c0, c1, half, one, out, &mut j);
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = gelu_scalar(a[r - cs] + b[r]);
+            }
+        }
+        i = len;
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
+        let tile = b_len;
+        for t in 0..len / tile {
+            let cs = t * tile;
+            let mut j = cs;
+            while j + 8 <= cs + tile {
+                let va = _mm256_loadu_ps(a.as_ptr().add(j));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
+                add_gelu_avx2_core(va, vb, c0, c1, half, one, out, &mut j);
+            }
+            for r in j..cs + tile {
+                *out.as_mut_ptr().add(r) = gelu_scalar(a[r] + b[r - cs]);
+            }
+        }
+        i = len;
+    }
+    for j in i..len {
+        *out.as_mut_ptr().add(j) = gelu_scalar(a[j % a_len] + b[j % b_len]);
+    }
+}
+
+/// Core AVX2 add+GELU computation: out[i] = gelu(va + vb), advances i by 8
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+unsafe fn add_gelu_avx2_core(
+    va: __m256,
+    vb: __m256,
+    c0: __m256,
+    c1: __m256,
+    half: __m256,
+    one: __m256,
+    out: &mut [f32],
+    i: &mut usize,
+) {
+    let x = _mm256_add_ps(va, vb);
+    let x3 = _mm256_mul_ps(_mm256_mul_ps(x, x), x);
+    let tanh_arg = _mm256_mul_ps(c0, _mm256_add_ps(x, _mm256_mul_ps(c1, x3)));
+    let t = tanh_avx2_vec(tanh_arg);
+    _mm256_storeu_ps(
+        out.as_mut_ptr().add(*i),
+        _mm256_mul_ps(half, _mm256_mul_ps(x, _mm256_add_ps(one, t))),
+    );
+    *i += 8;
+}

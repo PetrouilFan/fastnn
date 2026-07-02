@@ -7,7 +7,7 @@ pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
         node_id: NodeId,
         value: TensorValue,
     }
-    let mut folds: Vec<Fold> = Vec::new();
+    let mut folds: Vec<Fold> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     let _ = crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -18,7 +18,7 @@ pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
         let all_const = node.inputs.iter().all(|&input_id| {
             graph_ref
                 .get_node(input_id)
-                .map_or(false, |n| matches!(n.opcode, Opcode::Constant(_)))
+                .is_some_and(|n| matches!(n.opcode, Opcode::Constant(_)))
         });
 
         if !all_const {
@@ -57,6 +57,8 @@ fn has_side_effects(opcode: &Opcode) -> bool {
             | Opcode::LionUpdate
             | Opcode::RmspropUpdate
             | Opcode::GradientScale
+            | Opcode::QuantizeGradient
+            | Opcode::DequantizeGradient
     )
 }
 
@@ -101,11 +103,11 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             .or_else(|| unary_f32_data_op(&input_vals, |x| x.tanh())),
 
         Opcode::Gelu => unary_float_op(&input_vals, |x| {
-            0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh())
+            0.5 * x * (1.0 + (x * 0.797_884_6_f32).tanh())
         })
         .or_else(|| {
             unary_f32_data_op(&input_vals, |x| {
-                0.5 * x * (1.0 + (x * 0.7978845608028654_f32).tanh())
+                0.5 * x * (1.0 + (x * 0.797_884_6_f32).tanh())
             })
         }),
 
@@ -161,8 +163,8 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             let x_abs = x.abs();
             let t = 1.0 / (1.0 + 0.3275911 * x_abs);
             let y = 1.0
-                - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
-                    + 0.254829592)
+                - ((((1.061_405_4 * t + 1.453_152_1) * t + 1.421_413_8) * t - 0.284_496_72) * t
+                    + 0.254_829_6)
                     * t
                     * (-x_abs * x_abs).exp();
             sign * y
@@ -173,8 +175,9 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                 let x_abs = x.abs();
                 let t = 1.0 / (1.0 + 0.3275911 * x_abs);
                 let y = 1.0
-                    - ((((1.061405429 * t + 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
-                        + 0.254829592)
+                    - ((((1.061_405_4 * t + 1.453_152_1) * t + 1.421_413_8) * t - 0.284_496_72)
+                        * t
+                        + 0.254_829_6)
                         * t
                         * (-x_abs * x_abs).exp();
                 sign * y

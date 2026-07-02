@@ -1,12 +1,81 @@
 # Changelog
 
+## [2.5.0] - 2026-07-02
+
+### Added
+- **Unsigned quantization types**: `U4x8`, `U8x4` — full pipeline through storage,
+  serialization, ONNX import/export, CPU dispatch, Python bindings, CLI, and
+  `PrecisionConfig`
+- **I4Codebook quantization**: Per-block codebook INT4 with data-adaptive K-means
+  centroids and asymmetric F4 support
+- **F4/F8 packed GEMV+GEMM**: F4x8, F8x4, F8x4R kernels with fused conv and
+  per-channel quantization
+- **WeightDtype enum**: Type-safe weight dispatch for FP packed quantization
+- **Documentation rewrite** (PR #41): new structure with guides, reference, internals,
+  models, and roadmap sections; added CONTRIBUTING.md
+
+### Performance
+- **gemm crate** replaces matrixmultiply for parallel GEMM
+- **Zero-copy arena**: fused SIMD kernels, weight prepacking with Arc cache
+- **Tiled SIMD broadcasting** for add/sub/mul/div/max/min with fused kernels
+- **Generic TLS Vec pool** for f32/i8/u8/i32/u32/I8x4/I4x8/F4x8
+- **Dynamic tile sizing** from CPUID L2 cache detection
+- **Conv2d 3x3 s=1 p=1** routed through im2col+GEMM
+- **Direct Conv3x3 AVX2** ic-outer batched loop + M=1 depthwise GEMM fast path
+- **im2col min/max scan** fix (-74% latency: 1350ms→350ms)
+- **Graph ownership optimization**: Vec pre-allocation, fused bias-activation,
+  WriteConst/Fill skip on cached path, matmul Vec alloc elimination
+- **Conv2d params** precomputed at compile time
+
+### Fixed
+- **I8x4 im2col SIMD panic** and direct_conv3x3 bound optimization
+- **Quantization robustness** and FP4 scale formula
+- **Quantized weight dispatch** in persistent-view path + I4Codebook MatMul dequant
+- **Depthwise conv** left-edge shift + arena aliasing in prepared path
+- **Conv microkernel speed regression** and correctness bugs
+- **Non-x86_64 compile error** in norm dispatch
+
+### Changed
+- Version bumped to 2.5.0
+- Replaced matrixmultiply with gemm crate for GEMM operations
+- Standardized CI to use `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`
+- All clippy warnings resolved (0 errors across lib, tests, benches, examples)
+
+## [2.4.0] - 2026-06-29
+
+### Added
+- **FP8/F4 packed types**: `F8x4` (E4M3), `F8x4R` (E5M2), `F4x8` (NVFP4-style with
+  256-entry i16 LUT) — full SWAR pipeline, serialization, ONNX export, gradient
+  quantization support
+- **WGPU conv2d dispatch** for all 5 packed types (I4x8, I8x4, F4x8, F8x4, F8x4R)
+- **F8x4/F8x4R conv2d dispatch** — generic `im2col_pack_float8<T>` and
+  `conv2d_packed_float<T>` in packed_conv + `gemm_packed_float_fused<T>` in packed_gemm
+- **I4Codebook quantization**: Per-block codebook INT4 quantization with data-adaptive K-means centroids. Codebook captures distribution shape, per-block scale captures magnitude. 4-bit weight-only quantization for YOLO/edge deployment.
+- **Fusion pass stubs enabled**: `OpGelu`, `MatMulAddGelu`, `MatMulAddSilu`
+- **Welford single-pass variance** for scalar LayerNorm and fused residual+layernorm
+  (~33% fewer memory passes per row)
+- **AVX2 fused residual+layernorm** and **AVX2 fused residual+RMS norm**
+- **Rayon parallelism over batch rows** for layernorm, RMS norm, and reduce_f32 dispatch
+- **Arena-sourced matmul optimization** — eliminates Vec copies of matmul inputs,
+  BLAS path pre-fills output with bias (`beta=1` single-pass `C=A*B+bias`)
+
+### Fixed
+- **ONNX F8/F8R export scales** — now extracts actual per-channel scales instead
+  of hardcoding `1.0`
+- **Clippy warnings**: 10 warnings across 7 files (identity_op, unnecessary_cast,
+  doc_lazy_continuation, dead_code, unused_imports, unused_parens)
+
+### Changed
+- Version bumped to 2.4.0
+- Repository cleanup: 34+ build artifacts/results/docs removed from git tracking
+
 ## [2.3.0] - 2026-06-28
 
 ### Added
 - **Prepared plan execution**: persistent constant arena for static weights/biases,
   arena preload fallback, transposed conv weight binding, plan stats introspection
   from Python (`AotExecutor`)
-- **Per-group quantization** for U4/U8 packed tensors
+- **Per-group quantization** for I4/I8 packed tensors
 - **Activation quantization extended to Conv2d** (previously MatMul only)
 - **OpenBLAS conv GEMM path** with thread sweep support
 - **SWAR packed kernels** for quantized inference

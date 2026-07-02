@@ -207,8 +207,7 @@ fn openblas_im2col_transb(shape: Shape, col_nk: &[f32], weight: &[f32], out: &mu
 
 fn apply_bias_silu(shape: Shape, bias: &[f32], out: &mut [f32]) {
     let spatial = shape.spatial();
-    for oc in 0..shape.f {
-        let b = bias[oc];
+    for (oc, b) in bias.iter().enumerate().take(shape.f) {
         let row = oc * spatial;
         for x in &mut out[row..row + spatial] {
             *x = silu(*x + b);

@@ -2,7 +2,9 @@
 
 #![allow(dead_code)]
 
-use crate::dtypes::{F16x2, F32x1, PackedWord, U4x8, U8x4};
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use crate::dtypes::F16x2;
+use crate::dtypes::{F32x1, F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -13,12 +15,36 @@ use super::*;
 use rayon::prelude::*;
 
 // ============================================================
-// GEMM constants
+// Dynamic tile sizing — derived from L2 cache size
 // ============================================================
 
-/// Cache-blocked GEMV for packed types.
-/// Tiles the K dimension to keep activation blocks in L2 cache.
-const K_BLOCK_SIZE: usize = 4096;
+/// Returns the K-tile size (in f32 elements) based on L2 cache size.
+/// For 256 KiB L2 → 8192 (current default), scales proportionally.
+fn k_block_size() -> usize {
+    use std::sync::OnceLock;
+    static K_TILE: OnceLock<usize> = OnceLock::new();
+    *K_TILE.get_or_init(|| {
+        let l2 = crate::backend::cpu::topology::l2_cache_size_bytes();
+        // Use half of L2 cache divided by f32 (4 bytes), rounded to 4096
+        let tile = ((l2 / 2 / 4) / 4096) * 4096;
+        tile.clamp(4096, 65536)
+    })
+}
+
+/// K-tile size for the BLIS-style tiled GEMV (same as k_block_size).
+fn kc() -> usize {
+    k_block_size()
+}
+
+/// Threshold above which the BLIS-tiled GEMV path is used (≈ half of k_block_size).
+fn tiled_k_threshold() -> usize {
+    use std::sync::OnceLock;
+    static THRESH: OnceLock<usize> = OnceLock::new();
+    *THRESH.get_or_init(|| {
+        let kb = k_block_size();
+        (kb / 2 / 4096 * 4096).max(4096)
+    })
+}
 
 // ============================================================
 // Type-dispatched SIMD GEMV entry point
@@ -36,14 +62,14 @@ pub fn gemv_packed_simd<T: PackedWord>(
             // SAFETY: PackedTensor<T> has the same in-memory representation for all T
             // (a packed data slice + shape + scales + zeros). The bit-width match
             // guarantees the reinterpret cast is valid.
-            let w = unsafe { &*(weights as *const _ as *const PackedTensor<U8x4>) };
-            return gemv_u8x4_dispatch(w, activation, output);
+            let w = unsafe { &*(weights as *const _ as *const PackedTensor<I8x4>) };
+            return gemv_i8x4_dispatch(w, activation, output);
         }
         (4, false) => {
-            // SAFETY: Same reasoning as U8x4 case — memory layout is identical across
+            // SAFETY: Same reasoning as I8x4 case — memory layout is identical across
             // PackedWord types, and the match on BIT_WIDTH guarantees correctness.
-            let w = unsafe { &*(weights as *const _ as *const PackedTensor<U4x8>) };
-            return gemv_u4x8_dispatch(w, activation, output);
+            let w = unsafe { &*(weights as *const _ as *const PackedTensor<I4x8>) };
+            return gemv_i4x8_dispatch(w, activation, output);
         }
         (16, true) => {
             // SAFETY: Same as above — F16x2 has the same packed layout as other
@@ -57,6 +83,23 @@ pub fn gemv_packed_simd<T: PackedWord>(
             let w = unsafe { &*(weights as *const _ as *const PackedTensor<F32x1>) };
             return gemv_f32x1_dispatch(w, activation, output);
         }
+        (4, true) => {
+            // SAFETY: Same as above — F4x8 has the same packed layout as other
+            // PackedWord types and (BIT_WIDTH=4, IS_FLOAT=true) uniquely identifies F4x8.
+            let w = unsafe { &*(weights as *const _ as *const PackedTensor<F4x8>) };
+            return gemv_f4x8_dispatch(w, activation, output);
+        }
+        (8, true) => {
+            // SAFETY: F8x4 and F8x4R both have BIT_WIDTH=8, IS_FLOAT=true.
+            // Distinguish via runtime TypeId check; both share the same LUT-gather kernel.
+            if std::any::TypeId::of::<T>() == std::any::TypeId::of::<F8x4>() {
+                let w = unsafe { &*(weights as *const _ as *const PackedTensor<F8x4>) };
+                return gemv_f8x4_dispatch(w, activation, output);
+            } else {
+                let w = unsafe { &*(weights as *const _ as *const PackedTensor<F8x4R>) };
+                return gemv_f8x4r_dispatch(w, activation, output);
+            }
+        }
         _ => {}
     }
 
@@ -65,7 +108,7 @@ pub fn gemv_packed_simd<T: PackedWord>(
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
 
-    if k <= K_BLOCK_SIZE {
+    if k <= k_block_size() {
         gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
     } else {
         gemv_packed_blocked::<T>(weights, activation, output, m, k, k_packed);
@@ -73,12 +116,12 @@ pub fn gemv_packed_simd<T: PackedWord>(
 }
 
 // ============================================================
-// U8x4: AVX2 int8→f32 widening + FMA
+// I8x4: AVX2 int8→f32 widening + FMA
 // ============================================================
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[allow(unused_variables)]
-fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: &mut [f32]) {
+fn gemv_i8x4_dispatch(weights: &PackedTensor<I8x4>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
@@ -89,7 +132,7 @@ fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: 
     if has_avx512() {
         for row in 0..m {
             let dot = unsafe {
-                gemv_row_u8x4_avx512(weights_u32, activation, row * k_packed, k, k_packed)
+                gemv_row_i8x4_avx512(weights_u32, activation, row * k_packed, k, k_packed)
             };
             output[row] = apply_affine_dot(
                 dot,
@@ -101,7 +144,7 @@ fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: 
     } else if has_avx2() {
         for row in 0..m {
             let dot =
-                unsafe { gemv_row_u8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
+                unsafe { gemv_row_i8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
             output[row] = apply_affine_dot(
                 dot,
                 weights.scale_for_row(row),
@@ -113,7 +156,7 @@ fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: 
         for row in 0..m {
             let row_offset = row * k_packed;
             let dot =
-                unsafe { gemv_row_u8x4_scalar(weights_u32, activation, row_offset, k, k_packed) };
+                unsafe { gemv_row_i8x4_scalar(weights_u32, activation, row_offset, k, k_packed) };
             output[row] = apply_affine_dot(
                 dot,
                 weights.scale_for_row(row),
@@ -128,14 +171,14 @@ fn gemv_u8x4_dispatch(weights: &PackedTensor<U8x4>, activation: &[f32], output: 
 #[inline]
 // SAFETY: Caller must ensure `weights_u32` and `activation` are valid slices,
 // `row_offset` is in-bounds for `weights_u32`, and k/k_packed are correct.
-unsafe fn gemv_row_u8x4_scalar(
+unsafe fn gemv_row_i8x4_scalar(
     weights_u32: &[u32],
     activation: &[f32],
     row_offset: usize,
     k: usize,
     k_packed: usize,
 ) -> f32 {
-    // NOTE: U8x4 values are stored as SIGNED i8 (range -128..127), not unsigned u8.
+    // NOTE: I8x4 values are stored as SIGNED i8 (range -128..127), not unsigned u8.
     // The cast (bytes[j] as i8) as f32 correctly interprets the packed data.
     let mut total = 0.0f32;
     for p in 0..k_packed {
@@ -154,9 +197,9 @@ unsafe fn gemv_row_u8x4_scalar(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-// SAFETY: Same as gemv_row_u8x4_scalar — caller ensures valid slices, correct
+// SAFETY: Same as gemv_row_i8x4_scalar — caller ensures valid slices, correct
 // offsets, and AVX2+FMA availability.
-unsafe fn gemv_row_u8x4_avx2(
+unsafe fn gemv_row_i8x4_avx2(
     weights_u32: &[u32],
     activation: &[f32],
     row_offset: usize,
@@ -209,9 +252,9 @@ unsafe fn gemv_row_u8x4_avx2(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
-// SAFETY: Same as gemv_row_u8x4_scalar — caller ensures valid slices, correct
+// SAFETY: Same as gemv_row_i8x4_scalar — caller ensures valid slices, correct
 // offsets, and AVX512F+AVX512BW availability.
-unsafe fn gemv_row_u8x4_avx512(
+unsafe fn gemv_row_i8x4_avx512(
     weights_u32: &[u32],
     activation: &[f32],
     row_offset: usize,
@@ -304,12 +347,12 @@ unsafe fn gemv_row_u8x4_avx512(
 }
 
 // ============================================================
-// U4x8: AVX2 nibble extraction → int32 → f32 → FMA
+// I4x8: AVX2 nibble extraction → int32 → f32 → FMA
 // ============================================================
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[allow(unused_variables)]
-fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: &mut [f32]) {
+fn gemv_i4x8_dispatch(weights: &PackedTensor<I4x8>, activation: &[f32], output: &mut [f32]) {
     let shape = weights.shape();
     let m = shape[0];
     let k = shape[1];
@@ -320,7 +363,7 @@ fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: 
     if has_avx512() {
         for row in 0..m {
             let dot = unsafe {
-                gemv_row_u4x8_avx512(weights_u32, activation, row * k_packed, k, k_packed)
+                gemv_row_i4x8_avx512(weights_u32, activation, row * k_packed, k, k_packed)
             };
             output[row] = apply_affine_dot(
                 dot,
@@ -332,7 +375,7 @@ fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: 
     } else if has_avx2() {
         for row in 0..m {
             let dot =
-                unsafe { gemv_row_u4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
+                unsafe { gemv_row_i4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
             output[row] = apply_affine_dot(
                 dot,
                 weights.scale_for_row(row),
@@ -348,9 +391,9 @@ fn gemv_u4x8_dispatch(weights: &PackedTensor<U4x8>, activation: &[f32], output: 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-// SAFETY: Same as gemv_row_u8x4_avx2 — caller ensures valid slices, correct
+// SAFETY: Same as gemv_row_i8x4_avx2 — caller ensures valid slices, correct
 // offsets, and AVX2+FMA availability.
-unsafe fn gemv_row_u4x8_avx2(
+unsafe fn gemv_row_i4x8_avx2(
     weights_u32: &[u32],
     activation: &[f32],
     row_offset: usize,
@@ -425,9 +468,9 @@ unsafe fn gemv_row_u4x8_avx2(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 #[inline]
-// SAFETY: Same as gemv_row_u8x4_avx512 — caller ensures valid slices, correct
+// SAFETY: Same as gemv_row_i8x4_avx512 — caller ensures valid slices, correct
 // offsets, and AVX512F availability.
-unsafe fn gemv_row_u4x8_avx512(
+unsafe fn gemv_row_i4x8_avx512(
     weights_u32: &[u32],
     activation: &[f32],
     row_offset: usize,
@@ -550,7 +593,7 @@ unsafe fn u32x2_to_f32x4_f16c(w0: u32, w1: u32) -> __m128 {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma,f16c")]
 #[inline]
-// SAFETY: Same as gemv_row_u8x4_avx2 — caller ensures valid slices, correct
+// SAFETY: Same as gemv_row_i8x4_avx2 — caller ensures valid slices, correct
 // offsets, and AVX2+FMA+F16C availability.
 unsafe fn gemv_row_f16x2_f16c(
     weights_u32: &[u32],
@@ -667,6 +710,470 @@ fn gemv_f32x1_dispatch(weights: &PackedTensor<F32x1>, activation: &[f32], output
 }
 
 // ============================================================
+// F4x8: AVX2 nibble extraction → permutevar LUT → FMA
+// Uses _mm256_permutevar8x32_ps (register-only) instead of
+// _mm256_i32gather_ps (memory gather, ~20 cycle latency).
+// ============================================================
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[allow(unused_variables)]
+fn gemv_f4x8_dispatch(weights: &PackedTensor<F4x8>, activation: &[f32], output: &mut [f32]) {
+    let shape = weights.shape();
+    let m = shape[0];
+    let k = shape[1];
+
+    if weights.quant_block_size > 0 {
+        let f32_weights = weights.get_or_init_f32_weights();
+        for row in 0..m {
+            let row_data = &f32_weights[row * k..(row + 1) * k];
+            output[row] = fma_f32_slice(row_data, activation);
+        }
+        return;
+    }
+
+    let k_packed = k.div_ceil(8);
+    let weights_u32 = weights.as_u32();
+    let act_sum = affine_sum_term(activation, k, 1.0);
+
+    if has_avx2() {
+        for row in 0..m {
+            let dot =
+                unsafe { gemv_row_f4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
+        }
+    } else {
+        for row in 0..m {
+            let dot = unsafe {
+                gemv_row_f4x8_scalar(weights_u32, activation, row * k_packed, k, k_packed)
+            };
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+// SAFETY: Caller must ensure valid slices, correct offsets, and AVX2+FMA availability.
+unsafe fn gemv_row_f4x8_avx2(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+    let mask_lo = _mm256_set1_epi32(0xF);
+    let mask_mag = _mm256_set1_epi32(0x7);
+    let shift = _mm256_set_epi32(28, 24, 20, 16, 12, 8, 4, 0);
+    // FP4 magnitude LUT: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+    // _mm256_permutevar8x32_ps uses bits [2:0] of each index to select from 8 elements.
+    let mag_lut = _mm256_set_ps(6.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.5, 0.0);
+
+    while p + 2 <= k_packed && act_idx + 16 <= k {
+        if p + 4 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let w0 = weights_u32[row_offset + p];
+        let w1 = weights_u32[row_offset + p + 1];
+
+        let w0v = _mm256_set1_epi32(w0 as i32);
+        let w1v = _mm256_set1_epi32(w1 as i32);
+
+        // Extract 8 nibbles per word
+        let nib0 = _mm256_and_si256(_mm256_srlv_epi32(w0v, shift), mask_lo);
+        let nib1 = _mm256_and_si256(_mm256_srlv_epi32(w1v, shift), mask_lo);
+
+        // Magnitude indices = nibble & 0x7 (0-7)
+        let mag_idx0 = _mm256_and_si256(nib0, mask_mag);
+        let mag_idx1 = _mm256_and_si256(nib1, mask_mag);
+
+        // Register-only permutation: ~1 cycle vs ~20 for gather
+        let mag_f32_0 = _mm256_permutevar8x32_ps(mag_lut, mag_idx0);
+        let mag_f32_1 = _mm256_permutevar8x32_ps(mag_lut, mag_idx1);
+
+        // Sign from bit 3 → float sign bit (bit 31) via left shift by 28
+        let sign0 = _mm256_slli_epi32(_mm256_and_si256(nib0, _mm256_set1_epi32(8)), 28);
+        let sign1 = _mm256_slli_epi32(_mm256_and_si256(nib1, _mm256_set1_epi32(8)), 28);
+
+        // XOR to negate where sign bit is set
+        let w_f32_0 = _mm256_xor_ps(mag_f32_0, _mm256_castsi256_ps(sign0));
+        let w_f32_1 = _mm256_xor_ps(mag_f32_1, _mm256_castsi256_ps(sign1));
+
+        let al0 = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc0 = _mm256_fmadd_ps(w_f32_0, al0, acc0);
+
+        let al1 = _mm256_loadu_ps(activation.as_ptr().add(act_idx + 8));
+        acc1 = _mm256_fmadd_ps(w_f32_1, al1, acc1);
+
+        p += 2;
+        act_idx += 16;
+    }
+
+    acc0 = _mm256_add_ps(acc0, acc1);
+    let mut total = hsum256_ps(acc0);
+
+    // Scalar tail
+    while p < k_packed && act_idx < k {
+        let w = weights_u32[row_offset + p];
+        for j in 0..8 {
+            let idx = act_idx + j;
+            if idx < k {
+                let nibble = (w >> (j * 4)) & 0xF;
+                let lut = crate::dtypes::f4x8::fp4_f32_lut();
+                total += lut[nibble as usize] * activation[idx];
+            }
+        }
+        p += 1;
+        act_idx += 8;
+    }
+
+    total
+}
+
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+#[inline]
+unsafe fn gemv_row_f4x8_scalar(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let lut = crate::dtypes::f4x8::fp4_f32_lut();
+    let mut total = 0.0f32;
+    for p in 0..k_packed {
+        let w = weights_u32[row_offset + p];
+        for j in 0..8 {
+            let idx = p * 8 + j;
+            if idx < k {
+                let nibble = (w >> (j * 4)) & 0xF;
+                total += lut[nibble as usize] * activation[idx];
+            }
+        }
+    }
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+unsafe fn gemv_row_f4x8_scalar(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let lut = crate::dtypes::f4x8::fp4_f32_lut();
+    let mut total = 0.0f32;
+    for p in 0..k_packed {
+        let w = weights_u32[row_offset + p];
+        for j in 0..8 {
+            let idx = p * 8 + j;
+            if idx < k {
+                let nibble = (w >> (j * 4)) & 0xF;
+                total += lut[nibble as usize] * activation[idx];
+            }
+        }
+    }
+    total
+}
+
+// ============================================================
+// F8x4/F8x4R: AVX2 direct FP8 → f32 conversion + FMA
+// ============================================================
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+// SAFETY: E4M3→f32: sign(1)+exp(4,bias=7)+man(3) → f32 sign(1)+exp(8,bias=127)+man(23).
+// Converts 8 packed E4M3 bytes (in low 8 lanes of a 256-bit i32 vector) to 8 f32 values.
+unsafe fn e4m3_to_f32_avx2(v: __m256i, exp_bias_adj: __m256i, implicit_one: __m256i) -> __m256 {
+    let sign = _mm256_slli_epi32(_mm256_and_si256(v, _mm256_set1_epi32(0x80)), 24);
+    let exp_raw = _mm256_and_si256(_mm256_srli_epi32(v, 3), _mm256_set1_epi32(0xF));
+    let exp = _mm256_slli_epi32(_mm256_add_epi32(exp_raw, exp_bias_adj), 23);
+    let man = _mm256_slli_epi32(_mm256_and_si256(v, _mm256_set1_epi32(0x7)), 20);
+    let has_exp = _mm256_cmpgt_epi32(exp_raw, _mm256_setzero_si256());
+    let impl1 = _mm256_and_si256(has_exp, implicit_one);
+    let bits = _mm256_or_si256(_mm256_or_si256(sign, exp), _mm256_or_si256(man, impl1));
+    _mm256_castsi256_ps(bits)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+// SAFETY: E5M2→f32: sign(1)+exp(5,bias=15)+man(2) → f32 sign(1)+exp(8,bias=127)+man(23).
+// Converts 8 packed E5M2 bytes (in low 8 lanes of a 256-bit i32 vector) to 8 f32 values.
+unsafe fn e5m2_to_f32_avx2(v: __m256i, exp_bias_adj: __m256i, implicit_one: __m256i) -> __m256 {
+    let sign = _mm256_slli_epi32(_mm256_and_si256(v, _mm256_set1_epi32(0x80)), 24);
+    let exp_raw = _mm256_and_si256(_mm256_srli_epi32(v, 2), _mm256_set1_epi32(0x1F));
+    let exp = _mm256_slli_epi32(_mm256_add_epi32(exp_raw, exp_bias_adj), 23);
+    let man = _mm256_slli_epi32(_mm256_and_si256(v, _mm256_set1_epi32(0x3)), 21);
+    let has_exp = _mm256_cmpgt_epi32(exp_raw, _mm256_setzero_si256());
+    let impl1 = _mm256_and_si256(has_exp, implicit_one);
+    let bits = _mm256_or_si256(_mm256_or_si256(sign, exp), _mm256_or_si256(man, impl1));
+    _mm256_castsi256_ps(bits)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn gemv_f8x4_dispatch(weights: &PackedTensor<F8x4>, activation: &[f32], output: &mut [f32]) {
+    let shape = weights.shape();
+    let m = shape[0];
+    let k = shape[1];
+    let k_packed = k.div_ceil(4);
+    let weights_u32 = weights.as_u32();
+    let act_sum = affine_sum_term(activation, k, 1.0);
+
+    if has_avx2() {
+        for row in 0..m {
+            let dot =
+                unsafe { gemv_row_f8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
+        }
+    } else {
+        let lut = crate::dtypes::f8x4::f8_lut();
+        for row in 0..m {
+            let dot = unsafe {
+                gemv_row_f8x4_scalar(weights_u32, activation, row * k_packed, k, k_packed, lut)
+            };
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn gemv_f8x4r_dispatch(weights: &PackedTensor<F8x4R>, activation: &[f32], output: &mut [f32]) {
+    let shape = weights.shape();
+    let m = shape[0];
+    let k = shape[1];
+    let k_packed = k.div_ceil(4);
+    let weights_u32 = weights.as_u32();
+    let act_sum = affine_sum_term(activation, k, 1.0);
+
+    if has_avx2() {
+        for row in 0..m {
+            let dot = unsafe {
+                gemv_row_f8x4r_avx2(weights_u32, activation, row * k_packed, k, k_packed)
+            };
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
+        }
+    } else {
+        let lut = crate::dtypes::f8x4r::f8r_lut();
+        for row in 0..m {
+            let dot = unsafe {
+                gemv_row_f8x4_scalar(weights_u32, activation, row * k_packed, k, k_packed, lut)
+            };
+            output[row] = apply_affine_dot(
+                dot,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                act_sum,
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+// SAFETY: Caller must ensure valid slices, correct offsets, and AVX2+FMA availability.
+// E4M3: S(1) E(4,bias=7) M(3) → f32: bias adjustment = 127 - 7 = 120.
+unsafe fn gemv_row_f8x4_avx2(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let exp_bias_adj = _mm256_set1_epi32(120);
+    let implicit_one = _mm256_set1_epi32(1 << 23);
+    let lut = crate::dtypes::f8x4::f8_lut();
+
+    let mut acc = _mm256_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+
+    while p + 2 <= k_packed && act_idx + 8 <= k {
+        if p + 4 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let w01 =
+            (weights_u32[row_offset + p] as u64) | ((weights_u32[row_offset + p + 1] as u64) << 32);
+        let bytes_vec = _mm_cvtsi64_si128(w01 as i64);
+        let v = _mm256_cvtepu8_epi32(bytes_vec);
+
+        let w_f32 = e4m3_to_f32_avx2(v, exp_bias_adj, implicit_one);
+
+        let act = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc = _mm256_fmadd_ps(w_f32, act, acc);
+
+        p += 2;
+        act_idx += 8;
+    }
+
+    let mut total = hsum256_ps(acc);
+
+    while p < k_packed && act_idx < k {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = act_idx + j;
+            if idx < k {
+                total += lut[bytes[j] as usize] * activation[idx];
+            }
+        }
+        p += 1;
+        act_idx += 4;
+    }
+
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+// SAFETY: Caller must ensure valid slices, correct offsets, and AVX2+FMA availability.
+// E5M2: S(1) E(5,bias=15) M(2) → f32: bias adjustment = 127 - 15 = 112.
+unsafe fn gemv_row_f8x4r_avx2(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+) -> f32 {
+    let exp_bias_adj = _mm256_set1_epi32(112);
+    let implicit_one = _mm256_set1_epi32(1 << 23);
+    let lut = crate::dtypes::f8x4r::f8r_lut();
+
+    let mut acc = _mm256_setzero_ps();
+    let mut p = 0;
+    let mut act_idx = 0;
+
+    while p + 2 <= k_packed && act_idx + 8 <= k {
+        if p + 4 < k_packed {
+            _mm_prefetch(
+                weights_u32.as_ptr().add(row_offset + p + 4) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+
+        let w01 =
+            (weights_u32[row_offset + p] as u64) | ((weights_u32[row_offset + p + 1] as u64) << 32);
+        let bytes_vec = _mm_cvtsi64_si128(w01 as i64);
+        let v = _mm256_cvtepu8_epi32(bytes_vec);
+
+        let w_f32 = e5m2_to_f32_avx2(v, exp_bias_adj, implicit_one);
+
+        let act = _mm256_loadu_ps(activation.as_ptr().add(act_idx));
+        acc = _mm256_fmadd_ps(w_f32, act, acc);
+
+        p += 2;
+        act_idx += 8;
+    }
+
+    let mut total = hsum256_ps(acc);
+
+    while p < k_packed && act_idx < k {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = act_idx + j;
+            if idx < k {
+                total += lut[bytes[j] as usize] * activation[idx];
+            }
+        }
+        p += 1;
+        act_idx += 4;
+    }
+
+    total
+}
+
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+#[inline]
+unsafe fn gemv_row_f8x4_scalar(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+    lut: &[f32; 256],
+) -> f32 {
+    let mut total = 0.0f32;
+    for p in 0..k_packed {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = p * 4 + j;
+            if idx < k {
+                total += lut[bytes[j] as usize] * activation[idx];
+            }
+        }
+    }
+    total
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+unsafe fn gemv_row_f8x4_scalar(
+    weights_u32: &[u32],
+    activation: &[f32],
+    row_offset: usize,
+    k: usize,
+    k_packed: usize,
+    lut: &[f32; 256],
+) -> f32 {
+    let mut total = 0.0f32;
+    for p in 0..k_packed {
+        let w = weights_u32[row_offset + p];
+        let bytes = w.to_le_bytes();
+        for j in 0..4 {
+            let idx = p * 4 + j;
+            if idx < k {
+                total += lut[bytes[j] as usize] * activation[idx];
+            }
+        }
+    }
+    total
+}
+
+// ============================================================
 // Generic fallback
 // ============================================================
 
@@ -681,7 +1188,7 @@ pub(crate) fn gemv_generic_fallback<T: PackedWord>(
     let k = shape[1];
     let k_packed = k.div_ceil(T::ITEMS);
 
-    if k <= K_BLOCK_SIZE {
+    if k <= k_block_size() {
         gemv_packed_inner::<T>(weights, activation, output, m, k, k_packed);
     } else {
         gemv_packed_blocked::<T>(weights, activation, output, m, k, k_packed);
@@ -727,10 +1234,10 @@ pub(crate) fn gemv_packed_blocked<T: PackedWord>(
     let items = T::ITEMS;
     let act_sum = affine_sum_term(activation, k, 1.0);
 
-    with_scratch(K_BLOCK_SIZE, |unpack_buf| {
+    with_scratch(k_block_size(), |unpack_buf| {
         let mut k_offset = 0;
         while k_offset < k {
-            let k_end = (k_offset + K_BLOCK_SIZE).min(k);
+            let k_end = (k_offset + k_block_size()).min(k);
             let k_block = k_end - k_offset;
 
             for row in 0..m {
@@ -739,7 +1246,7 @@ pub(crate) fn gemv_packed_blocked<T: PackedWord>(
                 let packed_end = k_end.div_ceil(items);
                 let unpack_len = (packed_end - packed_start) * items;
 
-                if unpack_len <= K_BLOCK_SIZE {
+                if unpack_len <= k_block_size() {
                     for p in packed_start..packed_end {
                         let word = weights.as_packed()[row_offset + p];
                         let unpacked = word.unpack_to_f32();
@@ -759,7 +1266,7 @@ pub(crate) fn gemv_packed_blocked<T: PackedWord>(
                 }
             }
 
-            k_offset += K_BLOCK_SIZE;
+            k_offset += k_block_size();
         }
 
         for row in 0..m {
@@ -813,13 +1320,12 @@ thread_local! {
 fn with_blas_scratch<R>(f: impl FnOnce(&mut [f32]) -> R) -> R {
     BLAS_SCRATCH.with(|cell| {
         let mut buf = cell.borrow_mut();
-        buf.resize(KC * MR, 0.0);
+        buf.resize(kc() * MR, 0.0);
         f(&mut buf)
     })
 }
 
 const MR: usize = 4;
-const KC: usize = 8192;
 
 #[inline(always)]
 pub fn gemv_packed_tiled<T: PackedWord>(
@@ -840,7 +1346,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
     with_blas_scratch(|row_bufs| {
         let mut k_offset = 0;
         while k_offset < k {
-            let k_end = (k_offset + KC).min(k);
+            let k_end = (k_offset + kc()).min(k);
             let k_block = k_end - k_offset;
 
             let mut row = 0;
@@ -879,7 +1385,7 @@ pub fn gemv_packed_tiled<T: PackedWord>(
                 row += 1;
             }
 
-            k_offset += KC;
+            k_offset += kc();
         }
 
         for row in 0..m {
@@ -907,12 +1413,12 @@ fn micro_kernel<T: PackedWord>(
     row_bufs: &mut [f32],
 ) {
     debug_assert_eq!(output.len(), MR);
-    debug_assert!(row_bufs.len() >= KC * MR);
+    debug_assert!(row_bufs.len() >= kc() * MR);
 
     for r in 0..MR {
-        let row_start = r * KC;
-        if k_block < KC {
-            row_bufs[row_start + k_block..row_start + KC].fill(0.0);
+        let row_start = r * kc();
+        if k_block < kc() {
+            row_bufs[row_start + k_block..row_start + kc()].fill(0.0);
         }
         let row = start_row + r;
         let row_offset = row * k_packed;
@@ -936,7 +1442,7 @@ fn micro_kernel<T: PackedWord>(
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             // SAFETY: Feature check guarantees AVX2+FMA availability; all slices
-            // are valid and correctly sized (row_bufs is KC*MR, activation is k_block).
+            // are valid and correctly sized (row_bufs is kc()*MR, activation is k_block).
             unsafe {
                 micro_kernel_avx2(row_bufs, activation, output, k_block);
             }
@@ -945,7 +1451,7 @@ fn micro_kernel<T: PackedWord>(
     }
 
     for r in 0..MR {
-        let row_start = r * KC;
+        let row_start = r * kc();
         let mut acc = 0.0f32;
         for kk in 0..k_block {
             acc += row_bufs[row_start + kk] * activation[kk];
@@ -957,7 +1463,7 @@ fn micro_kernel<T: PackedWord>(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-// SAFETY: Caller must ensure `row_bufs` is at least KC * MR elements, `activation`
+// SAFETY: Caller must ensure `row_bufs` is at least kc() * MR elements, `activation`
 // is at least `k` elements, and `output` is at least MR elements. AVX2+FMA is
 // guaranteed by the target_feature attribute.
 unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [f32], k: usize) {
@@ -973,15 +1479,15 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
             _mm_prefetch(activation.as_ptr().add(kk + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(row_bufs.as_ptr().add(kk + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(
-                row_bufs.as_ptr().add(KC + kk + 32) as *const i8,
+                row_bufs.as_ptr().add(kc() + kk + 32) as *const i8,
                 _MM_HINT_T0,
             );
             _mm_prefetch(
-                row_bufs.as_ptr().add(2 * KC + kk + 32) as *const i8,
+                row_bufs.as_ptr().add(2 * kc() + kk + 32) as *const i8,
                 _MM_HINT_T0,
             );
             _mm_prefetch(
-                row_bufs.as_ptr().add(3 * KC + kk + 32) as *const i8,
+                row_bufs.as_ptr().add(3 * kc() + kk + 32) as *const i8,
                 _MM_HINT_T0,
             );
         }
@@ -991,13 +1497,13 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
         let row0 = _mm256_loadu_ps(row_bufs.as_ptr().add(kk));
         acc0 = _mm256_fmadd_ps(row0, act, acc0);
 
-        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(KC + kk));
+        let row1 = _mm256_loadu_ps(row_bufs.as_ptr().add(kc() + kk));
         acc1 = _mm256_fmadd_ps(row1, act, acc1);
 
-        let row2 = _mm256_loadu_ps(row_bufs.as_ptr().add(2 * KC + kk));
+        let row2 = _mm256_loadu_ps(row_bufs.as_ptr().add(2 * kc() + kk));
         acc2 = _mm256_fmadd_ps(row2, act, acc2);
 
-        let row3 = _mm256_loadu_ps(row_bufs.as_ptr().add(3 * KC + kk));
+        let row3 = _mm256_loadu_ps(row_bufs.as_ptr().add(3 * kc() + kk));
         acc3 = _mm256_fmadd_ps(row3, act, acc3);
 
         kk += 8;
@@ -1010,9 +1516,9 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
     while kk < k {
         let act = *activation.as_ptr().add(kk);
         tail0 += *row_bufs.as_ptr().add(kk) * act;
-        tail1 += *row_bufs.as_ptr().add(KC + kk) * act;
-        tail2 += *row_bufs.as_ptr().add(2 * KC + kk) * act;
-        tail3 += *row_bufs.as_ptr().add(3 * KC + kk) * act;
+        tail1 += *row_bufs.as_ptr().add(kc() + kk) * act;
+        tail2 += *row_bufs.as_ptr().add(2 * kc() + kk) * act;
+        tail3 += *row_bufs.as_ptr().add(3 * kc() + kk) * act;
         kk += 1;
     }
 
@@ -1030,12 +1536,10 @@ unsafe fn micro_kernel_avx2(row_bufs: &[f32], activation: &[f32], output: &mut [
 // Top-level CPU GEMV dispatcher
 // ============================================================
 
-const TILED_K_THRESHOLD: usize = 4096;
-
 #[inline(always)]
 pub fn gemv_cpu<T: PackedWord>(weights: &PackedTensor<T>, activation: &[f32], output: &mut [f32]) {
     let k = weights.shape()[1];
-    if k > TILED_K_THRESHOLD {
+    if k > tiled_k_threshold() {
         gemv_packed_tiled(weights, activation, output);
     } else {
         gemv_packed_simd(weights, activation, output);
@@ -1115,15 +1619,15 @@ pub fn gemm_cpu_flat<T: PackedWord>(
 }
 
 // ============================================================
-// I8 × U8x4 quantized GEMM  (scalar, no SIMD)
+// I8 × I8x4 quantized GEMM  (scalar, no SIMD)
 // ============================================================
 
-/// Flat-buffer I8 × U8x4 quantized GEMM.
+/// Flat-buffer I8 × I8x4 quantized GEMM.
 ///
 /// Activation payload format: [scale_f32][zp_f32][i8_data...]
 /// (8-byte header followed by `m × k` signed i8 elements).
 ///
-/// Weights are `PackedTensor<U8x4>` with shape [N, K].
+/// Weights are `PackedTensor<I8x4>` with shape [N, K].
 /// Output is `[m × n]` f32.
 ///
 /// Computes the affine dot product exactly for the stored quantized values:
@@ -1134,8 +1638,8 @@ pub fn gemm_cpu_flat<T: PackedWord>(
 /// The zp_a == 0 path keeps the qW*qA term as an i32 dot product and adds
 /// the zero_w contribution as `zero_w * scale_a * ΣqA`.
 #[inline(always)]
-pub fn gemm_cpu_flat_i8_u8x4(
-    weights: &PackedTensor<U8x4>,
+pub fn gemm_cpu_flat_i8_i8x4(
+    weights: &PackedTensor<I8x4>,
     activation_payload: &[u8],
     outputs: &mut [f32],
     m: usize,
@@ -1147,18 +1651,18 @@ pub fn gemm_cpu_flat_i8_u8x4(
     let k_in = shape[1];
     assert_eq!(
         oc, n,
-        "gemm_cpu_flat_i8_u8x4: weight output channels (oc={oc}) must equal n={n}"
+        "gemm_cpu_flat_i8_i8x4: weight output channels (oc={oc}) must equal n={n}"
     );
     assert_eq!(
         k_in, k,
-        "gemm_cpu_flat_i8_u8x4: weight input channels (k_in={k_in}) must equal k={k}"
+        "gemm_cpu_flat_i8_i8x4: weight input channels (k_in={k_in}) must equal k={k}"
     );
 
     let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
 
     // Non-zero activation zero-point requires lane-by-lane dequantization.
     if activation_affine.zero != 0.0 {
-        let k_packed = k.div_ceil(U8x4::ITEMS);
+        let k_packed = k.div_ceil(I8x4::ITEMS);
         // M-outer loop: activation data for each pixel is reused across all output channels
         for bi in 0..m {
             let act_base = bi * k;
@@ -1184,7 +1688,7 @@ pub fn gemm_cpu_flat_i8_u8x4(
 
     // Fast path: zero activation offset keeps the qW*qA term in integer space,
     // then reuses the shared Σactivation helper for the affine zero_w term.
-    let k_packed = k.div_ceil(U8x4::ITEMS);
+    let k_packed = k.div_ceil(I8x4::ITEMS);
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if crate::backend::cpu::microkernels::has_avx2() {
@@ -1283,14 +1787,14 @@ pub fn gemm_cpu_flat_i8_u8x4(
     }
 }
 
-/// Flat-buffer I8 × U4x8 quantized GEMM.
+/// Flat-buffer I8 × I4x8 quantized GEMM.
 ///
-/// Semantics mirror `gemm_cpu_flat_i8_u8x4`, but each packed weight word stores
+/// Semantics mirror `gemm_cpu_flat_i8_i8x4`, but each packed weight word stores
 /// eight signed 4-bit qW lanes (`[-8, 7]`) before the affine `qW * scale_w + zero_w`
 /// dequantization is applied.
 #[inline(always)]
-pub fn gemm_cpu_flat_i8_u4x8(
-    weights: &PackedTensor<U4x8>,
+pub fn gemm_cpu_flat_i8_i4x8(
+    weights: &PackedTensor<I4x8>,
     activation_payload: &[u8],
     outputs: &mut [f32],
     m: usize,
@@ -1302,15 +1806,15 @@ pub fn gemm_cpu_flat_i8_u4x8(
     let k_in = shape[1];
     assert_eq!(
         oc, n,
-        "gemm_cpu_flat_i8_u4x8: weight output channels (oc={oc}) must equal n={n}"
+        "gemm_cpu_flat_i8_i4x8: weight output channels (oc={oc}) must equal n={n}"
     );
     assert_eq!(
         k_in, k,
-        "gemm_cpu_flat_i8_u4x8: weight input channels (k_in={k_in}) must equal k={k}"
+        "gemm_cpu_flat_i8_i4x8: weight input channels (k_in={k_in}) must equal k={k}"
     );
 
     let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
-    let k_packed = k.div_ceil(U4x8::ITEMS);
+    let k_packed = k.div_ceil(I4x8::ITEMS);
 
     if activation_affine.zero != 0.0 {
         // M-outer loop: activation data reused across all output channels
@@ -1324,8 +1828,8 @@ pub fn gemm_cpu_flat_i8_u4x8(
                 let mut activation_sum = 0.0f32;
                 for p in 0..k_packed {
                     let word = weights.as_packed()[row_offset + p].0;
-                    for lane in 0..U4x8::ITEMS {
-                        let idx = p * U4x8::ITEMS + lane;
+                    for lane in 0..I4x8::ITEMS {
+                        let idx = p * I4x8::ITEMS + lane;
                         if idx < k {
                             let nibble = (word >> (lane * 4)) & 0xF;
                             let signed = if nibble & 0x8 != 0 {
@@ -1348,7 +1852,7 @@ pub fn gemm_cpu_flat_i8_u4x8(
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if crate::backend::cpu::microkernels::has_avx2() {
         // SAFETY: AVX2 feature check passed; all slices are valid and correctly
-        // sized, and the U4x8 nibble extraction follows the packed layout.
+        // sized, and the I4x8 nibble extraction follows the packed layout.
         unsafe {
             for bi in 0..m {
                 let act_base = bi * k;
@@ -1406,8 +1910,8 @@ pub fn gemm_cpu_flat_i8_u4x8(
                     let mut act_sum_tail = 0.0f32;
                     while p < k_packed {
                         let word = weights.as_packed()[row_offset + p].0;
-                        for lane in 0..U4x8::ITEMS {
-                            let idx = p * U4x8::ITEMS + lane;
+                        for lane in 0..I4x8::ITEMS {
+                            let idx = p * I4x8::ITEMS + lane;
                             if idx < k {
                                 let nibble = (word >> (lane * 4)) & 0xF;
                                 let signed = if nibble & 0x8 != 0 {
@@ -1445,8 +1949,8 @@ pub fn gemm_cpu_flat_i8_u4x8(
             let mut q_activation_sum: i32 = 0;
             for p in 0..k_packed {
                 let word = weights.as_packed()[row_offset + p].0;
-                for lane in 0..U4x8::ITEMS {
-                    let idx = p * U4x8::ITEMS + lane;
+                for lane in 0..I4x8::ITEMS {
+                    let idx = p * I4x8::ITEMS + lane;
                     if idx < k {
                         let nibble = (word >> (lane * 4)) & 0xF;
                         let signed = if nibble & 0x8 != 0 {
@@ -1491,7 +1995,7 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
 
     let mut k_start = 0;
     while k_start < k {
-        let k_end = (k_start + K_BLOCK_SIZE).min(k);
+        let k_end = (k_start + k_block_size()).min(k);
         let k_len = k_end - k_start;
         let packed_start = k_start / T::ITEMS;
         let packed_end = k_end.div_ceil(T::ITEMS);
@@ -1513,7 +2017,7 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
                 }
 
                 #[cfg(feature = "parallel")]
-                {
+                if output.len() / m >= crate::backend::cpu::topology::physical_core_count() {
                     output
                         .par_chunks_mut(m)
                         .enumerate()
@@ -1522,6 +2026,12 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
                             let acc = fma_f32_slice(unpack_buf, act_slice);
                             chunk[row] += acc;
                         });
+                } else {
+                    for bi in 0..output.len() / m {
+                        let act_slice = &activation[bi * k + k_start..bi * k + k_end];
+                        let acc = fma_f32_slice(unpack_buf, act_slice);
+                        output[bi * m + row] += acc;
+                    }
                 }
                 #[cfg(not(feature = "parallel"))]
                 for bi in 0..n {
@@ -1532,11 +2042,11 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
             }
         });
 
-        k_start += K_BLOCK_SIZE;
+        k_start += k_block_size();
     }
 
     #[cfg(feature = "parallel")]
-    {
+    if output.len() / m >= crate::backend::cpu::topology::physical_core_count() {
         let k_usize = k;
         output
             .par_chunks_mut(m)
@@ -1550,6 +2060,17 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
                     chunk[row] = apply_affine_dot(chunk[row], scale, zero, input_sum);
                 }
             });
+    } else {
+        for bi in 0..output.len() / m {
+            let input = &activation[bi * k..(bi + 1) * k];
+            let input_sum = affine_sum_term(input, k, 1.0);
+            for row in 0..m {
+                let scale = weights.scale_for_row(row);
+                let zero = weights.zero_for_row(row);
+                output[bi * m + row] =
+                    apply_affine_dot(output[bi * m + row], scale, zero, input_sum);
+            }
+        }
     }
     #[cfg(not(feature = "parallel"))]
     {

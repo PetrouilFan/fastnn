@@ -721,8 +721,14 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
-            DType::U4 | DType::U8 => {
-                panic!("as_f32_slice: packed U4/U8 tensors cannot be viewed as f32.");
+            DType::I4
+            | DType::I8Scaled
+            | DType::U4Scaled
+            | DType::U8Scaled
+            | DType::F8
+            | DType::F8R
+            | DType::F4 => {
+                panic!("as_f32_slice: packed/FP tensors cannot be viewed as f32.");
             }
         }
     }
@@ -769,8 +775,14 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
             }
-            DType::U4 | DType::U8 => {
-                panic!("as_f32_slice_mut: packed U4/U8 tensors cannot be viewed as f32.");
+            DType::I4
+            | DType::I8Scaled
+            | DType::U4Scaled
+            | DType::U8Scaled
+            | DType::F8
+            | DType::F8R
+            | DType::F4 => {
+                panic!("as_f32_slice_mut: packed/FP tensors cannot be viewed as f32.");
             }
         }
     }
@@ -931,6 +943,203 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     }
 }
 
+pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32 {
+    let mut total_norm = 0.0f32;
+    for t in tensors {
+        if let Some(g) = t.grad() {
+            let g_data = g.as_f32_slice();
+            if norm_type == 2.0 {
+                let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
+                total_norm += param_norm * param_norm;
+            } else {
+                total_norm += g_data.iter().map(|x| x.abs().powf(norm_type)).sum::<f32>();
+            }
+        }
+    }
+    if norm_type == 2.0 {
+        total_norm = total_norm.sqrt();
+    } else {
+        total_norm = total_norm.powf(1.0 / norm_type);
+    }
+    let clip_coef = max_norm / (total_norm.max(1e-6));
+    if clip_coef < 1.0 {
+        for t in tensors {
+            if let Some(mut g) = t.grad() {
+                for x in g.as_f32_slice_mut().iter_mut() {
+                    *x *= clip_coef;
+                }
+                t.set_grad(Some(g));
+            }
+        }
+    }
+    total_norm
+}
+
+pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
+    for t in tensors {
+        if let Some(mut g) = t.grad() {
+            for x in g.as_f32_slice_mut().iter_mut() {
+                *x = x.max(-clip_value).min(clip_value);
+            }
+            t.set_grad(Some(g));
+        }
+    }
+}
+
+// =============================================================================
+// AOT pipeline bridge — replace eager dispatcher calls with graph lowering
+// =============================================================================
+
+pub fn dtype_to_ir(dt: DType) -> IrDType {
+    match dt {
+        DType::F32 => IrDType::F32,
+        DType::F64 => panic!("dtype_to_ir: F64 not supported in IR"),
+        DType::I32 => IrDType::I32,
+        DType::I64 => IrDType::I64,
+        DType::Bool => IrDType::Bool,
+        DType::F16 => IrDType::F16,
+        DType::BF16 => IrDType::BF16,
+        // I4/I8/F4/F8/F8R need per-channel scale/zp metadata that lives in the IR node,
+        // not in the Tensor-level DType.  Use default values here; the actual
+        // scales are filled in by the quantization compiler pass.
+        DType::I4 => IrDType::I4 {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+            codebooks: vec![],
+        },
+        DType::I8Scaled => IrDType::I8Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::F8 => IrDType::F8 { scales: vec![1.0] },
+        DType::F8R => IrDType::F8R { scales: vec![1.0] },
+        DType::F4 => IrDType::F4 {
+            scales: vec![1.0],
+            zeros: vec![],
+            codebooks: vec![],
+        },
+        DType::U4Scaled => IrDType::U4Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::U8Scaled => IrDType::U8Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+    }
+}
+
+pub fn ir_to_dtype(idt: IrDType) -> DType {
+    match idt {
+        IrDType::F32 => DType::F32,
+        IrDType::F16 => DType::F16,
+        IrDType::BF16 => DType::BF16,
+        IrDType::I32 => DType::I32,
+        IrDType::I64 => DType::I64,
+        IrDType::Bool => DType::Bool,
+        IrDType::I8 => panic!("ir_to_dtype: I8 is IR-only, not a Tensor-level DType"),
+        // Packed types round-trip back to simple DType variants. Per-channel metadata
+        // stays in the IR node; Tensor-level storage uses the packed dtype.
+        IrDType::I4 { .. } => DType::I4,
+        IrDType::I8Scaled { .. } => DType::I8Scaled,
+        IrDType::F8 { .. } => DType::F8,
+        IrDType::F8R { .. } => DType::F8R,
+        IrDType::F4 { .. } => DType::F4,
+        IrDType::U4Scaled { .. } => DType::U4Scaled,
+        IrDType::U8Scaled { .. } => DType::U8Scaled,
+    }
+}
+
+impl Tensor {
+    /// Expose the tensor's data as a raw byte slice (CPU only).
+    pub fn as_bytes(&self) -> &[u8] {
+        match self.inner.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let elem_size = self.inner.dtype.size();
+                let offset = self.inner.storage_offset as usize * elem_size;
+                let num_bytes = self.inner.numel() as usize * elem_size;
+                &cpu.data[offset..offset + num_bytes]
+            }
+            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
+            _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
+        }
+    }
+
+    /// Build a single-op graph, compile it with the AOT pipeline, execute,
+    /// and return the output as a `Tensor`.
+    ///
+    /// `build_graph` receives the [`GraphBuilder`] and its graph-tensor inputs,
+    /// and must return the output [`GraphTensor`]s for the operation.
+    pub fn exec_aot<F>(inputs: &[&Tensor], build_graph: F) -> Result<Vec<Tensor>, BackendError>
+    where
+        F: FnOnce(
+            &GraphBuilder,
+            &[crate::ir::builder::GraphTensor],
+        ) -> Vec<crate::ir::builder::GraphTensor>,
+    {
+        let g = GraphBuilder::new();
+        let graph_inputs: Vec<_> = inputs
+            .iter()
+            .map(|t| {
+                let dims: Vec<DimExpr> = t
+                    .shape()
+                    .iter()
+                    .map(|&s| DimExpr::Known(s as u64))
+                    .collect();
+                g.input_with_dims(&dims, dtype_to_ir(t.dtype()))
+            })
+            .collect();
+
+        let graph_outputs = build_graph(&g, &graph_inputs);
+
+        let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
+        let result_bytes = g.compile_and_execute::<CpuBackend>(
+            &graph_outputs.iter().collect::<Vec<_>>(),
+            CpuBackend,
+            &input_bytes,
+        )?;
+
+        Ok(graph_outputs
+            .into_iter()
+            .zip(result_bytes)
+            .map(|(gt, bytes)| {
+                let shape: SmallVec<[i64; 8]> = gt
+                    .shape()
+                    .iter()
+                    .map(|d| match d {
+                        DimExpr::Known(v) => *v as i64,
+                        _ => unreachable!("AOT bridge: graph op output has concrete shape"),
+                    })
+                    .collect();
+                let dt = ir_to_dtype(gt.dtype());
+                let numel: usize = shape.iter().map(|&s| s as usize).product();
+                let expected_bytes = numel * dt.size();
+                let num_bytes = bytes.len();
+                // Validate that the AOT pipeline produced the right number of
+                // bytes for the shape inferred during graph construction.
+                // A mismatch here indicates a shape-inference or memory-planning
+                // bug in the compiler pipeline.
+                assert_eq!(
+                    num_bytes,
+                    expected_bytes,
+                    "AOT bridge: output byte size mismatch for shape {:?}, dtype {:?}: \
+                     got {} bytes but expected {} ({} elements × {} bytes/elem). \
+                     This is likely a shape-inference bug in the compiler pass.",
+                    shape,
+                    dt,
+                    num_bytes,
+                    expected_bytes,
+                    numel,
+                    dt.size()
+                );
+                let data = bytes.to_vec();
+                let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));
+                Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,7 +1206,7 @@ mod tests {
         let y = x.softplus(1.0, 20.0);
         let data = y.as_f32_slice();
         // softplus(0) = ln(1 + exp(0)) / 1 = ln(2) ≈ 0.693
-        assert!((data[0] - 0.693147).abs() < 1e-3);
+        assert!((data[0] - std::f32::consts::LN_2).abs() < 1e-3);
     }
 
     #[test]
@@ -1041,196 +1250,5 @@ mod tests {
         assert!((data[0] - (-2.4076)).abs() < 1e-3);
         assert!((data[1] - (-1.4076)).abs() < 1e-3);
         assert!((data[2] - (-0.4076)).abs() < 1e-3);
-    }
-}
-
-pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32 {
-    let mut total_norm = 0.0f32;
-    for t in tensors {
-        if let Some(g) = t.grad() {
-            let g_data = g.as_f32_slice();
-            if norm_type == 2.0 {
-                let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
-                total_norm += param_norm * param_norm;
-            } else {
-                total_norm += g_data.iter().map(|x| x.abs().powf(norm_type)).sum::<f32>();
-            }
-        }
-    }
-    if norm_type == 2.0 {
-        total_norm = total_norm.sqrt();
-    } else {
-        total_norm = total_norm.powf(1.0 / norm_type);
-    }
-    let clip_coef = max_norm / (total_norm.max(1e-6));
-    if clip_coef < 1.0 {
-        for t in tensors {
-            if let Some(mut g) = t.grad() {
-                for x in g.as_f32_slice_mut().iter_mut() {
-                    *x *= clip_coef;
-                }
-                t.set_grad(Some(g));
-            }
-        }
-    }
-    total_norm
-}
-
-pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
-    for t in tensors {
-        if let Some(mut g) = t.grad() {
-            for x in g.as_f32_slice_mut().iter_mut() {
-                *x = x.max(-clip_value).min(clip_value);
-            }
-            t.set_grad(Some(g));
-        }
-    }
-}
-
-// =============================================================================
-// AOT pipeline bridge — replace eager dispatcher calls with graph lowering
-// =============================================================================
-
-pub fn dtype_to_ir(dt: DType) -> IrDType {
-    match dt {
-        DType::F32 => IrDType::F32,
-        DType::F64 => panic!("dtype_to_ir: F64 not supported in IR"),
-        DType::I32 => IrDType::I32,
-        DType::I64 => IrDType::I64,
-        DType::Bool => IrDType::Bool,
-        DType::F16 => IrDType::F16,
-        DType::BF16 => IrDType::BF16,
-        // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
-        // not in the Tensor-level DType.  Use default values here; the actual
-        // scales are filled in by the quantization compiler pass.
-        DType::U4 => IrDType::U4 {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-        DType::U8 => IrDType::U8 {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-    }
-}
-
-pub fn ir_to_dtype(idt: IrDType) -> DType {
-    match idt {
-        IrDType::F32 => DType::F32,
-        IrDType::F16 => DType::F16,
-        IrDType::BF16 => DType::BF16,
-        IrDType::I32 => DType::I32,
-        IrDType::I64 => DType::I64,
-        IrDType::Bool => DType::Bool,
-        IrDType::I8 => panic!("ir_to_dtype: I8 is IR-only, not a Tensor-level DType"),
-        // U4/U8 round-trips back to simple DType::U4/U8. Per-channel metadata
-        // stays in the IR node; Tensor-level storage uses the packed dtype.
-        IrDType::U4 { .. } => DType::U4,
-        IrDType::U8 { .. } => DType::U8,
-    }
-}
-
-impl Tensor {
-    /// Expose the tensor's data as a raw byte slice (CPU only).
-    pub fn as_bytes(&self) -> &[u8] {
-        match self.inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                let elem_size = self.inner.dtype.size();
-                let offset = self.inner.storage_offset as usize * elem_size;
-                let num_bytes = self.inner.numel() as usize * elem_size;
-                &cpu.data[offset..offset + num_bytes]
-            }
-            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
-            _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
-        }
-    }
-
-    /// Build a single-op graph, compile it with the AOT pipeline, execute,
-    /// and return the output as a `Tensor`.
-    ///
-    /// `build_graph` receives the [`GraphBuilder`] and its graph-tensor inputs,
-    /// and must return the output [`GraphTensor`]s for the operation.
-    pub fn exec_aot<F>(inputs: &[&Tensor], build_graph: F) -> Result<Vec<Tensor>, BackendError>
-    where
-        F: FnOnce(
-            &GraphBuilder,
-            &[crate::ir::builder::GraphTensor],
-        ) -> Vec<crate::ir::builder::GraphTensor>,
-    {
-        let g = GraphBuilder::new();
-        let graph_inputs: Vec<_> = inputs
-            .iter()
-            .map(|t| {
-                let dims: Vec<DimExpr> = t
-                    .shape()
-                    .iter()
-                    .map(|&s| DimExpr::Known(s as u64))
-                    .collect();
-                g.input_with_dims(&dims, dtype_to_ir(t.dtype()))
-            })
-            .collect();
-
-        let graph_outputs = build_graph(&g, &graph_inputs);
-
-        let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
-        let result_bytes = (|| -> Result<Vec<Vec<u8>>, BackendError> {
-            #[cfg(feature = "gpu")]
-            if inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_))) {
-                return g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
-                    &graph_outputs.iter().collect::<Vec<_>>(),
-                    crate::backend::wgpu::WgpuBackend,
-                    &input_bytes,
-                );
-            }
-            g.compile_and_execute::<CpuBackend>(
-                &graph_outputs.iter().collect::<Vec<_>>(),
-                CpuBackend,
-                &input_bytes,
-            )
-        })()?;
-
-        Ok(graph_outputs
-            .into_iter()
-            .zip(result_bytes)
-            .map(|(gt, bytes)| {
-                let shape: SmallVec<[i64; 8]> = gt
-                    .shape()
-                    .iter()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as i64,
-                        _ => unreachable!("AOT bridge: graph op output has concrete shape"),
-                    })
-                    .collect();
-                let dt = ir_to_dtype(gt.dtype());
-                let numel: usize = shape.iter().map(|&s| s as usize).product();
-                let expected_bytes = numel * dt.size();
-                let num_bytes = bytes.len();
-                // Validate that the AOT pipeline produced the right number of
-                // bytes for the shape inferred during graph construction.
-                // A mismatch here indicates a shape-inference or memory-planning
-                // bug in the compiler pipeline.
-                assert_eq!(
-                    num_bytes,
-                    expected_bytes,
-                    "AOT bridge: output byte size mismatch for shape {:?}, dtype {:?}: \
-                     got {} bytes but expected {} ({} elements × {} bytes/elem). \
-                     This is likely a shape-inference bug in the compiler pass.",
-                    shape,
-                    dt,
-                    num_bytes,
-                    expected_bytes,
-                    numel,
-                    dt.size()
-                );
-                let data = bytes.to_vec();
-                let storage = Storage::Cpu(crate::storage::CpuStorage {
-                    data: Arc::new(data),
-                    nbytes: num_bytes,
-                    #[cfg(feature = "gpu")]
-                    gpu_buffer_cache: parking_lot::RwLock::new(std::collections::HashMap::new()),
-                });
-                Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
-            })
-            .collect())
     }
 }

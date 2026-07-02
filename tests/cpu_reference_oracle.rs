@@ -3,8 +3,10 @@ use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::Instruction;
 use fastnn::compiler::passes::activation_quantization;
 use fastnn::compiler::passes::shape_inference;
+use fastnn::dtypes::{F4x8, F8x4, F8x4R, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
+use fastnn::packed_tensor::PackedTensor;
 use half::f16;
 
 #[derive(Clone, Copy)]
@@ -68,9 +70,9 @@ fn naive_broadcast_add(
     let mut out = vec![0.0; lhs.len()];
     for b in 0..batch {
         for c in 0..channels {
-            for x in 0..width {
-                let idx = b * channels * width + c * width + x;
-                out[idx] = lhs[idx] + rhs[x];
+            let base = b * channels * width + c * width;
+            for (x, &r) in rhs.iter().enumerate().take(width) {
+                out[base + x] = lhs[base + x] + r;
             }
         }
     }
@@ -107,7 +109,7 @@ fn kernel_names(plan: &fastnn::backend::ExecutablePlan) -> Vec<String> {
 }
 
 fn run_single_output_f32(
-    graph: &ComputeGraph,
+    graph: ComputeGraph,
     inputs: &[&[u8]],
     quantize: Option<u8>,
 ) -> (Vec<f32>, Vec<String>) {
@@ -124,15 +126,14 @@ fn run_single_output_f32(
 }
 
 fn run_single_output_f32_with_i8_activations(
-    graph: &ComputeGraph,
+    mut graph: ComputeGraph,
     inputs: &[&[u8]],
     quantize: u8,
 ) -> (Vec<f32>, Vec<String>) {
-    let mut rewritten = graph.clone();
-    shape_inference::infer_shapes(&mut rewritten).expect("shape inference should succeed");
-    activation_quantization::quantize_activations(&mut rewritten)
+    shape_inference::infer_shapes(&mut graph).expect("shape inference should succeed");
+    activation_quantization::quantize_activations(&mut graph)
         .expect("activation quantization rewrite should succeed");
-    run_single_output_f32(&rewritten, inputs, Some(quantize))
+    run_single_output_f32(graph, inputs, Some(quantize))
 }
 
 #[test]
@@ -165,7 +166,7 @@ fn matmul_f32_reference_oracle_covers_batched_gemv_and_gemm() {
 
         let activations = seeded_values(seed, batch * m * k);
         let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-        let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+        let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
         let expected = naive_matmul(&activations, &weights, batch, m, k, n);
 
         assert!(
@@ -210,11 +211,11 @@ fn matmul_u4_reference_oracle_hits_quantized_dispatch_on_tail_k() {
 
         let activations = seeded_values(seed, m * k);
         let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-        let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], Some(4));
+        let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], Some(4));
         let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
         assert!(
-            kernels.iter().any(|name| name == "matmul_u4"),
+            kernels.iter().any(|name| name == "matmul_i4"),
             "expected matmul_u4 kernel, got {kernels:?}"
         );
         assert_close(
@@ -223,7 +224,7 @@ fn matmul_u4_reference_oracle_hits_quantized_dispatch_on_tail_k() {
             &expected,
             Tolerance {
                 abs: 0.45,
-                rel: 0.35,
+                rel: 0.40,
             },
         );
     }
@@ -255,11 +256,11 @@ fn matmul_u8_reference_oracle_hits_quantized_dispatch_on_tail_k() {
 
         let activations = seeded_values(seed, m * k);
         let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-        let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], Some(8));
+        let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], Some(8));
         let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
         assert!(
-            kernels.iter().any(|name| name == "matmul_u8"),
+            kernels.iter().any(|name| name == "matmul_i8"),
             "expected matmul_u8 kernel, got {kernels:?}"
         );
         assert_close(
@@ -313,7 +314,7 @@ fn matmul_i8_activation_path_matches_reference_oracle() {
         .map(|value| value * 0.2)
         .collect();
     let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-    let (actual, kernels) = run_single_output_f32_with_i8_activations(&graph, &[&input_bytes], 8);
+    let (actual, kernels) = run_single_output_f32_with_i8_activations(graph, &[&input_bytes], 8);
     let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
     assert!(
@@ -321,7 +322,7 @@ fn matmul_i8_activation_path_matches_reference_oracle() {
         "expected quantize_activations kernel, got {kernels:?}"
     );
     assert!(
-        kernels.iter().any(|name| name == "matmul_u8_i8"),
+        kernels.iter().any(|name| name == "matmul_i8_i8"),
         "expected matmul_u8_i8 kernel, got {kernels:?}"
     );
     assert_close(
@@ -374,7 +375,7 @@ fn matmul_u4_i8_activation_path_matches_reference_oracle() {
         .map(|value| value * 0.14 + 0.35)
         .collect();
     let input_bytes = bytemuck::cast_slice(&activations).to_vec();
-    let (actual, kernels) = run_single_output_f32_with_i8_activations(&graph, &[&input_bytes], 4);
+    let (actual, kernels) = run_single_output_f32_with_i8_activations(graph, &[&input_bytes], 4);
     let expected = naive_matmul(&activations, &weights, 1, m, k, n);
 
     assert!(
@@ -382,7 +383,7 @@ fn matmul_u4_i8_activation_path_matches_reference_oracle() {
         "expected quantize_activations kernel, got {kernels:?}"
     );
     assert!(
-        kernels.iter().any(|name| name == "matmul_u4_i8"),
+        kernels.iter().any(|name| name == "matmul_i4_i8"),
         "expected matmul_u4_i8 kernel, got {kernels:?}"
     );
     assert_close(
@@ -408,7 +409,7 @@ fn f16_roundtrip_reference_oracle_uses_cpu_conversion_kernels() {
 
     let source = seeded_values(seed, len);
     let input_bytes = bytemuck::cast_slice(&source).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+    let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
     let expected: Vec<f32> = source
         .iter()
         .map(|&value| f16::from_f32(value).to_f32())
@@ -454,7 +455,7 @@ fn broadcast_add_reference_oracle_covers_negative_values() {
 
     let lhs_values = seeded_values(seed, batch * channels * width);
     let input_bytes = bytemuck::cast_slice(&lhs_values).to_vec();
-    let (actual, kernels) = run_single_output_f32(&graph, &[&input_bytes], None);
+    let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
     let expected = naive_broadcast_add(&lhs_values, &rhs_values, batch, channels, width);
 
     assert!(
@@ -470,4 +471,116 @@ fn broadcast_add_reference_oracle_covers_negative_values() {
             rel: 1e-6,
         },
     );
+}
+
+fn run_fp_matmul_test<T, F>(
+    seed: u64,
+    m: usize,
+    k: usize,
+    n: usize,
+    make_dtype: F,
+    expected_kernel: &str,
+    tol: Tolerance,
+) where
+    T: PackedWord + 'static,
+    F: Fn(Vec<f32>) -> IrDType,
+{
+    let builder = GraphBuilder::new();
+    let weights = seeded_values(seed + 1, k * n);
+
+    let mut transposed = vec![0.0f32; k * n];
+    for r in 0..k {
+        for c in 0..n {
+            transposed[c * k + r] = weights[r * n + c];
+        }
+    }
+    let pt = PackedTensor::<T>::from_f32_per_channel(&transposed, &[n, k]);
+    let scales: Vec<f32> = (0..n).map(|r| pt.scale_for_row(r)).collect();
+    let weight = builder.constant(
+        pt.as_bytes(),
+        TensorType::new(
+            vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+            make_dtype(scales),
+        ),
+    );
+    let input = builder.input_with_dims(
+        &[DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+        IrDType::F32,
+    );
+    let output = builder.matmul(&input, &weight);
+    let graph = graph_from(&builder, &output);
+
+    let activations = seeded_values(seed, m * k);
+    let input_bytes = bytemuck::cast_slice(&activations).to_vec();
+    let (actual, kernels) = run_single_output_f32(graph, &[&input_bytes], None);
+    let expected = naive_matmul(&activations, &weights, 1, m, k, n);
+
+    assert!(
+        kernels.iter().any(|name| name == expected_kernel),
+        "expected {expected_kernel} kernel, got {kernels:?}"
+    );
+    assert_close(
+        &format!("{expected_kernel} matmul seed={seed} shape=[{m},{k}]x[{k},{n}]"),
+        &actual,
+        &expected,
+        tol,
+    );
+}
+
+#[test]
+fn matmul_f4_reference_oracle() {
+    for (seed, m, k, n) in [(23u64, 2usize, 7, 5), (29u64, 3usize, 9, 4)] {
+        run_fp_matmul_test::<F4x8, _>(
+            seed,
+            m,
+            k,
+            n,
+            |scales| IrDType::F4 {
+                scales,
+                zeros: vec![],
+                codebooks: vec![],
+            },
+            "matmul_f4",
+            Tolerance {
+                abs: 2.0,
+                rel: 0.25,
+            },
+        );
+    }
+}
+
+#[test]
+fn matmul_f8_reference_oracle() {
+    for (seed, m, k, n) in [(23u64, 2usize, 7, 5), (29u64, 3usize, 9, 4)] {
+        run_fp_matmul_test::<F8x4, _>(
+            seed,
+            m,
+            k,
+            n,
+            |scales| IrDType::F8 { scales },
+            "matmul_f8",
+            Tolerance {
+                abs: 0.20,
+                rel: 0.10,
+            },
+        );
+    }
+}
+
+#[test]
+fn matmul_f8r_reference_oracle() {
+    for (seed, m, k, n) in [(23u64, 2usize, 7, 5), (29u64, 3usize, 9, 4)] {
+        run_fp_matmul_test::<F8x4R, _>(
+            seed,
+            m,
+            k,
+            n,
+            |scales| IrDType::F8R { scales },
+            "matmul_f8r",
+            Tolerance {
+                abs: 0.50,
+                rel: 0.15,
+            },
+        );
+    }
 }

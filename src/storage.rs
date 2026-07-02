@@ -1,3 +1,5 @@
+use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(feature = "gpu")]
@@ -5,6 +7,101 @@ use parking_lot::RwLock;
 #[cfg(feature = "gpu")]
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const CACHE_LINE_ALIGN: usize = 64;
+
+/// A byte buffer guaranteed to be 64-byte (cache-line) aligned, suitable for
+/// direct SIMD load/store without alignment checks.
+///
+/// Provides [`Deref<Target=[u8]>`] and [`DerefMut`] so existing code that treats
+/// `&AlignedVec` as `&[u8]` works transparently.
+#[derive(Debug)]
+pub struct AlignedVec {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: AlignedVec owns uniquely-identified memory.  Access is governed by
+// Rust's borrow rules (shared through `&self` / `Arc`, exclusive through
+// `&mut self` / `Arc::make_mut`).
+unsafe impl Send for AlignedVec {}
+unsafe impl Sync for AlignedVec {}
+
+impl AlignedVec {
+    /// Allocate a zero-initialized buffer whose start address is 64-byte aligned.
+    /// Returns an empty (no-allocation) buffer when `nbytes == 0`.
+    pub fn new_zeroed(nbytes: usize) -> Self {
+        if nbytes == 0 {
+            return AlignedVec {
+                ptr: std::ptr::NonNull::dangling().as_ptr(),
+                len: 0,
+            };
+        }
+        let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN).expect("AlignedVec layout");
+        let ptr = unsafe { alloc_zeroed(layout) };
+        AlignedVec { ptr, len: nbytes }
+    }
+
+    /// Build an aligned buffer by copying the contents of `vec`.
+    /// The original `Vec` is dropped, freeing its (potentially unaligned) memory.
+    pub fn from_vec(vec: Vec<u8>) -> Self {
+        let nbytes = vec.len();
+        if nbytes == 0 {
+            drop(vec);
+            return AlignedVec::new_zeroed(0);
+        }
+        let mut buf = AlignedVec::new_zeroed(nbytes);
+        buf.copy_from_slice(&vec);
+        buf
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+}
+
+impl Clone for AlignedVec {
+    fn clone(&self) -> Self {
+        let mut buf = AlignedVec::new_zeroed(self.len);
+        if self.len > 0 {
+            buf.copy_from_slice(self);
+        }
+        buf
+    }
+}
+
+impl Drop for AlignedVec {
+    fn drop(&mut self) {
+        if self.len > 0 {
+            // Layout must match the one used in new_zeroed.
+            let layout = Layout::from_size_align(self.len, CACHE_LINE_ALIGN)
+                .expect("AlignedVec dealloc layout");
+            unsafe { dealloc(self.ptr, layout) };
+        }
+    }
+}
+
+impl Deref for AlignedVec {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        if self.len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+}
+
+impl DerefMut for AlignedVec {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+        }
+    }
+}
 
 static ALLOC_STATS: std::sync::OnceLock<AllocStats> = std::sync::OnceLock::new();
 
@@ -17,12 +114,23 @@ pub enum DType {
     Bool,
     F16,
     BF16,
-    /// Packed 4-bit (U4x8): 8 values per u32 word.
+    /// Packed 4-bit (I4x8): 8 values per u32 word.
     /// Per-channel scales/zero_points are stored in the IR node metadata.
-    U4,
-    /// Packed 8-bit (U8x4): 4 values per u32 word.
+    I4,
+    /// Packed 8-bit (I8x4): 4 values per u32 word.
     /// Per-channel scales/zero_points are stored in the IR node metadata.
-    U8,
+    /// Formerly named `U8` (misleading — this was always signed I8x4).
+    I8Scaled,
+    /// FP8 E4M3: 4 values per u32 word.
+    F8,
+    /// FP8 E5M2 (range variant): 4 values per u32 word.
+    F8R,
+    /// FP4 E2M1 (NVFP4-style): 8 values per u32 word, 256-entry LUT dot product.
+    F4,
+    /// Unsigned packed 4-bit (U4x8): 8 values per u32 word.
+    U4Scaled,
+    /// Unsigned packed 8-bit (U8x4): 4 values per u32 word.
+    U8Scaled,
 }
 
 impl DType {
@@ -32,8 +140,13 @@ impl DType {
             DType::F64 | DType::I64 => 8,
             DType::F16 | DType::BF16 => 2,
             DType::Bool => 1,
-            DType::U4 => 1,
-            DType::U8 => 1,
+            DType::I4 => 1,
+            DType::I8Scaled => 1,
+            DType::F8 => 1,
+            DType::F8R => 1,
+            DType::F4 => 1,
+            DType::U4Scaled => 1,
+            DType::U8Scaled => 1,
         }
     }
 
@@ -43,11 +156,23 @@ impl DType {
             DType::F64 | DType::I64 => numel * 8,
             DType::F16 | DType::BF16 => numel * 2,
             DType::Bool => numel,
-            DType::U4 => {
+            DType::I4 => {
                 let words = numel.div_ceil(8);
                 words * 4
             }
-            DType::U8 => {
+            DType::I8Scaled | DType::F8 | DType::F8R => {
+                let words = numel.div_ceil(4);
+                words * 4
+            }
+            DType::F4 => {
+                let words = numel.div_ceil(8);
+                words * 4
+            }
+            DType::U4Scaled => {
+                let words = numel.div_ceil(8);
+                words * 4
+            }
+            DType::U8Scaled => {
                 let words = numel.div_ceil(4);
                 words * 4
             }
@@ -63,8 +188,13 @@ impl DType {
             DType::Bool => "bool",
             DType::F16 => "f16",
             DType::BF16 => "bf16",
-            DType::U4 => "u4",
-            DType::U8 => "u8",
+            DType::I4 => "i4",
+            DType::I8Scaled => "i8",
+            DType::F8 => "f8",
+            DType::F8R => "f8r",
+            DType::F4 => "f4",
+            DType::U4Scaled => "u4",
+            DType::U8Scaled => "u8",
         }
     }
 
@@ -77,8 +207,15 @@ impl DType {
             "bool" => Some(DType::Bool),
             "f16" | "float16" => Some(DType::F16),
             "bf16" | "bfloat16" => Some(DType::BF16),
-            "u4" | "uint4" | "int4" => Some(DType::U4),
-            "u8" | "uint8" | "int8" => Some(DType::U8),
+            "int4" | "i4" => Some(DType::I4),
+            "u4" | "uint4" => Some(DType::U4Scaled),
+            "i8" | "int8" => Some(DType::I8Scaled),
+            "u8" | "uint8" => Some(DType::U8Scaled),
+            "f8" | "fp8" | "e4m3" => Some(DType::F8),
+            "f8r" | "fp8r" | "e5m2" => Some(DType::F8R),
+            "f4" | "fp4" | "e2m1" => Some(DType::F4),
+            "u4scaled" | "uint4x8" => Some(DType::U4Scaled),
+            "u8scaled" | "uint8x4" => Some(DType::U8Scaled),
             _ => None,
         }
     }
@@ -120,10 +257,22 @@ impl Device {
     }
 }
 
+/// Helper to construct a `CpuStorage` from a `Vec<u8>` (copied into aligned memory).
+impl CpuStorage {
+    pub fn from_vec(data: Vec<u8>, nbytes: usize) -> Self {
+        CpuStorage {
+            data: Arc::new(AlignedVec::from_vec(data)),
+            nbytes,
+            #[cfg(feature = "gpu")]
+            gpu_buffer_cache: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
 // CPU storage variant - with optional lazy GPU buffer cache
 #[derive(Debug)]
 pub struct CpuStorage {
-    pub data: Arc<Vec<u8>>,
+    pub data: Arc<AlignedVec>,
     pub nbytes: usize,
     // Lazy GPU buffer cache: maps device_id -> GPU buffer
     // This avoids repeated CPU->GPU transfers for tensors used in multiple GPU ops
@@ -172,13 +321,9 @@ impl Clone for Storage {
 }
 
 impl Storage {
-    // Create CPU storage
+    // Create CPU storage with 64-byte aligned buffer
     pub fn new_cpu(_dtype: DType, nbytes: usize) -> Self {
-        let data = if nbytes > 0 {
-            Arc::new(vec![0u8; nbytes])
-        } else {
-            Arc::new(vec![])
-        };
+        let data = Arc::new(AlignedVec::new_zeroed(nbytes));
 
         if let Some(stats) = ALLOC_STATS.get() {
             stats.add_alloc(nbytes);
@@ -207,21 +352,17 @@ impl Storage {
         })
     }
 
-    pub fn from_vec_owned<T: bytemuck::Pod>(
-        mut data: Vec<T>,
-        _dtype: DType,
-        _device: Device,
-    ) -> Self {
+    pub fn from_vec_owned<T: bytemuck::Pod>(data: Vec<T>, _dtype: DType, _device: Device) -> Self {
         let nbytes = std::mem::size_of::<T>() * data.len();
-        let ptr = data.as_mut_ptr() as *mut u8;
-        let len = nbytes;
-        let cap = data.capacity() * std::mem::size_of::<T>();
-        std::mem::forget(data);
-        // SAFETY: The pointer, length, and capacity were obtained from a prior `Vec` via `into_raw_parts`,
-        // ensuring they are consistent and the memory is valid for the original allocation.
-        let byte_vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+        // Copy into 64-byte aligned storage (safe, no unsafe needed)
+        let src_bytes = bytemuck::cast_slice(&data);
+        let mut aligned = AlignedVec::new_zeroed(nbytes);
+        if nbytes > 0 {
+            aligned.copy_from_slice(src_bytes);
+        }
+        drop(data);
         Storage::Cpu(CpuStorage {
-            data: Arc::new(byte_vec),
+            data: Arc::new(aligned),
             nbytes,
             #[cfg(feature = "gpu")]
             gpu_buffer_cache: Default::default(),

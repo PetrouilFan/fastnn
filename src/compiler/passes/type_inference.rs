@@ -16,7 +16,7 @@
 //!
 //! The expected dtype for each input depends on the opcode:
 //! - Most arithmetic/activation ops expect F32.
-//! - MatMul/Conv can accept U4/U8 on the weight input and INT8 on the activation.
+//! - MatMul/Conv can accept I4/I8 packed weights or F4/F8/F8R FP packed weights, with INT8 activation quantization.
 //! - Conversion ops (Cast, Quantize, Dequantize, ToF16, ToF32) accept their
 //!   natural input type.
 
@@ -69,7 +69,7 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
         target_dtype: IrDType,
     }
 
-    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
     crate::utils::traverse_graph(graph_ref, |node_id, node| {
@@ -150,7 +150,7 @@ fn dtypes_match(a: &IrDType, b: &IrDType) -> bool {
         | (Bool, Bool)
         | (I8, I8) => true,
         // U4/U8 match regardless of scales/zps (those are metadata)
-        (U4 { .. }, U4 { .. }) | (U8 { .. }, U8 { .. }) => true,
+        (I4 { .. }, I4 { .. }) | (I8Scaled { .. }, I8Scaled { .. }) => true,
         _ => false,
     }
 }
@@ -160,10 +160,10 @@ fn conversion_between(actual: &IrDType, expected: &IrDType) -> Option<Opcode> {
     use IrDType::*;
     match (actual, expected) {
         // U4/U8 → F32
-        (U4 { .. }, F32) | (U8 { .. }, F32) => Some(Opcode::Dequantize),
+        (I4 { .. }, F32) | (I8Scaled { .. }, F32) => Some(Opcode::Dequantize),
         // F32 → U4/U8 (weight quantization — needs bit_width)
-        (F32, U4 { .. }) => Some(Opcode::Quantize),
-        (F32, U8 { .. }) => Some(Opcode::Quantize),
+        (F32, I4 { .. }) => Some(Opcode::Quantize),
+        (F32, I8Scaled { .. }) => Some(Opcode::Quantize),
         // F32 ↔ F16
         (F32, F16) => Some(Opcode::ToF16),
         (F16, F32) => Some(Opcode::ToF32),
@@ -390,9 +390,10 @@ mod tests {
             vec![input_id],
             TensorType::new(
                 vec![DimExpr::Known(4)],
-                IrDType::U4 {
+                IrDType::I4 {
                     scales: vec![],
                     zero_points: vec![],
+                    codebooks: vec![],
                 },
             ),
         );

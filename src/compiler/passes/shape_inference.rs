@@ -536,7 +536,9 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             | Opcode::MuonUpdate
             | Opcode::LionUpdate
             | Opcode::RmspropUpdate
-            | Opcode::GradientScale => None,
+            | Opcode::GradientScale
+            | Opcode::QuantizeGradient
+            | Opcode::DequantizeGradient => None,
         };
 
         if let Some(shape) = inferred {
@@ -797,8 +799,5 @@ fn conv_transpose_spatial_dim(
 /// or `"0"` to match the rest of the IR's stringly-typed attrs, but
 /// existing call sites also pass `"true"` / `"false"`. Accept both.
 fn parse_keepdim_attr(v: &str) -> bool {
-    match v.trim() {
-        "0" | "false" | "False" | "FALSE" => false,
-        _ => true,
-    }
+    !matches!(v.trim(), "0" | "false" | "False" | "FALSE")
 }

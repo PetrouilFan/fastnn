@@ -238,8 +238,11 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                 4 => DType::Bool,
                 5 => DType::F16,
                 6 => DType::BF16,
-                7 => DType::U4,
-                8 => DType::U8,
+                7 => DType::I4,
+                8 => DType::I8Scaled,
+                9 => DType::F8,
+                10 => DType::F8R,
+                11 => DType::F4,
                 other => {
                     return Err(FastnnError::Serialization(format!(
                         "Unknown dtype tag {} for parameter '{}'",
@@ -270,12 +273,7 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
             }
 
             let sizes: SmallVec<[i64; 8]> = shape.into();
-            let storage = Arc::new(Storage::Cpu(CpuStorage {
-                data: Arc::new(data_bytes),
-                nbytes,
-                #[cfg(feature = "gpu")]
-                gpu_buffer_cache: Default::default(),
-            }));
+            let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(data_bytes, nbytes)));
             let tensor = Tensor::new(TensorImpl::new(storage, sizes, dtype));
             result.insert(name, tensor);
         }

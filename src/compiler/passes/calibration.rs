@@ -9,7 +9,7 @@ use crate::ir::node::NodeId;
 use std::collections::HashMap;
 
 /// Calibration statistics collected per tensor.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CalibrationStats {
     pub min: f32,
     pub max: f32,
@@ -25,6 +25,12 @@ pub struct CalibrationStats {
     pub per_channel_min: Vec<f32>,
     pub per_channel_max: Vec<f32>,
     pub per_channel_count: Vec<u64>,
+}
+
+impl Default for CalibrationStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CalibrationStats {
@@ -267,7 +273,7 @@ impl CalibrationData {
     pub fn observe(&mut self, name: &str, values: &[f32]) {
         self.stats
             .entry(name.to_string())
-            .or_insert_with(CalibrationStats::new)
+            .or_default()
             .observe(values);
     }
 
@@ -281,10 +287,7 @@ impl CalibrationData {
         channel_stride: usize,
         values: &[f32],
     ) {
-        let stats = self
-            .stats
-            .entry(name.to_string())
-            .or_insert_with(CalibrationStats::new);
+        let stats = self.stats.entry(name.to_string()).or_default();
         stats.observe(values);
         for ch in 0..channels {
             let start = ch * channel_stride;
@@ -459,9 +462,9 @@ mod tests {
         let kl_result = stats.compute_scale_zp_kl(8);
         assert!(kl_result.is_some());
 
-        let (scale, zp) = kl_result.unwrap();
+        let (scale, _zp) = kl_result.unwrap();
         // Should be tighter than min/max
-        let (scale_minmax, zp_minmax) = stats.compute_scale_zp(8);
+        let (scale_minmax, _zp_minmax) = stats.compute_scale_zp(8);
         // KL should give smaller scale (clip outliers)
         assert!(scale <= scale_minmax * 1.1); // Allow some tolerance
     }

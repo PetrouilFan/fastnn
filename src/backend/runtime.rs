@@ -115,7 +115,7 @@ impl<B: Backend> Runtime<B> {
         let enough_capacity = self
             .cached_arena
             .as_ref()
-            .map_or(false, |(cap, _)| *cap >= arena_size);
+            .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
         }

@@ -1081,7 +1081,7 @@ impl<'a> OnnxConverter<'a> {
                 if ins.len() < 8 {
                     return Err("QLinearMatMul needs 8 inputs: A, A_scale, A_zp, B, B_scale, B_zp, Y_scale, Y_zp".to_string());
                 }
-                // Cast quantized U8 inputs to F32 before arithmetic.
+                // Cast quantized I8 inputs to F32 before arithmetic.
                 // ONNX QLinearMatMul inputs A, A_zp, B, B_zp are typically UINT8;
                 // A_scale, B_scale, Y_scale, Y_zp are F32.
                 let a_f32 = self.graph.cast_op(&ins[0], IrDType::F32);
@@ -1104,7 +1104,7 @@ impl<'a> OnnxConverter<'a> {
                 // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
                 let y = self.graph.cast_op(
                     &y_f32,
-                    IrDType::U8 {
+                    IrDType::I8Scaled {
                         scales: vec![],
                         zero_points: vec![],
                     },
@@ -1659,11 +1659,27 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
         // not in the Tensor-level DType. Use default values here; the actual
         // scales are filled in by the quantization compiler pass.
-        DType::U4 => IrDType::U4 {
+        DType::I4 => IrDType::I4 {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+            codebooks: vec![],
+        },
+        DType::I8Scaled => IrDType::I8Scaled {
             scales: vec![1.0],
             zero_points: vec![0.0],
         },
-        DType::U8 => IrDType::U8 {
+        DType::F8 => IrDType::F8 { scales: vec![1.0] },
+        DType::F8R => IrDType::F8R { scales: vec![1.0] },
+        DType::F4 => IrDType::F4 {
+            scales: vec![1.0],
+            zeros: vec![],
+            codebooks: vec![],
+        },
+        DType::U4Scaled => IrDType::U4Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::U8Scaled => IrDType::U8Scaled {
             scales: vec![1.0],
             zero_points: vec![0.0],
         },

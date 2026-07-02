@@ -1,0 +1,86 @@
+use super::PackedWord;
+
+/// 8-bit signed integer, 4 values packed per u32 word.
+/// Values are in the range [-128, 127].
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct I8x4(pub u32);
+
+// SAFETY: I8x4 is a `repr(transparent)` struct over `u32`, so it is safe to
+// reinterpret cast from/to byte slices.
+unsafe impl bytemuck::Pod for I8x4 {}
+unsafe impl bytemuck::Zeroable for I8x4 {}
+
+impl PackedWord for I8x4 {
+    const ITEMS: usize = 4;
+    const BIT_WIDTH: usize = 8;
+    const IS_FLOAT: bool = false;
+    const MAX_REPRESENTABLE: f32 = 127.0;
+    type Array = [f32; 4];
+
+    #[inline]
+    fn unpack_to_f32(self) -> [f32; 4] {
+        let bytes = self.0.to_le_bytes();
+        [
+            bytes[0] as i8 as f32,
+            bytes[1] as i8 as f32,
+            bytes[2] as i8 as f32,
+            bytes[3] as i8 as f32,
+        ]
+    }
+
+    #[inline]
+    fn pack_from_f32(vals: [f32; 4]) -> Self {
+        let mut word: u32 = 0;
+        for i in 0..4 {
+            let clamped = vals[i].clamp(-128.0, 127.0).round() as i8;
+            word |= (clamped as u8 as u32) << (i * 8);
+        }
+        I8x4(word)
+    }
+
+    fn wgsl_unpack_body() -> &'static str {
+        "return vec4<f32>(unpack4xI8(packed));\n"
+    }
+
+    fn wgsl_return_type() -> &'static str {
+        "vec4<f32>"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pack_unpack_roundtrip_i8x4() {
+        let vals = [0.0, 1.0, -1.0, 127.0];
+        let packed = I8x4::pack_from_f32(vals);
+        let unpacked = packed.unpack_to_f32();
+        for i in 0..4 {
+            assert!(
+                (unpacked[i] - vals[i]).abs() < 0.5,
+                "Mismatch at index {}: got {}, expected {}",
+                i,
+                unpacked[i],
+                vals[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_clamp_i8x4() {
+        let vals = [200.0, -200.0, 50.0, -50.0];
+        let packed = I8x4::pack_from_f32(vals);
+        let unpacked = packed.unpack_to_f32();
+        assert_eq!(unpacked[0], 127.0);
+        assert_eq!(unpacked[1], -128.0);
+    }
+
+    #[test]
+    fn test_zero_i8x4() {
+        let vals = [0.0; 4];
+        let packed = I8x4::pack_from_f32(vals);
+        assert_eq!(packed.0, 0);
+    }
+}

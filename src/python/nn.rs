@@ -936,11 +936,31 @@ fn try_extract_native_layer(b: &Bound<'_, PyAny>) -> Option<Arc<dyn Module>> {
     try_extract_inner!(b, Embedding, core_nn::embedding::Embedding);
     try_extract_inner!(b, PReLU, core_nn::activations::PReLU);
     try_extract_inner!(b, Softmax, core_nn::activations::Softmax);
-    try_extract_inner!(b, AdaptiveAvgPool2d, core_nn::activations::AdaptiveAvgPool2d);
-    try_extract_inner!(b, FusedConvBn, core_nn::fused::FusedConvBn<core_nn::fused::NoAct>);
-    try_extract_inner!(b, FusedConvBnRelu, core_nn::fused::FusedConvBn<core_nn::fused::ReluAct>);
-    try_extract_inner!(b, FusedConvBnGelu, core_nn::fused::FusedConvBn<core_nn::fused::GeluAct>);
-    try_extract_inner!(b, PyTransformerEncoder, core_nn::transformer::TransformerEncoder);
+    try_extract_inner!(
+        b,
+        AdaptiveAvgPool2d,
+        core_nn::activations::AdaptiveAvgPool2d
+    );
+    try_extract_inner!(
+        b,
+        FusedConvBn,
+        core_nn::fused::FusedConvBn<core_nn::fused::NoAct>
+    );
+    try_extract_inner!(
+        b,
+        FusedConvBnRelu,
+        core_nn::fused::FusedConvBn<core_nn::fused::ReluAct>
+    );
+    try_extract_inner!(
+        b,
+        FusedConvBnGelu,
+        core_nn::fused::FusedConvBn<core_nn::fused::GeluAct>
+    );
+    try_extract_inner!(
+        b,
+        PyTransformerEncoder,
+        core_nn::transformer::TransformerEncoder
+    );
 
     // ---- parameterless activations (no inner) ----
     try_extract_activation!(b, ReLU, core_nn::activations::ReLU);
@@ -958,15 +978,13 @@ fn try_extract_native_layer(b: &Bound<'_, PyAny>) -> Option<Arc<dyn Module>> {
         );
     }
     if let Ok(layer) = b.extract::<pyo3::PyRef<'_, Softplus>>() {
-        return Some(
-            Arc::new(core_nn::activations::Softplus::new(layer.beta, layer.threshold))
-                as Arc<dyn Module>,
-        );
+        return Some(Arc::new(core_nn::activations::Softplus::new(
+            layer.beta,
+            layer.threshold,
+        )) as Arc<dyn Module>);
     }
     if let Ok(layer) = b.extract::<pyo3::PyRef<'_, Elu>>() {
-        return Some(
-            Arc::new(core_nn::activations::Elu::new(layer.alpha)) as Arc<dyn Module>,
-        );
+        return Some(Arc::new(core_nn::activations::Elu::new(layer.alpha)) as Arc<dyn Module>);
     }
 
     None // Python-only module – will fall back to Python dispatch
@@ -997,7 +1015,10 @@ impl Sequential {
     #[new]
     fn new(py: Python<'_>, layers: Vec<Py<PyAny>>) -> Self {
         let native_layers = build_native_layers(py, &layers).unwrap_or_default();
-        Sequential { layers, native_layers }
+        Sequential {
+            layers,
+            native_layers,
+        }
     }
 
     #[getter]
@@ -1095,7 +1116,11 @@ impl Sequential {
         }
         if let Some(layer) = self.layers.first() {
             if let Ok(m) = layer.getattr(py, "is_training") {
-                return m.call0(py).ok().and_then(|v| v.extract::<bool>(py).ok()).unwrap_or(false);
+                return m
+                    .call0(py)
+                    .ok()
+                    .and_then(|v| v.extract::<bool>(py).ok())
+                    .unwrap_or(false);
             }
         }
         false
@@ -1188,7 +1213,6 @@ pub struct AotExecutor {
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
-    #[cfg(feature = "prepared-plan")]
     prepared_plan: crate::backend::prepared::PreparedExecutablePlan,
 }
 
@@ -1197,13 +1221,20 @@ impl AotExecutor {
     #[new]
     #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, quantize=None))]
     fn new(
+        _py: pyo3::Python<'_>,
         nodes: Vec<std::collections::HashMap<String, String>>,
         params: std::collections::HashMap<String, PyTensor>,
         input_names: Vec<String>,
         output_names: Vec<String>,
         input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
-        quantize: Option<u8>,
+        quantize: Option<pyo3::Bound<'_, pyo3::PyAny>>,
     ) -> pyo3::PyResult<Self> {
+        // Clear the global f32 weight cache to prevent unbounded memory
+        // accumulation across executor instances (e.g., when the benchmark
+        // script creates a new AotExecutor for a different quantization dtype).
+        // Without this, dequantized f32 weights from all dtypes persist
+        // in the global cache for the lifetime of the Python process.
+        crate::backend::cpu::clear_f32_weight_cache();
         // Convert Python node dicts to OnnxNodes
         let onnx_nodes: Vec<crate::onnx::converter::OnnxNode> = nodes
             .into_iter()
@@ -1250,14 +1281,14 @@ impl AotExecutor {
             })
             .collect();
 
-        let rust_params: std::collections::HashMap<String, Tensor> = params
-            .into_iter()
-            .map(|(k, v)| (k, v.inner))
-            .collect();
+        let rust_params: std::collections::HashMap<String, Tensor> =
+            params.into_iter().map(|(k, v)| (k, v.inner)).collect();
 
         // Build input shapes map if provided.
-        let mut rust_input_shapes: std::collections::HashMap<String, Vec<crate::ir::node::DimExpr>> =
-            std::collections::HashMap::new();
+        let mut rust_input_shapes: std::collections::HashMap<
+            String,
+            Vec<crate::ir::node::DimExpr>,
+        > = std::collections::HashMap::new();
         if let Some(shapes) = input_shapes {
             for (name, dims) in shapes {
                 let ir_dims: Vec<crate::ir::node::DimExpr> = dims
@@ -1276,22 +1307,68 @@ impl AotExecutor {
         }
 
         let converter = crate::onnx::converter::OnnxConverter::new(
-            &onnx_nodes, &rust_params, &input_names, &output_names,
+            &onnx_nodes,
+            &rust_params,
+            &input_names,
+            &output_names,
         )
         .with_input_shapes(&rust_input_shapes);
         let graph = converter
             .to_compute_graph()
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
-        let executor = crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let weight_dtype: crate::backend::executor::WeightDtype = match quantize {
+            None => crate::backend::executor::WeightDtype::F32,
+            Some(obj) => {
+                if let Ok(val) = obj.extract::<u8>() {
+                    match val {
+                        4 => crate::backend::executor::WeightDtype::I4,
+                        8 => crate::backend::executor::WeightDtype::I8,
+                        _ => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported quantize value for integer: {} (expected 4 or 8)",
+                                val
+                            )))
+                        }
+                    }
+                } else if let Ok(s) = obj.extract::<String>() {
+                    match s.as_str() {
+                        "f32" => crate::backend::executor::WeightDtype::F32,
+                        "i4" => crate::backend::executor::WeightDtype::I4,
+                        "i8" => crate::backend::executor::WeightDtype::I8,
+                        "u4" => crate::backend::executor::WeightDtype::U4,
+                        "u8" => crate::backend::executor::WeightDtype::U8,
+                        "f8" => crate::backend::executor::WeightDtype::F8x4,
+                        "f8r" => crate::backend::executor::WeightDtype::F8x4R,
+                        "f4" => crate::backend::executor::WeightDtype::F4x8,
+                        "i4cb" => crate::backend::executor::WeightDtype::I4Codebook,
+                        _ => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, 4, or 8)",
+                                s
+                            )))
+                        }
+                    }
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "quantize must be int (4, 8) or str (f32, f8, f8r, f4) or None",
+                    ));
+                }
+            }
+        };
+
+        let executor =
+            crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, quantize, None)
+            .compile_with_weight_dtype(graph, weight_dtype, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
-            .iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
 
-        #[cfg(feature = "prepared-plan")]
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan);
 
         Ok(AotExecutor {
@@ -1301,7 +1378,6 @@ impl AotExecutor {
             executor,
             input_names,
             output_map,
-            #[cfg(feature = "prepared-plan")]
             prepared_plan,
         })
     }
@@ -1310,15 +1386,44 @@ impl AotExecutor {
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                inputs
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "required input '{}' not found",
+                            name
+                        ))
+                    })
+                    .map(|t| t.inner.as_bytes())
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let output_data = self.executor
+        #[cfg(feature = "prepared-plan")]
+        let output_data = {
+            if self.prepared_plan.static_weight_binding_count() > 0 {
+                self.executor
+                    .execute_prepared_no_copy(
+                        &self.graph,
+                        &mut self.plan,
+                        &self.memory_plan,
+                        &input_refs,
+                        &self.prepared_plan,
+                    )
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            } else {
+                self.executor
+                    .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            }
+        };
+
+        #[cfg(not(feature = "prepared-plan"))]
+        let output_data = self
+            .executor
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -1346,21 +1451,23 @@ impl AotExecutor {
     /// This recompiles the entire model with the calibration data, so it may
     /// take some time. The model must have been originally created with
     /// `quantize=4` or `quantize=8`.
-    fn apply_calibration(
-        &mut self,
-        scales_json: String,
-    ) -> pyo3::PyResult<()> {
+    fn apply_calibration(&mut self, scales_json: String) -> pyo3::PyResult<()> {
         // Parse calibration data from JSON
         eprintln!("[APPLY_CALIB] Parsing calibration JSON...");
         let calib = crate::compiler::passes::calibration::CalibrationData::from_json(&scales_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        eprintln!("[APPLY_CALIB] Parsed {} calibration entries", calib.stats.len());
+        eprintln!(
+            "[APPLY_CALIB] Parsed {} calibration entries",
+            calib.stats.len()
+        );
 
         // Recompile with calibration data - the quantization pass will UPDATE
         // existing QuantizeActivations nodes with new calibration attrs
         eprintln!("[APPLY_CALIB] Recompiling with calibration...");
-        let (plan, memory_plan, graph) = self.executor
-            .compile_with_plan_and_quantize(&self.graph, None, Some(calib))
+        let graph = std::mem::replace(&mut self.graph, crate::ir::node::ComputeGraph::new());
+        let (plan, memory_plan, graph) = self
+            .executor
+            .compile_with_plan_and_quantize(graph, None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.plan = plan;
@@ -1391,15 +1498,24 @@ impl AotExecutor {
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                inputs
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "required input '{}' not found",
+                            name
+                        ))
+                    })
+                    .map(|t| t.inner.as_bytes())
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let output_data = self.executor
+        let output_data = self
+            .executor
             .execute_prepared_fallback(
                 &self.graph,
                 &mut self.plan,
@@ -1431,15 +1547,24 @@ impl AotExecutor {
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                inputs
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "required input '{}' not found",
+                            name
+                        ))
+                    })
+                    .map(|t| t.inner.as_bytes())
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let output_data = self.executor
+        let output_data = self
+            .executor
             .execute_prepared_arena_fallback(
                 &self.graph,
                 &mut self.plan,
@@ -1477,15 +1602,24 @@ impl AotExecutor {
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                inputs
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "required input '{}' not found",
+                            name
+                        ))
+                    })
+                    .map(|t| t.inner.as_bytes())
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let output_data = self.executor
+        let output_data = self
+            .executor
             .execute_prepared_no_copy(
                 &self.graph,
                 &mut self.plan,
@@ -1513,15 +1647,24 @@ impl AotExecutor {
         py: pyo3::Python<'_>,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                inputs
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "required input '{}' not found",
+                            name
+                        ))
+                    })
+                    .map(|t| t.inner.as_bytes())
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let (output_data, profile_entries) = self.executor
+        let (output_data, profile_entries) = self
+            .executor
             .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -1534,15 +1677,24 @@ impl AotExecutor {
         py: pyo3::Python<'_>,
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        let input_refs: Vec<&[u8]> = self.input_names.iter().map(|name| {
-            inputs.get(name.as_str())
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    format!("required input '{}' not found", name),
-                ))
-                .map(|t| t.inner.as_bytes())
-        }).collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                inputs
+                    .get(name.as_str())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "required input '{}' not found",
+                            name
+                        ))
+                    })
+                    .map(|t| t.inner.as_bytes())
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
-        let (output_data, profile_entries) = self.executor
+        let (output_data, profile_entries) = self
+            .executor
             .execute_profile_prepared_arena_fallback(
                 &self.graph,
                 &mut self.plan,
@@ -1573,8 +1725,8 @@ impl AotExecutor {
     /// reuse groups without executing the graph. Use it to find broad memory and
     /// layout efficiency targets before adding kernel-specific optimisations.
     fn memory_stats(&self, py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
-        use pyo3::types::{PyDict, PyList};
         use crate::backend::Instruction;
+        use pyo3::types::{PyDict, PyList};
         use std::collections::{BTreeMap, HashMap};
 
         let stats = PyDict::new(py);
@@ -1607,7 +1759,10 @@ impl AotExecutor {
                 .push(*node_id);
         }
         let physical_slot_bytes: usize = physical_by_offset.values().copied().sum();
-        let alias_groups = nodes_by_offset.values().filter(|nodes| nodes.len() > 1).count();
+        let alias_groups = nodes_by_offset
+            .values()
+            .filter(|nodes| nodes.len() > 1)
+            .count();
         let aliased_nodes: usize = nodes_by_offset
             .values()
             .filter(|nodes| nodes.len() > 1)
@@ -1738,7 +1893,9 @@ impl AotExecutor {
                     ..
                 } => {
                     call_kernel_count += 1;
-                    let entry = kernel_counts.entry(kernel_name.clone()).or_insert((0, 0, 0));
+                    let entry = kernel_counts
+                        .entry(kernel_name.clone())
+                        .or_insert((0, 0, 0));
                     entry.0 += 1;
                     let read_bytes = input_slices.iter().map(|s| s.size).sum::<usize>();
                     let mut write_bytes = output_slice.size;
@@ -1755,15 +1912,17 @@ impl AotExecutor {
                     let input_shapes = input_nodes
                         .iter()
                         .filter_map(|id| self.graph.get_node(*id))
-                        .map(|input| input.output_type.shape.iter().map(|d| d.evaluate()).collect())
+                        .map(|input| {
+                            input
+                                .output_type
+                                .shape
+                                .iter()
+                                .map(|d| d.evaluate())
+                                .collect()
+                        })
                         .collect();
-                    let output_shape = node.map(|n| {
-                        n.output_type
-                            .shape
-                            .iter()
-                            .map(|d| d.evaluate())
-                            .collect()
-                    });
+                    let output_shape =
+                        node.map(|n| n.output_type.shape.iter().map(|d| d.evaluate()).collect());
                     instruction_traffic.push(InstructionTrafficRow {
                         instruction_index,
                         kind: "call_kernel".to_string(),
@@ -1839,7 +1998,10 @@ impl AotExecutor {
         stats.set_item("memory_plan_total_size", memory_plan.total_size)?;
         stats.set_item("logical_slot_bytes", logical_slot_bytes)?;
         stats.set_item("physical_slot_bytes", physical_slot_bytes)?;
-        stats.set_item("slot_reuse_saved_bytes", logical_slot_bytes.saturating_sub(physical_slot_bytes))?;
+        stats.set_item(
+            "slot_reuse_saved_bytes",
+            logical_slot_bytes.saturating_sub(physical_slot_bytes),
+        )?;
         stats.set_item("alias_groups", alias_groups)?;
         stats.set_item("aliased_nodes", aliased_nodes)?;
         stats.set_item("primary_slots", memory_plan.slots.len())?;
@@ -1860,8 +2022,9 @@ impl AotExecutor {
         )?;
 
         let top_kernels = PyList::empty(py);
-        let mut kernel_counts: Vec<(String, (usize, usize, usize))> = kernel_counts.into_iter().collect();
-        kernel_counts.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
+        let mut kernel_counts: Vec<(String, (usize, usize, usize))> =
+            kernel_counts.into_iter().collect();
+        kernel_counts.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
         for (kernel, (count, read_bytes, write_bytes)) in kernel_counts.into_iter().take(20) {
             let item = PyDict::new(py);
             item.set_item("kernel", kernel)?;
@@ -2143,22 +2306,31 @@ impl AotExecutor {
             if let Some(data) = output_data.get(*idx) {
                 // Resolve the output node's dtype and shape from the graph.
                 let output_node_id = self.graph.outputs[*idx];
-                let output_node = self.graph.get_node(output_node_id)
-                    .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                        "AotExecutor: output node not found in graph"
-                    ))?;
+                let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "AotExecutor: output node not found in graph",
+                    )
+                })?;
                 let ir_dtype = output_node.output_type.dtype.clone();
                 // Extract quantization metadata before ir_to_dtype strips it
                 let (q_scales, q_zero_points) = match &ir_dtype {
-                    crate::ir::node::IrDType::U4 { scales, zero_points }
-                    | crate::ir::node::IrDType::U8 { scales, zero_points } => {
-                        (scales.clone(), zero_points.clone())
+                    crate::ir::node::IrDType::I4 {
+                        scales,
+                        zero_points,
+                        ..
                     }
+                    | crate::ir::node::IrDType::I8Scaled {
+                        scales,
+                        zero_points,
+                    } => (scales.clone(), zero_points.clone()),
                     _ => (vec![], vec![]),
                 };
                 let dtype: crate::storage::DType = crate::tensor::ir_to_dtype(ir_dtype);
                 // Resolve shape from DimExpr (all should be Known after compilation).
-                let shape: Vec<i64> = output_node.output_type.shape.iter()
+                let shape: Vec<i64> = output_node
+                    .output_type
+                    .shape
+                    .iter()
                     .filter_map(|d| match d {
                         crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
                         _ => None,
@@ -2167,42 +2339,60 @@ impl AotExecutor {
 
                 let tensor = match dtype {
                     crate::storage::DType::F32 => {
-                        let f32_vals: Vec<f32> = data.chunks_exact(4)
-                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                        let f32_vals: Vec<f32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
                             .collect();
                         Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::I32 => {
-                        let i32_vals: Vec<i32> = data.chunks_exact(4)
-                            .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                        let i32_vals: Vec<i32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
                             .collect();
                         let f32_vals: Vec<f32> = i32_vals.iter().map(|&v| v as f32).collect();
                         Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::I64 => {
-                        let i64_vals: Vec<i64> = data.chunks_exact(8)
-                            .map(|chunk| i64::from_le_bytes([
-                                chunk[0], chunk[1], chunk[2], chunk[3],
-                                chunk[4], chunk[5], chunk[6], chunk[7],
-                            ]))
+                        let i64_vals: Vec<i64> = data
+                            .chunks_exact(8)
+                            .map(|chunk| {
+                                i64::from_le_bytes([
+                                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5],
+                                    chunk[6], chunk[7],
+                                ])
+                            })
                             .collect();
                         let f32_vals: Vec<f32> = i64_vals.iter().map(|&v| v as f32).collect();
                         Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::Bool => {
-                        let vals: Vec<f32> = data.iter().map(|&b| if b != 0 { 1.0f32 } else { 0.0f32 }).collect();
+                        let vals: Vec<f32> = data
+                            .iter()
+                            .map(|&b| if b != 0 { 1.0f32 } else { 0.0f32 })
+                            .collect();
                         Tensor::from_vec(vals, shape)
                     }
                     crate::storage::DType::F16 => {
-                        let f16_vals: Vec<half::f16> = data.chunks_exact(2)
-                            .map(|chunk| half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
+                        let f16_vals: Vec<half::f16> = data
+                            .chunks_exact(2)
+                            .map(|chunk| {
+                                half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]]))
+                            })
                             .collect();
                         let f32_vals: Vec<f32> = f16_vals.iter().map(|v| v.to_f32()).collect();
                         Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::BF16 => {
-                        let bf16_vals: Vec<half::bf16> = data.chunks_exact(2)
-                            .map(|chunk| half::bf16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
+                        let bf16_vals: Vec<half::bf16> = data
+                            .chunks_exact(2)
+                            .map(|chunk| {
+                                half::bf16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]]))
+                            })
                             .collect();
                         let f32_vals: Vec<f32> = bf16_vals.iter().map(|v| v.to_f32()).collect();
                         Tensor::from_vec(f32_vals, shape)
@@ -2211,9 +2401,12 @@ impl AotExecutor {
                     // In the normal pipeline, MatMul/Conv2d outputs remain F32 (dequant happens
                     // inside the SIMD kernel). This path is a safety net for ops whose IR output
                     // type is U4/U8.
-                    crate::storage::DType::U4 => {
-                        let words: Vec<u32> = data.chunks_exact(4)
-                            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    crate::storage::DType::I4 => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
                             .collect();
                         let num_elements = words.len() * 8; // 8 nibbles per u32
                         let mut f32_vals = Vec::with_capacity(num_elements);
@@ -2221,16 +2414,25 @@ impl AotExecutor {
                             for nibble in 0..8 {
                                 let val = (word >> (nibble * 4)) & 0xF;
                                 let ch = word_idx * 8 + nibble;
-                                let s = q_scales.get(ch % q_scales.len().max(1)).copied().unwrap_or(1.0);
-                                let zp = q_zero_points.get(ch % q_zero_points.len().max(1)).copied().unwrap_or(0.0);
+                                let s = q_scales
+                                    .get(ch % q_scales.len().max(1))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                let zp = q_zero_points
+                                    .get(ch % q_zero_points.len().max(1))
+                                    .copied()
+                                    .unwrap_or(0.0);
                                 f32_vals.push(val as f32 * s + zp);
                             }
                         }
                         Tensor::from_vec(f32_vals, shape)
                     }
-                    crate::storage::DType::U8 => {
-                        let words: Vec<u32> = data.chunks_exact(4)
-                            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    crate::storage::DType::I8Scaled => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
                             .collect();
                         let num_elements = words.len() * 4; // 4 bytes per u32
                         let mut f32_vals = Vec::with_capacity(num_elements);
@@ -2238,21 +2440,124 @@ impl AotExecutor {
                             for byte in 0..4 {
                                 let val = (word >> (byte * 8)) & 0xFF;
                                 let ch = word_idx * 4 + byte;
-                                let s = q_scales.get(ch % q_scales.len().max(1)).copied().unwrap_or(1.0);
-                                let zp = q_zero_points.get(ch % q_zero_points.len().max(1)).copied().unwrap_or(0.0);
+                                let s = q_scales
+                                    .get(ch % q_scales.len().max(1))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                let zp = q_zero_points
+                                    .get(ch % q_zero_points.len().max(1))
+                                    .copied()
+                                    .unwrap_or(0.0);
                                 f32_vals.push(val as f32 * s + zp);
                             }
                         }
                         Tensor::from_vec(f32_vals, shape)
                     }
                     crate::storage::DType::F64 => {
-                        let f64_vals: Vec<f64> = data.chunks_exact(8)
-                            .map(|chunk| f64::from_le_bytes([
-                                chunk[0], chunk[1], chunk[2], chunk[3],
-                                chunk[4], chunk[5], chunk[6], chunk[7],
-                            ]))
+                        let f64_vals: Vec<f64> = data
+                            .chunks_exact(8)
+                            .map(|chunk| {
+                                f64::from_le_bytes([
+                                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5],
+                                    chunk[6], chunk[7],
+                                ])
+                            })
                             .collect();
                         let f32_vals: Vec<f32> = f64_vals.iter().map(|&v| v as f32).collect();
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::F8 => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let mut f32_vals = Vec::with_capacity(words.len() * 4);
+                        for &word in &words {
+                            for byte in 0..4 {
+                                let val = ((word >> (byte * 8)) & 0xFF) as u8;
+                                f32_vals.push(crate::dtypes::f8x4::e4m3_to_f32(val));
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::F8R => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let mut f32_vals = Vec::with_capacity(words.len() * 4);
+                        for &word in &words {
+                            for byte in 0..4 {
+                                let val = ((word >> (byte * 8)) & 0xFF) as u8;
+                                f32_vals.push(crate::dtypes::f8x4r::e5m2_to_f32(val));
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::U4Scaled => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect();
+                        let num_elements = words.len() * 8; // 8 nibbles per u32
+                        let mut f32_vals = Vec::with_capacity(num_elements);
+                        for (word_idx, &word) in words.iter().enumerate() {
+                            for nibble in 0..8 {
+                                let val = (word >> (nibble * 4)) & 0xF;
+                                let ch = word_idx * 8 + nibble;
+                                let s = q_scales
+                                    .get(ch % q_scales.len().max(1))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                let zp = q_zero_points
+                                    .get(ch % q_zero_points.len().max(1))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                f32_vals.push(val as f32 * s + zp);
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::U8Scaled => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect();
+                        let num_elements = words.len() * 4; // 4 bytes per u32
+                        let mut f32_vals = Vec::with_capacity(num_elements);
+                        for (word_idx, &word) in words.iter().enumerate() {
+                            for byte in 0..4 {
+                                let val = (word >> (byte * 8)) & 0xFF;
+                                let ch = word_idx * 4 + byte;
+                                let s = q_scales
+                                    .get(ch % q_scales.len().max(1))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                let zp = q_zero_points
+                                    .get(ch % q_zero_points.len().max(1))
+                                    .copied()
+                                    .unwrap_or(0.0);
+                                f32_vals.push(val as f32 * s + zp);
+                            }
+                        }
+                        Tensor::from_vec(f32_vals, shape)
+                    }
+                    crate::storage::DType::F4 => {
+                        let words: Vec<u32> = data
+                            .chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        let mut f32_vals = Vec::with_capacity(words.len() * 8);
+                        for &word in &words {
+                            for nibble in 0..8 {
+                                let val = ((word >> (nibble * 4)) & 0xF) as u8;
+                                f32_vals.push(crate::dtypes::f4x8::fp4_to_f32(val));
+                            }
+                        }
                         Tensor::from_vec(f32_vals, shape)
                     }
                 };
@@ -2262,4 +2567,3 @@ impl AotExecutor {
         Ok(result)
     }
 }
-

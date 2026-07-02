@@ -27,6 +27,38 @@ use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
+/// Target weight dtype for compilation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WeightDtype {
+    /// No quantization — keep f32 weights as-is.
+    F32,
+    /// Integer 4-bit symmetric quantization (I4x8).
+    I4,
+    /// Integer 8-bit symmetric quantization (I8x4/U8).
+    I8,
+    /// Unsigned integer 4-bit quantization (U4x8).
+    U4,
+    /// Unsigned integer 8-bit quantization (U8x4).
+    U8,
+    /// Float 8-bit E4M3 (F8x4).
+    F8x4,
+    /// Float 8-bit E5M2 (F8x4R).
+    F8x4R,
+    /// Float 4-bit E2M1 (F4x8).
+    F4x8,
+    /// Integer 4-bit codebook quantization (I4x8).
+    I4Codebook,
+}
+
+/// Cached state for an all-Known-shape model so that every forward call
+/// after the first can skip ShapeEnv resolution, shape validation, and
+/// memory-plan tightening.
+struct StaticShapeCache {
+    tightened_memory_plan: MemoryPlan,
+    shape_env: ShapeEnv,
+    filtered_plan: ExecutablePlan,
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -34,6 +66,9 @@ use std::sync::atomic::Ordering;
 pub struct GraphExecutor<B: Backend> {
     backend: B,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
+    /// Populated after the first inference when `graph.has_static_shapes()`
+    /// is true. Subsequent calls skip ShapeEnv/tighten/tighten_slices.
+    static_shape_cache: Option<StaticShapeCache>,
 }
 
 /// Read output tensors from the arena using the tightened memory plan
@@ -55,14 +90,16 @@ fn read_execution_outputs<B: Backend>(
             })?;
         let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
             let resolved_shape =
-                resolve_shape(&node.output_type.shape, &shape_env).map_err(|e| {
+                resolve_shape(&node.output_type.shape, shape_env).map_err(|e| {
                     BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
                 })?;
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
             let computed = match &node.output_type.dtype {
-                IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                    node.output_type.dtype.packed_byte_size(actual_numel)
-                }
+                IrDType::I4 { .. }
+                | IrDType::I8Scaled { .. }
+                | IrDType::F8 { .. }
+                | IrDType::F8R { .. }
+                | IrDType::F4 { .. } => node.output_type.dtype.packed_byte_size(actual_numel),
                 IrDType::I8 => actual_numel + 8,
                 _ => actual_numel * node.output_type.dtype.byte_size(),
             };
@@ -82,6 +119,7 @@ impl<B: Backend> GraphExecutor<B> {
         GraphExecutor {
             backend,
             cached_arena: None,
+            static_shape_cache: None,
         }
     }
 
@@ -91,12 +129,13 @@ impl<B: Backend> GraphExecutor<B> {
     }
 
     /// Run the full compilation pipeline:
-    /// 1. Clone the graph so the original is not mutated
-    /// 2. Shape inference
-    /// 3. Operator fusion
-    /// 4. Memory planning
-    /// 5. Backend compilation
-    pub fn compile(&self, graph: &ComputeGraph) -> Result<ExecutablePlan, BackendError> {
+    /// 1. Shape inference
+    /// 2. Operator fusion
+    /// 3. Memory planning
+    /// 4. Backend compilation
+    ///
+    /// Takes ownership of the graph to avoid an unnecessary deep clone.
+    pub fn compile(&self, graph: ComputeGraph) -> Result<ExecutablePlan, BackendError> {
         let (plan, _memory_plan, _graph) = self.compile_with_plan(graph)?;
         Ok(plan)
     }
@@ -110,10 +149,10 @@ impl<B: Backend> GraphExecutor<B> {
     ///
     /// If `quantize` is `Some(bit_width)`, the quantization pass is applied
     /// after operator fusion and before memory planning. Valid values are
-    /// `4` (U4x8) and `8` (U8x4).
+    /// `4` (I4x8) and `8` (I8x4).
     pub fn compile_with_plan(
         &self,
-        graph: &ComputeGraph,
+        graph: ComputeGraph,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
         self.compile_with_plan_and_quantize(graph, None, None)
     }
@@ -125,13 +164,51 @@ impl<B: Backend> GraphExecutor<B> {
     /// packed 4-bit or 8-bit precision. If `calib_data` is provided, it will
     /// be used to compute per-tensor/per-channel activation scales for optimal
     /// quantization accuracy.
+    ///
+    /// For FP packed types (F8/F8R/F4), use [`compile_with_weight_dtype`]
+    /// instead. This method only supports integer quantization (I4/I8).
     pub fn compile_with_plan_and_quantize(
         &self,
-        graph: &ComputeGraph,
+        graph: ComputeGraph,
         quantize: Option<u8>,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let mut graph = graph.clone();
+        let weight_dtype = match quantize {
+            Some(4) => WeightDtype::I4,
+            Some(8) => WeightDtype::I8,
+            None => WeightDtype::F32,
+            Some(other) => {
+                return Err(BackendError::Compilation(format!(
+                    "Unsupported quantization bit width: {}. Supported values: 4, 8",
+                    other
+                )))
+            }
+        };
+        self.compile_with_weight_dtype(graph, weight_dtype, calib_data)
+    }
+
+    /// Compile a graph with an explicit [`WeightDtype`] target, including FP
+    /// packed types (F8x4, F8x4R, F4x8).
+    ///
+    /// Supports all variants of `WeightDtype`:
+    /// - `F32`: no weight quantization
+    /// - `I4` / `I8`: integer symmetric quantization (backed by
+    ///   [`quantize_weights`])
+    /// - `F8x4` / `F8x4R` / `F4x8`: FP packed quantization (backed by
+    ///   [`quantize_weights_fp`])
+    ///
+    /// If `calib_data` is provided, per-tensor/per-channel activation scales
+    /// will be applied after weight quantization (weight-only quant only uses
+    /// the weight quant step; activations remain f32).
+    ///
+    /// Takes ownership of `graph` to avoid an unnecessary deep clone.
+    pub fn compile_with_weight_dtype(
+        &self,
+        mut graph: ComputeGraph,
+        weight_dtype: WeightDtype,
+        calib_data: Option<calibration::CalibrationData>,
+    ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
+        let do_weight_quant = weight_dtype != WeightDtype::F32;
 
         // ── Phase 1: Shape inference ──────────────────────────────────────
         shape_inference::infer_shapes(&mut graph)
@@ -164,22 +241,50 @@ impl<B: Backend> GraphExecutor<B> {
 
         // ── Phase 2.5: Quantization (optional) ───────────────────────────
         // Handle three cases:
-        // 1. quantize=Some(bit_width): quantize weights only.
+        // 1. weight_dtype != F32: quantize weights.
         //    Activation quantization is only applied when calibration data is provided.
-        // 2. quantize=None, calib_data=Some(_): re-quantize activations only (weights already quantized)
-        // 3. quantize=None, calib_data=None: no quantization
-        let do_quantize = quantize.is_some() || calib_data.is_some();
+        // 2. weight_dtype == F32, calib_data=Some(_): re-quantize activations only (weights already quantized)
+        // 3. weight_dtype == F32, calib_data=None: no quantization
+        let do_quantize = do_weight_quant || calib_data.is_some();
         if do_quantize {
-            // Quantize weights if requested (or if not already quantized)
-            if let Some(bit_width) = quantize {
-                if bit_width != 4 && bit_width != 8 {
-                    return Err(BackendError::Compilation(format!(
-                        "unsupported quantization bit width: {} (expected 4 or 8)",
-                        bit_width
-                    )));
+            // Quantize weights if requested
+            if do_weight_quant {
+                use quantization::FpDtype;
+                match weight_dtype {
+                    WeightDtype::I4 => {
+                        quantization::quantize_weights(&mut graph, 4, true, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::I8 => {
+                        quantization::quantize_weights(&mut graph, 8, true, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::U4 => {
+                        quantization::quantize_weights(&mut graph, 4, false, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::U8 => {
+                        quantization::quantize_weights(&mut graph, 8, false, None)
+                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
+                    }
+                    WeightDtype::F8x4 => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4, None)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::F8x4R => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R, None)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::F4x8 => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8, None)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::I4Codebook => {
+                        quantization::quantize_weights_fp(&mut graph, &FpDtype::I4Codebook, None)
+                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
+                    }
+                    WeightDtype::F32 => {}
                 }
-                quantization::quantize_weights(&mut graph, bit_width, None)
-                    .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
             }
 
             // After quantizing weights, wrap any optimizer ops that now have
@@ -236,16 +341,12 @@ impl<B: Backend> GraphExecutor<B> {
                         .map(|m| format!("bw={} scales={}", m.bit_width, m.scales.len()))
                         .unwrap_or_default();
                     eprintln!("  INSTR[{}] kernel={} {}", i, kernel_name, meta_info);
-                    if kernel_name.starts_with("conv2d_u4") {
+                    if kernel_name.starts_with("conv2d_i4") {
                         conv2d_quant_u4 += 1;
-                    } else if kernel_name.starts_with("conv2d_u8") {
+                    } else if kernel_name.starts_with("conv2d_i8") {
                         conv2d_quant_u8 += 1;
                     } else if kernel_name.starts_with("conv2d") {
                         conv2d_fp32 += 1;
-                    } else if kernel_name.starts_with("quantize_activations")
-                        || kernel_name.starts_with("dequantize_activations")
-                    {
-                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     } else {
                         other_kernels.push((kernel_name.clone(), Some(meta_info)));
                     }
@@ -508,43 +609,108 @@ impl<B: Backend> GraphExecutor<B> {
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         // ── Preamble: shape env, tighten, safety, arena, input write ──
-        let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
-            .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
-        validate_shapes(graph, &shape_env)
-            .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
+        let (tightened_memory_plan, shape_env, cached_filtered_plan) =
+            if let Some(StaticShapeCache {
+                ref tightened_memory_plan,
+                ref shape_env,
+                ref filtered_plan,
+            }) = self.static_shape_cache
+            {
+                // Fast path: the plan was already tightened on the first
+                // inference.  Reuse the cached tightened memory plan and
+                // shape env, skipping the O(N_nodes) resolve + tighten
+                // + tighten_slices steps entirely.
+                (
+                    tightened_memory_plan.clone(),
+                    shape_env.clone(),
+                    Some(filtered_plan.clone()),
+                )
+            } else {
+                let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
+                    .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
+                validate_shapes(graph, &shape_env)
+                    .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-        let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
-        tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+                let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
+                tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
-        for (&node_id, slot) in &tightened_memory_plan.slots {
-            if let Some(node) = graph.get_node(node_id) {
-                let needed = if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
-                    let numel: u64 = shape.iter().product();
-                    let raw = numel as usize * node.output_type.dtype.byte_size();
-                    match &node.output_type.dtype {
-                        IrDType::U4 { .. } | IrDType::U8 { .. } => {
-                            node.output_type.dtype.packed_byte_size(numel as usize)
-                        }
-                        IrDType::I8 => numel as usize + 8,
-                        _ => raw,
-                    }
+                // Cache for static-shape models so subsequent calls
+                // skip the entire preamble.
+                if graph.has_static_shapes() {
+                    let filtered_instructions: Vec<Instruction> = plan
+                        .instructions
+                        .iter()
+                        .filter(|instr| {
+                            !matches!(
+                                instr,
+                                Instruction::WriteConst { .. } | Instruction::Fill { .. }
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                    let filtered_plan = ExecutablePlan {
+                        instructions: filtered_instructions,
+                        arena_size: plan.arena_size,
+                        levels: plan.levels.clone(),
+                    };
+                    self.static_shape_cache = Some(StaticShapeCache {
+                        tightened_memory_plan: tightened_memory_plan.clone(),
+                        shape_env: shape_env.clone(),
+                        filtered_plan,
+                    });
+                    // Return None so the FIRST call uses the full plan
+                    // (including WriteConst/Fill) to populate the arena.
+                    // Subsequent cache-hit calls will use the filtered plan.
+                    (tightened_memory_plan, shape_env, None)
                 } else {
-                    continue;
-                };
-                if needed > slot.size {
-                    return Err(BackendError::Dispatch(format!(
-                        "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
-                        node_id, needed, slot.size, node.output_type.shape
-                    )));
+                    (tightened_memory_plan, shape_env, None)
+                }
+            };
+
+        // Slot safety check: only needed on the first call when shapes are
+        // being resolved for the first time. On subsequent calls with a
+        // populated static_shape_cache the shapes are identical and were
+        // already validated.
+        if cached_filtered_plan.is_none() {
+            for (&node_id, slot) in &tightened_memory_plan.slots {
+                if let Some(node) = graph.get_node(node_id) {
+                    let needed =
+                        if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
+                            let numel: u64 = shape.iter().product();
+                            let raw = numel as usize * node.output_type.dtype.byte_size();
+                            match &node.output_type.dtype {
+                                IrDType::I4 { .. }
+                                | IrDType::I8Scaled { .. }
+                                | IrDType::F8 { .. }
+                                | IrDType::F8R { .. }
+                                | IrDType::F4 { .. } => {
+                                    node.output_type.dtype.packed_byte_size(numel as usize)
+                                }
+                                IrDType::I8 => numel as usize + 8,
+                                _ => raw,
+                            }
+                        } else {
+                            continue;
+                        };
+                    if needed > slot.size {
+                        return Err(BackendError::Dispatch(format!(
+                            "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
+                            node_id, needed, slot.size, node.output_type.shape
+                        )));
+                    }
                 }
             }
         }
 
-        let arena_size = plan.arena_size;
+        // Use the tightened memory plan's total_size instead of the
+        // compile-time plan.arena_size which was sized using
+        // SYMBOL_DIM_MAX=8192 for symbolic dimensions — for batch=1
+        // this can be ~50MB vs ~400MB.
+        let arena_size = tightened_memory_plan.total_size;
         let enough_capacity = self
             .cached_arena
             .as_ref()
-            .map_or(false, |(cap, _)| *cap >= arena_size);
+            .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
         }
@@ -573,20 +739,22 @@ impl<B: Backend> GraphExecutor<B> {
                 plan.clone()
             } else {
                 let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
-                let mut removed = 0usize;
                 for instr in &plan.instructions {
+                    // Only skip WriteConst for fp32 weight slots — the
+                    // persistent-view dispatch path (`dispatch_with_persistent_view`)
+                    // knows how to satisfy fp32 Conv2d/MatMul weights from the
+                    // view. Quantized weight slots must keep their WriteConst in
+                    // the dispatch plan because the kernel dispatch reads them
+                    // from the arena, not from the persistent view.
                     let drop = matches!(
                         instr,
                         Instruction::WriteConst { dst, .. }
                             if view.get(&(dst.offset, dst.size)).is_some()
                     );
-                    if drop {
-                        removed += 1;
-                    } else {
+                    if !drop {
                         filtered.push(instr.clone());
                     }
                 }
-                let _ = removed;
                 ExecutablePlan {
                     instructions: filtered,
                     arena_size: plan.arena_size,
@@ -665,7 +833,11 @@ impl<B: Backend> GraphExecutor<B> {
         #[cfg(not(feature = "prepared-plan"))]
         let arena_preloaded_plan: Option<ExecutablePlan> = None;
 
-        let dispatch_plan = arena_preloaded_plan.as_ref().unwrap_or(plan);
+        let dispatch_plan = if let Some(ref fp) = cached_filtered_plan {
+            fp
+        } else {
+            arena_preloaded_plan.as_ref().unwrap_or(plan)
+        };
 
         let profile_entries = if profile {
             self.backend
@@ -713,7 +885,7 @@ impl<B: Backend> GraphExecutor<B> {
         graph: &ComputeGraph,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        let (mut plan, memory_plan, compiled_graph) = self.compile_with_plan(graph)?;
+        let (mut plan, memory_plan, compiled_graph) = self.compile_with_plan(graph.clone())?;
         self.execute(&compiled_graph, &mut plan, &memory_plan, inputs)
     }
 
@@ -769,6 +941,10 @@ impl<B: Backend> GraphExecutor<B> {
             inject_optimizer(&mut combined_graph, &params_with_grads, &config.optimizer)
                 .map_err(|e| BackendError::Compilation(format!("inject_optimizer: {e}")))?;
 
+        // 4b. Insert F8x4R gradient quantization around optimizer gradient inputs
+        use crate::compiler::passes::gradient_quantization;
+        gradient_quantization::quantize_gradients(&mut combined_graph);
+
         // 5. Set graph inputs and outputs
         combined_graph.outputs = vec![loss_node];
 
@@ -798,7 +974,7 @@ impl<B: Backend> GraphExecutor<B> {
 
         // 6. Run the standard compiler pipeline
         let (plan, memory_plan, final_graph) =
-            self.compile_with_plan_and_quantize(&combined_graph, config.quantize, None)?;
+            self.compile_with_plan_and_quantize(combined_graph, config.quantize, None)?;
 
         // 6b. Optionally tighten memory plan using concrete batch shapes.
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
@@ -1953,6 +2129,100 @@ mod prepared_fallback_tests {
         assert_eq!(
             read_f32(&out[0]),
             vec![0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    /// Verify that the static shape cache is populated after the first
+    /// inference and produces byte-identical results on subsequent calls.
+    #[test]
+    fn static_shape_cache_produces_correct_repeated_results() {
+        let g = GraphBuilder::new();
+        let a = g.input(&[1, 4], IrDType::F32);
+        let b = g.input(&[1, 4], IrDType::F32);
+        let c = g.add(&a, &b);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&c], CpuBackend).expect("compile must succeed");
+        let mut executor = GraphExecutor::new(CpuBackend);
+
+        let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let b_data = f32_data(&[10.0, 20.0, 30.0, 40.0]);
+
+        // First call — populates the cache.
+        let first = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+        );
+
+        // Second call — should use the cached fast path.
+        let second = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+        );
+
+        // Third call — another cache hit.
+        let third = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&a_data, &b_data],
+        );
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0], second[0],
+            "second call (cache path) must match first"
+        );
+        assert_eq!(
+            second[0], third[0],
+            "third call (cache path) must match first"
+        );
+        assert_eq!(
+            read_f32(&first[0]),
+            vec![11.0, 22.0, 33.0, 44.0],
+            "correctness: 1+10=11, 2+20=22, 3+30=33, 4+40=44"
+        );
+
+        // The cache must be populated now.
+        assert!(
+            executor.static_shape_cache.is_some(),
+            "static shape cache must be populated for a Known-only graph"
+        );
+    }
+
+    /// Verify that the static shape cache is NOT populated when the graph
+    /// has symbolic (non-Known) dims.
+    #[test]
+    fn static_shape_cache_skipped_for_dynamic_graph() {
+        let g = GraphBuilder::new();
+        let batch = DimExpr::Symbol("N".into());
+        let x = g.input_with_dims(&[batch, DimExpr::Known(4)], IrDType::F32);
+        let y = g.relu(&x);
+
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let mut executor = GraphExecutor::new(CpuBackend);
+
+        let input = f32_data(&[-1.0, -2.0, 3.0, 4.0]);
+        let _ = executor_run(
+            &mut executor,
+            &compiled_graph,
+            &mut plan,
+            &memory_plan,
+            &[&input],
+        );
+
+        // Dynamic-shape graph should NOT populate the cache.
+        assert!(
+            executor.static_shape_cache.is_none(),
+            "static shape cache must NOT be populated for a graph with Symbol dims"
         );
     }
 

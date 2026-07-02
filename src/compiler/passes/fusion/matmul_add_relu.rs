@@ -22,7 +22,7 @@ impl FusionPass for MatMulAddRelu {
     fn fuse(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
         let mut fused = false;
         let mut to_remove: HashSet<NodeId> = HashSet::new();
-        let mut new_nodes: Vec<IRNode> = Vec::new();
+        let mut new_nodes: Vec<IRNode> = Vec::with_capacity(graph.nodes.len());
         let node_ids: Vec<NodeId> = graph.nodes.iter().map(|n| n.id).collect();
 
         for &matmul_id in &node_ids {

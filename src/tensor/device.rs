@@ -69,8 +69,14 @@ impl TensorImpl {
                         .iter()
                         .map(|&v| if v != 0 { 1.0 } else { 0.0 })
                         .collect(),
-                    DType::U4 | DType::U8 => {
-                        panic!("to_dtype: packed U4/U8 tensors cannot be converted via the Tensor-level conversion path. Use the IR pipeline with explicit quantize/dequantize nodes.")
+                    DType::I4
+                    | DType::I8Scaled
+                    | DType::U4Scaled
+                    | DType::U8Scaled
+                    | DType::F8
+                    | DType::F8R
+                    | DType::F4 => {
+                        panic!("to_dtype: packed/FP tensors cannot be converted via the Tensor-level conversion path. Use the IR pipeline with explicit quantize/dequantize nodes.")
                     }
                 };
 
@@ -126,17 +132,18 @@ impl TensorImpl {
                             new_bytes[i] = if v != 0.0 { 1 } else { 0 };
                         }
                     }
-                    DType::U4 | DType::U8 => {
-                        panic!("to_dtype: packed U4/U8 tensors cannot be converted via the Tensor-level path. Use the IR pipeline with explicit quantize/dequantize nodes.")
+                    DType::I4
+                    | DType::I8Scaled
+                    | DType::U4Scaled
+                    | DType::U8Scaled
+                    | DType::F8
+                    | DType::F8R
+                    | DType::F4 => {
+                        panic!("to_dtype: packed/FP tensors cannot be converted via the Tensor-level path. Use the IR pipeline with explicit quantize/dequantize nodes.")
                     }
                 }
 
-                let new_storage = Arc::new(Storage::Cpu(CpuStorage {
-                    data: Arc::new(new_bytes),
-                    nbytes,
-                    #[cfg(feature = "gpu")]
-                    gpu_buffer_cache: RwLock::new(HashMap::new()),
-                }));
+                let new_storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(new_bytes, nbytes)));
 
                 TensorImpl::new(new_storage, self.sizes.clone(), dtype).into()
             }
@@ -230,12 +237,8 @@ impl Tensor {
                 use crate::backend::wgpu::context::get_wgpu_context;
                 let ctx = get_wgpu_context(gpu.device_id);
                 let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
-                let storage = Arc::new(Storage::Cpu(CpuStorage {
-                    data: Arc::new(bytemuck::cast_slice(&data).to_vec()),
-                    nbytes: gpu.nbytes,
-                    #[cfg(feature = "gpu")]
-                    gpu_buffer_cache: RwLock::new(HashMap::new()),
-                }));
+                let byte_data = bytemuck::cast_slice(&data).to_vec();
+                let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(byte_data, gpu.nbytes)));
                 Tensor::new(self.inner.new_on_device(storage, Device::Cpu))
             }
         }

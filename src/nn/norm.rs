@@ -229,7 +229,7 @@ impl Module for BatchNorm1d {
                 batch_var.clone()
             } else {
                 Tensor::zeros(
-                    vec![num_features as i64],
+                    vec![num_features],
                     crate::storage::DType::F32,
                     crate::storage::Device::Cpu,
                 )

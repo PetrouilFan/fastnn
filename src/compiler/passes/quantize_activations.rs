@@ -113,12 +113,13 @@ fn quantize_node_output(
 
     // Create quantized output type
     let quant_dtype = if bit_width == 4 {
-        IrDType::U4 {
+        IrDType::I4 {
             scales: vec![scale],
             zero_points: vec![zero_point],
+            codebooks: vec![],
         }
     } else {
-        IrDType::U8 {
+        IrDType::I8Scaled {
             scales: vec![scale],
             zero_points: vec![zero_point],
         }
@@ -163,6 +164,7 @@ fn quantize_node_output(
 }
 
 #[cfg(test)]
+#[test]
 fn test_quantize_node_output() {
     let builder = GraphBuilder::new();
     let input = builder.input(&[1, 4], IrDType::F32);
@@ -171,7 +173,7 @@ fn test_quantize_node_output() {
         TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
     );
     // Use a simple Add instead of Conv2d for test simplicity
-    let add = builder.add(&input, &weight);
+    let _add = builder.add(&input, &weight);
     let mut graph = builder.to_graph();
 
     let mut calib = CalibrationData::new();

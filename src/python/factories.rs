@@ -116,7 +116,8 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyResult<PyTensor> {
     let m = m.unwrap_or(n);
     if n <= 0 || m <= 0 {
         return Err(PyValueError::new_err(format!(
-            "eye(): n and m must be positive, got n={}, m={}", n, m
+            "eye(): n and m must be positive, got n={}, m={}",
+            n, m
         )));
     }
     let mut values = vec![0.0f32; (n * m) as usize];
@@ -124,7 +125,11 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyResult<PyTensor> {
         values[(i * m + i) as usize] = 1.0;
     }
     let device = resolve_device(device);
-    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(values, vec![n, m], device)))
+    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+        values,
+        vec![n, m],
+        device,
+    )))
 }
 
 #[pyfunction]
@@ -156,7 +161,8 @@ fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
 fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyResult<PyTensor> {
     if high <= low {
         return Err(PyValueError::new_err(format!(
-            "randint(): high must be greater than low, got low={}, high={}", low, high
+            "randint(): high must be greater than low, got low={}, high={}",
+            low, high
         )));
     }
     let numel: i64 = shape.iter().product();
@@ -169,7 +175,9 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyRe
             .collect()
     };
     let device = resolve_device(device);
-    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device)))
+    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+        values, shape, device,
+    )))
 }
 
 #[pyfunction]
@@ -185,12 +193,9 @@ fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> P
         )));
     }
     let sizes: SmallVec<[i64; 8]> = shape.into();
-    let storage = Arc::new(crate::storage::Storage::Cpu(crate::storage::CpuStorage {
-        data: Arc::new(data),
-        nbytes: expected_bytes,
-        #[cfg(feature = "gpu")]
-        gpu_buffer_cache: Default::default(),
-    }));
+    let storage = Arc::new(crate::storage::Storage::Cpu(
+        crate::storage::CpuStorage::from_vec(data, expected_bytes),
+    ));
     let tensor = Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, dtype));
     Ok(PyTensor::from_tensor(tensor))
 }
@@ -212,4 +217,3 @@ fn ones_like(tensor: &PyTensor) -> PyTensor {
         tensor.inner.device(),
     ))
 }
-

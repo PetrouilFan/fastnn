@@ -122,6 +122,7 @@ fn build_im2col(
                     padding,
                     dilation,
                     &mut col_matrix[col_start..col_start + spatial_size * col_w],
+                    false, // benchmark does not track min/max
                 );
             }
         }
@@ -198,7 +199,7 @@ unsafe fn conv_phase_sgemm(
             n as i32,
         );
     } else {
-        matrixmultiply::sgemm(
+        fastnn::backend::cpu::sgemm::sgemm(
             m,
             k,
             n,
@@ -226,7 +227,7 @@ unsafe fn conv_phase_sgemm(
     b_im2col_nk: *const f32,
     c: *mut f32,
 ) {
-    matrixmultiply::sgemm(
+    fastnn::backend::cpu::sgemm::sgemm(
         m,
         k,
         n,

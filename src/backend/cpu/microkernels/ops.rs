@@ -2,7 +2,7 @@
 
 #![allow(dead_code, unused_imports)]
 
-use crate::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
 use std::sync::OnceLock;
 
@@ -737,7 +737,7 @@ pub unsafe fn biasadd_f32_avx2(
     let mut i = 0;
     while i + 8 <= len {
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
-        let b0 = bias[((i + 0) / channel_stride) % bias_len];
+        let b0 = bias[(i / channel_stride) % bias_len];
         let b1 = bias[((i + 1) / channel_stride) % bias_len];
         let b2 = bias[((i + 2) / channel_stride) % bias_len];
         let b3 = bias[((i + 3) / channel_stride) % bias_len];
@@ -756,28 +756,28 @@ pub unsafe fn biasadd_f32_avx2(
 
 // ── norm_layernorm_f32 — LayerNorm ──────────────────────────
 
+/// Single-pass Welford-based LayerNorm: computes mean + variance in one pass
+/// instead of two, reducing memory traffic by ~33%.
 #[inline]
 pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
-        let n = row_size as f32;
-        // Pass 1: sum
-        let mut sum = 0.0f32;
+        // Welford's online algorithm: single pass for mean + variance
+        let mut mean = 0.0f32;
+        let mut m2 = 0.0f32;
+        let mut count = 0u32;
         for i in start..end {
-            sum += input[i];
+            count += 1;
+            let x = input[i];
+            let delta = x - mean;
+            mean += delta / (count as f32);
+            let delta2 = x - mean;
+            m2 += delta * delta2;
         }
-        let mean = if n > 0.0 { sum / n } else { 0.0 };
-        // Pass 2: sum of squared diffs
-        let mut var = 0.0f32;
-        for i in start..end {
-            let d = input[i] - mean;
-            var += d * d;
-        }
-        var = var / n;
+        let var = if count > 1 { m2 / (count as f32) } else { 0.0 };
         let inv_std = 1.0 / (var + eps).sqrt();
-        // Pass 3: normalize
         for i in start..end {
             output[i] = (input[i] - mean) * inv_std;
         }
@@ -799,20 +799,20 @@ pub fn fused_residual_add_layer_norm_f32_scalar(
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
-        let n = row_size as f32;
 
-        let mut sum = 0.0f32;
+        // Welford single-pass mean + variance on (main + residual)
+        let mut mean = 0.0f32;
+        let mut m2 = 0.0f32;
+        let mut count = 0u32;
         for i in start..end {
-            sum += main[i] + residual[i];
+            count += 1;
+            let x = main[i] + residual[i];
+            let delta = x - mean;
+            mean += delta / (count as f32);
+            let delta2 = x - mean;
+            m2 += delta * delta2;
         }
-        let mean = if n > 0.0 { sum / n } else { 0.0 };
-
-        let mut var = 0.0f32;
-        for i in start..end {
-            let d = main[i] + residual[i] - mean;
-            var += d * d;
-        }
-        var /= n;
+        let var = if count > 1 { m2 / (count as f32) } else { 0.0 };
         let inv_std = 1.0 / (var + eps).sqrt();
 
         for i in start..end {
@@ -865,7 +865,7 @@ pub unsafe fn norm_layernorm_f32_avx2(
             let d = input[j] - mean;
             var += d * d;
         }
-        var = var / n;
+        var /= n;
         let inv_std = 1.0 / (var + eps).sqrt();
         // Pass 3: vectorized normalize
         let vinv_std = _mm256_set1_ps(inv_std);
@@ -882,6 +882,93 @@ pub unsafe fn norm_layernorm_f32_avx2(
         }
         for j in i..end {
             output[j] = (input[j] - mean) * inv_std;
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller must ensure `residual`, `main`, `weight`, `bias`, and `output` are valid,
+// non-overlapping, and each at least `num_rows * row_size` elements.
+pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
+    let len = output.len().min(main.len()).min(residual.len());
+    let num_rows = len / row_size;
+    for r in 0..num_rows {
+        let start = r * row_size;
+        let end = start + row_size;
+        let n = row_size as f32;
+
+        // Pass 1: vectorized sum of (main + residual)
+        let mut i = start;
+        let mut vsum = _mm256_setzero_ps();
+        while i + 8 <= end {
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            vsum = _mm256_add_ps(vsum, _mm256_add_ps(vm, vr));
+            i += 8;
+        }
+        let mut sum = hsum256_ps(vsum);
+        for j in i..end {
+            sum += main[j] + residual[j];
+        }
+        let mean = if n > 0.0 { sum / n } else { 0.0 };
+        let vmean = _mm256_set1_ps(mean);
+
+        // Pass 2: vectorized sum of ((main + residual) - mean)^2
+        i = start;
+        let mut vvar = _mm256_setzero_ps();
+        while i + 8 <= end {
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let d = _mm256_sub_ps(_mm256_add_ps(vm, vr), vmean);
+            vvar = _mm256_fmadd_ps(d, d, vvar);
+            i += 8;
+        }
+        let mut var = hsum256_ps(vvar);
+        for j in i..end {
+            let d = main[j] + residual[j] - mean;
+            var += d * d;
+        }
+        var /= n;
+        let inv_std = 1.0 / (var + eps).sqrt();
+        let vinv_std = _mm256_set1_ps(inv_std);
+
+        // Pass 3: vectorized normalize with weight + bias
+        i = start;
+        while i + 8 <= end {
+            let idx = i - start;
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let vnorm = _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(vm, vr), vmean), vinv_std);
+            let vw = if weight.len() >= 8 {
+                _mm256_loadu_ps(weight.as_ptr().add(idx))
+            } else {
+                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
+            };
+            let vb = if bias.len() >= 8 {
+                _mm256_loadu_ps(bias.as_ptr().add(idx))
+            } else {
+                _mm256_set1_ps(if idx < bias.len() { bias[idx] } else { 0.0 })
+            };
+            _mm256_storeu_ps(
+                output.as_mut_ptr().add(i),
+                _mm256_add_ps(_mm256_mul_ps(vnorm, vw), vb),
+            );
+            i += 8;
+        }
+        for j in i..end {
+            let idx = j - start;
+            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
+            output[j] = (main[j] + residual[j] - mean) * inv_std * w + b;
         }
     }
 }
@@ -952,6 +1039,71 @@ pub fn fused_residual_add_rms_norm_f32_scalar(
             let idx = i - start;
             let w = if idx < weight.len() { weight[idx] } else { 1.0 };
             output[i] = (main[i] + residual[i]) / rms * w;
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller must ensure `residual`, `main`, `weight`, and `output` are valid,
+// non-overlapping, and each at least `num_rows * row_size` elements.
+pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
+    residual: &[f32],
+    main: &[f32],
+    weight: &[f32],
+    output: &mut [f32],
+    row_size: usize,
+    eps: f32,
+) {
+    let len = output.len().min(main.len()).min(residual.len());
+    let num_rows = len / row_size;
+    for r in 0..num_rows {
+        let start = r * row_size;
+        let end = start + row_size;
+        // Vectorized sum of (main + residual)^2
+        let mut i = start;
+        let mut vsq = _mm256_setzero_ps();
+        while i + 8 <= end {
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let vx = _mm256_add_ps(vm, vr);
+            vsq = _mm256_fmadd_ps(vx, vx, vsq);
+            i += 8;
+        }
+        let mut sq_sum = hsum256_ps(vsq);
+        for j in i..end {
+            let x = main[j] + residual[j];
+            sq_sum += x * x;
+        }
+        let n = row_size as f32;
+        let rms = if n > 0.0 {
+            (sq_sum / n + eps).sqrt()
+        } else {
+            1.0
+        };
+        let inv_rms = _mm256_set1_ps(1.0 / rms);
+        // Vectorized writeback with weight
+        i = start;
+        while i + 8 <= end {
+            let idx = i - start;
+            let vm = _mm256_loadu_ps(main.as_ptr().add(i));
+            let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
+            let vx = _mm256_add_ps(vm, vr);
+            let w = if weight.len() >= 8 {
+                _mm256_loadu_ps(weight.as_ptr().add(idx))
+            } else {
+                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
+            };
+            _mm256_storeu_ps(
+                output.as_mut_ptr().add(i),
+                _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
+            );
+            i += 8;
+        }
+        for j in i..end {
+            let idx = j - start;
+            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
+            output[j] = (main[j] + residual[j]) / rms * w;
         }
     }
 }
@@ -1387,19 +1539,42 @@ pub fn adam_update_f32_scalar(
     bias_corr1: f32,
     bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let len = w.len();
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
+    adam_update_f32_scalar_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
+    (w_new, m_new, v_new)
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn adam_update_f32_scalar_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len()).min(v_out.len());
     for i in 0..len {
         let gi = g.get(i % g.len()).copied().unwrap_or(0.0);
-        m_new[i] = beta1 * m[i] + (1.0 - beta1) * gi;
-        v_new[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi;
-        let m_hat = m_new[i] / bias_corr1;
-        let v_hat = v_new[i] / bias_corr2;
-        w_new[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+        m_out[i] = beta1 * m[i] + (1.0 - beta1) * gi;
+        v_out[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi;
+        let m_hat = m_out[i] / bias_corr1;
+        let v_hat = v_out[i] / bias_corr2;
+        w_out[i] = w[i] - lr * m_hat / (v_hat.sqrt() + eps);
     }
-    (w_new, m_new, v_new)
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1418,10 +1593,37 @@ pub unsafe fn adam_update_f32_avx2(
     bias_corr1: f32,
     bias_corr2: f32,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let len = w.len();
     let mut w_new = w.to_vec();
     let mut m_new = m.to_vec();
     let mut v_new = v.to_vec();
+    adam_update_f32_avx2_into(
+        w, g, m, v, lr, beta1, beta2, eps, bias_corr1, bias_corr2, &mut w_new, &mut m_new,
+        &mut v_new,
+    );
+    (w_new, m_new, v_new)
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+// SAFETY: Caller ensures `w`, `g`, `m`, `v`, `w_out`, `m_out`, `v_out` are all
+// valid. `w`/`w_out` may alias; the function reads `w` before writing `w_out`.
+pub unsafe fn adam_update_f32_avx2_into(
+    w: &[f32],
+    g: &[f32],
+    m: &[f32],
+    v: &[f32],
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    bias_corr1: f32,
+    bias_corr2: f32,
+    w_out: &mut [f32],
+    m_out: &mut [f32],
+    v_out: &mut [f32],
+) {
+    let len = w.len().min(w_out.len()).min(m_out.len()).min(v_out.len());
     let vlr = _mm256_set1_ps(lr);
     let vb1 = _mm256_set1_ps(beta1);
     let vb1c = _mm256_set1_ps(1.0 - beta1);
@@ -1437,32 +1639,26 @@ pub unsafe fn adam_update_f32_avx2(
             let vg = _mm256_loadu_ps(g.as_ptr().add(i));
             let vm = _mm256_loadu_ps(m.as_ptr().add(i));
             let vv = _mm256_loadu_ps(v.as_ptr().add(i));
-            // m_new = beta1 * m + (1-beta1) * g
             let vm_new = _mm256_fmadd_ps(vb1c, vg, _mm256_mul_ps(vb1, vm));
-            // v_new = beta2 * v + (1-beta2) * g * g
             let vv_new = _mm256_fmadd_ps(vb2c, _mm256_mul_ps(vg, vg), _mm256_mul_ps(vb2, vv));
-            // m_hat = m_new / bias_corr1
             let vm_hat = _mm256_div_ps(vm_new, vbc1);
-            // v_hat = v_new / bias_corr2
             let vv_hat = _mm256_div_ps(vv_new, vbc2);
-            // w -= lr * m_hat / (sqrt(v_hat) + eps)
             let vdenom = _mm256_add_ps(_mm256_sqrt_ps(vv_hat), veps);
             let vupdate = _mm256_div_ps(_mm256_mul_ps(vlr, vm_hat), vdenom);
-            _mm256_storeu_ps(w_new.as_mut_ptr().add(i), _mm256_sub_ps(vw, vupdate));
-            _mm256_storeu_ps(m_new.as_mut_ptr().add(i), vm_new);
-            _mm256_storeu_ps(v_new.as_mut_ptr().add(i), vv_new);
+            _mm256_storeu_ps(w_out.as_mut_ptr().add(i), _mm256_sub_ps(vw, vupdate));
+            _mm256_storeu_ps(m_out.as_mut_ptr().add(i), vm_new);
+            _mm256_storeu_ps(v_out.as_mut_ptr().add(i), vv_new);
             i += 8;
         }
     }
     for j in i..len {
         let gi = g.get(j % g.len()).copied().unwrap_or(0.0);
-        m_new[j] = beta1 * m[j] + (1.0 - beta1) * gi;
-        v_new[j] = beta2 * v[j] + (1.0 - beta2) * gi * gi;
-        let m_hat = m_new[j] / bias_corr1;
-        let v_hat = v_new[j] / bias_corr2;
-        w_new[j] -= lr * m_hat / (v_hat.sqrt() + eps);
+        m_out[j] = beta1 * m[j] + (1.0 - beta1) * gi;
+        v_out[j] = beta2 * v[j] + (1.0 - beta2) * gi * gi;
+        let m_hat = m_out[j] / bias_corr1;
+        let v_hat = v_out[j] / bias_corr2;
+        w_out[j] = w[j] - lr * m_hat / (v_hat.sqrt() + eps);
     }
-    (w_new, m_new, v_new)
 }
 
 // ── Optimizer: adamw_update_f32 ─────────────────────────────

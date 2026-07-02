@@ -49,6 +49,18 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Patch/rebase artifacts
+*.orig
+*.rej
+
+# Binary numpy test data
+tests/*.npy
+
+# Results / benchmark output
+results/
+scales_*.json
+simple_test.json
+
 # Logs and temporary files
 *.log
 *.tmp
@@ -56,6 +68,10 @@ Thumbs.db
 
 # Docs
 docs/_build/
+docs/plans/
+
+# .cargo config (machine-specific paths)
+.cargo/config.toml
 
 # Misc
 MANIFEST
@@ -85,6 +101,17 @@ tests/profile_*.py
 tests/test_alignment.py
 tests/test_memory.py
 tests/test_threading.py
+
+# Root-level plan/benchmark docs (internal artifacts)
+ARCHITECTURE_PLAN.md
+BENCHMARKS.md
+
+# AGENTS.md knowledge base files (internal artifacts)
+**/AGENTS.md
+
+# IDE/agent working directories
+.omo/
+.opencode/
 
 # Temporary analysis/documentation files
 *ARCHITECTURE_ANALYSIS.md

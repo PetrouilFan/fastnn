@@ -253,9 +253,10 @@ fn test_quantized_matmul_export_still_works() {
     let weight_shape = vec![DimExpr::Known(2), DimExpr::Known(4)];
     let weight_tt = TensorType::new(
         weight_shape,
-        IrDType::U4 {
+        IrDType::I4 {
             scales: vec![0.1, 0.2, 0.3, 0.4],
             zero_points: vec![0.0, 0.0, 0.0, 0.0],
+            codebooks: vec![],
         },
     );
     let weight_data = vec![0u8; 80];

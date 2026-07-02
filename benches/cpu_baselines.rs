@@ -3,7 +3,7 @@ use fastnn::backend::cpu::microkernels::{gemm_cpu, gemv_cpu};
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::dtypes::{F32x1, PackedWord, U4x8, U8x4};
+use fastnn::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
 use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
@@ -158,9 +158,9 @@ fn reduce_max(input: &[f32]) -> f32 {
 }
 
 fn rowwise_sum(input: &[f32], out: &mut [f32], batch: usize, hidden: usize) {
-    for row in 0..batch {
+    for (row, out_val) in out.iter_mut().enumerate().take(batch) {
         let start = row * hidden;
-        out[row] = input[start..start + hidden].iter().copied().sum();
+        *out_val = input[start..start + hidden].iter().copied().sum();
     }
 }
 
@@ -323,8 +323,8 @@ fn bench_gemv(c: &mut Criterion) {
         );
 
         bench_fastnn_gemv::<F32x1>(&mut group, "fastnn_f32x1", case);
-        bench_fastnn_gemv::<U8x4>(&mut group, "fastnn_u8x4", case);
-        bench_fastnn_gemv::<U4x8>(&mut group, "fastnn_u4x8", case);
+        bench_fastnn_gemv::<I8x4>(&mut group, "fastnn_i8x4", case);
+        bench_fastnn_gemv::<I4x8>(&mut group, "fastnn_i4x8", case);
     }
 
     group.finish();
@@ -401,8 +401,8 @@ fn bench_gemm(c: &mut Criterion) {
         );
 
         bench_fastnn_gemm::<F32x1>(&mut group, "fastnn_f32x1", case);
-        bench_fastnn_gemm::<U8x4>(&mut group, "fastnn_u8x4", case);
-        bench_fastnn_gemm::<U4x8>(&mut group, "fastnn_u4x8", case);
+        bench_fastnn_gemm::<I8x4>(&mut group, "fastnn_i8x4", case);
+        bench_fastnn_gemm::<I4x8>(&mut group, "fastnn_i4x8", case);
     }
 
     group.finish();
@@ -428,6 +428,7 @@ fn bench_elementwise(c: &mut Criterion) {
             len: 1_048_576,
         },
     ];
+    #[allow(clippy::type_complexity)]
     let binary_ops: [(&str, fn(f32, f32) -> f32); 3] = [
         ("add", |x, y| x + y),
         ("mul", |x, y| x * y),
@@ -784,7 +785,7 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
         let graph = graph_from(&builder, &out);
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, None, None)
+            .compile_with_plan_and_quantize(graph, None, None)
             .expect("relu graph should compile");
         group.bench_with_input(
             BenchmarkId::new("relu_zero_copy", case.name),
@@ -821,7 +822,7 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
         let graph = graph_from(&builder, &out);
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, None, None)
+            .compile_with_plan_and_quantize(graph, None, None)
             .expect("add_scalar graph should compile");
         group.bench_with_input(
             BenchmarkId::new("add_scalar_zero_copy", case.name),
@@ -859,7 +860,7 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
         let graph = graph_from(&builder, &out);
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, None, None)
+            .compile_with_plan_and_quantize(graph, None, None)
             .expect("plain add graph should compile");
         group.bench_with_input(
             BenchmarkId::new("add_plain_zero_copy", case.name),
@@ -923,7 +924,7 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
             let graph = graph_from(&builder, &out);
             let mut executor = GraphExecutor::new(CpuBackend);
             let (mut plan, memory_plan, compiled_graph) = executor
-                .compile_with_plan_and_quantize(&graph, None, None)
+                .compile_with_plan_and_quantize(graph, None, None)
                 .expect("reduce graph should compile");
             group.bench_with_input(
                 BenchmarkId::new(format!("reduce_{op}_zero_copy"), case.name),
@@ -986,7 +987,7 @@ fn bench_cpu_arena_telemetry(c: &mut Criterion) {
         let graph = graph_from(&builder, &out);
         let mut executor = GraphExecutor::new(CpuBackend);
         let (mut plan, memory_plan, compiled_graph) = executor
-            .compile_with_plan_and_quantize(&graph, None, None)
+            .compile_with_plan_and_quantize(graph, None, None)
             .expect("broadcast add graph should compile");
         group.bench_with_input(
             BenchmarkId::new("add_broadcast_zero_copy", case.name),

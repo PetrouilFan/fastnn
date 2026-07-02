@@ -19,9 +19,10 @@ fn build_qmatmul_graph() -> ComputeGraph {
     let weight_shape = vec![DimExpr::Known(2), DimExpr::Known(4)];
     let weight_tt = TensorType::new(
         weight_shape,
-        IrDType::U4 {
+        IrDType::I4 {
             scales: vec![0.1, 0.2, 0.3, 0.4],
             zero_points: vec![0.0, 0.0, 0.0, 0.0],
+            codebooks: vec![],
         },
     );
     let weight_data = vec![0u8; 80]; // enough for packed U4
@@ -180,9 +181,10 @@ fn test_export_qlinear_conv_detected() {
     ];
     let weight_tt = TensorType::new(
         weight_shape,
-        IrDType::U4 {
+        IrDType::I4 {
             scales: vec![0.1],
             zero_points: vec![0.0],
+            codebooks: vec![],
         },
     );
     let weight_data = vec![0u8; 80]; // enough for packed U4

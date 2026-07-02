@@ -1,6 +1,8 @@
 use crate::backend::BufferSlice;
 
-use super::{add_f32, arena, div_f32, microkernels, mul_f32, sub_f32, CpuBuffer};
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use super::{add_f32, div_f32, microkernels, mul_f32, sub_f32};
+use super::{arena, CpuBuffer};
 
 /// Compute a fused binary op + activation over already-extracted f32 slices.
 ///
@@ -10,6 +12,10 @@ use super::{add_f32, arena, div_f32, microkernels, mul_f32, sub_f32, CpuBuffer};
 /// semantics.
 #[inline]
 fn fused_binary_activation_dispatch_slices(
+    #[cfg_attr(
+        not(all(feature = "simd", target_arch = "x86_64")),
+        allow(unused_variables)
+    )]
     kernel_name: &str,
     a: &[f32],
     b: &[f32],
@@ -17,9 +23,34 @@ fn fused_binary_activation_dispatch_slices(
     op: &(impl Fn(f32, f32) -> f32 + Sync),
     act: &(impl Fn(f32) -> f32 + Sync),
 ) {
-    // SIMD fast path: chain elementwise op + activation using existing
-    // SIMD microkernels. The `kernel_name` tells us which combination
-    // to dispatch. Two SIMD passes is still 4-8x faster than scalar.
+    // Single-pass fused SIMD kernels: combine binary op + activation in one pass.
+    // Supports same-shape, scalar broadcast, and tiled broadcast patterns.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if out_f32.len() >= 8
+        && (a.len() == out_f32.len() || b.len() == out_f32.len())
+        && microkernels::simd_avx2_available()
+    {
+        match kernel_name {
+            "add_relu_f32" => {
+                return unsafe { microkernels::fused_add_relu_f32_avx2(a, b, out_f32) }
+            }
+            "mul_relu_f32" => {
+                return unsafe { microkernels::fused_mul_relu_f32_avx2(a, b, out_f32) }
+            }
+            "add_silu_f32" => {
+                return unsafe { microkernels::fused_add_silu_f32_avx2(a, b, out_f32) }
+            }
+            "mul_silu_f32" => {
+                return unsafe { microkernels::fused_mul_silu_f32_avx2(a, b, out_f32) }
+            }
+            "add_gelu_f32" => {
+                return unsafe { microkernels::fused_add_gelu_f32_avx2(a, b, out_f32) }
+            }
+            _ => {}
+        }
+    }
+
+    // Two-pass SIMD path: binary op then activation in-place.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if microkernels::simd_avx2_available() && out_f32.len() >= 8 {
         // Binary op dispatch
@@ -82,7 +113,7 @@ fn fused_binary_activation_dispatch_slices(
         }
     }
     #[cfg(feature = "parallel")]
-    {
+    if out_len >= 4096 {
         use rayon::prelude::*;
         out_f32[..out_len]
             .par_iter_mut()
@@ -91,6 +122,11 @@ fn fused_binary_activation_dispatch_slices(
                 let x = op(a[i % a_len], b[i % b_len]);
                 *o = act(x);
             });
+    } else {
+        for i in 0..out_len {
+            let x = op(a[i % a_len], b[i % b_len]);
+            out_f32[i] = act(x);
+        }
     }
 }
 
