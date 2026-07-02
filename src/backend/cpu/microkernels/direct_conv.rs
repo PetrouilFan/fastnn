@@ -15,6 +15,7 @@ use core::arch::x86_64::*;
 
 // ── Helper: apply activation to an AVX2 vector ──────────────────
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::backend::cpu::microkernels::activations::{exp_avx2_vec, tanh_avx2_vec};
 
 #[cfg(feature = "debug_canary")]
