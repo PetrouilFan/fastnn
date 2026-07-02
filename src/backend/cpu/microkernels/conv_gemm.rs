@@ -14,8 +14,10 @@
 //! to matrixmultiply with zero overhead.
 
 use super::ConvActivation;
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::backend::cpu::microkernels::activations::{exp_avx2_vec, tanh_avx2_vec};
 use crate::backend::cpu::microkernels::conv::apply_conv_activation;
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::backend::cpu::microkernels::simd_avx2_available;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
