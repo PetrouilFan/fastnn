@@ -7158,12 +7158,14 @@ impl Backend for CpuBackend {
 
         for instruction in &plan.instructions {
             match instruction {
-                // Skip WriteConst for slots the persistent view will
-                // satisfy directly.  Check both f32 and u8 payloads
-                // (FP32 weights go to `get()`, quantized go to `get_u8()`).
+                // Skip WriteConst for fp32 weight slots the persistent
+                // view will satisfy directly.  Quantized weight slots are
+                // NOT skipped — the kernel dispatch path for quantized
+                // Conv2d/MatMul reads weights from the arena, not from
+                // the persistent view, so the WriteConst must execute to
+                // populate the arena.
                 Instruction::WriteConst { dst, .. }
-                    if view.get(&(dst.offset, dst.size)).is_some()
-                        || view.get_u8(&(dst.offset, dst.size)).is_some() =>
+                    if view.get(&(dst.offset, dst.size)).is_some() =>
                 {
                     continue;
                 }

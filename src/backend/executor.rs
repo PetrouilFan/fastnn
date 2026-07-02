@@ -732,11 +732,16 @@ impl<B: Backend> GraphExecutor<B> {
             } else {
                 let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
                 for instr in &plan.instructions {
+                    // Only skip WriteConst for fp32 weight slots — the
+                    // persistent-view dispatch path (`dispatch_with_persistent_view`)
+                    // knows how to satisfy fp32 Conv2d/MatMul weights from the
+                    // view. Quantized weight slots must keep their WriteConst in
+                    // the dispatch plan because the kernel dispatch reads them
+                    // from the arena, not from the persistent view.
                     let drop = matches!(
                         instr,
                         Instruction::WriteConst { dst, .. }
                             if view.get(&(dst.offset, dst.size)).is_some()
-                                || view.get_u8(&(dst.offset, dst.size)).is_some()
                     );
                     if !drop {
                         filtered.push(instr.clone());
