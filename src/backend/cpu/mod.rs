@@ -14,7 +14,7 @@ use crate::backend::cpu::microkernels::{
 use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4, PackedWord};
+use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
@@ -70,9 +70,10 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
         write_size,
         TypeId::of::<T>(),
     );
-    static CACHE: OnceLock<
+    type PackedCache = OnceLock<
         Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>,
-    > = OnceLock::new();
+    >;
+    static CACHE: PackedCache = OnceLock::new();
     let mut cache = CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -156,7 +157,7 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
 /// pointer is 4-byte aligned (the common case for arena-backed data),
 /// otherwise fall back to a u32-anchored copy.
 fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
-    if raw.as_ptr() as usize % std::mem::align_of::<T>() == 0 {
+    if (raw.as_ptr() as usize).is_multiple_of(std::mem::align_of::<T>()) {
         // SAFETY: bytemuck::cast_slice panics if misaligned; we checked alignment.
         bytemuck::cast_slice::<u8, T>(raw).to_vec()
     } else {
@@ -427,7 +428,9 @@ impl Backend for CpuBackend {
                             if input_dtypes
                                 .first()
                                 .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })) =>
+                                && input_dtypes.iter().any(|d| {
+                                    matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })
+                                }) =>
                         {
                             "matmul_i4_i8"
                         }
@@ -436,10 +439,12 @@ impl Backend for CpuBackend {
                             if input_dtypes
                                 .first()
                                 .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| matches!(d, IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. }))
-                                && !input_dtypes
-                                    .iter()
-                                    .any(|d| matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })) =>
+                                && input_dtypes.iter().any(|d| {
+                                    matches!(d, IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. })
+                                })
+                                && !input_dtypes.iter().any(|d| {
+                                    matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })
+                                }) =>
                         {
                             "matmul_i8_i8"
                         }
@@ -451,7 +456,9 @@ impl Backend for CpuBackend {
                         }
                         // Quantized: F32 activation + Unsigned U4 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::U4Scaled { .. })) =>
+                            if input_dtypes
+                                .iter()
+                                .any(|d| matches!(d, IrDType::U4Scaled { .. })) =>
                         {
                             "matmul_u4"
                         }
@@ -477,7 +484,9 @@ impl Backend for CpuBackend {
                         }
                         // Quantized: F32 activation + Unsigned U8 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::U8Scaled { .. })) =>
+                            if input_dtypes
+                                .iter()
+                                .any(|d| matches!(d, IrDType::U8Scaled { .. })) =>
                         {
                             "matmul_u8"
                         }
@@ -2671,7 +2680,7 @@ impl Backend for CpuBackend {
         let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
         // ANCHOR: debug-canary-end
 
-        for (_instr_idx, instr) in plan.instructions.iter().enumerate() {
+        for instr in plan.instructions.iter() {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
@@ -3543,13 +3552,11 @@ impl Backend for CpuBackend {
                                 if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] =
                                     &input_slices[..]
                                 {
-                                    let (data, weight, bias, running_mean, running_var): (
-                                        &[f32],
-                                        &[f32],
-                                        &[f32],
-                                        &[f32],
-                                        &[f32],
-                                    ) = {
+                                    type F32Slices<'a> =
+                                        (&'a [f32], &'a [f32], &'a [f32], &'a [f32], &'a [f32]);
+                                    let (data, weight, bias, running_mean, running_var): F32Slices<
+                                        '_,
+                                    > = {
                                         let d = arena.data_mut();
                                         (
                                             bytemuck::cast_slice::<_, f32>(
@@ -3963,7 +3970,7 @@ impl Backend for CpuBackend {
                                             let w_sl = get_or_cache_packed::<I4x8>(
                                                 w_slice.offset,
                                                 w_slice.size,
-                                                &raw,
+                                                raw,
                                             );
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
@@ -4012,7 +4019,7 @@ impl Backend for CpuBackend {
                                                                 * 0.5
                                                                 * (1.0
                                                                     + (val
-                                                                        * 0.7978845608
+                                                                        * 0.797_884_6
                                                                         * (1.0
                                                                             + 0.044715
                                                                                 * val
@@ -4032,7 +4039,7 @@ impl Backend for CpuBackend {
                                             let w_sl = get_or_cache_packed::<I8x4>(
                                                 w_slice.offset,
                                                 w_slice.size,
-                                                &raw,
+                                                raw,
                                             );
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
@@ -4318,7 +4325,7 @@ impl Backend for CpuBackend {
                             } else if !input_slices.is_empty() {
                                 // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
-                                for (_si, slice) in input_slices.iter().enumerate() {
+                                for slice in input_slices.iter() {
                                     let input_data =
                                         unsafe { arena.view_f32(slice.offset, slice.size) };
                                     let out_f32 = unsafe {
@@ -5296,7 +5303,7 @@ impl Backend for CpuBackend {
                                 arena,
                                 out_start,
                                 out_end,
-                                |data, s, out| gt_scalar_f32(data, s, out),
+                                gt_scalar_f32,
                             );
                         }
                         "lt_scalar_f32" => {
@@ -5305,7 +5312,7 @@ impl Backend for CpuBackend {
                                 arena,
                                 out_start,
                                 out_end,
-                                |data, s, out| lt_scalar_f32(data, s, out),
+                                lt_scalar_f32,
                             );
                         }
                         "eq_scalar_f32" => {
@@ -5314,7 +5321,7 @@ impl Backend for CpuBackend {
                                 arena,
                                 out_start,
                                 out_end,
-                                |data, s, out| eq_scalar_f32(data, s, out),
+                                eq_scalar_f32,
                             );
                         }
                         "add_scalar_f32" => {
@@ -5323,7 +5330,7 @@ impl Backend for CpuBackend {
                                 arena,
                                 out_start,
                                 out_end,
-                                |data, s, out| add_scalar_f32(data, s, out),
+                                add_scalar_f32,
                             );
                         }
                         "mul_scalar_f32" => {
@@ -5332,7 +5339,7 @@ impl Backend for CpuBackend {
                                 arena,
                                 out_start,
                                 out_end,
-                                |data, s, out| mul_scalar_f32(data, s, out),
+                                mul_scalar_f32,
                             );
                         }
                         "div_scalar_f32" => {
@@ -5341,7 +5348,7 @@ impl Backend for CpuBackend {
                                 arena,
                                 out_start,
                                 out_end,
-                                |data, s, out| div_scalar_f32(data, s, out),
+                                div_scalar_f32,
                             );
                         }
                         "argmax" => {

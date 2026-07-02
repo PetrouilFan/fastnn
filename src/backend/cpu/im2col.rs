@@ -271,10 +271,8 @@ pub unsafe fn im2col_kernel_rect_avx2_stride2(
                         // The shuffle places these as  [0,2,8,10, 4,6,12,14].
                         // The permute reorders to     [0,2,4,6,  8,10,12,14].
                         let s = _mm256_shuffle_ps(v0, v1, 0b10_00_10_00);
-                        let v = _mm256_permutevar8x32_ps(
-                            s,
-                            _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7),
-                        );
+                        let v =
+                            _mm256_permutevar8x32_ps(s, _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7));
 
                         // Store directly: extract lanes via cast+extract instead of
                         // spill-to-stack to avoid store-forwarding penalty.
@@ -300,7 +298,8 @@ pub unsafe fn im2col_kernel_rect_avx2_stride2(
                         let iw = ow * 2 + kw;
                         let dst = col_ch_off + col_k_off + ow * col_w;
                         if iw >= 1 && iw <= w {
-                            *col.get_unchecked_mut(dst) = *data.get_unchecked(inp_row_base + iw - 1);
+                            *col.get_unchecked_mut(dst) =
+                                *data.get_unchecked(inp_row_base + iw - 1);
                         } else {
                             *col.get_unchecked_mut(dst) = 0.0;
                         }

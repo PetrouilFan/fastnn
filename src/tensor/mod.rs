@@ -721,7 +721,13 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
-            DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled | DType::F8 | DType::F8R | DType::F4 => {
+            DType::I4
+            | DType::I8Scaled
+            | DType::U4Scaled
+            | DType::U8Scaled
+            | DType::F8
+            | DType::F8R
+            | DType::F4 => {
                 panic!("as_f32_slice: packed/FP tensors cannot be viewed as f32.");
             }
         }
@@ -769,7 +775,13 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
             }
-            DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled | DType::F8 | DType::F8R | DType::F4 => {
+            DType::I4
+            | DType::I8Scaled
+            | DType::U4Scaled
+            | DType::U8Scaled
+            | DType::F8
+            | DType::F8R
+            | DType::F4 => {
                 panic!("as_f32_slice_mut: packed/FP tensors cannot be viewed as f32.");
             }
         }
@@ -931,119 +943,6 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cat_dim0() {
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-        let b = Tensor::from_vec(vec![5.0, 6.0], vec![1, 2]);
-        let c = Tensor::cat(&[a, b], 0);
-        assert_eq!(c.shape(), vec![3, 2]);
-        let data = c.as_f32_slice();
-        assert!((data[0] - 1.0).abs() < 1e-5);
-        assert!((data[4] - 5.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_repeat() {
-        let x = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
-        let y = x.repeat(&[3, 2]);
-        assert_eq!(y.shape(), vec![3, 4]);
-    }
-
-    #[test]
-    fn test_where_tensor() {
-        let a = Tensor::from_vec(vec![10.0, 20.0, 30.0, 40.0], vec![4]);
-        let cond = Tensor::from_vec(vec![1.0, 0.0, 1.0, 0.0], vec![4]);
-        let b = Tensor::from_vec(vec![0.0, 0.0, 0.0, 0.0], vec![4]);
-        let result = a.where_tensor(&cond, &b);
-        let data = result.as_f32_slice();
-        assert!((data[0] - 10.0).abs() < 1e-5);
-        assert!((data[1] - 0.0).abs() < 1e-5);
-        assert!((data[2] - 30.0).abs() < 1e-5);
-        assert!((data[3] - 0.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_einsum_matmul() {
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
-        let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0], vec![3, 2]);
-        let c = einsum("ij,jk->ik", &[a, b]);
-        assert_eq!(c.shape(), vec![2, 2]);
-    }
-
-    #[test]
-    fn test_einsum_dot() {
-        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]);
-        let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], vec![3]);
-        let result = einsum("i,i->", &[x, y]);
-        assert!((result.item() - 32.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_leaky_relu() {
-        let x = Tensor::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![5]);
-        let y = x.leaky_relu(0.1);
-        let data = y.as_f32_slice();
-        assert!((data[0] - (-0.2)).abs() < 1e-5);
-        assert!((data[3] - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_softplus() {
-        let x = Tensor::from_vec(vec![0.0], vec![1]);
-        let y = x.softplus(1.0, 20.0);
-        let data = y.as_f32_slice();
-        // softplus(0) = ln(1 + exp(0)) / 1 = ln(2) ≈ 0.693
-        assert!((data[0] - 0.693147).abs() < 1e-3);
-    }
-
-    #[test]
-    fn test_hardswish() {
-        let x = Tensor::from_vec(vec![0.0], vec![1]);
-        let y = x.hardswish();
-        let data = y.as_f32_slice();
-        // hardswish(0) = 0 * relu6(3) / 6 = 0
-        assert!((data[0] - 0.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_flip() {
-        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
-        let y = x.flip(&[0]);
-        let data = y.as_f32_slice();
-        assert!((data[0] - 3.0).abs() < 1e-5);
-        assert!((data[1] - 4.0).abs() < 1e-5);
-        assert!((data[2] - 1.0).abs() < 1e-5);
-        assert!((data[3] - 2.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_maximum() {
-        let a = Tensor::from_vec(vec![1.0, 5.0, 3.0], vec![3]);
-        let b = Tensor::from_vec(vec![2.0, 4.0, 4.0], vec![3]);
-        let c = a.maximum(&b);
-        let data = c.as_f32_slice();
-        assert!((data[0] - 2.0).abs() < 1e-5);
-        assert!((data[1] - 5.0).abs() < 1e-5);
-        assert!((data[2] - 4.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_log_softmax() {
-        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]);
-        let y = x.log_softmax(0);
-        let data = y.as_f32_slice();
-        // softmax([1,2,3]) = [0.0900, 0.2447, 0.6652]
-        // log_softmax = [-2.4076, -1.4076, -0.4076]
-        assert!((data[0] - (-2.4076)).abs() < 1e-3);
-        assert!((data[1] - (-1.4076)).abs() < 1e-3);
-        assert!((data[2] - (-0.4076)).abs() < 1e-3);
-    }
-}
-
 pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32 {
     let mut total_norm = 0.0f32;
     for t in tensors {
@@ -1194,21 +1093,11 @@ impl Tensor {
         let graph_outputs = build_graph(&g, &graph_inputs);
 
         let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
-        let result_bytes = (|| -> Result<Vec<Vec<u8>>, BackendError> {
-            #[cfg(feature = "gpu")]
-            if inputs.iter().any(|t| matches!(t.device(), Device::Wgpu(_))) {
-                return g.compile_and_execute::<crate::backend::wgpu::WgpuBackend>(
-                    &graph_outputs.iter().collect::<Vec<_>>(),
-                    crate::backend::wgpu::WgpuBackend,
-                    &input_bytes,
-                );
-            }
-            g.compile_and_execute::<CpuBackend>(
-                &graph_outputs.iter().collect::<Vec<_>>(),
-                CpuBackend,
-                &input_bytes,
-            )
-        })()?;
+        let result_bytes = g.compile_and_execute::<CpuBackend>(
+            &graph_outputs.iter().collect::<Vec<_>>(),
+            CpuBackend,
+            &input_bytes,
+        )?;
 
         Ok(graph_outputs
             .into_iter()
@@ -1248,5 +1137,118 @@ impl Tensor {
                 Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cat_dim0() {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let b = Tensor::from_vec(vec![5.0, 6.0], vec![1, 2]);
+        let c = Tensor::cat(&[a, b], 0);
+        assert_eq!(c.shape(), vec![3, 2]);
+        let data = c.as_f32_slice();
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[4] - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_repeat() {
+        let x = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+        let y = x.repeat(&[3, 2]);
+        assert_eq!(y.shape(), vec![3, 4]);
+    }
+
+    #[test]
+    fn test_where_tensor() {
+        let a = Tensor::from_vec(vec![10.0, 20.0, 30.0, 40.0], vec![4]);
+        let cond = Tensor::from_vec(vec![1.0, 0.0, 1.0, 0.0], vec![4]);
+        let b = Tensor::from_vec(vec![0.0, 0.0, 0.0, 0.0], vec![4]);
+        let result = a.where_tensor(&cond, &b);
+        let data = result.as_f32_slice();
+        assert!((data[0] - 10.0).abs() < 1e-5);
+        assert!((data[1] - 0.0).abs() < 1e-5);
+        assert!((data[2] - 30.0).abs() < 1e-5);
+        assert!((data[3] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_einsum_matmul() {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+        let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0], vec![3, 2]);
+        let c = einsum("ij,jk->ik", &[a, b]);
+        assert_eq!(c.shape(), vec![2, 2]);
+    }
+
+    #[test]
+    fn test_einsum_dot() {
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]);
+        let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], vec![3]);
+        let result = einsum("i,i->", &[x, y]);
+        assert!((result.item() - 32.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_leaky_relu() {
+        let x = Tensor::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![5]);
+        let y = x.leaky_relu(0.1);
+        let data = y.as_f32_slice();
+        assert!((data[0] - (-0.2)).abs() < 1e-5);
+        assert!((data[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_softplus() {
+        let x = Tensor::from_vec(vec![0.0], vec![1]);
+        let y = x.softplus(1.0, 20.0);
+        let data = y.as_f32_slice();
+        // softplus(0) = ln(1 + exp(0)) / 1 = ln(2) ≈ 0.693
+        assert!((data[0] - std::f32::consts::LN_2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_hardswish() {
+        let x = Tensor::from_vec(vec![0.0], vec![1]);
+        let y = x.hardswish();
+        let data = y.as_f32_slice();
+        // hardswish(0) = 0 * relu6(3) / 6 = 0
+        assert!((data[0] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_flip() {
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+        let y = x.flip(&[0]);
+        let data = y.as_f32_slice();
+        assert!((data[0] - 3.0).abs() < 1e-5);
+        assert!((data[1] - 4.0).abs() < 1e-5);
+        assert!((data[2] - 1.0).abs() < 1e-5);
+        assert!((data[3] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_maximum() {
+        let a = Tensor::from_vec(vec![1.0, 5.0, 3.0], vec![3]);
+        let b = Tensor::from_vec(vec![2.0, 4.0, 4.0], vec![3]);
+        let c = a.maximum(&b);
+        let data = c.as_f32_slice();
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 5.0).abs() < 1e-5);
+        assert!((data[2] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_log_softmax() {
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]);
+        let y = x.log_softmax(0);
+        let data = y.as_f32_slice();
+        // softmax([1,2,3]) = [0.0900, 0.2447, 0.6652]
+        // log_softmax = [-2.4076, -1.4076, -0.4076]
+        assert!((data[0] - (-2.4076)).abs() < 1e-3);
+        assert!((data[1] - (-1.4076)).abs() < 1e-3);
+        assert!((data[2] - (-0.4076)).abs() < 1e-3);
     }
 }

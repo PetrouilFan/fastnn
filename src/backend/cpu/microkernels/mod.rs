@@ -163,14 +163,62 @@ macro_rules! tls_pool {
     };
 }
 
-tls_pool!(f32, TLS_VEC_POOL_F32, ScopedVec, tls_alloc_f32, tls_alloc_zeroed_f32);
-tls_pool!(i8, TLS_VEC_POOL_I8, ScopedVecI8, tls_alloc_i8, tls_alloc_zeroed_i8);
-tls_pool!(u8, TLS_VEC_POOL_U8, ScopedVecU8, tls_alloc_u8, tls_alloc_zeroed_u8);
-tls_pool!(i32, TLS_VEC_POOL_I32, ScopedVecI32, tls_alloc_i32, tls_alloc_zeroed_i32);
-tls_pool!(u32, TLS_VEC_POOL_U32, ScopedVecU32, tls_alloc_u32, tls_alloc_zeroed_u32);
-tls_pool!(I8x4, TLS_VEC_POOL_I8X4, ScopedVecI8x4, tls_alloc_i8x4, tls_alloc_zeroed_i8x4);
-tls_pool!(I4x8, TLS_VEC_POOL_I4X8, ScopedVecI4x8, tls_alloc_i4x8, tls_alloc_zeroed_i4x8);
-tls_pool!(F4x8, TLS_VEC_POOL_F4X8, ScopedVecF4x8, tls_alloc_f4x8, tls_alloc_zeroed_f4x8);
+tls_pool!(
+    f32,
+    TLS_VEC_POOL_F32,
+    ScopedVec,
+    tls_alloc_f32,
+    tls_alloc_zeroed_f32
+);
+tls_pool!(
+    i8,
+    TLS_VEC_POOL_I8,
+    ScopedVecI8,
+    tls_alloc_i8,
+    tls_alloc_zeroed_i8
+);
+tls_pool!(
+    u8,
+    TLS_VEC_POOL_U8,
+    ScopedVecU8,
+    tls_alloc_u8,
+    tls_alloc_zeroed_u8
+);
+tls_pool!(
+    i32,
+    TLS_VEC_POOL_I32,
+    ScopedVecI32,
+    tls_alloc_i32,
+    tls_alloc_zeroed_i32
+);
+tls_pool!(
+    u32,
+    TLS_VEC_POOL_U32,
+    ScopedVecU32,
+    tls_alloc_u32,
+    tls_alloc_zeroed_u32
+);
+tls_pool!(
+    I8x4,
+    TLS_VEC_POOL_I8X4,
+    ScopedVecI8x4,
+    tls_alloc_i8x4,
+    tls_alloc_zeroed_i8x4
+);
+tls_pool!(
+    I4x8,
+    TLS_VEC_POOL_I4X8,
+    ScopedVecI4x8,
+    tls_alloc_i4x8,
+    tls_alloc_zeroed_i4x8
+);
+tls_pool!(
+    F4x8,
+    TLS_VEC_POOL_F4X8,
+    ScopedVecF4x8,
+    tls_alloc_f4x8,
+    tls_alloc_zeroed_f4x8
+);
 
 /// Backward-compatible alias: `TlsVecPool::alloc(...)` still returns `ScopedVec` (f32).
 pub(crate) struct TlsVecPool;

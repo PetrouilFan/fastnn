@@ -27,6 +27,8 @@
 //! full API.
 
 #![allow(clippy::needless_range_loop)]
+// SIMD compute kernels require many raw pointer + dimension parameters for zero-overhead dispatch.
+#![allow(clippy::too_many_arguments)]
 
 pub mod error;
 pub mod io;

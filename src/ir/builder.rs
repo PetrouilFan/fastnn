@@ -42,11 +42,13 @@ use crate::ir::node::*;
 // executed with the same input shapes.
 // ============================================================
 
+#[allow(clippy::type_complexity)]
+type PlanCache =
+    std::sync::LazyLock<Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>>;
+
 /// Key: hash of (graph topological structure + input byte lengths).
 /// Value: cached (ExecutablePlan, MemoryPlan, compiled_graph).
-static PLAN_CACHE: std::sync::LazyLock<
-    Mutex<HashMap<u64, (ExecutablePlan, MemoryPlan, ComputeGraph)>>,
-> = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
+static PLAN_CACHE: PlanCache = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
 
 /// Compute a ~unique hash for a graph + its input shapes.
 fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]], quantize: Option<u8>) -> u64 {
@@ -1935,7 +1937,7 @@ impl GraphBuilder {
     ) -> GraphTensor {
         let x_shape = x.shape();
         let y_shape = y.shape();
-        let output_shape = broadcast_shape(&x_shape, &y_shape);
+        let output_shape = broadcast_shape(x_shape, y_shape);
         let out_tt = TensorType::new(output_shape, IrDType::F32);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
@@ -2815,7 +2817,7 @@ mod tests {
         // Verify the actual values are correct by computing manually for batch=1
         // x = [0,1,2,...,63], w column j = [j%10, j%10, ..., j%10] (64 times)
         // logits[0,j] = sum_{k=0}^{63} k * (j%10)
-        let expected_0 = (0..64).map(|k| k as f32 * (0 % 10) as f32).sum::<f32>();
+        let expected_0 = (0..64).map(|k| k as f32 * 0 as f32).sum::<f32>();
         assert!(
             (out_1[0] - expected_0).abs() < 1e-3,
             "expected logit[0,0]={}, got {}",
@@ -3080,12 +3082,12 @@ mod tests {
         assert!((sig_out[1] - 0.7310586).abs() < 1e-5);
         // tanh
         assert!((tan_out[0] - 0.0).abs() < 1e-5);
-        assert!((tan_out[1] - 0.76159416).abs() < 1e-5);
+        assert!((tan_out[1] - 0.761_594_2).abs() < 1e-5);
         // exp
         assert!((exp_out[0] - 1.0).abs() < 1e-5);
-        assert!((exp_out[1] - 2.7182818).abs() < 1e-5);
+        assert!((exp_out[1] - std::f32::consts::E).abs() < 1e-5);
         // sqrt
-        assert!((sqrt_out[3] - 1.4142135).abs() < 1e-5);
+        assert!((sqrt_out[3] - std::f32::consts::SQRT_2).abs() < 1e-5);
         // abs
         assert!((abs_out[2] - 1.0).abs() < 1e-5);
     }

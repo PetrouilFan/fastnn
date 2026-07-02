@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "fastnn"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "bincode",
  "blas-src",

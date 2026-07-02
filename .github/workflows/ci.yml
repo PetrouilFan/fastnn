@@ -26,10 +26,10 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Rustfmt baseline
-        run: ./scripts/ci/check-rustfmt-baseline.sh
-      - name: Clippy baseline
-        run: python3 ./scripts/ci/check-clippy-baseline.py
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: Rust unit tests
         run: cargo test --lib -- --test-threads=1
       - name: Quantized pipeline tests

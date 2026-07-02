@@ -16,9 +16,8 @@
 use std::sync::LazyLock;
 
 /// Number of threads for parallel GEMM — computed once from system topology.
-static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
-    crate::backend::cpu::topology::physical_core_count().max(1)
-});
+static NUM_THREADS: LazyLock<usize> =
+    LazyLock::new(|| crate::backend::cpu::topology::physical_core_count().max(1));
 
 /// Parallel SGEMM: C ← alpha·A·B + beta·C
 ///

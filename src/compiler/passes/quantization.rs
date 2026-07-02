@@ -176,10 +176,7 @@ pub fn quantize_weights(
                         gs,
                     )
                 } else {
-                    PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(
-                        &quant_data,
-                        &quant_shape,
-                    )
+                    PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
                 };
                 let bytes = pt.as_bytes().to_vec();
                 (
@@ -198,10 +195,7 @@ pub fn quantize_weights(
                         gs,
                     )
                 } else {
-                    PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(
-                        &quant_data,
-                        &quant_shape,
-                    )
+                    PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
                 };
                 let bytes = pt.as_bytes().to_vec();
                 (
@@ -220,10 +214,7 @@ pub fn quantize_weights(
                     gs,
                 )
             } else {
-                PackedTensor::<I8x4>::from_f32_per_channel_asymmetric(
-                    &quant_data,
-                    &quant_shape,
-                )
+                PackedTensor::<I8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
             };
             let bytes = pt.as_bytes().to_vec();
             (
@@ -241,10 +232,7 @@ pub fn quantize_weights(
                     gs,
                 )
             } else {
-                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(
-                    &quant_data,
-                    &quant_shape,
-                )
+                PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
             };
             let bytes = pt.as_bytes().to_vec();
             (
@@ -411,7 +399,7 @@ pub fn quantize_weights_fp(
                 (pt.as_bytes().to_vec(), pt.scales, vec![], vec![])
             }
             FpDtype::F4x8 => {
-                let inner = if quant_shape.len() >= 2 {
+                let _inner = if quant_shape.len() >= 2 {
                     quant_shape[1..].iter().product::<usize>()
                 } else {
                     quant_data.len()
@@ -840,7 +828,8 @@ mod tests {
         let _output = gb.relu(&input);
         let mut graph = gb.to_graph();
 
-        quantize_weights(&mut graph, 4, true, None).expect("quantization should succeed on empty graph");
+        quantize_weights(&mut graph, 4, true, None)
+            .expect("quantization should succeed on empty graph");
     }
 
     #[test]

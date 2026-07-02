@@ -70,9 +70,9 @@ fn naive_broadcast_add(
     let mut out = vec![0.0; lhs.len()];
     for b in 0..batch {
         for c in 0..channels {
-            for x in 0..width {
-                let idx = b * channels * width + c * width + x;
-                out[idx] = lhs[idx] + rhs[x];
+            let base = b * channels * width + c * width;
+            for (x, &r) in rhs.iter().enumerate().take(width) {
+                out[base + x] = lhs[base + x] + r;
             }
         }
     }
@@ -535,7 +535,11 @@ fn matmul_f4_reference_oracle() {
             m,
             k,
             n,
-            |scales| IrDType::F4 { scales, zeros: vec![], codebooks: vec![] },
+            |scales| IrDType::F4 {
+                scales,
+                zeros: vec![],
+                codebooks: vec![],
+            },
             "matmul_f4",
             Tolerance {
                 abs: 2.0,

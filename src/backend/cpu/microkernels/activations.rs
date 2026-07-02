@@ -343,8 +343,8 @@ pub fn tanh_f32_scalar(x: f32) -> f32 {
 // from within a function that guarantees AVX2+FMA availability.
 pub(crate) unsafe fn exp_avx2_vec(x: __m256) -> __m256 {
     let vlog2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
-    let vln2_hi = _mm256_set1_ps(0.693359375f32);
-    let vln2_lo = _mm256_set1_ps(-2.12194440e-4f32);
+    let vln2_hi = _mm256_set1_ps(0.693_359_4_f32);
+    let vln2_lo = _mm256_set1_ps(-2.121_944_4e-4_f32);
     let v_120 = _mm256_set1_ps(1.0f32 / 120.0f32);
     let v_24 = _mm256_set1_ps(1.0f32 / 24.0f32);
     let v_6 = _mm256_set1_ps(1.0f32 / 6.0f32);
@@ -570,7 +570,7 @@ pub unsafe fn gelu_f32_avx2(input: &[f32], output: &mut [f32]) {
     let mut i = 0;
     let vhalf = _mm256_set1_ps(0.5f32);
     let vone = _mm256_set1_ps(1.0f32);
-    let vsqrt2pi = _mm256_set1_ps(0.7978845608028654f32); // √(2/π)
+    let vsqrt2pi = _mm256_set1_ps(0.797_884_6_f32); // √(2/π)
     let vcoeff = _mm256_set1_ps(0.044715f32);
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
@@ -1000,24 +1000,33 @@ pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
         while i + 8 <= len {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
             let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(_mm256_add_ps(va, vb), zero));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+            );
             i += 8;
         }
     } else if a_len == 1 && b_len == len {
         let va = _mm256_broadcast_ss(&a[0]);
         while i + 8 <= len {
             let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(_mm256_add_ps(va, vb), zero));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+            );
             i += 8;
         }
     } else if a_len == len && b_len == 1 {
         let vb = _mm256_broadcast_ss(&b[0]);
         while i + 8 <= len {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(_mm256_add_ps(va, vb), zero));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+            );
             i += 8;
         }
-    } else if b_len == len && a_len > 1 && len % a_len == 0 {
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
         let tile = a_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1025,7 +1034,10 @@ pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             while j + 8 <= cs + tile {
                 let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
                 let vb = _mm256_loadu_ps(b.as_ptr().add(j));
-                _mm256_storeu_ps(out.as_mut_ptr().add(j), _mm256_max_ps(_mm256_add_ps(va, vb), zero));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+                );
                 j += 8;
             }
             for r in j..cs + tile {
@@ -1033,7 +1045,7 @@ pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             }
         }
         i = len;
-    } else if a_len == len && b_len > 1 && len % b_len == 0 {
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
         let tile = b_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1041,7 +1053,10 @@ pub unsafe fn fused_add_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             while j + 8 <= cs + tile {
                 let va = _mm256_loadu_ps(a.as_ptr().add(j));
                 let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
-                _mm256_storeu_ps(out.as_mut_ptr().add(j), _mm256_max_ps(_mm256_add_ps(va, vb), zero));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_add_ps(va, vb), zero),
+                );
                 j += 8;
             }
             for r in j..cs + tile {
@@ -1083,24 +1098,33 @@ pub unsafe fn fused_mul_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
         while i + 8 <= len {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
             let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(_mm256_mul_ps(va, vb), zero));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+            );
             i += 8;
         }
     } else if a_len == 1 && b_len == len {
         let va = _mm256_broadcast_ss(&a[0]);
         while i + 8 <= len {
             let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(_mm256_mul_ps(va, vb), zero));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+            );
             i += 8;
         }
     } else if a_len == len && b_len == 1 {
         let vb = _mm256_broadcast_ss(&b[0]);
         while i + 8 <= len {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            _mm256_storeu_ps(out.as_mut_ptr().add(i), _mm256_max_ps(_mm256_mul_ps(va, vb), zero));
+            _mm256_storeu_ps(
+                out.as_mut_ptr().add(i),
+                _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+            );
             i += 8;
         }
-    } else if b_len == len && a_len > 1 && len % a_len == 0 {
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
         let tile = a_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1108,7 +1132,10 @@ pub unsafe fn fused_mul_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             while j + 8 <= cs + tile {
                 let va = _mm256_loadu_ps(a.as_ptr().add(j - cs));
                 let vb = _mm256_loadu_ps(b.as_ptr().add(j));
-                _mm256_storeu_ps(out.as_mut_ptr().add(j), _mm256_max_ps(_mm256_mul_ps(va, vb), zero));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+                );
                 j += 8;
             }
             for r in j..cs + tile {
@@ -1116,7 +1143,7 @@ pub unsafe fn fused_mul_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             }
         }
         i = len;
-    } else if a_len == len && b_len > 1 && len % b_len == 0 {
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
         let tile = b_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1124,7 +1151,10 @@ pub unsafe fn fused_mul_relu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             while j + 8 <= cs + tile {
                 let va = _mm256_loadu_ps(a.as_ptr().add(j));
                 let vb = _mm256_loadu_ps(b.as_ptr().add(j - cs));
-                _mm256_storeu_ps(out.as_mut_ptr().add(j), _mm256_max_ps(_mm256_mul_ps(va, vb), zero));
+                _mm256_storeu_ps(
+                    out.as_mut_ptr().add(j),
+                    _mm256_max_ps(_mm256_mul_ps(va, vb), zero),
+                );
                 j += 8;
             }
             for r in j..cs + tile {
@@ -1186,7 +1216,7 @@ pub unsafe fn fused_add_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
             silu_avx2_core(va, vb, one, neg_zero, out, &mut i);
         }
-    } else if b_len == len && a_len > 1 && len % a_len == 0 {
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
         let tile = a_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1201,7 +1231,7 @@ pub unsafe fn fused_add_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             }
         }
         i = len;
-    } else if a_len == len && b_len > 1 && len % b_len == 0 {
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
         let tile = b_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1283,7 +1313,7 @@ pub unsafe fn fused_mul_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
             silu_mul_avx2_core(va, vb, one, neg_zero, out, &mut i);
         }
-    } else if b_len == len && a_len > 1 && len % a_len == 0 {
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
         let tile = a_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1298,7 +1328,7 @@ pub unsafe fn fused_mul_silu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             }
         }
         i = len;
-    } else if a_len == len && b_len > 1 && len % b_len == 0 {
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
         let tile = b_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1391,7 +1421,7 @@ pub unsafe fn fused_add_gelu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             let va = _mm256_loadu_ps(a.as_ptr().add(i));
             add_gelu_avx2_core(va, vb, c0, c1, half, one, out, &mut i);
         }
-    } else if b_len == len && a_len > 1 && len % a_len == 0 {
+    } else if b_len == len && a_len > 1 && len.is_multiple_of(a_len) {
         let tile = a_len;
         for t in 0..len / tile {
             let cs = t * tile;
@@ -1406,7 +1436,7 @@ pub unsafe fn fused_add_gelu_f32_avx2(a: &[f32], b: &[f32], out: &mut [f32]) {
             }
         }
         i = len;
-    } else if a_len == len && b_len > 1 && len % b_len == 0 {
+    } else if a_len == len && b_len > 1 && len.is_multiple_of(b_len) {
         let tile = b_len;
         for t in 0..len / tile {
             let cs = t * tile;

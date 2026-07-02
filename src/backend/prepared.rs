@@ -443,7 +443,12 @@ impl PreparedConstantArena {
     /// Register a constant from raw bytes.
     /// The `kind` determines the PackedWeightKind and storage variant.
     /// Returns the id (or existing id if name is duplicate).
-    pub fn insert_raw(&mut self, name: impl Into<String>, data: Vec<u8>, kind: PackedWeightKind) -> PackedWeightId {
+    pub fn insert_raw(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<u8>,
+        kind: PackedWeightKind,
+    ) -> PackedWeightId {
         let name = name.into();
         if let Some(id) = self.name_to_id.get(&name) {
             return *id;
@@ -735,7 +740,10 @@ pub fn try_prepare_matmul(
 /// Prefers the runtime `weight_meta` bit_width when available (4 → U4,
 /// 8 → I8).  Falls back to kernel-name heuristics for quantized variants
 /// that don't carry metadata.
-fn detect_weight_kind(weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>, kernel_name: &str) -> PackedWeightKind {
+fn detect_weight_kind(
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
+    kernel_name: &str,
+) -> PackedWeightKind {
     if let Some(meta) = weight_meta {
         match meta.bit_width {
             4 => return PackedWeightKind::U4,
@@ -817,13 +825,23 @@ pub fn detect_static_weights(
                 input_slices,
                 weight_meta,
                 ..
-            } if kernel_name.starts_with("conv2d") => (input_slices.as_slice(), kernel_name.as_str(), weight_meta, "conv"),
+            } if kernel_name.starts_with("conv2d") => (
+                input_slices.as_slice(),
+                kernel_name.as_str(),
+                weight_meta,
+                "conv",
+            ),
             Instruction::CallKernel {
                 kernel_name,
                 input_slices,
                 weight_meta,
                 ..
-            } if is_matmul_kernel_name(kernel_name) => (input_slices.as_slice(), kernel_name.as_str(), weight_meta, "matmul"),
+            } if is_matmul_kernel_name(kernel_name) => (
+                input_slices.as_slice(),
+                kernel_name.as_str(),
+                weight_meta,
+                "matmul",
+            ),
             _ => continue,
         };
         let weight_kind = detect_weight_kind(weight_meta, kernel_name);
@@ -849,9 +867,15 @@ pub fn detect_static_weights(
         // matmul kernels. For plain "matmul" the slot is absent and
         // this branch is a no-op.
         if let Some(bias_slice) = input_slices.get(2) {
-            if let Some(binding) =
-                bind_consumer_input(&const_slots, arena, instruction_index, 2, bias_slice, role, PackedWeightKind::Fp32)
-            {
+            if let Some(binding) = bind_consumer_input(
+                &const_slots,
+                arena,
+                instruction_index,
+                2,
+                bias_slice,
+                role,
+                PackedWeightKind::Fp32,
+            ) {
                 bindings.push(binding);
             }
         }
@@ -1040,7 +1064,7 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
             let empty: Vec<&StaticWeightBinding> = Vec::new();
             let inst_bindings = by_instr
                 .get(&instruction_index)
-                .map(|v| v.iter().copied().collect::<Vec<_>>())
+                .map(|v| v.to_vec())
                 .unwrap_or(empty);
             let prepared = try_prepare_conv2d(inst, instruction_index)
                 .or_else(|| try_prepare_matmul(inst, instruction_index))
@@ -1049,7 +1073,6 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         })
         .collect();
 
-    let mut arena = arena;
     materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions);
 
     let mut prepared = PreparedExecutablePlan {
@@ -1490,7 +1513,9 @@ pub fn build_persistent_prepared_weights(
     for inst in &prepared.instructions {
         match inst {
             Conv2d(conv) => {
-                let is_quantized = conv.packed_weight.map_or(false, |id| id.kind != PackedWeightKind::Fp32);
+                let is_quantized = conv
+                    .packed_weight
+                    .is_some_and(|id| id.kind != PackedWeightKind::Fp32);
                 if is_quantized {
                     register_quantized_slot(&mut view, arena, conv.packed_weight, conv.weight);
                 } else {
@@ -1498,7 +1523,9 @@ pub fn build_persistent_prepared_weights(
                 }
             }
             MatMul(matmul) => {
-                let is_quantized = matmul.packed_weight.map_or(false, |id| id.kind != PackedWeightKind::Fp32);
+                let is_quantized = matmul
+                    .packed_weight
+                    .is_some_and(|id| id.kind != PackedWeightKind::Fp32);
                 if is_quantized {
                     register_quantized_slot(&mut view, arena, matmul.packed_weight, matmul.b);
                 } else {
@@ -1530,7 +1557,7 @@ fn register_fp32_slot(
         return;
     };
     let expected_bytes = slot.size;
-    let actual_bytes = payload.len() * std::mem::size_of::<f32>();
+    let actual_bytes = std::mem::size_of_val(payload);
     if expected_bytes != actual_bytes {
         return;
     }
@@ -1544,11 +1571,22 @@ fn register_quantized_slot(
     packed_id: Option<PackedWeightId>,
     slot: BufferSlice,
 ) {
-    let Some(id) = packed_id else { return; };
-    if !matches!(id.kind, PackedWeightKind::I8 | PackedWeightKind::U4 | PackedWeightKind::F8 | PackedWeightKind::F8R | PackedWeightKind::F4) {
+    let Some(id) = packed_id else {
+        return;
+    };
+    if !matches!(
+        id.kind,
+        PackedWeightKind::I8
+            | PackedWeightKind::U4
+            | PackedWeightKind::F8
+            | PackedWeightKind::F8R
+            | PackedWeightKind::F4
+    ) {
         return;
     }
-    let Some(payload) = arena.get_raw(id) else { return; };
+    let Some(payload) = arena.get_raw(id) else {
+        return;
+    };
     let expected_bytes = slot.size;
     let actual_bytes = payload.len();
     if expected_bytes != actual_bytes {
@@ -3244,8 +3282,8 @@ mod tests {
 
         // Build a plan that yields two arena entries (one Conv2d
         // weight + one fused matmul weight).
-        let wc_a = make_write_const(BufferSlice::new(0, 32), &vec![0.0_f32; 8]);
-        let wc_b = make_write_const(BufferSlice::new(64, 24), &vec![1.0_f32; 6]);
+        let wc_a = make_write_const(BufferSlice::new(0, 32), &[0.0_f32; 8]);
+        let wc_b = make_write_const(BufferSlice::new(64, 24), &[1.0_f32; 6]);
         let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
         if let Instruction::CallKernel { input_slices, .. } = &mut conv {
             input_slices[0] = BufferSlice::new(0, 768);
@@ -3294,8 +3332,8 @@ mod tests {
     #[test]
     fn constant_arena_total_bytes_sums_entry_sizes() {
         // 8 f32 (32 bytes) + 6 f32 (24 bytes) = 56 bytes.
-        let wc_a = make_write_const(BufferSlice::new(0, 32), &vec![0.0_f32; 8]);
-        let wc_b = make_write_const(BufferSlice::new(64, 24), &vec![1.0_f32; 6]);
+        let wc_a = make_write_const(BufferSlice::new(0, 32), &[0.0_f32; 8]);
+        let wc_b = make_write_const(BufferSlice::new(64, 24), &[1.0_f32; 6]);
         let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
         if let Instruction::CallKernel { input_slices, .. } = &mut conv {
             input_slices[0] = BufferSlice::new(0, 768);
@@ -3323,7 +3361,7 @@ mod tests {
     fn constant_arena_total_bytes_matches_arena_helper() {
         // Cross-check: the helper should report the same value as
         // reading the arena directly.
-        let wc = make_write_const(BufferSlice::new(0, 16), &vec![0.0_f32; 4]);
+        let wc = make_write_const(BufferSlice::new(0, 16), &[0.0_f32; 4]);
         let mut conv = make_conv2d_instruction("conv2d", Conv2dParams::default());
         if let Instruction::CallKernel { input_slices, .. } = &mut conv {
             input_slices[0] = BufferSlice::new(0, 768);
@@ -3487,7 +3525,7 @@ mod tests {
         assert_eq!(view.len(), 1);
 
         let got = view.get(&(128, 16)).expect("entry must be present");
-        assert_eq!(got.as_ref(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(got, &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(view.get(&(0, 0)), None);
     }
 
@@ -3515,6 +3553,6 @@ mod tests {
         view.insert((0, 8), payload.clone());
         let cloned = view.clone();
         let got = cloned.get(&(0, 8)).expect("cloned entry must be present");
-        assert_eq!(got.as_ref(), payload.as_ref());
+        assert_eq!(got, payload.as_ref());
     }
 }

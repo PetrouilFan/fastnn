@@ -412,8 +412,8 @@ pub unsafe fn upsample_nearest2d_f32_avx2(
                             *input.get_unchecked(in_base + 2),
                             *input.get_unchecked(in_base + 1),
                             *input.get_unchecked(in_base + 1),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
                         )
                     }
                     4 => {
@@ -423,10 +423,10 @@ pub unsafe fn upsample_nearest2d_f32_avx2(
                             *input.get_unchecked(in_base + 1),
                             *input.get_unchecked(in_base + 1),
                             *input.get_unchecked(in_base + 1),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
-                            *input.get_unchecked(in_base + 0),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
+                            *input.get_unchecked(in_base),
                         )
                     }
                     _ => unreachable!(),
@@ -530,7 +530,7 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
         let mut j = 0;
         while j + 8 <= n {
             // Load 8 rows of 8 elements each
-            let r0 = _mm256_loadu_ps(input.as_ptr().add((i + 0) * n + j));
+            let r0 = _mm256_loadu_ps(input.as_ptr().add(i * n + j));
             let r1 = _mm256_loadu_ps(input.as_ptr().add((i + 1) * n + j));
             let r2 = _mm256_loadu_ps(input.as_ptr().add((i + 2) * n + j));
             let r3 = _mm256_loadu_ps(input.as_ptr().add((i + 3) * n + j));
@@ -571,7 +571,7 @@ pub unsafe fn transpose_f32_avx2(input: &[f32], output: &mut [f32], m: usize, n:
             let out7 = _mm256_permute2f128_ps(q3, q7, 0x31);
 
             // Store 8 cols × 8 rows in transposed position
-            _mm256_storeu_ps(output.as_mut_ptr().add((j + 0) * m + i), out0);
+            _mm256_storeu_ps(output.as_mut_ptr().add(j * m + i), out0);
             _mm256_storeu_ps(output.as_mut_ptr().add((j + 1) * m + i), out1);
             _mm256_storeu_ps(output.as_mut_ptr().add((j + 2) * m + i), out2);
             _mm256_storeu_ps(output.as_mut_ptr().add((j + 3) * m + i), out3);

@@ -106,7 +106,7 @@ impl MemoryPlan {
                         // The perm comes from node attrs (e.g. "0,3,1,2")
                         let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
                         let mut params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
-                        params.push(rank as usize);
+                        params.push(rank);
                         params.extend(input_shape.iter().map(|&d| d as usize));
                         if perm_str.is_empty() {
                             // Default: reverse
@@ -193,20 +193,16 @@ impl MemoryPlan {
                     let kw = weight_shape.get(3).copied().unwrap_or(0) as usize;
                     let c_per_group = c / groups;
                     let f_out = weight_shape.first().copied().unwrap_or(1) as usize;
-                    let h_out = if stride > 0 {
-                        (h + 2 * padding).saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
-                            / stride
-                            + 1
-                    } else {
-                        1
-                    };
-                    let w_out = if stride > 0 {
-                        (w + 2 * padding).saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
-                            / stride
-                            + 1
-                    } else {
-                        1
-                    };
+                    let h_out = (h + 2 * padding)
+                        .saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
+                        .checked_div(stride)
+                        .map(|v| v + 1)
+                        .unwrap_or(1);
+                    let w_out = (w + 2 * padding)
+                        .saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
+                        .checked_div(stride)
+                        .map(|v| v + 1)
+                        .unwrap_or(1);
                     let spatial_size = h_out * w_out;
                     let col_w = c_per_group * kh * kw;
                     // Layout: [stride, padding, dilation, groups, c, h, w, kh, kw,

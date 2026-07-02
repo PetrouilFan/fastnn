@@ -174,9 +174,10 @@ struct CachedBackwardPlan {
     recorded_input_ids: Vec<NodeId>,
 }
 
-static BACKWARD_GRAPH_CACHE: std::sync::LazyLock<
-    parking_lot::Mutex<(HashMap<u64, CachedBackwardPlan>, Vec<u64>)>,
-> = std::sync::LazyLock::new(|| {
+type BackwardCache =
+    std::sync::LazyLock<parking_lot::Mutex<(HashMap<u64, CachedBackwardPlan>, Vec<u64>)>>;
+
+static BACKWARD_GRAPH_CACHE: BackwardCache = std::sync::LazyLock::new(|| {
     parking_lot::Mutex::new((HashMap::with_capacity(32), Vec::with_capacity(32)))
 });
 
@@ -475,7 +476,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             })
             .collect();
 
-        let node_ptr = Arc::as_ptr(&node) as usize;
+        let node_ptr = Arc::as_ptr(node) as usize;
         let forward_tensor = grad_fn_to_tensor
             .get(&node_ptr)
             .cloned()
@@ -577,7 +578,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             | "PermuteBackward" | "SliceBackward" => forward_builder.add(
                 &input_gts[0],
                 &forward_builder.constant(
-                    &0.0f32.to_le_bytes().to_vec(),
+                    0.0f32.to_le_bytes().as_ref(),
                     crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                 ),
             ),
@@ -591,7 +592,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             | "ConvTranspose2dBackward" => forward_builder.add(
                 &input_gts[0],
                 &forward_builder.constant(
-                    &0.0f32.to_le_bytes().to_vec(),
+                    0.0f32.to_le_bytes().as_ref(),
                     crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                 ),
             ),
@@ -636,7 +637,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                     forward_builder.add(
                         &input_gts[0],
                         &forward_builder.constant(
-                            &0.0f32.to_le_bytes().to_vec(),
+                            0.0f32.to_le_bytes().as_ref(),
                             crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                         ),
                     )
@@ -645,7 +646,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             "AdaptiveAvgPool2dBackward" | "UpsampleBackward" => forward_builder.add(
                 &input_gts[0],
                 &forward_builder.constant(
-                    &0.0f32.to_le_bytes().to_vec(),
+                    0.0f32.to_le_bytes().as_ref(),
                     crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                 ),
             ),
@@ -659,7 +660,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             "LossBackward" | "CheckpointBackward" => forward_builder.add(
                 &input_gts[0],
                 &forward_builder.constant(
-                    &0.0f32.to_le_bytes().to_vec(),
+                    0.0f32.to_le_bytes().as_ref(),
                     crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                 ),
             ),
@@ -686,7 +687,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 forward_builder.add(
                     &input_gts[0],
                     &forward_builder.constant(
-                        &0.0f32.to_le_bytes().to_vec(),
+                        0.0f32.to_le_bytes().as_ref(),
                         crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                     ),
                 )
@@ -694,7 +695,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
             _ => forward_builder.add(
                 &input_gts[0],
                 &forward_builder.constant(
-                    &0.0f32.to_le_bytes().to_vec(),
+                    0.0f32.to_le_bytes().as_ref(),
                     crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
                 ),
             ),
@@ -756,7 +757,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
 
-        let mut executor = GraphExecutor::new(CpuBackend);
+    let mut executor = GraphExecutor::new(CpuBackend);
     results = match (|| {
         let (mut plan, memory_plan, compiled_graph) =
             executor.compile_with_plan_and_quantize(combined, None, None)?;
@@ -852,7 +853,7 @@ mod tests {
 
         let grad_a = a.grad().expect("a should have grad");
         let grad_vals_a: Vec<f32> = unsafe {
-            let ptr = grad_a.data_ptr_f32() as *const f32;
+            let ptr = grad_a.data_ptr_f32();
             (0..4).map(|i| *ptr.add(i)).collect()
         };
         // d(loss)/da = d(mean(a+b))/da = 1/4 = 0.25
@@ -862,7 +863,7 @@ mod tests {
         // b should also have grad = 0.25
         let grad_b = b.grad().expect("b should have grad");
         let grad_vals_b: Vec<f32> = unsafe {
-            let ptr = grad_b.data_ptr_f32() as *const f32;
+            let ptr = grad_b.data_ptr_f32();
             (0..4).map(|i| *ptr.add(i)).collect()
         };
         for &g in &grad_vals_b {
@@ -883,7 +884,7 @@ mod tests {
         let grad_a = a.grad().expect("a should have grad");
         let _grad_b = b.grad().expect("b should have grad");
         let vals_a: Vec<f32> = unsafe {
-            let ptr = grad_a.data_ptr_f32() as *const f32;
+            let ptr = grad_a.data_ptr_f32();
             (0..4).map(|i| *ptr.add(i)).collect()
         };
         // d(mean(a*b))/da_i = b_i / 4
@@ -949,7 +950,7 @@ mod tests {
         assert_eq!(a.shape(), grad_a.shape(), "grad shape should match input");
 
         let vals: Vec<f32> = unsafe {
-            let ptr = grad_a.data_ptr_f32() as *const f32;
+            let ptr = grad_a.data_ptr_f32();
             (0..4).map(|i| *ptr.add(i)).collect()
         };
         // Non-negative inputs should have non-zero gradients (relu' = 1 for x>0)
@@ -990,7 +991,7 @@ mod tests {
         // First backward
         backward(&loss, None);
         let grad_a_1 = a.grad().expect("a should have grad after first backward");
-        let val_1: f32 = unsafe { *(grad_a_1.data_ptr_f32() as *const f32) };
+        let val_1: f32 = unsafe { *grad_a_1.data_ptr_f32() };
         // d(sum(a+b))/da = 1 for each element → sum of grads = 4
         assert!(
             (val_1 - 1.0).abs() < 1e-5,
@@ -1001,7 +1002,7 @@ mod tests {
         // Second backward (gradients accumulate)
         backward(&loss, None);
         let grad_a_2 = a.grad().expect("a should have grad after second backward");
-        let val_2: f32 = unsafe { *(grad_a_2.data_ptr_f32() as *const f32) };
+        let val_2: f32 = unsafe { *grad_a_2.data_ptr_f32() };
         // Should accumulate: 1 + 1 = 2
         assert!(
             (val_2 - 2.0).abs() < 1e-5,
@@ -1077,7 +1078,7 @@ mod tests {
 
         // Verify gradients are non-zero
         let w1_grad_sum: f32 = unsafe {
-            let ptr = w1_grad.data_ptr_f32() as *const f32;
+            let ptr = w1_grad.data_ptr_f32();
             (0..32).map(|i| *ptr.add(i)).sum()
         };
         assert!(
@@ -1121,11 +1122,11 @@ mod tests {
         let grad_b = b.grad().expect("b should have grad");
 
         let grad_a_sum: f32 = unsafe {
-            let ptr = grad_a.data_ptr_f32() as *const f32;
+            let ptr = grad_a.data_ptr_f32();
             (0..4).map(|i| *ptr.add(i)).sum()
         };
         let grad_b_sum: f32 = unsafe {
-            let ptr = grad_b.data_ptr_f32() as *const f32;
+            let ptr = grad_b.data_ptr_f32();
             (0..4).map(|i| *ptr.add(i)).sum()
         };
 
@@ -1544,13 +1545,13 @@ pub fn build_backward_graph(
                     let half = create_constant_scalar(0.5f32, &[], IrDType::F32, &mut grad_graph);
                     let one = create_constant_scalar(1.0f32, &[], IrDType::F32, &mut grad_graph);
                     let sqrt_2_over_pi =
-                        create_constant_scalar(0.79788456f32, &[], IrDType::F32, &mut grad_graph);
+                        create_constant_scalar(0.797_884_6_f32, &[], IrDType::F32, &mut grad_graph);
                     let a_const =
                         create_constant_scalar(0.044715f32, &[], IrDType::F32, &mut grad_graph);
                     let three_a =
                         create_constant_scalar(0.134145f32, &[], IrDType::F32, &mut grad_graph);
                     let half_k =
-                        create_constant_scalar(0.39894228f32, &[], IrDType::F32, &mut grad_graph);
+                        create_constant_scalar(0.398_942_3_f32, &[], IrDType::F32, &mut grad_graph);
                     // x², x³
                     let x2 = grad_graph.add_node(
                         Opcode::Mul,
@@ -3036,7 +3037,7 @@ pub fn build_backward_graph(
                             vec![]
                         };
                         let dim_pads: Vec<(i64, i64)> = if pad_values.len() >= 2
-                            && pad_values.len() % 2 == 0
+                            && pad_values.len().is_multiple_of(2)
                         {
                             let n_pairs = pad_values.len() / 2;
                             (0..n_pairs)

@@ -737,7 +737,7 @@ pub unsafe fn biasadd_f32_avx2(
     let mut i = 0;
     while i + 8 <= len {
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
-        let b0 = bias[((i + 0) / channel_stride) % bias_len];
+        let b0 = bias[(i / channel_stride) % bias_len];
         let b1 = bias[((i + 1) / channel_stride) % bias_len];
         let b2 = bias[((i + 2) / channel_stride) % bias_len];
         let b3 = bias[((i + 3) / channel_stride) % bias_len];
@@ -865,7 +865,7 @@ pub unsafe fn norm_layernorm_f32_avx2(
             let d = input[j] - mean;
             var += d * d;
         }
-        var = var / n;
+        var /= n;
         let inv_std = 1.0 / (var + eps).sqrt();
         // Pass 3: vectorized normalize
         let vinv_std = _mm256_set1_ps(inv_std);
@@ -937,7 +937,7 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
             let d = main[j] + residual[j] - mean;
             var += d * d;
         }
-        var = var / n;
+        var /= n;
         let inv_std = 1.0 / (var + eps).sqrt();
         let vinv_std = _mm256_set1_ps(inv_std);
 

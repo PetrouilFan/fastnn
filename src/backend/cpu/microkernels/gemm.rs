@@ -737,9 +737,8 @@ fn gemv_f4x8_dispatch(weights: &PackedTensor<F4x8>, activation: &[f32], output: 
 
     if has_avx2() {
         for row in 0..m {
-            let dot = unsafe {
-                gemv_row_f4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed)
-            };
+            let dot =
+                unsafe { gemv_row_f4x8_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
             output[row] = apply_affine_dot(
                 dot,
                 weights.scale_for_row(row),
@@ -913,10 +912,7 @@ unsafe fn e4m3_to_f32_avx2(v: __m256i, exp_bias_adj: __m256i, implicit_one: __m2
     let man = _mm256_slli_epi32(_mm256_and_si256(v, _mm256_set1_epi32(0x7)), 20);
     let has_exp = _mm256_cmpgt_epi32(exp_raw, _mm256_setzero_si256());
     let impl1 = _mm256_and_si256(has_exp, implicit_one);
-    let bits = _mm256_or_si256(
-        _mm256_or_si256(sign, exp),
-        _mm256_or_si256(man, impl1),
-    );
+    let bits = _mm256_or_si256(_mm256_or_si256(sign, exp), _mm256_or_si256(man, impl1));
     _mm256_castsi256_ps(bits)
 }
 
@@ -932,10 +928,7 @@ unsafe fn e5m2_to_f32_avx2(v: __m256i, exp_bias_adj: __m256i, implicit_one: __m2
     let man = _mm256_slli_epi32(_mm256_and_si256(v, _mm256_set1_epi32(0x3)), 21);
     let has_exp = _mm256_cmpgt_epi32(exp_raw, _mm256_setzero_si256());
     let impl1 = _mm256_and_si256(has_exp, implicit_one);
-    let bits = _mm256_or_si256(
-        _mm256_or_si256(sign, exp),
-        _mm256_or_si256(man, impl1),
-    );
+    let bits = _mm256_or_si256(_mm256_or_si256(sign, exp), _mm256_or_si256(man, impl1));
     _mm256_castsi256_ps(bits)
 }
 
@@ -950,9 +943,8 @@ fn gemv_f8x4_dispatch(weights: &PackedTensor<F8x4>, activation: &[f32], output: 
 
     if has_avx2() {
         for row in 0..m {
-            let dot = unsafe {
-                gemv_row_f8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed)
-            };
+            let dot =
+                unsafe { gemv_row_f8x4_avx2(weights_u32, activation, row * k_packed, k, k_packed) };
             output[row] = apply_affine_dot(
                 dot,
                 weights.scale_for_row(row),
@@ -1041,8 +1033,8 @@ unsafe fn gemv_row_f8x4_avx2(
             );
         }
 
-        let w01 = (weights_u32[row_offset + p] as u64)
-            | ((weights_u32[row_offset + p + 1] as u64) << 32);
+        let w01 =
+            (weights_u32[row_offset + p] as u64) | ((weights_u32[row_offset + p + 1] as u64) << 32);
         let bytes_vec = _mm_cvtsi64_si128(w01 as i64);
         let v = _mm256_cvtepu8_epi32(bytes_vec);
 
@@ -1101,8 +1093,8 @@ unsafe fn gemv_row_f8x4r_avx2(
             );
         }
 
-        let w01 = (weights_u32[row_offset + p] as u64)
-            | ((weights_u32[row_offset + p + 1] as u64) << 32);
+        let w01 =
+            (weights_u32[row_offset + p] as u64) | ((weights_u32[row_offset + p + 1] as u64) << 32);
         let bytes_vec = _mm_cvtsi64_si128(w01 as i64);
         let v = _mm256_cvtepu8_epi32(bytes_vec);
 
@@ -2075,7 +2067,8 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
             for row in 0..m {
                 let scale = weights.scale_for_row(row);
                 let zero = weights.zero_for_row(row);
-                output[bi * m + row] = apply_affine_dot(output[bi * m + row], scale, zero, input_sum);
+                output[bi * m + row] =
+                    apply_affine_dot(output[bi * m + row], scale, zero, input_sum);
             }
         }
     }

@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_pack_unpack_roundtrip_f32x1() {
-        let vals = [3.14159f32];
+        let vals = [std::f32::consts::PI];
         let packed = F32x1::pack_from_f32(vals);
         let unpacked = packed.unpack_to_f32();
         assert_eq!(unpacked[0], vals[0]);

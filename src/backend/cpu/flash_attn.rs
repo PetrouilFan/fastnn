@@ -115,7 +115,15 @@ fn flash_attention_single(
             let k_tile = &k[kv_start * dk..kv_end * dk];
             let v_tile = &v[kv_start * dv..kv_end * dv];
 
-            matmul_tile(q_tile, k_tile, br, dk, bc, scale, &mut matmul_buf[..br * bc]);
+            matmul_tile(
+                q_tile,
+                k_tile,
+                br,
+                dk,
+                bc,
+                scale,
+                &mut matmul_buf[..br * bc],
+            );
 
             for i in 0..br {
                 let s_row = &matmul_buf[i * bc..(i + 1) * bc];
