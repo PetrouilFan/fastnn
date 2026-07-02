@@ -84,18 +84,18 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     graph.set_outputs(vec![mm_id]);
 
     infer_shapes(&mut graph).unwrap();
-    quantize_weights(&mut graph, 8, None).unwrap();
+    quantize_weights(&mut graph, 8, true, None).unwrap();
     eliminate_dead_code(&mut graph);
 
     let matmul_node = graph.get_node(mm_id).unwrap().clone();
     let weight_id = matmul_node.inputs[1];
     let weight_node = graph.get_node_mut(weight_id).unwrap();
-    weight_node.output_type.dtype = IrDType::U8 {
+    weight_node.output_type.dtype = IrDType::I8Scaled {
         scales: vec![],
         zero_points: vec![],
     };
     if let Opcode::Constant(TensorValue::Data { tensor_type, .. }) = &mut weight_node.opcode {
-        tensor_type.dtype = IrDType::U8 {
+        tensor_type.dtype = IrDType::I8Scaled {
             scales: vec![],
             zero_points: vec![],
         };
