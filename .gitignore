@@ -109,6 +109,10 @@ BENCHMARKS.md
 # AGENTS.md knowledge base files (internal artifacts)
 **/AGENTS.md
 
+# IDE/agent working directories
+.omo/
+.opencode/
+
 # Temporary analysis/documentation files
 *ARCHITECTURE_ANALYSIS.md
 *FINAL_REPORT.md
