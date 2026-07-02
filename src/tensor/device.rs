@@ -69,7 +69,7 @@ impl TensorImpl {
                         .iter()
                         .map(|&v| if v != 0 { 1.0 } else { 0.0 })
                         .collect(),
-                    DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+                    DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled | DType::F8 | DType::F8R | DType::F4 => {
                         panic!("to_dtype: packed/FP tensors cannot be converted via the Tensor-level conversion path. Use the IR pipeline with explicit quantize/dequantize nodes.")
                     }
                 };
@@ -126,7 +126,7 @@ impl TensorImpl {
                             new_bytes[i] = if v != 0.0 { 1 } else { 0 };
                         }
                     }
-                    DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+                    DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled | DType::F8 | DType::F8R | DType::F4 => {
                         panic!("to_dtype: packed/FP tensors cannot be converted via the Tensor-level path. Use the IR pipeline with explicit quantize/dequantize nodes.")
                     }
                 }

@@ -119,13 +119,18 @@ pub enum DType {
     I4,
     /// Packed 8-bit (I8x4): 4 values per u32 word.
     /// Per-channel scales/zero_points are stored in the IR node metadata.
-    U8,
+    /// Formerly named `U8` (misleading — this was always signed I8x4).
+    I8Scaled,
     /// FP8 E4M3: 4 values per u32 word.
     F8,
     /// FP8 E5M2 (range variant): 4 values per u32 word.
     F8R,
     /// FP4 E2M1 (NVFP4-style): 8 values per u32 word, 256-entry LUT dot product.
     F4,
+    /// Unsigned packed 4-bit (U4x8): 8 values per u32 word.
+    U4Scaled,
+    /// Unsigned packed 8-bit (U8x4): 4 values per u32 word.
+    U8Scaled,
 }
 
 impl DType {
@@ -136,10 +141,12 @@ impl DType {
             DType::F16 | DType::BF16 => 2,
             DType::Bool => 1,
             DType::I4 => 1,
-            DType::U8 => 1,
+            DType::I8Scaled => 1,
             DType::F8 => 1,
             DType::F8R => 1,
             DType::F4 => 1,
+            DType::U4Scaled => 1,
+            DType::U8Scaled => 1,
         }
     }
 
@@ -153,12 +160,20 @@ impl DType {
                 let words = numel.div_ceil(8);
                 words * 4
             }
-            DType::U8 | DType::F8 | DType::F8R => {
+            DType::I8Scaled | DType::F8 | DType::F8R => {
                 let words = numel.div_ceil(4);
                 words * 4
             }
             DType::F4 => {
                 let words = numel.div_ceil(8);
+                words * 4
+            }
+            DType::U4Scaled => {
+                let words = numel.div_ceil(8);
+                words * 4
+            }
+            DType::U8Scaled => {
+                let words = numel.div_ceil(4);
                 words * 4
             }
         }
@@ -174,10 +189,12 @@ impl DType {
             DType::F16 => "f16",
             DType::BF16 => "bf16",
             DType::I4 => "i4",
-            DType::U8 => "i8",
+            DType::I8Scaled => "i8",
             DType::F8 => "f8",
             DType::F8R => "f8r",
             DType::F4 => "f4",
+            DType::U4Scaled => "u4",
+            DType::U8Scaled => "u8",
         }
     }
 
@@ -190,11 +207,15 @@ impl DType {
             "bool" => Some(DType::Bool),
             "f16" | "float16" => Some(DType::F16),
             "bf16" | "bfloat16" => Some(DType::BF16),
-            "u4" | "uint4" | "int4" | "i4" => Some(DType::I4),
-            "i8" | "u8" | "uint8" | "int8" => Some(DType::U8),
+            "int4" | "i4" => Some(DType::I4),
+            "u4" | "uint4" => Some(DType::U4Scaled),
+            "i8" | "int8" => Some(DType::I8Scaled),
+            "u8" | "uint8" => Some(DType::U8Scaled),
             "f8" | "fp8" | "e4m3" => Some(DType::F8),
             "f8r" | "fp8r" | "e5m2" => Some(DType::F8R),
             "f4" | "fp4" | "e2m1" => Some(DType::F4),
+            "u4scaled" | "uint4x8" => Some(DType::U4Scaled),
+            "u8scaled" | "uint8x4" => Some(DType::U8Scaled),
             _ => None,
         }
     }
