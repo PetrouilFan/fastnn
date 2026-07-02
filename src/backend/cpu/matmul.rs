@@ -201,7 +201,16 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
 
-        crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
+        if !pt.codebooks.is_empty() {
+            // Codebook quantization (I4Codebook): dequant to f32 using codebook
+            // lookup, then use standard f32 BLAS matmul. This mirrors the Conv2d
+            // path which uses `dispatch_packed_conv_cached!` → `get_or_init_f32_weights()`
+            // → `conv2d_f32_im2col_gemm`.
+            let f32_weights = pt.get_or_init_f32_weights();
+            matmul_blas_into(activations, &f32_weights, out_f32, m, k, n);
+        } else {
+            crate::backend::cpu::microkernels::gemm_cpu_flat::<T>(&pt, activations, out_f32, m, k, n);
+        }
     }
     Ok(())
 }
