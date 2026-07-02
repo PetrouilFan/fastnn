@@ -181,7 +181,7 @@ fn detect_qlinear_patterns(
                 zero_points,
                 ..
             } => (scales.clone(), zero_points.clone()),
-            IrDType::U8 {
+            IrDType::I8Scaled {
                 scales,
                 zero_points,
             } => (scales.clone(), zero_points.clone()),
@@ -299,7 +299,7 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
                 (s, zp)
             }
         }
-        IrDType::U8 {
+        IrDType::I8Scaled {
             scales,
             zero_points,
         } => {
@@ -551,7 +551,7 @@ pub fn export_to_onnx_json_with_config(
                         let is_packed = matches!(
                             &tensor_type.dtype,
                             IrDType::I4 { .. }
-                                | IrDType::U8 { .. }
+                                | IrDType::I8Scaled { .. }
                                 | IrDType::F4 { .. }
                                 | IrDType::F8 { .. }
                                 | IrDType::F8R { .. }
@@ -572,7 +572,7 @@ pub fn export_to_onnx_json_with_config(
                                     shape,
                                     dtype: match &tensor_type.dtype {
                                         IrDType::I4 { .. } => "u4".to_string(),
-                                        IrDType::U8 { .. } => "i8".to_string(),
+                                        IrDType::I8Scaled { .. } => "i8".to_string(),
                                         IrDType::F4 { .. } => "f4".to_string(),
                                         IrDType::F8 { .. } => "f8".to_string(),
                                         IrDType::F8R { .. } => "f8r".to_string(),
