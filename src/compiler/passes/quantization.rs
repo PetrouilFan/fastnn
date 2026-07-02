@@ -126,6 +126,12 @@ pub fn quantize_weights(
             continue;
         }
 
+        // Skip 1D tensors — no benefit and the dequant path assumes shape[0]
+        // is the number of rows, which breaks for 1D [N] tensors.
+        if orig_shape.len() < 2 {
+            continue;
+        }
+
         // For 2D MatMul weights, transpose from [K, N] to [N, K] so the
         // packed GEMM kernel (gemm_packed_batched) sees [N_out, K_in].
         // For Conv weights ([N_out, C_in, KH, KW]), N_out is already first —
@@ -303,6 +309,12 @@ pub fn quantize_weights_fp(
             continue;
         }
 
+        // Skip 1D tensors — no benefit and the dequant path assumes shape[0]
+        // is the number of rows, which breaks for 1D [N] tensors.
+        if orig_shape.len() < 2 {
+            continue;
+        }
+
         let (quant_data, quant_shape) = if orig_shape.len() == 2 {
             let rows = orig_shape[0];
             let cols = orig_shape[1];
@@ -318,6 +330,7 @@ pub fn quantize_weights_fp(
         };
 
         let f4_block_size: usize = 32;
+        let mut f4x8_use_per_block = false;
 
         let (packed_bytes, scales, zeros, codebooks) = match fp_dtype {
             FpDtype::F8x4 => {
@@ -348,8 +361,15 @@ pub fn quantize_weights_fp(
                 } else {
                     quant_data.len()
                 };
-                let use_per_block =
-                    group_size.is_none() && inner >= f4_block_size && inner % f4_block_size == 0;
+                // Per-block F4 quantization disabled because the packed-F4 GEMM kernel
+                // (gemm_batch_packed_simd) applies a single (scale, zero_point) per row
+                // during the affine post-processing step.  Per-block layout has different
+                // scale/zero for each block within a row, so the affine formula
+                // (dot * scale + zero * sum(act)) does not factor correctly —
+                // the kernel would apply the wrong scale to most elements.
+                // Keep per-channel or grouped per-channel only.
+                let use_per_block = false;
+                f4x8_use_per_block = false;
                 let pt = if use_per_block {
                     PackedTensor::<F4x8>::from_f32_per_block_asymmetric(
                         &quant_data,
@@ -417,7 +437,10 @@ pub fn quantize_weights_fp(
             node_mut.output_type = new_tensor_type;
             // Store the block size so the backend can reconstruct PackedTensor correctly.
             // This is critical when inner dim is not divisible by the block size.
-            if matches!(fp_dtype, FpDtype::I4Codebook | FpDtype::F4x8) {
+            // Only set for I4Codebook (always per-block) and F4x8 when per-block was
+            // actually used.  Per-channel F4x8 must NOT carry qbs — it makes the backend
+            // attempt per-block dequant on per-channel scales, causing scale_for_elem OOB.
+            if matches!(fp_dtype, FpDtype::I4Codebook) || f4x8_use_per_block {
                 node_mut
                     .attrs
                     .insert("quant_block_size".to_string(), f4_block_size.to_string());

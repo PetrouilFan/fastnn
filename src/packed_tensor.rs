@@ -908,8 +908,6 @@ impl<T: PackedWord> PackedTensor<T> {
                     zeros.push(0.0);
                 } else if is_fp4 {
                     let effective_magnitude = 4.0;
-                    let fp4_range = effective_magnitude * 2.0;
-                    let scale = range / fp4_range;
                     // Mean over all rows in the group — see per-block rationale above.
                     let mut sum = 0.0f32;
                     let mut cnt: usize = 0;
@@ -923,6 +921,14 @@ impl<T: PackedWord> PackedTensor<T> {
                         }
                     }
                     let zp = if cnt > 0 { sum / cnt as f32 } else { 0.0 };
+                    // Use max(|data - zp|) as spread, not range/2 — for skewed
+                    // distributions the mean (zero-point) is not centered in [bmin,bmax],
+                    // so range/2 overestimates how much code-space headroom is needed
+                    // on the distant side.  max_dev guarantees all values fit within
+                    // FP4's active [-4, +4] code range after quantization.
+                    let dev_from_zp = (zp - grp_min).abs().max((grp_max - zp).abs());
+                    let max_dev = if dev_from_zp == 0.0 { 1e-10 } else { dev_from_zp };
+                    let scale = max_dev / effective_magnitude;
                     scales.push(scale);
                     zeros.push(zp);
                 } else {
@@ -943,12 +949,14 @@ impl<T: PackedWord> PackedTensor<T> {
                     zeros.push(0.0);
                 } else if is_fp4 {
                     let effective_magnitude = 4.0;
-                    let fp4_range = effective_magnitude * 2.0;
-                    let scale = range / fp4_range;
                     let row_start = row * inner_stride;
                     let row_end = row_start + inner_stride;
                     let mean = data[row_start..row_end.min(numel)].iter().sum::<f32>()
                         / inner_stride as f32;
+                    // max_dev guarantees all values fit within FP4 [-4,+4] after quant
+                    let dev_from_zp = (mean - mins[row]).abs().max((maxs[row] - mean).abs());
+                    let max_dev = if dev_from_zp == 0.0 { 1e-10 } else { dev_from_zp };
+                    let scale = max_dev / effective_magnitude;
                     scales.push(scale);
                     zeros.push(mean);
                 } else {
@@ -1095,9 +1103,10 @@ impl<T: PackedWord> PackedTensor<T> {
                     // non-uniform code space where most values actually lie,
                     // reducing average quantization error.
                     let effective_magnitude = 4.0; // clip to ±4, drop ±6
-                    let fp4_range = effective_magnitude * 2.0; // 8.0
-                    let scale = range / fp4_range;
                     let zp = block_data.iter().sum::<f32>() / qblock as f32;
+                    let dev_from_zp = (zp - bmin).abs().max((bmax - zp).abs());
+                    let max_dev = if dev_from_zp == 0.0 { 1e-10 } else { dev_from_zp };
+                    let scale = max_dev / effective_magnitude;
                     scales.push(scale);
                     zeros.push(zp);
                 } else {
