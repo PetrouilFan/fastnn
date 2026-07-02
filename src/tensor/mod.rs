@@ -721,7 +721,7 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
             }
-            DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+            DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled | DType::F8 | DType::F8R | DType::F4 => {
                 panic!("as_f32_slice: packed/FP tensors cannot be viewed as f32.");
             }
         }
@@ -769,7 +769,7 @@ impl Tensor {
             DType::BF16 | DType::F16 => {
                 panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
             }
-            DType::I4 | DType::U8 | DType::F8 | DType::F8R | DType::F4 => {
+            DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled | DType::F8 | DType::F8R | DType::F4 => {
                 panic!("as_f32_slice_mut: packed/FP tensors cannot be viewed as f32.");
             }
         }
@@ -1108,7 +1108,7 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
             zero_points: vec![0.0],
             codebooks: vec![],
         },
-        DType::U8 => IrDType::U8 {
+        DType::I8Scaled => IrDType::I8Scaled {
             scales: vec![1.0],
             zero_points: vec![0.0],
         },
@@ -1118,6 +1118,14 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
             scales: vec![1.0],
             zeros: vec![],
             codebooks: vec![],
+        },
+        DType::U4Scaled => IrDType::U4Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        },
+        DType::U8Scaled => IrDType::U8Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
         },
     }
 }
@@ -1134,10 +1142,12 @@ pub fn ir_to_dtype(idt: IrDType) -> DType {
         // Packed types round-trip back to simple DType variants. Per-channel metadata
         // stays in the IR node; Tensor-level storage uses the packed dtype.
         IrDType::I4 { .. } => DType::I4,
-        IrDType::U8 { .. } => DType::U8,
+        IrDType::I8Scaled { .. } => DType::I8Scaled,
         IrDType::F8 { .. } => DType::F8,
         IrDType::F8R { .. } => DType::F8R,
         IrDType::F4 { .. } => DType::F4,
+        IrDType::U4Scaled { .. } => DType::U4Scaled,
+        IrDType::U8Scaled { .. } => DType::U8Scaled,
     }
 }
 

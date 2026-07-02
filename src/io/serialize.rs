@@ -239,7 +239,7 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                 5 => DType::F16,
                 6 => DType::BF16,
                 7 => DType::I4,
-                8 => DType::U8,
+                8 => DType::I8Scaled,
                 9 => DType::F8,
                 10 => DType::F8R,
                 11 => DType::F4,
