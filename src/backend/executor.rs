@@ -213,13 +213,8 @@ impl<B: Backend> GraphExecutor<B> {
         // before fusion to reduce the number of nodes the fusion pass sees.
         {
             use crate::compiler::passes::{arithmetic_simplify, constant_folding};
-            let folded = constant_folding::constant_fold(&mut graph);
-            let simplified = arithmetic_simplify::arithmetic_simplify(&mut graph);
-            if folded + simplified > 0 {
-                eprintln!(
-                    "[fastnn] pre-fusion optimization: folded {folded} constant nodes, simplified {simplified} arithmetic"
-                );
-            }
+            constant_folding::constant_fold(&mut graph);
+            arithmetic_simplify::arithmetic_simplify(&mut graph);
         }
 
         // ── Phase 2: Operator fusion ──────────────────────────────────────

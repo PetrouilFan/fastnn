@@ -4325,7 +4325,7 @@ impl Backend for CpuBackend {
                             } else if !input_slices.is_empty() {
                                 // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
-                                for (si, slice) in input_slices.iter().enumerate() {
+                                for (_si, slice) in input_slices.iter().enumerate() {
                                     let input_data =
                                         unsafe { arena.view_f32(slice.offset, slice.size) };
                                     let out_f32 = unsafe {
@@ -4352,7 +4352,7 @@ impl Backend for CpuBackend {
                                     #[cfg(feature = "debug_canary")]
                                     eprintln!(
                                         "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} (flat fallback)",
-                                        out_start, out_end, si, slice.offset, slice.size, input_data.len()
+                                        out_start, out_end, _si, slice.offset, slice.size, input_data.len()
                                     );
                                     output_offset += input_data.len();
                                 }

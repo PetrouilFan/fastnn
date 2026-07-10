@@ -1454,17 +1454,11 @@ impl AotExecutor {
     /// `quantize=4` or `quantize=8`.
     fn apply_calibration(&mut self, scales_json: String) -> pyo3::PyResult<()> {
         // Parse calibration data from JSON
-        eprintln!("[APPLY_CALIB] Parsing calibration JSON...");
         let calib = crate::compiler::passes::calibration::CalibrationData::from_json(&scales_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        eprintln!(
-            "[APPLY_CALIB] Parsed {} calibration entries",
-            calib.stats.len()
-        );
 
         // Recompile with calibration data - the quantization pass will UPDATE
         // existing QuantizeActivations nodes with new calibration attrs
-        eprintln!("[APPLY_CALIB] Recompiling with calibration...");
         let graph = std::mem::replace(&mut self.graph, crate::ir::node::ComputeGraph::new());
         let (plan, memory_plan, graph) = self
             .executor
@@ -1475,7 +1469,6 @@ impl AotExecutor {
         self.memory_plan = memory_plan;
         self.graph = graph;
 
-        eprintln!("[APPLY_CALIB] Recompilation complete");
         Ok(())
     }
 
