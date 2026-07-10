@@ -6,14 +6,24 @@ Current development priorities and historical planning documents.
 
 ## Current Focus
 
-fastnn v2.4 is stabilizing the v2.3 CPU performance work and expanding toward
-GPU-resident execution and multi-device training.
+fastnn v2.5 is stabilizing CPU performance work, improving maintainability,
+and expanding toward GPU-resident execution and multi-device training.
 
 **Active areas:**
 
 - **CPU backend maturity** — benchmark expansion, copy-reduction, fused epilogues
 - **Telemetry and observability** — arena allocation counters, dispatch profiling
 - **Module maintainability** — splitting the large CPU backend module after perf work
+
+The active source-layout and ownership plan is
+[Codebase Reorganization Roadmap](codebase-reorganization.md). It defines
+contract-impact constraints, dependency direction, and the Rust/Python compiler
+ownership decisions required before mechanical module moves.
+
+The broader engineering backlog is in
+[Architecture Improvement Backlog](architecture-improvements.md). The dtype and
+quantization redesign is separately specified in
+[Dtype and Quantization Redesign](dtype-redesign.md).
 
 **Upcoming:**
 
