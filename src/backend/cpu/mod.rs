@@ -2680,7 +2680,7 @@ impl Backend for CpuBackend {
         let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
         // ANCHOR: debug-canary-end
 
-        for instr in plan.instructions.iter() {
+        for (_instr_idx, instr) in plan.instructions.iter().enumerate() {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
@@ -4325,7 +4325,7 @@ impl Backend for CpuBackend {
                             } else if !input_slices.is_empty() {
                                 // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
-                                for slice in input_slices.iter() {
+                                for (si, slice) in input_slices.iter().enumerate() {
                                     let input_data =
                                         unsafe { arena.view_f32(slice.offset, slice.size) };
                                     let out_f32 = unsafe {

@@ -1,14 +1,11 @@
 use crate::storage::{CpuStorage, DType, Device, Storage};
 use std::sync::Arc;
 
+use super::{Tensor, TensorImpl};
 #[cfg(feature = "gpu")]
 use crate::storage::GpuStorage;
 #[cfg(feature = "gpu")]
 use parking_lot::RwLock;
-#[cfg(feature = "gpu")]
-use std::collections::HashMap;
-
-use super::{Tensor, TensorImpl};
 
 impl TensorImpl {
     pub fn to_dtype(&self, dtype: DType) -> Tensor {

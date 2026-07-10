@@ -611,7 +611,7 @@ fn try_gpu_dispatch(
                     encoder,
                     pending_reads,
                     arena,
-                    input_slice,
+                    *input_slice,
                     output_slice,
                     numel,
                 )
@@ -629,7 +629,7 @@ fn try_gpu_dispatch(
                     encoder,
                     pending_reads,
                     arena,
-                    input_slice,
+                    *input_slice,
                     output_slice,
                     numel,
                 )
