@@ -94,15 +94,7 @@ fn read_execution_outputs<B: Backend>(
                     BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
                 })?;
             let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-            let computed = match &node.output_type.dtype {
-                IrDType::I4 { .. }
-                | IrDType::I8Scaled { .. }
-                | IrDType::F8 { .. }
-                | IrDType::F8R { .. }
-                | IrDType::F4 { .. } => node.output_type.dtype.packed_byte_size(actual_numel),
-                IrDType::I8 => actual_numel + 8,
-                _ => actual_numel * node.output_type.dtype.byte_size(),
-            };
+            let computed = execution_storage_size(&node.output_type.dtype, actual_numel);
             (computed, resolved_shape)
         } else {
             (slot.size, vec![])
@@ -111,6 +103,20 @@ fn read_execution_outputs<B: Backend>(
         outputs.push(data);
     }
     Ok(outputs)
+}
+
+fn execution_storage_size(dtype: &IrDType, numel: usize) -> usize {
+    match dtype {
+        IrDType::I4 { .. }
+        | IrDType::I8Scaled { .. }
+        | IrDType::F8 { .. }
+        | IrDType::F8R { .. }
+        | IrDType::F4 { .. }
+        | IrDType::U4Scaled { .. }
+        | IrDType::U8Scaled { .. } => dtype.packed_byte_size(numel),
+        IrDType::I8 => numel + 8,
+        _ => numel * dtype.byte_size(),
+    }
 }
 
 impl<B: Backend> GraphExecutor<B> {
@@ -677,18 +683,7 @@ impl<B: Backend> GraphExecutor<B> {
                     let needed =
                         if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
                             let numel: u64 = shape.iter().product();
-                            let raw = numel as usize * node.output_type.dtype.byte_size();
-                            match &node.output_type.dtype {
-                                IrDType::I4 { .. }
-                                | IrDType::I8Scaled { .. }
-                                | IrDType::F8 { .. }
-                                | IrDType::F8R { .. }
-                                | IrDType::F4 { .. } => {
-                                    node.output_type.dtype.packed_byte_size(numel as usize)
-                                }
-                                IrDType::I8 => numel as usize + 8,
-                                _ => raw,
-                            }
+                            execution_storage_size(&node.output_type.dtype, numel as usize)
                         } else {
                             continue;
                         };
@@ -2251,5 +2246,39 @@ mod prepared_fallback_tests {
         executor
             .execute_prepared_fallback(graph, plan, memory_plan, inputs, prepared)
             .expect("prepared fallback execute must succeed")
+    }
+}
+
+#[cfg(test)]
+mod execution_storage_size_tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_packed_types_use_exact_packed_storage_size() {
+        let u4 = IrDType::U4Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        };
+        let u8 = IrDType::U8Scaled {
+            scales: vec![1.0],
+            zero_points: vec![0.0],
+        };
+
+        for numel in [1, 7, 8, 9, 17, 64] {
+            assert_eq!(
+                execution_storage_size(&u4, numel),
+                u4.packed_byte_size(numel)
+            );
+            assert_eq!(
+                execution_storage_size(&u8, numel),
+                u8.packed_byte_size(numel)
+            );
+        }
+    }
+
+    #[test]
+    fn native_types_use_logical_element_size() {
+        assert_eq!(execution_storage_size(&IrDType::F32, 17), 68);
+        assert_eq!(execution_storage_size(&IrDType::I64, 17), 136);
     }
 }
