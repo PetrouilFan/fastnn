@@ -24,31 +24,9 @@ use crate::compiler::passes::{
     quantization, shape_inference,
 };
 use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
+use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-
-/// Target weight dtype for compilation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum WeightDtype {
-    /// No quantization — keep f32 weights as-is.
-    F32,
-    /// Integer 4-bit symmetric quantization (I4x8).
-    I4,
-    /// Integer 8-bit symmetric quantization (I8x4/U8).
-    I8,
-    /// Unsigned integer 4-bit quantization (U4x8).
-    U4,
-    /// Unsigned integer 8-bit quantization (U8x4).
-    U8,
-    /// Float 8-bit E4M3 (F8x4).
-    F8x4,
-    /// Float 8-bit E5M2 (F8x4R).
-    F8x4R,
-    /// Float 4-bit E2M1 (F4x8).
-    F4x8,
-    /// Integer 4-bit codebook quantization (I4x8).
-    I4Codebook,
-}
 
 /// Cached state for an all-Known-shape model so that every forward call
 /// after the first can skip ShapeEnv resolution, shape validation, and
@@ -171,7 +149,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// be used to compute per-tensor/per-channel activation scales for optimal
     /// quantization accuracy.
     ///
-    /// For FP packed types (F8/F8R/F4), use [`compile_with_weight_dtype`]
+    /// For FP packed types (F8/F8R/F4), use [`compile_with_target`]
     /// instead. This method only supports integer quantization (I4/I8).
     pub fn compile_with_plan_and_quantize(
         &self,
@@ -179,10 +157,10 @@ impl<B: Backend> GraphExecutor<B> {
         quantize: Option<u8>,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let weight_dtype = match quantize {
-            Some(4) => WeightDtype::I4,
-            Some(8) => WeightDtype::I8,
-            None => WeightDtype::F32,
+        let target = match quantize {
+            Some(4) => CompileTarget::WeightOnly(QuantTarget::I4),
+            Some(8) => CompileTarget::WeightOnly(QuantTarget::I8),
+            None => CompileTarget::Native,
             Some(other) => {
                 return Err(BackendError::Compilation(format!(
                     "Unsupported quantization bit width: {}. Supported values: 4, 8",
@@ -190,31 +168,40 @@ impl<B: Backend> GraphExecutor<B> {
                 )))
             }
         };
-        self.compile_with_weight_dtype(graph, weight_dtype, calib_data)
+        self.compile_with_target(graph, target, calib_data)
     }
 
-    /// Compile a graph with an explicit [`WeightDtype`] target, including FP
-    /// packed types (F8x4, F8x4R, F4x8).
-    ///
-    /// Supports all variants of `WeightDtype`:
-    /// - `F32`: no weight quantization
-    /// - `I4` / `I8`: integer symmetric quantization (backed by
-    ///   [`quantize_weights`])
-    /// - `F8x4` / `F8x4R` / `F4x8`: FP packed quantization (backed by
-    ///   [`quantize_weights_fp`])
+    /// Compile a graph with an explicit representation target.
     ///
     /// If `calib_data` is provided, per-tensor/per-channel activation scales
     /// will be applied after weight quantization (weight-only quant only uses
     /// the weight quant step; activations remain f32).
     ///
     /// Takes ownership of `graph` to avoid an unnecessary deep clone.
-    pub fn compile_with_weight_dtype(
+    pub fn compile_with_target(
         &self,
         mut graph: ComputeGraph,
-        weight_dtype: WeightDtype,
+        target: CompileTarget,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let do_weight_quant = weight_dtype != WeightDtype::F32;
+        let quant_target = match target {
+            CompileTarget::Native => None,
+            CompileTarget::WeightOnly(target) => Some(target),
+            CompileTarget::IntegerInference(target) => {
+                if calib_data.is_none() {
+                    return Err(BackendError::Compilation(
+                        "integer inference requires activation calibration data".into(),
+                    ));
+                }
+                Some(target)
+            }
+            CompileTarget::TrainingMixedPrecision { .. } => {
+                return Err(BackendError::Compilation(
+                    "mixed-precision training compilation is not implemented".into(),
+                ));
+            }
+        };
+        let do_weight_quant = quant_target.is_some();
 
         // ── Phase 1: Shape inference ──────────────────────────────────────
         shape_inference::infer_shapes(&mut graph)
@@ -254,42 +241,41 @@ impl<B: Backend> GraphExecutor<B> {
         let do_quantize = do_weight_quant || calib_data.is_some();
         if do_quantize {
             // Quantize weights if requested
-            if do_weight_quant {
+            if let Some(quant_target) = quant_target {
                 use quantization::FpDtype;
-                match weight_dtype {
-                    WeightDtype::I4 => {
+                match quant_target {
+                    QuantTarget::I4 => {
                         quantization::quantize_weights(&mut graph, 4, true, None)
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
-                    WeightDtype::I8 => {
+                    QuantTarget::I8 => {
                         quantization::quantize_weights(&mut graph, 8, true, None)
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
-                    WeightDtype::U4 => {
+                    QuantTarget::U4 => {
                         quantization::quantize_weights(&mut graph, 4, false, None)
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
-                    WeightDtype::U8 => {
+                    QuantTarget::U8 => {
                         quantization::quantize_weights(&mut graph, 8, false, None)
                             .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
                     }
-                    WeightDtype::F8x4 => {
+                    QuantTarget::Fp8E4M3 => {
                         quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
-                    WeightDtype::F8x4R => {
+                    QuantTarget::Fp8E5M2 => {
                         quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
-                    WeightDtype::F4x8 => {
+                    QuantTarget::Fp4E2M1 => {
                         quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
-                    WeightDtype::I4Codebook => {
+                    QuantTarget::I4Codebook => {
                         quantization::quantize_weights_fp(&mut graph, &FpDtype::I4Codebook, None)
                             .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
                     }
-                    WeightDtype::F32 => {}
                 }
             }
 
@@ -2280,5 +2266,36 @@ mod execution_storage_size_tests {
     fn native_types_use_logical_element_size() {
         assert_eq!(execution_storage_size(&IrDType::F32, 17), 68);
         assert_eq!(execution_storage_size(&IrDType::I64, 17), 136);
+    }
+
+    #[test]
+    fn integer_inference_requires_calibration() {
+        let executor = GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let error = executor
+            .compile_with_target(
+                ComputeGraph::new(),
+                CompileTarget::IntegerInference(QuantTarget::U8),
+                None,
+            )
+            .expect_err("integer inference without calibration must fail");
+        assert!(error
+            .to_string()
+            .contains("requires activation calibration"));
+    }
+
+    #[test]
+    fn unsupported_mixed_precision_target_is_reported() {
+        let executor = GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let error = executor
+            .compile_with_target(
+                ComputeGraph::new(),
+                CompileTarget::TrainingMixedPrecision {
+                    compute: crate::types::ScalarType::F16,
+                    accumulator: crate::types::ScalarType::F32,
+                },
+                None,
+            )
+            .expect_err("unsupported target must fail explicitly");
+        assert!(error.to_string().contains("not implemented"));
     }
 }

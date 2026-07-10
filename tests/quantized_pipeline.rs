@@ -5,7 +5,7 @@
 
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::backend::executor::WeightDtype;
+
 use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
@@ -16,6 +16,7 @@ use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::node::ComputeGraph;
 use fastnn::ir::node::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::packed_tensor::PackedTensor;
+use fastnn::types::{CompileTarget, QuantTarget};
 
 /// Helper: build a MatMul graph and run through the full pipeline.
 /// Returns output as Vec<f32>.
@@ -835,7 +836,7 @@ fn test_matmul_i4codebook_roundtrip() {
         4,
         &weight_data,
         &input_data,
-        Some(WeightDtype::I4Codebook),
+        Some(QuantTarget::I4Codebook),
     );
     assert_eq!(result.len(), 4, "output shape mismatch");
     let expected = [1.0f32, 2.0, 3.0, 4.0];
@@ -856,7 +857,14 @@ fn test_matmul_f4x8_roundtrip() {
     ];
     let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
-    let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::F4x8));
+    let result = run_matmul_fp(
+        1,
+        4,
+        4,
+        &weight_data,
+        &input_data,
+        Some(QuantTarget::Fp4E2M1),
+    );
     assert_eq!(result.len(), 4, "output shape mismatch");
     let expected = [1.0f32, 2.0, 3.0, 4.0];
     for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
@@ -868,7 +876,7 @@ fn test_matmul_f4x8_roundtrip() {
     }
 }
 
-/// Helper: build a MatMul graph and run with compile_with_weight_dtype.
+/// Helper: build a MatMul graph and run with an explicit compile target.
 /// Returns output as Vec<f32>.
 fn run_matmul_fp(
     batch: usize,
@@ -876,7 +884,7 @@ fn run_matmul_fp(
     n: usize,
     weight_data: &[f32],
     input_data: &[f32],
-    weight_dtype: Option<WeightDtype>,
+    quant_target: Option<QuantTarget>,
 ) -> Vec<f32> {
     let mut graph = ComputeGraph::new();
 
@@ -915,10 +923,12 @@ fn run_matmul_fp(
     let input_bytes: Vec<u8> = bytemuck::cast_slice(input_data).to_vec();
 
     let mut executor = GraphExecutor::new(CpuBackend);
-    let weight_dt = weight_dtype.unwrap_or(WeightDtype::F32);
+    let target = quant_target
+        .map(CompileTarget::WeightOnly)
+        .unwrap_or(CompileTarget::Native);
     let (mut plan, mem, compiled_graph) = executor
-        .compile_with_weight_dtype(graph, weight_dt, None)
-        .expect("compile_with_weight_dtype should succeed");
+        .compile_with_target(graph, target, None)
+        .expect("compile_with_target should succeed");
 
     let result = executor
         .execute(&compiled_graph, &mut plan, &mem, &[&input_bytes])

@@ -1317,13 +1317,14 @@ impl AotExecutor {
             .to_compute_graph()
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
-        let weight_dtype: crate::backend::executor::WeightDtype = match quantize {
-            None => crate::backend::executor::WeightDtype::F32,
+        use crate::types::{CompileTarget, QuantTarget};
+        let target = match quantize {
+            None => CompileTarget::Native,
             Some(obj) => {
                 if let Ok(val) = obj.extract::<u8>() {
                     match val {
-                        4 => crate::backend::executor::WeightDtype::I4,
-                        8 => crate::backend::executor::WeightDtype::I8,
+                        4 => CompileTarget::WeightOnly(QuantTarget::I4),
+                        8 => CompileTarget::WeightOnly(QuantTarget::I8),
                         _ => {
                             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                                 "unsupported quantize value for integer: {} (expected 4 or 8)",
@@ -1333,15 +1334,15 @@ impl AotExecutor {
                     }
                 } else if let Ok(s) = obj.extract::<String>() {
                     match s.as_str() {
-                        "f32" => crate::backend::executor::WeightDtype::F32,
-                        "i4" => crate::backend::executor::WeightDtype::I4,
-                        "i8" => crate::backend::executor::WeightDtype::I8,
-                        "u4" => crate::backend::executor::WeightDtype::U4,
-                        "u8" => crate::backend::executor::WeightDtype::U8,
-                        "f8" => crate::backend::executor::WeightDtype::F8x4,
-                        "f8r" => crate::backend::executor::WeightDtype::F8x4R,
-                        "f4" => crate::backend::executor::WeightDtype::F4x8,
-                        "i4cb" => crate::backend::executor::WeightDtype::I4Codebook,
+                        "f32" => CompileTarget::Native,
+                        "i4" => CompileTarget::WeightOnly(QuantTarget::I4),
+                        "i8" => CompileTarget::WeightOnly(QuantTarget::I8),
+                        "u4" => CompileTarget::WeightOnly(QuantTarget::U4),
+                        "u8" => CompileTarget::WeightOnly(QuantTarget::U8),
+                        "f8" => CompileTarget::WeightOnly(QuantTarget::Fp8E4M3),
+                        "f8r" => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
+                        "f4" => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
+                        "i4cb" => CompileTarget::WeightOnly(QuantTarget::I4Codebook),
                         _ => {
                             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                                 "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, 4, or 8)",
@@ -1360,7 +1361,7 @@ impl AotExecutor {
         let executor =
             crate::backend::executor::GraphExecutor::new(crate::backend::cpu::CpuBackend);
         let (plan, memory_plan, compiled_graph) = executor
-            .compile_with_weight_dtype(graph, weight_dtype, None)
+            .compile_with_target(graph, target, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let output_map: Vec<(String, usize)> = output_names
