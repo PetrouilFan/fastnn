@@ -181,8 +181,9 @@ impl<B: Backend> GraphExecutor<B> {
         target: CompileTarget,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let compiled =
-            crate::compiler::pipeline::CompilerPipeline::new(target, calib_data).run(graph)?;
+        let compiled = crate::compiler::pipeline::CompilerPipeline::new(target, calib_data)
+            .run(graph)
+            .map_err(|error| BackendError::Compilation(error.to_string()))?;
         let graph = compiled.graph;
         let memory_plan = compiled.memory_plan;
         let plan = self.backend.compile(&graph, &memory_plan)?;
