@@ -559,7 +559,7 @@ fn test_memory_plan_tighten() {
 
     // Tighten with a ShapeEnv that resolves N to a small value
     let mut shape_env = ShapeEnv::new();
-    shape_env.bind("N", 10);
+    shape_env.try_bind("N", 10).unwrap();
     let tightened = plan.tighten(&graph, &shape_env);
 
     // The tightened size should be <= the original (10*4 = 40 bytes)

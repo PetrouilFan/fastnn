@@ -228,22 +228,6 @@ impl ShapeEnv {
         }
     }
 
-    /// Bind a symbol name to a concrete value.
-    ///
-    /// # Panics
-    /// Panics if the symbol is already bound to a *different* value, to prevent
-    /// silently inconsistent runtime shapes.
-    pub fn bind(&mut self, name: &str, value: u64) {
-        if let Some(&existing) = self.symbols.get(name) {
-            assert_eq!(
-                existing, value,
-                "ShapeEnv: symbol '{}' bound to {} then inconsistently to {}",
-                name, existing, value
-            );
-        }
-        self.symbols.insert(name.to_string(), value);
-    }
-
     /// Bind a symbol name to a concrete value, returning an error on conflicts.
     pub fn try_bind(&mut self, name: &str, value: u64) -> Result<(), String> {
         if let Some(&existing) = self.symbols.get(name) {
@@ -267,7 +251,7 @@ impl ShapeEnv {
     ///
     /// Returns an error if:
     /// - Input byte count is not evenly divisible by the known-stride element count.
-    /// - Two inputs infer different values for the same symbol (via [`bind`](Self::bind)).
+    /// - Two inputs infer different values for the same symbol.
     ///
     /// The algorithm has two passes:
     ///

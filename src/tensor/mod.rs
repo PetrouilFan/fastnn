@@ -1,6 +1,7 @@
 use crate::autograd::{self, AutogradMeta};
 use crate::backend::cpu::CpuBackend;
 use crate::backend::BackendError;
+use crate::error::{FastnnError, FastnnResult};
 use crate::ir::builder::GraphBuilder;
 use crate::ir::{DimExpr, IrDType};
 use crate::storage::{DType, Device, Storage};
@@ -472,19 +473,24 @@ impl Tensor {
         self.inner.detach()
     }
 
-    pub fn item(&self) -> f32 {
+    pub fn item(&self) -> FastnnResult<f32> {
         if self.inner.numel() != 1 {
-            panic!("item() can only be called on tensors with one element");
+            return Err(FastnnError::shape(format!(
+                "item() requires one element, got {}",
+                self.inner.numel()
+            )));
         }
 
         let ptr = match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
-                panic!("Cannot call item() on GPU tensor. Use .cpu() first.");
+                return Err(FastnnError::device(
+                    "item() requires CPU storage; transfer the tensor to CPU first",
+                ));
             }
         };
-        match self.inner.dtype {
+        Ok(match self.inner.dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *const f32;
                 // SAFETY: `self.inner.numel() == 1` was validated above. The pointer
@@ -517,8 +523,12 @@ impl Tensor {
                 // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { f32::from(*f16_ptr.add(self.inner.storage_offset as usize)) }
             }
-            _ => panic!("Unsupported dtype for item()"),
-        }
+            dtype => {
+                return Err(FastnnError::dtype(format!(
+                    "item() does not support {dtype:?}"
+                )))
+            }
+        })
     }
 
     pub fn to_numpy(&self) -> Vec<f32> {
@@ -1188,7 +1198,7 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]);
         let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], vec![3]);
         let result = einsum("i,i->", &[x, y]);
-        assert!((result.item() - 32.0).abs() < 1e-5);
+        assert!((result.item().unwrap() - 32.0).abs() < 1e-5);
     }
 
     #[test]

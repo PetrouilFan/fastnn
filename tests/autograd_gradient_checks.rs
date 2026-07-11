@@ -51,7 +51,7 @@ where
                         Tensor::from_vec(values.clone(), tensor_shape.to_vec())
                     })
                     .collect();
-                let plus = build_loss(&plus_tensors).item();
+                let plus = build_loss(&plus_tensors).item().unwrap();
 
                 let mut minus_inputs: Vec<Vec<f32>> =
                     inputs.iter().map(|(values, _)| values.to_vec()).collect();
@@ -63,7 +63,7 @@ where
                         Tensor::from_vec(values.clone(), tensor_shape.to_vec())
                     })
                     .collect();
-                let minus = build_loss(&minus_tensors).item();
+                let minus = build_loss(&minus_tensors).item().unwrap();
 
                 grad[element_idx] = (plus - minus) / (2.0 * FINITE_DIFF_EPS);
             }

@@ -7,9 +7,29 @@ use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::tensor::Tensor;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(values).to_vec()
+}
+
+#[test]
+fn item_on_non_scalar_tensor_returns_shape_error() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    let error = tensor
+        .item()
+        .expect_err("item on a multi-element tensor must fail");
+    assert!(error.to_string().contains("requires one element"));
+}
+
+#[test]
+fn conflicting_shape_binding_returns_error() {
+    let mut env = fastnn::ir::ShapeEnv::new();
+    env.try_bind("N", 2).unwrap();
+    let error = env
+        .try_bind("N", 3)
+        .expect_err("conflicting shape binding must fail");
+    assert!(error.contains("inconsistently"));
 }
 
 #[test]

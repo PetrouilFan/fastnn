@@ -673,7 +673,7 @@ fn test_shape_tightening_reduces_arena() {
 
     // With tightening: N=2
     let mut shape_env = ShapeEnv::new();
-    shape_env.bind("N", 2);
+    shape_env.try_bind("N", 2).unwrap();
     let model_tightened = executor
         .compile_train(
             &graph,
@@ -698,7 +698,7 @@ fn test_shape_tightening_reduces_arena() {
 
     // With tightening: N=1, feed matching data
     let mut shape_env = ShapeEnv::new();
-    shape_env.bind("N", 1);
+    shape_env.try_bind("N", 1).unwrap();
     let mut model2 = executor
         .compile_train(
             &graph,

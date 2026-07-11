@@ -48,7 +48,10 @@ impl Muon {
         // Compute Frobenius norm: sqrt(sum(x * x))
         let norm_squared = a.mul(a).sum(-1, false).sum(-1, false);
         let norm = norm_squared.sqrt();
-        let norm_val = norm.item();
+        let Ok(norm_val) = norm.item() else {
+            *out = Tensor::zeros(a.shape(), a.dtype(), a.device());
+            return;
+        };
 
         const EPSILON: f32 = 1e-8;
 

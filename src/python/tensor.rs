@@ -101,12 +101,12 @@ impl PyTensor {
         self.inner.is_contiguous()
     }
 
-    fn item(&self) -> f32 {
+    fn item(&self) -> PyResult<f32> {
         #[cfg(feature = "gpu")]
         if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return self.inner.to_cpu().item();
+            return self.inner.to_cpu().item().map_err(Into::into);
         }
-        self.inner.item()
+        self.inner.item().map_err(Into::into)
     }
 
     fn numpy(&self) -> Vec<f32> {
