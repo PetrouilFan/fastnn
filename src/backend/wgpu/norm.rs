@@ -2,8 +2,6 @@ use super::PendingRead;
 use crate::backend::wgpu::context::WgpuContext;
 use crate::backend::BackendError;
 
-const NORM_WORKGROUP_SIZE: u32 = 256;
-
 pub(super) fn dispatch_norm_gpu(
     ctx: &mut WgpuContext,
     encoder: &mut wgpu::CommandEncoder,
