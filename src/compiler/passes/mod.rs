@@ -11,7 +11,6 @@ pub mod memory_planning;
 pub mod operator_fusion;
 pub mod prune_qdq_pairs;
 pub mod quantization;
-pub mod quantize_activations;
 pub mod shape_inference;
 pub mod training;
 pub mod type_inference;
