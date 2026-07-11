@@ -247,6 +247,21 @@ impl CpuBuffer {
         let ptr = (*self.0.get()).as_ptr().add(offset);
         std::slice::from_raw_parts(ptr, size)
     }
+
+    /// Create a zero-copy `&mut [u8]` view over `[offset, offset + size)` bytes.
+    ///
+    /// # Safety
+    ///
+    /// - `offset + size` must be within the buffer bounds.
+    /// - No other access (shared or mutable) to this byte range may exist for the
+    ///   lifetime of the view.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn view_u8_mut(&self, offset: usize, size: usize) -> &mut [u8] {
+        // SAFETY: The caller guarantees bounds and exclusive access to this byte range.
+        let ptr = (*self.0.get()).as_mut_ptr().add(offset);
+        std::slice::from_raw_parts_mut(ptr, size)
+    }
 }
 
 // SAFETY: `Vec<u8>` is `Send + Sync`.  The arena is never accessed
@@ -254,6 +269,28 @@ impl CpuBuffer {
 // via `UnsafeCell` does not introduce data races.
 unsafe impl Send for CpuBuffer {}
 unsafe impl Sync for CpuBuffer {}
+
+#[cfg(test)]
+mod cpu_buffer_tests {
+    use super::CpuBuffer;
+
+    #[test]
+    fn mutable_byte_view_preserves_non_word_aligned_lengths() {
+        for size in [1, 2, 3, 5, 6, 7] {
+            let buffer = CpuBuffer::new(vec![0; 16]);
+            {
+                // SAFETY: The range is in bounds and this is the only live view.
+                let view = unsafe { buffer.view_u8_mut(2, size) };
+                assert_eq!(view.len(), size);
+                view.fill(0xA5);
+            }
+            let data = buffer.data_mut();
+            assert!(data[..2].iter().all(|byte| *byte == 0));
+            assert!(data[2..2 + size].iter().all(|byte| *byte == 0xA5));
+            assert!(data[2 + size..].iter().all(|byte| *byte == 0));
+        }
+    }
+}
 
 /// CPU execution context. Zero allocation during dispatch.
 #[derive(Clone)]
@@ -6893,8 +6930,7 @@ impl Backend for CpuBackend {
                                 let f32_data =
                                     unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
                                 let out_bytes =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let out_bytes: &mut [u8] = bytemuck::cast_slice_mut(out_bytes);
+                                    unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
                                 for (i, &v) in f32_data.iter().enumerate() {
                                     let f16_val = half::f16::from_f32(v);
                                     let bytes = f16_val.to_le_bytes();
@@ -6932,11 +6968,8 @@ impl Backend for CpuBackend {
                             if let Some(input_slice) = input_slices.first() {
                                 let f32_data =
                                     unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let out_bytes = unsafe {
-                                    bytemuck::cast_slice_mut(
-                                        arena.view_f32_mut(out_start, out_end - out_start),
-                                    )
-                                };
+                                let out_bytes =
+                                    unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
 
                                 if is_per_channel && num_channels > 0 {
                                     // Per-channel asymmetric quantization
