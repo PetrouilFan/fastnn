@@ -1,7 +1,7 @@
 # Compiler passes guide
 
 This directory owns individual graph analyses and rewrites. The authoritative
-pipeline order is `GraphExecutor::compile_with_weight_dtype` in
+pipeline order is `GraphExecutor::compile_with_target` in
 `src/backend/executor.rs`; do not duplicate or infer it from this directory.
 
 ## Pass rules
