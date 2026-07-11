@@ -304,11 +304,6 @@ pub(crate) struct I8ActivationAffine {
 
 impl I8ActivationAffine {
     #[inline(always)]
-    fn dequantize(self, q: i8) -> f32 {
-        (q as f32) * self.scale + self.zero
-    }
-
-    #[inline(always)]
     fn sum_from_q_sum(self, q_sum: i32, len: usize) -> f32 {
         (q_sum as f32) * self.scale + (len as f32) * self.zero
     }

@@ -564,6 +564,47 @@ mod neon_tests {
     }
 
     #[test]
+    fn test_gemm_cpu_flat_i8_i8x4_nonzero_offsets_match_affine_reference() {
+        let n = 1;
+        let k = 4;
+        let m = 1;
+        let weight_scale = 0.5f32;
+        let weight_offset = -1.25f32;
+        let quantized_weights = [-4i8, -1, 2, 7];
+        let weights: Vec<f32> = quantized_weights
+            .iter()
+            .map(|value| *value as f32 * weight_scale + weight_offset)
+            .collect();
+        let packed =
+            PackedTensor::<I8x4>::from_f32_slice(&weights, &[n, k], weight_scale, weight_offset);
+
+        let activation_scale = 0.25f32;
+        let activation_offset = 1.5f32;
+        let quantized_activations = [-8i8, -2, 3, 11];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&activation_scale.to_le_bytes());
+        payload.extend_from_slice(&activation_offset.to_le_bytes());
+        payload.extend(quantized_activations.iter().map(|value| *value as u8));
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_i8x4(&packed, &payload, &mut output, m, k, n);
+
+        let expected: f32 = weights
+            .iter()
+            .zip(quantized_activations)
+            .map(|(weight, activation)| {
+                weight * (activation as f32 * activation_scale + activation_offset)
+            })
+            .sum();
+        assert!(
+            (output[0] - expected).abs() < 1e-4,
+            "got {}, expected {}",
+            output[0],
+            expected
+        );
+    }
+
+    #[test]
     fn test_gemm_cpu_flat_i8_i4x8_signed_nibbles_match_f32_reference() {
         let n = 2;
         let k = 8;

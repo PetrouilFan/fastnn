@@ -1631,6 +1631,22 @@ unsafe fn hsum256_epi32(value: __m256i) -> i32 {
     lanes.into_iter().sum()
 }
 
+#[inline]
+fn apply_integer_affine_dot(
+    q_dot: i32,
+    q_weight_sum: i32,
+    q_activation_sum: i32,
+    k: usize,
+    weight_scale: f32,
+    weight_offset: f32,
+    activation: I8ActivationAffine,
+) -> f32 {
+    weight_scale * activation.scale * q_dot as f32
+        + weight_scale * activation.zero * q_weight_sum as f32
+        + weight_offset * activation.scale * q_activation_sum as f32
+        + k as f32 * weight_offset * activation.zero
+}
+
 /// Flat-buffer I8 × I8x4 quantized GEMM.
 ///
 /// Activation payload format: [scale_f32][zp_f32][i8_data...]
@@ -1669,27 +1685,37 @@ pub fn gemm_cpu_flat_i8_i8x4(
 
     let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
 
-    // Non-zero activation zero-point requires lane-by-lane dequantization.
+    // Affine offsets are corrected after collecting integer sufficient statistics.
     if activation_affine.zero != 0.0 {
         let k_packed = k.div_ceil(I8x4::ITEMS);
-        // M-outer loop: activation data for each pixel is reused across all output channels
         for bi in 0..m {
             let act_base = bi * k;
+            let q_activation_sum: i32 = act_i8[act_base..act_base + k]
+                .iter()
+                .map(|value| *value as i8 as i32)
+                .sum();
             for row in 0..oc {
                 let scale_w = weights.scale_for_row(row);
                 let zero_w = weights.zero_for_row(row);
                 let row_offset = row * k_packed;
-                let mut acc_f32 = 0.0f32;
-                let mut activation_sum = 0.0f32;
+                let mut q_dot = 0i32;
+                let mut q_weight_sum = 0i32;
                 for kk in 0..k {
-                    let a = activation_affine.dequantize(act_i8[act_base + kk] as i8);
-                    let word = weights.as_packed()[row_offset + kk / 4].0;
-                    let bytes = word.to_le_bytes();
-                    let q_w = bytes[kk % 4] as i8 as f32;
-                    acc_f32 += a * q_w;
-                    activation_sum += a;
+                    let word = weights.as_packed()[row_offset + kk / I8x4::ITEMS].0;
+                    let q_w = word.to_le_bytes()[kk % I8x4::ITEMS] as i8 as i32;
+                    let q_a = act_i8[act_base + kk] as i8 as i32;
+                    q_dot += q_w * q_a;
+                    q_weight_sum += q_w;
                 }
-                outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
+                outputs[bi * n + row] = apply_integer_affine_dot(
+                    q_dot,
+                    q_weight_sum,
+                    q_activation_sum,
+                    k,
+                    scale_w,
+                    zero_w,
+                    activation_affine,
+                );
             }
         }
         return;
@@ -1825,33 +1851,44 @@ pub fn gemm_cpu_flat_i8_i4x8(
     let k_packed = k.div_ceil(I4x8::ITEMS);
 
     if activation_affine.zero != 0.0 {
-        // M-outer loop: activation data reused across all output channels
         for bi in 0..m {
             let act_base = bi * k;
+            let q_activation_sum: i32 = act_i8[act_base..act_base + k]
+                .iter()
+                .map(|value| *value as i8 as i32)
+                .sum();
             for row in 0..oc {
                 let scale_w = weights.scale_for_row(row);
                 let zero_w = weights.zero_for_row(row);
                 let row_offset = row * k_packed;
-                let mut acc_f32 = 0.0f32;
-                let mut activation_sum = 0.0f32;
+                let mut q_dot = 0i32;
+                let mut q_weight_sum = 0i32;
                 for p in 0..k_packed {
                     let word = weights.as_packed()[row_offset + p].0;
                     for lane in 0..I4x8::ITEMS {
                         let idx = p * I4x8::ITEMS + lane;
                         if idx < k {
                             let nibble = (word >> (lane * 4)) & 0xF;
-                            let signed = if nibble & 0x8 != 0 {
+                            let q_w = if nibble & 0x8 != 0 {
                                 (nibble | 0xFFFFFFF0) as i32
                             } else {
                                 nibble as i32
                             };
-                            let a = activation_affine.dequantize(act_i8[act_base + idx] as i8);
-                            acc_f32 += signed as f32 * a;
-                            activation_sum += a;
+                            let q_a = act_i8[act_base + idx] as i8 as i32;
+                            q_dot += q_w * q_a;
+                            q_weight_sum += q_w;
                         }
                     }
                 }
-                outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
+                outputs[bi * n + row] = apply_integer_affine_dot(
+                    q_dot,
+                    q_weight_sum,
+                    q_activation_sum,
+                    k,
+                    scale_w,
+                    zero_w,
+                    activation_affine,
+                );
             }
         }
         return;
