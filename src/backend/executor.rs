@@ -18,11 +18,8 @@ use crate::autograd::build_backward_graph;
 use crate::backend::{
     Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan, ProfileEntry,
 };
+use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
-use crate::compiler::passes::{
-    activation_quantization, calibration, dead_code_elimination, memory_planning, operator_fusion,
-    quantization, shape_inference,
-};
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
@@ -180,152 +177,14 @@ impl<B: Backend> GraphExecutor<B> {
     /// Takes ownership of `graph` to avoid an unnecessary deep clone.
     pub fn compile_with_target(
         &self,
-        mut graph: ComputeGraph,
+        graph: ComputeGraph,
         target: CompileTarget,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let quant_target = match target {
-            CompileTarget::Native => None,
-            CompileTarget::WeightOnly(target) => Some(target),
-            CompileTarget::IntegerInference(target) => {
-                if calib_data.is_none() {
-                    return Err(BackendError::Compilation(
-                        "integer inference requires activation calibration data".into(),
-                    ));
-                }
-                Some(target)
-            }
-            CompileTarget::TrainingMixedPrecision { .. } => {
-                return Err(BackendError::Compilation(
-                    "mixed-precision training compilation is not implemented".into(),
-                ));
-            }
-        };
-        let do_weight_quant = quant_target.is_some();
-
-        // ── Phase 1: Shape inference ──────────────────────────────────────
-        shape_inference::infer_shapes(&mut graph)
-            .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
-
-        // ── Phase 1.5: Constant folding + arithmetic simplification ──────
-        // Evaluate fully-constant nodes (Shape, broadcast constants, etc.)
-        // and simplify trivial arithmetic (x*1.0, x+0.0, Neg(Neg(x)), etc.)
-        // before fusion to reduce the number of nodes the fusion pass sees.
-        {
-            use crate::compiler::passes::{arithmetic_simplify, constant_folding};
-            constant_folding::constant_fold(&mut graph);
-            arithmetic_simplify::arithmetic_simplify(&mut graph);
-        }
-
-        // ── Phase 2: Operator fusion ──────────────────────────────────────
-        operator_fusion::fuse_operators(&mut graph)
-            .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
-
-        // ── Phase 2.5: Dead code elimination after fusion ────────────────
-        // Fusion creates dead intermediate nodes (e.g. the original Add and
-        // Relu when fusing MatMul+Add+Relu). Eliminate them before
-        // quantization to avoid quantizing dead nodes.
-        dead_code_elimination::eliminate_dead_code(&mut graph);
-
-        // ── Phase 2.5: Quantization (optional) ───────────────────────────
-        // Handle three cases:
-        // 1. weight_dtype != F32: quantize weights.
-        //    Activation quantization is only applied when calibration data is provided.
-        // 2. weight_dtype == F32, calib_data=Some(_): re-quantize activations only (weights already quantized)
-        // 3. weight_dtype == F32, calib_data=None: no quantization
-        let do_quantize = do_weight_quant || calib_data.is_some();
-        if do_quantize {
-            // Quantize weights if requested
-            if let Some(quant_target) = quant_target {
-                use quantization::FpDtype;
-                match quant_target {
-                    QuantTarget::I4 => {
-                        quantization::quantize_weights(&mut graph, 4, true, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    QuantTarget::I8 => {
-                        quantization::quantize_weights(&mut graph, 8, true, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    QuantTarget::U4 => {
-                        quantization::quantize_weights(&mut graph, 4, false, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    QuantTarget::U8 => {
-                        quantization::quantize_weights(&mut graph, 8, false, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    QuantTarget::Fp8E4M3 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    QuantTarget::Fp8E5M2 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    QuantTarget::Fp4E2M1 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    QuantTarget::I4Codebook => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::I4Codebook, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                }
-            }
-
-            // After quantizing weights, wrap any optimizer ops that now have
-            // quantized weight inputs with Dequantize/Quantize.
-            quantization::wrap_quantized_optimizer(&mut graph)
-                .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
-
-            // Insert QuantizeActivations before MatMul/Conv2d activation inputs only
-            // when explicit calibration data is provided. Without calibrated scales,
-            // activation quantization produces garbage outputs and adds unnecessary
-            // Q/DQ overhead that makes weight-only quantized inference slower than FP32.
-            if let Some(calib) = calib_data {
-                activation_quantization::quantize_activations_with_calibration(&mut graph, &calib)
-                    .map_err(|e| {
-                        BackendError::Compilation(format!("activation quantization: {e}"))
-                    })?;
-            }
-
-            // Remove redundant QuantizeActivations → DequantizeActivations round-trips
-            // that were inserted by activation quantization or the optimizer wrapper.
-            // This pass is dead-code in auto_cast.rs; wire it into the main pipeline.
-            crate::compiler::passes::prune_qdq_pairs::prune_qdq_pairs(&mut graph)
-                .map_err(|e| BackendError::Compilation(format!("prune qdq pairs: {e}")))?;
-        }
-
-        // ── Phase 3: Dead code elimination ────────────────────────────────
-        let _removed = dead_code_elimination::eliminate_dead_code(&mut graph);
-
-        // Reject malformed legacy dtype metadata at the compiler boundary while
-        // the graph is being migrated to the canonical representation model.
-        for node in &graph.nodes {
-            for tensor_type in
-                std::iter::once(&node.output_type).chain(node.secondary_output_type.as_ref())
-            {
-                let representation = tensor_type.dtype.value_representation().map_err(|error| {
-                    BackendError::Compilation(format!(
-                        "invalid dtype metadata on node {}: {error}",
-                        node.id
-                    ))
-                })?;
-                representation.validate().map_err(|error| {
-                    BackendError::Compilation(format!(
-                        "invalid value representation on node {}: {error}",
-                        node.id
-                    ))
-                })?;
-            }
-        }
-
-        // ── Phase 4: Memory planning ──────────────────────────────────────
-        let memory_plan = memory_planning::plan_memory(&graph)
-            .map_err(|e| BackendError::Compilation(format!("memory planning: {e}")))?;
-
-        // ── Phase 5: Backend compilation ──────────────────────────────────
+        let compiled =
+            crate::compiler::pipeline::CompilerPipeline::new(target, calib_data).run(graph)?;
+        let graph = compiled.graph;
+        let memory_plan = compiled.memory_plan;
         let plan = self.backend.compile(&graph, &memory_plan)?;
 
         if std::env::var("FASTNN_DUMP_INSTRS").is_ok() {
