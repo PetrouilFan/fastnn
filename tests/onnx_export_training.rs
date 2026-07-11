@@ -255,7 +255,7 @@ fn test_quantized_matmul_export_still_works() {
         weight_shape,
         IrDType::I4 {
             scales: vec![0.1, 0.2, 0.3, 0.4],
-            zero_points: vec![0.0, 0.0, 0.0, 0.0],
+            dequant_offsets: vec![0.0, 0.0, 0.0, 0.0],
             codebooks: vec![],
         },
     );

@@ -112,12 +112,12 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     let weight_node = graph.get_node_mut(weight_id).unwrap();
     weight_node.output_type.dtype = IrDType::I8Scaled {
         scales: vec![],
-        zero_points: vec![],
+        dequant_offsets: vec![],
     };
     if let Opcode::Constant(TensorValue::Data { tensor_type, .. }) = &mut weight_node.opcode {
         tensor_type.dtype = IrDType::I8Scaled {
             scales: vec![],
-            zero_points: vec![],
+            dequant_offsets: vec![],
         };
     }
 

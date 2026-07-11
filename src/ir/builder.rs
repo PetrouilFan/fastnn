@@ -1222,7 +1222,7 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Quantize F32 → U4/U8 with per-channel scales/zero_points.
+    /// Quantize F32 → U4/U8 with per-channel scales/dequant_offsets.
     ///
     /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::I4` or
     /// `IrDType::I8` packed weight type with per-channel scale/zero-point metadata.
@@ -1231,12 +1231,12 @@ impl GraphBuilder {
         let output_dtype = match bit_width {
             4 => IrDType::I4 {
                 scales: vec![],
-                zero_points: vec![],
+                dequant_offsets: vec![],
                 codebooks: vec![],
             },
             8 => IrDType::I8Scaled {
                 scales: vec![],
-                zero_points: vec![],
+                dequant_offsets: vec![],
             },
             _ => panic!("quantize: bit_width must be 4 or 8, got {}", bit_width),
         };
@@ -1260,11 +1260,11 @@ impl GraphBuilder {
         let output_dtype = match bit_width {
             4 => IrDType::U4Scaled {
                 scales: vec![],
-                zero_points: vec![],
+                dequant_offsets: vec![],
             },
             8 => IrDType::U8Scaled {
                 scales: vec![],
-                zero_points: vec![],
+                dequant_offsets: vec![],
             },
             _ => panic!(
                 "quantize_unsigned: bit_width must be 4 or 8, got {}",
@@ -1285,7 +1285,7 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Dequantize U4/U8 → F32 using the scales/zero_points from the input dtype.
+    /// Dequantize U4/U8 → F32 using the scales/dequant_offsets from the input dtype.
     pub fn dequantize(&self, input: &GraphTensor) -> GraphTensor {
         let output_shape = input.shape().to_vec();
         let output_type = TensorType::new(output_shape, IrDType::F32);

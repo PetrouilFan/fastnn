@@ -27,7 +27,7 @@ pub enum FpDtype {
 ///
 /// For a weight of shape `[out_channels, in_features]`, we compute one
 /// (scale, zero_point) pair per output channel (row).  The scales and
-/// zero_points are stored directly on the `IrDType::I4/I8Scaled/U4Scaled/U8Scaled`
+/// dequant_offsets are stored directly on the `IrDType::I4/I8Scaled/U4Scaled/U8Scaled`
 /// variant so the CPU backend can feed them into `PackedTensor::from_raw(…)`.
 ///
 /// When `signed` is true, packed storage uses signed `I4x8`/`I8x4` and
@@ -183,7 +183,7 @@ pub fn quantize_weights(
                     bytes,
                     IrDType::I4 {
                         scales: pt.scales,
-                        zero_points: pt.zeros,
+                        dequant_offsets: pt.zeros,
                         codebooks: vec![],
                     },
                 )
@@ -202,7 +202,7 @@ pub fn quantize_weights(
                     bytes,
                     IrDType::U4Scaled {
                         scales: pt.scales,
-                        zero_points: pt.zeros,
+                        dequant_offsets: pt.zeros,
                     },
                 )
             }
@@ -221,7 +221,7 @@ pub fn quantize_weights(
                 bytes,
                 IrDType::I8Scaled {
                     scales: pt.scales,
-                    zero_points: pt.zeros,
+                    dequant_offsets: pt.zeros,
                 },
             )
         } else {
@@ -239,7 +239,7 @@ pub fn quantize_weights(
                 bytes,
                 IrDType::U8Scaled {
                     scales: pt.scales,
-                    zero_points: pt.zeros,
+                    dequant_offsets: pt.zeros,
                 },
             )
         };
@@ -457,7 +457,7 @@ pub fn quantize_weights_fp(
             },
             FpDtype::I4Codebook => IrDType::I4 {
                 scales,
-                zero_points: vec![],
+                dequant_offsets: vec![],
                 codebooks,
             },
         };
@@ -603,14 +603,14 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
             .map(|wn| match &wn.output_type.dtype {
                 IrDType::I4 {
                     scales,
-                    zero_points,
+                    dequant_offsets,
                     ..
-                } => (scales.clone(), zero_points.clone()),
+                } => (scales.clone(), dequant_offsets.clone()),
                 IrDType::I8Scaled {
                     scales,
-                    zero_points,
+                    dequant_offsets,
                     ..
-                } => (scales.clone(), zero_points.clone()),
+                } => (scales.clone(), dequant_offsets.clone()),
                 _ => (vec![], vec![]),
             })
             .unwrap_or_default();
@@ -620,12 +620,12 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
             match wrap.bit_width {
                 4 => IrDType::I4 {
                     scales: orig_scales,
-                    zero_points: orig_zeros,
+                    dequant_offsets: orig_zeros,
                     codebooks: vec![],
                 },
                 8 => IrDType::I8Scaled {
                     scales: orig_scales,
-                    zero_points: orig_zeros,
+                    dequant_offsets: orig_zeros,
                 },
                 _ => {
                     return Err(FastnnError::compilation(format!(
@@ -732,7 +732,7 @@ mod tests {
 
         if let IrDType::I4 {
             scales,
-            zero_points,
+            dequant_offsets,
             ..
         } = &u4_node.output_type.dtype
         {
@@ -742,9 +742,9 @@ mod tests {
                 "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])"
             );
             assert_eq!(
-                zero_points.len(),
+                dequant_offsets.len(),
                 8,
-                "Should have 8 per-channel zero_points"
+                "Should have 8 per-channel dequant_offsets"
             );
             for &s in scales.iter() {
                 assert!(s > 0.0, "Scale should be positive, got {}", s);
@@ -774,7 +774,7 @@ mod tests {
 
         if let IrDType::I8Scaled {
             scales,
-            zero_points,
+            dequant_offsets,
         } = &u8_node.output_type.dtype
         {
             assert_eq!(
@@ -782,7 +782,7 @@ mod tests {
                 8,
                 "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])"
             );
-            assert_eq!(zero_points.len(), 8);
+            assert_eq!(dequant_offsets.len(), 8);
         } else {
             panic!("Expected U8 dtype after quantization");
         }
@@ -798,7 +798,7 @@ mod tests {
             vec![DimExpr::Known(2), DimExpr::Known(4)],
             IrDType::I4 {
                 scales: vec![1.0],
-                zero_points: vec![0.0],
+                dequant_offsets: vec![0.0],
                 codebooks: vec![],
             },
         );
@@ -1195,7 +1195,7 @@ mod tests {
             &[4, 2],
             IrDType::I4 {
                 scales: vec![1.0; 4],
-                zero_points: vec![0.0; 4],
+                dequant_offsets: vec![0.0; 4],
                 codebooks: vec![],
             },
         );

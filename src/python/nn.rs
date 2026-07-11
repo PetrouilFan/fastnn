@@ -2307,16 +2307,16 @@ impl AotExecutor {
                 })?;
                 let ir_dtype = output_node.output_type.dtype.clone();
                 // Extract quantization metadata before ir_to_dtype strips it
-                let (q_scales, q_zero_points) = match &ir_dtype {
+                let (q_scales, q_dequant_offsets) = match &ir_dtype {
                     crate::ir::IrDType::I4 {
                         scales,
-                        zero_points,
+                        dequant_offsets,
                         ..
                     }
                     | crate::ir::IrDType::I8Scaled {
                         scales,
-                        zero_points,
-                    } => (scales.clone(), zero_points.clone()),
+                        dequant_offsets,
+                    } => (scales.clone(), dequant_offsets.clone()),
                     _ => (vec![], vec![]),
                 };
                 let dtype: crate::storage::DType = crate::tensor::ir_to_dtype(ir_dtype);
@@ -2412,8 +2412,8 @@ impl AotExecutor {
                                     .get(ch % q_scales.len().max(1))
                                     .copied()
                                     .unwrap_or(1.0);
-                                let zp = q_zero_points
-                                    .get(ch % q_zero_points.len().max(1))
+                                let zp = q_dequant_offsets
+                                    .get(ch % q_dequant_offsets.len().max(1))
                                     .copied()
                                     .unwrap_or(0.0);
                                 f32_vals.push(val as f32 * s + zp);
@@ -2438,8 +2438,8 @@ impl AotExecutor {
                                     .get(ch % q_scales.len().max(1))
                                     .copied()
                                     .unwrap_or(1.0);
-                                let zp = q_zero_points
-                                    .get(ch % q_zero_points.len().max(1))
+                                let zp = q_dequant_offsets
+                                    .get(ch % q_dequant_offsets.len().max(1))
                                     .copied()
                                     .unwrap_or(0.0);
                                 f32_vals.push(val as f32 * s + zp);
@@ -2505,8 +2505,8 @@ impl AotExecutor {
                                     .get(ch % q_scales.len().max(1))
                                     .copied()
                                     .unwrap_or(1.0);
-                                let zp = q_zero_points
-                                    .get(ch % q_zero_points.len().max(1))
+                                let zp = q_dequant_offsets
+                                    .get(ch % q_dequant_offsets.len().max(1))
                                     .copied()
                                     .unwrap_or(0.0);
                                 f32_vals.push(val as f32 * s + zp);
@@ -2531,8 +2531,8 @@ impl AotExecutor {
                                     .get(ch % q_scales.len().max(1))
                                     .copied()
                                     .unwrap_or(1.0);
-                                let zp = q_zero_points
-                                    .get(ch % q_zero_points.len().max(1))
+                                let zp = q_dequant_offsets
+                                    .get(ch % q_dequant_offsets.len().max(1))
                                     .copied()
                                     .unwrap_or(0.0);
                                 f32_vals.push(val as f32 * s + zp);

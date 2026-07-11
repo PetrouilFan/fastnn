@@ -21,7 +21,7 @@ fn build_qmatmul_graph() -> ComputeGraph {
         weight_shape,
         IrDType::I4 {
             scales: vec![0.1, 0.2, 0.3, 0.4],
-            zero_points: vec![0.0, 0.0, 0.0, 0.0],
+            dequant_offsets: vec![0.0, 0.0, 0.0, 0.0],
             codebooks: vec![],
         },
     );
@@ -183,7 +183,7 @@ fn test_export_qlinear_conv_detected() {
         weight_shape,
         IrDType::I4 {
             scales: vec![0.1],
-            zero_points: vec![0.0],
+            dequant_offsets: vec![0.0],
             codebooks: vec![],
         },
     );

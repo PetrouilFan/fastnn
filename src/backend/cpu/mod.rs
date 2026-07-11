@@ -562,32 +562,32 @@ impl Backend for CpuBackend {
                     let weight_meta = if is_quantized {
                         node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
-                                let (bit_width, scales, zero_points, codebooks) = match &wn
+                                let (bit_width, scales, dequant_offsets, codebooks) = match &wn
                                     .output_type
                                     .dtype
                                 {
                                     IrDType::I4 {
                                         scales,
-                                        zero_points,
+                                        dequant_offsets,
                                         codebooks,
                                     } => (
                                         4usize,
                                         scales.clone(),
-                                        zero_points.clone(),
+                                        dequant_offsets.clone(),
                                         codebooks.clone(),
                                     ),
                                     IrDType::U8Scaled {
                                         scales,
-                                        zero_points,
-                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                        dequant_offsets,
+                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
                                     IrDType::U4Scaled {
                                         scales,
-                                        zero_points,
-                                    } => (4usize, scales.clone(), zero_points.clone(), vec![]),
+                                        dequant_offsets,
+                                    } => (4usize, scales.clone(), dequant_offsets.clone(), vec![]),
                                     IrDType::I8Scaled {
                                         scales,
-                                        zero_points,
-                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                        dequant_offsets,
+                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
                                     IrDType::F4 { scales, zeros, .. } => {
                                         (4usize, scales.clone(), zeros.clone(), vec![])
                                     }
@@ -624,7 +624,7 @@ impl Backend for CpuBackend {
                                 std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width,
                                     scales,
-                                    zero_points,
+                                    dequant_offsets,
                                     shape: w_shape,
                                     quant_block_size,
                                     codebooks,
@@ -903,28 +903,28 @@ impl Backend for CpuBackend {
 
                         let meta = node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
-                                let (bw, scales, zero_points, codebooks) = match &wn
+                                let (bw, scales, dequant_offsets, codebooks) = match &wn
                                     .output_type
                                     .dtype
                                 {
                                     IrDType::I4 {
                                         scales,
-                                        zero_points,
+                                        dequant_offsets,
                                         codebooks,
                                     } => (
                                         4usize,
                                         scales.clone(),
-                                        zero_points.clone(),
+                                        dequant_offsets.clone(),
                                         codebooks.clone(),
                                     ),
                                     IrDType::U8Scaled {
                                         scales,
-                                        zero_points,
-                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                        dequant_offsets,
+                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
                                     IrDType::U4Scaled {
                                         scales,
-                                        zero_points,
-                                    } => (4usize, scales.clone(), zero_points.clone(), vec![]),
+                                        dequant_offsets,
+                                    } => (4usize, scales.clone(), dequant_offsets.clone(), vec![]),
                                     IrDType::F4 { scales, zeros, .. } => {
                                         (4usize, scales.clone(), zeros.clone(), vec![])
                                     }
@@ -936,8 +936,8 @@ impl Backend for CpuBackend {
                                     }
                                     IrDType::I8Scaled {
                                         scales,
-                                        zero_points,
-                                    } => (8usize, scales.clone(), zero_points.clone(), vec![]),
+                                        dequant_offsets,
+                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
                                     _ => (bit_width, vec![], vec![], vec![]),
                                 };
                                 let w_shape: Vec<usize> = wn
@@ -959,7 +959,7 @@ impl Backend for CpuBackend {
                                 std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                     bit_width: bw,
                                     scales,
-                                    zero_points,
+                                    dequant_offsets,
                                     shape: w_shape,
                                     quant_block_size,
                                     codebooks,
@@ -2219,24 +2219,24 @@ impl Backend for CpuBackend {
                         .map(|n| match &n.output_type.dtype {
                             IrDType::I4 {
                                 scales,
-                                zero_points,
+                                dequant_offsets,
                                 ..
                             }
                             | IrDType::U4Scaled {
                                 scales,
-                                zero_points,
+                                dequant_offsets,
                                 ..
                             }
                             | IrDType::I8Scaled {
                                 scales,
-                                zero_points,
+                                dequant_offsets,
                                 ..
                             }
                             | IrDType::U8Scaled {
                                 scales,
-                                zero_points,
+                                dequant_offsets,
                                 ..
-                            } => (scales.clone(), zero_points.clone()),
+                            } => (scales.clone(), dequant_offsets.clone()),
                             _ => (vec![], vec![]),
                         })
                         .unwrap_or_default();
@@ -2272,33 +2272,33 @@ impl Backend for CpuBackend {
                     // quantized Constants or Quantize ops). These are passed as
                     // additional params so the dequantize kernel can reconstruct
                     // f32 values without relying on an inline header.
-                    let (scales, zero_points) = node
+                    let (scales, dequant_offsets) = node
                         .inputs
                         .first()
                         .and_then(|&input_id| graph.get_node(input_id))
                         .map(|n| match &n.output_type.dtype {
                             IrDType::I4 {
                                 scales,
-                                zero_points,
+                                dequant_offsets,
                                 ..
-                            } => (scales.clone(), zero_points.clone()),
+                            } => (scales.clone(), dequant_offsets.clone()),
                             IrDType::U4Scaled {
                                 scales,
-                                zero_points,
+                                dequant_offsets,
                                 ..
-                            } => (scales.clone(), zero_points.clone()),
+                            } => (scales.clone(), dequant_offsets.clone()),
                             IrDType::I8Scaled {
                                 scales,
-                                zero_points,
-                            } => (scales.clone(), zero_points.clone()),
+                                dequant_offsets,
+                            } => (scales.clone(), dequant_offsets.clone()),
                             IrDType::U8Scaled {
                                 scales,
-                                zero_points,
-                            } => (scales.clone(), zero_points.clone()),
+                                dequant_offsets,
+                            } => (scales.clone(), dequant_offsets.clone()),
                             _ => (vec![], vec![]),
                         })
                         .unwrap_or_default();
-                    let has_metadata = !scales.is_empty() && !zero_points.is_empty();
+                    let has_metadata = !scales.is_empty() && !dequant_offsets.is_empty();
                     let format_flag: usize = if has_metadata { 1 } else { 0 }; // 0=header, 1=metadata
                                                                                // Flatten scales and zero_points into params (f32 bits as usize)
                     let mut params = vec![numel, format_flag];
@@ -2307,7 +2307,7 @@ impl Backend for CpuBackend {
                     for &s in &scales {
                         params.push(s.to_bits() as usize);
                     }
-                    for &zp in &zero_points {
+                    for &zp in &dequant_offsets {
                         params.push(zp.to_bits() as usize);
                     }
                     instructions.push(Instruction::CallKernel {
@@ -4016,11 +4016,11 @@ impl Backend for CpuBackend {
                                             } else {
                                                 meta.scales.clone()
                                             };
-                                            let local_zps = if meta.zero_points.len() > 1 {
-                                                meta.zero_points[g_oc_off..g_oc_off + oc_per_g]
+                                            let local_zps = if meta.dequant_offsets.len() > 1 {
+                                                meta.dequant_offsets[g_oc_off..g_oc_off + oc_per_g]
                                                     .to_vec()
                                             } else {
-                                                meta.zero_points.clone()
+                                                meta.dequant_offsets.clone()
                                             };
                                             let pt = PackedTensor::from_raw(
                                                 w_slice.to_vec(),
@@ -4081,16 +4081,16 @@ impl Backend for CpuBackend {
                                             let w_slice =
                                                 &w_sl[g_oc_off * kp..(g_oc_off + oc_per_g) * kp];
                                             let per_channel_w = meta.scales.len() > 1;
-                                            let per_channel_zp = meta.zero_points.len() > 1;
+                                            let per_channel_zp = meta.dequant_offsets.len() > 1;
                                             let w_scales = if per_channel_w {
                                                 &meta.scales[g_oc_off..g_oc_off + oc_per_g]
                                             } else {
                                                 &meta.scales
                                             };
                                             let w_zps = if per_channel_zp {
-                                                &meta.zero_points[g_oc_off..g_oc_off + oc_per_g]
+                                                &meta.dequant_offsets[g_oc_off..g_oc_off + oc_per_g]
                                             } else {
-                                                &meta.zero_points
+                                                &meta.dequant_offsets
                                             };
                                             // Pack i8 â†’ I8x4 into reusable buffer
                                             packed_conv::pack_i8_col_to_i8x4(
@@ -4212,7 +4212,7 @@ impl Backend for CpuBackend {
                                             packed_data,
                                             vec![oc, inner],
                                             meta.scales.clone(),
-                                            meta.zero_points.clone(),
+                                            meta.dequant_offsets.clone(),
                                         );
                                         pt.quant_block_size = meta.quant_block_size;
                                         unsafe {
@@ -4244,7 +4244,7 @@ impl Backend for CpuBackend {
                                             &raw,
                                             &[oc, inner],
                                             &meta.scales,
-                                            &meta.zero_points,
+                                            &meta.dequant_offsets,
                                             meta.quant_block_size,
                                             &meta.codebooks,
                                         );

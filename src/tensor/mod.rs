@@ -1014,12 +1014,12 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
         // scales are filled in by the quantization compiler pass.
         DType::I4 => IrDType::I4 {
             scales: vec![1.0],
-            zero_points: vec![0.0],
+            dequant_offsets: vec![0.0],
             codebooks: vec![],
         },
         DType::I8Scaled => IrDType::I8Scaled {
             scales: vec![1.0],
-            zero_points: vec![0.0],
+            dequant_offsets: vec![0.0],
         },
         DType::F8 => IrDType::F8 { scales: vec![1.0] },
         DType::F8R => IrDType::F8R { scales: vec![1.0] },
@@ -1030,11 +1030,11 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
         },
         DType::U4Scaled => IrDType::U4Scaled {
             scales: vec![1.0],
-            zero_points: vec![0.0],
+            dequant_offsets: vec![0.0],
         },
         DType::U8Scaled => IrDType::U8Scaled {
             scales: vec![1.0],
-            zero_points: vec![0.0],
+            dequant_offsets: vec![0.0],
         },
     }
 }

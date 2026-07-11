@@ -37,7 +37,7 @@ impl BufferSlice {
 }
 
 /// Quantized weight metadata for packed precision kernels.
-/// Carries per-channel scales, zero-points, shape, and bit-width
+/// Carries per-channel scales, dequantization offsets, shape, and bit-width
 /// so the backend dispatch can construct a [`PackedTensor`] for SIMD
 /// or GPU compute shaders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,8 +46,8 @@ pub struct QuantizedWeightMeta {
     pub bit_width: usize,
     /// Per-output-channel scale factors.
     pub scales: Vec<f32>,
-    /// Per-output-channel zero points.
-    pub zero_points: Vec<f32>,
+    /// Per-output-channel floating offsets in `real = q * scale + offset`.
+    pub dequant_offsets: Vec<f32>,
     /// Logical shape of the weight tensor.
     pub shape: Vec<usize>,
     /// Per-element quantization block size within each row. 0 = per-channel.

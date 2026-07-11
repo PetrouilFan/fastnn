@@ -558,7 +558,7 @@ fn try_gpu_dispatch(
                 .unwrap_or_default();
             let zero_points = weight_meta
                 .as_ref()
-                .map(|m| m.zero_points.clone())
+                .map(|m| m.dequant_offsets.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_matmul_gpu(
                 ctx,
@@ -588,7 +588,7 @@ fn try_gpu_dispatch(
                 .unwrap_or_default();
             let zero_points = weight_meta
                 .as_ref()
-                .map(|m| m.zero_points.clone())
+                .map(|m| m.dequant_offsets.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_conv_gpu(
                 ctx,

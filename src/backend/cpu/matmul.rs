@@ -88,10 +88,10 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             "{kernel_name}: quantized weight metadata missing scales"
         )));
     }
-    let zero_points = if meta.zero_points.is_empty() {
+    let zero_points = if meta.dequant_offsets.is_empty() {
         vec![0.0; meta.scales.len()]
     } else {
-        meta.zero_points.clone()
+        meta.dequant_offsets.clone()
     };
     if meta.scales.len() != zero_points.len() {
         return Err(BackendError::Dispatch(format!(
@@ -194,7 +194,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
-                zero_points: vec![0.0],
+                dequant_offsets: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
                 codebooks: vec![],
@@ -263,7 +263,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 8,
                 scales: vec![1.0],
-                zero_points: vec![0.0],
+                dequant_offsets: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
                 codebooks: vec![],
@@ -323,7 +323,7 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width: 4,
                 scales: vec![1.0],
-                zero_points: vec![0.0],
+                dequant_offsets: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
                 codebooks: vec![],

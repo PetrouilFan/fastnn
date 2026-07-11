@@ -622,12 +622,12 @@ fn test_matmul_u4_i8_dispatch_path() {
 
     let mm_node = graph.get_node(mm_id).unwrap();
     let packed_weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    let (scales, zero_points) = match &packed_weight_node.output_type.dtype {
+    let (scales, dequant_offsets) = match &packed_weight_node.output_type.dtype {
         IrDType::I4 {
             scales,
-            zero_points,
+            dequant_offsets,
             ..
-        } => (scales.clone(), zero_points.clone()),
+        } => (scales.clone(), dequant_offsets.clone()),
         other => panic!("expected U4 weight node, got {:?}", other),
     };
     let raw_bytes = match &packed_weight_node.opcode {
@@ -648,7 +648,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     if packed_shape.len() == 2 {
         packed_shape.reverse();
     }
-    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, zero_points);
+    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, dequant_offsets);
     let mut expected_payload = Vec::new();
     expected_payload.extend_from_slice(&act_scale.to_le_bytes());
     expected_payload.extend_from_slice(&act_zp.to_le_bytes());

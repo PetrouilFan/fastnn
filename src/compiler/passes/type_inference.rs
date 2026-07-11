@@ -392,7 +392,7 @@ mod tests {
                 vec![DimExpr::Known(4)],
                 IrDType::I4 {
                     scales: vec![],
-                    zero_points: vec![],
+                    dequant_offsets: vec![],
                     codebooks: vec![],
                 },
             ),

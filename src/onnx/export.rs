@@ -120,7 +120,7 @@ struct QLinearPattern {
     /// Weight per-channel scales (from packed dtype).
     weight_scales: Vec<f32>,
     /// Weight per-channel zero points.
-    weight_zero_points: Vec<f32>,
+    weight_dequant_offsets: Vec<f32>,
     /// Activation scale from DequantizeActivations (None if unquantized).
     activation_scale: Option<f32>,
 }
@@ -174,17 +174,17 @@ fn detect_qlinear_patterns(
             None => continue,
         };
 
-        // Extract scales/zero_points from the packed weight's dtype.
-        let (weight_scales, weight_zero_points) = match &packed_node.output_type.dtype {
+        // Extract scales/dequant_offsets from the packed weight's dtype.
+        let (weight_scales, weight_dequant_offsets) = match &packed_node.output_type.dtype {
             IrDType::I4 {
                 scales,
-                zero_points,
+                dequant_offsets,
                 ..
-            } => (scales.clone(), zero_points.clone()),
+            } => (scales.clone(), dequant_offsets.clone()),
             IrDType::I8Scaled {
                 scales,
-                zero_points,
-            } => (scales.clone(), zero_points.clone()),
+                dequant_offsets,
+            } => (scales.clone(), dequant_offsets.clone()),
             IrDType::F4 { scales, zeros, .. } => (
                 scales.clone(),
                 if zeros.is_empty() {
@@ -245,7 +245,7 @@ fn detect_qlinear_patterns(
                 },
                 q_output_id,
                 weight_scales,
-                weight_zero_points,
+                weight_dequant_offsets,
                 activation_scale,
             },
         );
@@ -260,9 +260,9 @@ fn per_tensor_scale(scales: &[f32]) -> f32 {
     scales.first().copied().unwrap_or(1.0)
 }
 
-/// Extract a per-tensor zero_point from per-channel zero_points.
-fn per_tensor_zero_point(zero_points: &[f32]) -> i32 {
-    zero_points.first().copied().unwrap_or(0.0) as i32
+/// Extract a per-tensor zero_point from per-channel dequant_offsets.
+fn per_tensor_zero_point(dequant_offsets: &[f32]) -> i32 {
+    dequant_offsets.first().copied().unwrap_or(0.0) as i32
 }
 
 /// Generate unique param entry names for the scale/zero_point scalars
@@ -288,11 +288,11 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
     match &q_node.output_type.dtype {
         IrDType::I4 {
             scales,
-            zero_points,
+            dequant_offsets,
             ..
         } => {
             let s = scales.first().copied().unwrap_or(1.0);
-            let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
+            let zp = dequant_offsets.first().copied().unwrap_or(0.0) as i32;
             if scales.is_empty() {
                 (1.0, 0)
             } else {
@@ -301,10 +301,10 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         }
         IrDType::I8Scaled {
             scales,
-            zero_points,
+            dequant_offsets,
         } => {
             let s = scales.first().copied().unwrap_or(1.0);
-            let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
+            let zp = dequant_offsets.first().copied().unwrap_or(0.0) as i32;
             if scales.is_empty() {
                 (1.0, 0)
             } else {
@@ -422,7 +422,7 @@ pub fn export_to_onnx_json_with_config(
             let b_src = node_output_names[&node.inputs[1]].clone();
 
             let b_scale = per_tensor_scale(&pattern.weight_scales);
-            let b_zp = per_tensor_zero_point(&pattern.weight_zero_points);
+            let b_zp = per_tensor_zero_point(&pattern.weight_dequant_offsets);
             let a_scale = pattern.activation_scale.unwrap_or(1.0);
             let a_zp = 0;
             let (y_scale, y_zp) = extract_output_scale_zp(graph, pattern.q_output_id);

@@ -399,33 +399,33 @@ pub enum IrDType {
     /// Signed 8-bit integer (used for INT8 activation quantization).
     I8,
     /// Packed 4-bit (I4x8): 8 values per u32 word.
-    /// `scales` and `zero_points` are per-output-channel vectors.
+    /// `scales` and `dequant_offsets` are per-output-channel vectors.
     /// When `codebooks` is non-empty, bits 0-3 are an unsigned 4-bit index
     /// (0-15) into `codebook[block_idx]`.  Dequant: `codebook[blk][nibble]`.
     /// Replaces scales/zeros when present (they are ignored).
     I4 {
         scales: Vec<f32>,
-        zero_points: Vec<f32>,
+        dequant_offsets: Vec<f32>,
         codebooks: Vec<[f32; 16]>,
     },
     /// Packed 8-bit (I8x4): 4 values per u32 word.
-    /// `scales` and `zero_points` are per-output-channel vectors.
+    /// `scales` and `dequant_offsets` are per-output-channel vectors.
     /// Formerly named `U8` (misleading — this was always signed I8x4).
     I8Scaled {
         scales: Vec<f32>,
-        zero_points: Vec<f32>,
+        dequant_offsets: Vec<f32>,
     },
     /// Unsigned packed 4-bit (U4x8): 8 values per u32 word.
-    /// `scales` and `zero_points` are per-output-channel vectors.
+    /// `scales` and `dequant_offsets` are per-output-channel vectors.
     U4Scaled {
         scales: Vec<f32>,
-        zero_points: Vec<f32>,
+        dequant_offsets: Vec<f32>,
     },
     /// Unsigned packed 8-bit (U8x4): 4 values per u32 word.
-    /// `scales` and `zero_points` are per-output-channel vectors.
+    /// `scales` and `dequant_offsets` are per-output-channel vectors.
     U8Scaled {
         scales: Vec<f32>,
-        zero_points: Vec<f32>,
+        dequant_offsets: Vec<f32>,
     },
 
     /// FP8 E4M3 (no zero-point, 2-term dequant).
@@ -459,21 +459,21 @@ impl IrDType {
         match self {
             Self::I4 {
                 scales,
-                zero_points,
+                dequant_offsets,
                 codebooks,
-            } if codebooks.is_empty() => Some((scales, zero_points)),
+            } if codebooks.is_empty() => Some((scales, dequant_offsets)),
             Self::I8Scaled {
                 scales,
-                zero_points,
+                dequant_offsets,
             }
             | Self::U4Scaled {
                 scales,
-                zero_points,
+                dequant_offsets,
             }
             | Self::U8Scaled {
                 scales,
-                zero_points,
-            } => Some((scales, zero_points)),
+                dequant_offsets,
+            } => Some((scales, dequant_offsets)),
             _ => None,
         }
     }
@@ -618,32 +618,32 @@ impl IrDType {
             }),
             Self::I4 {
                 scales,
-                zero_points,
+                dequant_offsets,
                 codebooks,
             } if !codebooks.is_empty() => Ok(codebook_representation(
                 ScalarType::I4,
                 8,
                 scales,
-                zero_points,
+                dequant_offsets,
                 codebooks,
             )?),
             Self::I4 {
                 scales,
-                zero_points,
+                dequant_offsets,
                 ..
-            } => affine(ScalarType::I4, 8, scales, zero_points),
+            } => affine(ScalarType::I4, 8, scales, dequant_offsets),
             Self::I8Scaled {
                 scales,
-                zero_points,
-            } => affine(ScalarType::I8, 4, scales, zero_points),
+                dequant_offsets,
+            } => affine(ScalarType::I8, 4, scales, dequant_offsets),
             Self::U4Scaled {
                 scales,
-                zero_points,
-            } => affine(ScalarType::U4, 8, scales, zero_points),
+                dequant_offsets,
+            } => affine(ScalarType::U4, 8, scales, dequant_offsets),
             Self::U8Scaled {
                 scales,
-                zero_points,
-            } => affine(ScalarType::U8, 4, scales, zero_points),
+                dequant_offsets,
+            } => affine(ScalarType::U8, 4, scales, dequant_offsets),
             Self::F8 { scales } => scaled_float_representation(ScalarType::Fp8E4M3, 4, scales),
             Self::F8R { scales } => scaled_float_representation(ScalarType::Fp8E5M2, 4, scales),
             Self::F4 {
@@ -882,7 +882,7 @@ mod tests {
     fn maps_unsigned_affine_ir_dtype_to_canonical_representation() {
         let representation = IrDType::U4Scaled {
             scales: vec![0.25, 0.5],
-            zero_points: vec![8.0, 7.0],
+            dequant_offsets: vec![8.0, 7.0],
         }
         .value_representation()
         .unwrap();
@@ -922,7 +922,7 @@ mod tests {
     fn preserves_fractional_legacy_dequantization_offsets() {
         let dtype = IrDType::I8Scaled {
             scales: vec![0.25],
-            zero_points: vec![1.5],
+            dequant_offsets: vec![1.5],
         };
         let (scales, offsets) = dtype.affine_dequantization().unwrap();
         assert_eq!(scales, &[0.25]);
@@ -941,7 +941,7 @@ mod tests {
     fn codebook_dtype_does_not_expose_affine_dequantization() {
         let dtype = IrDType::I4 {
             scales: vec![1.0],
-            zero_points: vec![3.5],
+            dequant_offsets: vec![3.5],
             codebooks: vec![[0.0; 16]],
         };
         assert!(dtype.affine_dequantization().is_none());
