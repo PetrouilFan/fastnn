@@ -45,11 +45,10 @@ pub mod python;
 pub mod residual;
 pub mod storage;
 pub mod storage_pool;
-pub mod storage_quantized;
+
 pub mod tensor;
 pub mod types;
 pub use error::{FastnnError, FastnnResult};
-pub use storage_quantized::QuantizedTensor;
 
 // v2.0.0: The old `kernels` module and DAG dispatcher have been removed.
 // All operations route through the AOT pipeline (ir/ + backend/ + compiler/).
