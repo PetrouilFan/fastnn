@@ -240,15 +240,10 @@ pub trait Backend {
 
     /// Write `data` into the arena at byte `offset`.
     /// Used by the executor to populate graph inputs.
-    /// Default implementation panics — backends that support host-visible
-    /// buffers should override this.
-    fn write_arena(&self, _arena: &Self::Buffer, _offset: usize, _data: &[u8]) {
-        panic!("write_arena not implemented for backend '{}'", self.name());
-    }
+    /// Backends must define their host-transfer behavior explicitly.
+    fn write_arena(&self, arena: &Self::Buffer, offset: usize, data: &[u8]);
 
     /// Read `size` bytes from the arena starting at `offset`.
     /// Used by the executor to extract graph outputs.
-    fn read_arena(&self, _arena: &Self::Buffer, _offset: usize, _size: usize) -> Vec<u8> {
-        panic!("read_arena not implemented for backend '{}'", self.name());
-    }
+    fn read_arena(&self, arena: &Self::Buffer, offset: usize, size: usize) -> Vec<u8>;
 }
