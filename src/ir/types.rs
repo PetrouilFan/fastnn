@@ -448,6 +448,37 @@ pub enum IrDType {
     },
 }
 
+impl IrDType {
+    /// Return floating affine-dequantization parameters for legacy packed
+    /// integer representations.
+    ///
+    /// These values implement `real = q * scale + offset`; the second slice is
+    /// not an integer quantizer zero point. Codebook-backed I4 values return
+    /// `None` because their lookup table owns the value transform.
+    pub fn affine_dequantization(&self) -> Option<(&[f32], &[f32])> {
+        match self {
+            Self::I4 {
+                scales,
+                zero_points,
+                codebooks,
+            } if codebooks.is_empty() => Some((scales, zero_points)),
+            Self::I8Scaled {
+                scales,
+                zero_points,
+            }
+            | Self::U4Scaled {
+                scales,
+                zero_points,
+            }
+            | Self::U8Scaled {
+                scales,
+                zero_points,
+            } => Some((scales, zero_points)),
+            _ => None,
+        }
+    }
+}
+
 /// Macro that generates simple per-variant constant lookup methods for IrDType.
 macro_rules! impl_ir_dtype_props {
     ($(($variant:pat, $byte_size:expr, $as_str:expr, $bit_width:expr, $items_per_word:expr)),* $(,)?) => {
@@ -889,17 +920,30 @@ mod tests {
 
     #[test]
     fn preserves_fractional_legacy_dequantization_offsets() {
-        let representation = IrDType::I8Scaled {
+        let dtype = IrDType::I8Scaled {
             scales: vec![0.25],
             zero_points: vec![1.5],
-        }
-        .value_representation()
-        .unwrap();
+        };
+        let (scales, offsets) = dtype.affine_dequantization().unwrap();
+        assert_eq!(scales, &[0.25]);
+        assert_eq!(offsets, &[1.5]);
+
+        let representation = dtype.value_representation().unwrap();
         assert!(matches!(
             representation.transform,
             RepresentationTransform::AffineDequantization { ref offsets, .. }
                 if offsets == &[1.5]
         ));
         representation.validate().unwrap();
+    }
+
+    #[test]
+    fn codebook_dtype_does_not_expose_affine_dequantization() {
+        let dtype = IrDType::I4 {
+            scales: vec![1.0],
+            zero_points: vec![3.5],
+            codebooks: vec![[0.0; 16]],
+        };
+        assert!(dtype.affine_dequantization().is_none());
     }
 }
