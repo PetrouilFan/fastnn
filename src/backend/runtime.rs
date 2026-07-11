@@ -19,7 +19,7 @@
 
 use crate::backend::{Backend, BackendError, ExecutablePlan, MemoryPlan};
 use crate::compiler::passes::memory_planning::AllocSlot;
-use crate::ir::node::{NodeId, ShapeEnv};
+use crate::ir::{NodeId, ShapeEnv};
 
 /// A minimal runtime that loads and executes pre-compiled plans.
 ///

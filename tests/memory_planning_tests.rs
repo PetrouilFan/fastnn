@@ -1,6 +1,6 @@
 use fastnn::compiler::passes::memory_planning;
 use fastnn::compiler::passes::shape_inference;
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 
 #[test]
 fn test_memory_plan_basic_reuse() {
@@ -537,7 +537,7 @@ fn test_memory_plan_zero_sized_tensor() {
 
 #[test]
 fn test_memory_plan_tighten() {
-    use fastnn::ir::node::ShapeEnv;
+    use fastnn::ir::ShapeEnv;
 
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(

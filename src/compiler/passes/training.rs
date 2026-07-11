@@ -1,5 +1,5 @@
 use crate::error::FastnnError;
-use crate::ir::node::*;
+use crate::ir::*;
 use std::collections::HashMap;
 
 pub enum OptimizerConfig {

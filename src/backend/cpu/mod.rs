@@ -15,7 +15,7 @@ use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use smallvec::{smallvec, SmallVec};
@@ -362,7 +362,7 @@ impl Backend for CpuBackend {
             // Collect input shapes for dimension-dependent kernels.
             // Symbolic dims that can't be resolved at compile time are
             // replaced with SYMBOL_DIM_MAX to preserve shape rank.
-            let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed);
+            let symbol_max = crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed);
             let input_shapes: Vec<Vec<u64>> = node
                 .inputs
                 .iter()
@@ -1341,7 +1341,7 @@ impl Backend for CpuBackend {
                     let group_size = group_size_dim.evaluate().unwrap_or_else(|| {
                         // Symbolic dim â€” use SYMBOL_DIM_MAX as compile-time
                         // estimate; runtime resolves via param_dims.
-                        crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
+                        crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
                     }) as usize;
 
                     instructions.push(Instruction::CallKernel {

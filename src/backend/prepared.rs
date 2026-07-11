@@ -1,5 +1,5 @@
 use crate::backend::{BufferSlice, ExecutablePlan, Instruction};
-use crate::ir::node::NodeId;
+use crate::ir::NodeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 

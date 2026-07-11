@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::ir::builder::{GraphBuilder, GraphTensor};
-use crate::ir::node::*;
+use crate::ir::*;
 use crate::storage::DType;
 use crate::tensor::Tensor;
 

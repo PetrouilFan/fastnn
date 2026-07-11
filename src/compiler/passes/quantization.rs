@@ -7,7 +7,7 @@
 
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4};
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
 
 /// Target floating-point packed dtype for weight quantization.
@@ -673,7 +673,7 @@ mod tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;
     use crate::ir::builder::GraphBuilder;
-    use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorValue};
+    use crate::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorValue};
 
     /// Helper: create a ComputeGraph with a MatMul and f32 Constant weight.
     fn build_matmul_graph(weight_data: &[f32], weight_shape: &[usize]) -> ComputeGraph {

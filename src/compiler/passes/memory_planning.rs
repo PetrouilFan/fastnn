@@ -1,5 +1,5 @@
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
+use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 

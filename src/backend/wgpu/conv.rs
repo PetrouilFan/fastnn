@@ -11,7 +11,7 @@ pub(super) fn dispatch_conv_gpu(
     input_slices: &[crate::backend::BufferSlice],
     output_slice: crate::backend::BufferSlice,
     resolved_params: &[usize],
-    _shape_env: &crate::ir::node::ShapeEnv,
+    _shape_env: &crate::ir::ShapeEnv,
 ) -> Result<(), BackendError> {
     let stride = resolved_params.first().copied().unwrap_or(1);
     let padding = resolved_params.get(1).copied().unwrap_or(0);

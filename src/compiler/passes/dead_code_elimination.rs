@@ -1,4 +1,4 @@
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, Opcode};
+use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode};
 use crate::utils::parse_shape_attr;
 use std::collections::HashSet;
 

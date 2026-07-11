@@ -13,8 +13,8 @@ use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::dtypes::I4x8;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::ComputeGraph;
-use fastnn::ir::node::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::ir::ComputeGraph;
+use fastnn::ir::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::packed_tensor::PackedTensor;
 use fastnn::types::{CompileTarget, QuantTarget};
 

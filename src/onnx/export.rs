@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for ONNX export behavior.

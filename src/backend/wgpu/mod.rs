@@ -46,7 +46,7 @@ mod transpose;
 
 use crate::backend::cpu::CpuBackend;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, MemoryPlan};
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
+use crate::ir::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use bytemuck;
 use context::{with_wgpu_context, WgpuContext};
 use std::cell::UnsafeCell;

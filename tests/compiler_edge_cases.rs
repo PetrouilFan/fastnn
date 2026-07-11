@@ -1,6 +1,6 @@
 use fastnn::compiler::passes::{memory_planning, shape_inference};
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 
 #[test]
 fn test_single_node_graph() {

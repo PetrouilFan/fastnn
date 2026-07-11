@@ -23,7 +23,7 @@ use crate::compiler::passes::{
     activation_quantization, calibration, dead_code_elimination, memory_planning, operator_fusion,
     quantization, shape_inference,
 };
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -1272,7 +1272,7 @@ pub fn tensor_byte_size(shape: &[DimExpr], elem_byte_size: usize) -> usize {
         .map(|d| match d {
             DimExpr::Known(v) => *v as usize,
             DimExpr::Bounded { max, .. } => *max as usize,
-            DimExpr::Symbol(_) => crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize,
+            DimExpr::Symbol(_) => crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize,
         })
         .product();
     numel * elem_byte_size
@@ -1295,7 +1295,7 @@ fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Result<Vec<u64>, String> 
 /// can still run in the presence of symbols that will be resolved at
 /// runtime (e.g. the -1 dimension of a Reshape).
 fn resolve_shape_lenient(shape: &[DimExpr], env: &ShapeEnv) -> Vec<u64> {
-    let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+    let symbol_max = crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
     shape
         .iter()
         .map(|d| d.evaluate_with_env(env).unwrap_or(symbol_max))
@@ -1395,7 +1395,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 // Skip dim compatibility checks if any input contains
                 // unresolved Symbol dims (resolved to SYMBOL_DIM_MAX).
                 let symbol_max =
-                    crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
                 let has_unresolved = input_shapes.iter().any(|s| s.contains(&symbol_max));
                 if !has_unresolved {
                     for (i, s) in input_shapes.iter().enumerate().skip(1) {
@@ -1907,7 +1907,7 @@ mod prepared_fallback_tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::prepared::{prepare_executable_plan, validate_prepared_against_plan};
     use crate::ir::builder::GraphBuilder;
-    use crate::ir::node::{DimExpr, IrDType};
+    use crate::ir::{DimExpr, IrDType};
 
     fn f32_data(values: &[f32]) -> Vec<u8> {
         bytemuck::cast_slice(values).to_vec()
@@ -1929,10 +1929,8 @@ mod prepared_fallback_tests {
         // a real WriteConst instruction.
         let g = GraphBuilder::new();
         let a = g.input(&[1, 4], IrDType::F32);
-        let b_tt = crate::ir::node::TensorType::new(
-            vec![DimExpr::Known(1), DimExpr::Known(4)],
-            IrDType::F32,
-        );
+        let b_tt =
+            crate::ir::TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
         let b_bytes = f32_data(&[0.5, -0.5, 0.25, -0.25]);
         let b = g.constant(&b_bytes, b_tt);
         let s = g.add(&a, &b);
@@ -2206,7 +2204,7 @@ mod prepared_fallback_tests {
 
     fn executor_run(
         executor: &mut GraphExecutor<CpuBackend>,
-        graph: &crate::ir::node::ComputeGraph,
+        graph: &crate::ir::ComputeGraph,
         plan: &mut crate::backend::ExecutablePlan,
         memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
         inputs: &[&[u8]],
@@ -2218,7 +2216,7 @@ mod prepared_fallback_tests {
 
     fn executor_fallback(
         executor: &mut GraphExecutor<CpuBackend>,
-        graph: &crate::ir::node::ComputeGraph,
+        graph: &crate::ir::ComputeGraph,
         plan: &mut crate::backend::ExecutablePlan,
         memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
         inputs: &[&[u8]],

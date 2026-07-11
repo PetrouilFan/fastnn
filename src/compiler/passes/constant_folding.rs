@@ -1,6 +1,4 @@
-use crate::ir::node::{
-    ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue,
-};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue};
 
 pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
     struct Fold {

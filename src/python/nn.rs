@@ -1209,7 +1209,7 @@ impl_nn_module!(PyTransformerEncoder {
 pub struct AotExecutor {
     plan: crate::backend::ExecutablePlan,
     memory_plan: crate::compiler::passes::memory_planning::MemoryPlan,
-    graph: crate::ir::node::ComputeGraph,
+    graph: crate::ir::ComputeGraph,
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
@@ -1287,18 +1287,18 @@ impl AotExecutor {
         // Build input shapes map if provided.
         let mut rust_input_shapes: std::collections::HashMap<
             String,
-            Vec<crate::ir::node::DimExpr>,
+            Vec<crate::ir::DimExpr>,
         > = std::collections::HashMap::new();
         if let Some(shapes) = input_shapes {
             for (name, dims) in shapes {
-                let ir_dims: Vec<crate::ir::node::DimExpr> = dims
+                let ir_dims: Vec<crate::ir::DimExpr> = dims
                     .into_iter()
                     .map(|d| {
                         if d < 0 {
                             // Negative dim = symbolic (batch, height, width, etc.)
-                            crate::ir::node::DimExpr::Symbol(format!("d{}", -d))
+                            crate::ir::DimExpr::Symbol(format!("d{}", -d))
                         } else {
-                            crate::ir::node::DimExpr::Known(d as u64)
+                            crate::ir::DimExpr::Known(d as u64)
                         }
                     })
                     .collect();
@@ -1459,7 +1459,7 @@ impl AotExecutor {
 
         // Recompile with calibration data - the quantization pass will UPDATE
         // existing QuantizeActivations nodes with new calibration attrs
-        let graph = std::mem::replace(&mut self.graph, crate::ir::node::ComputeGraph::new());
+        let graph = std::mem::replace(&mut self.graph, crate::ir::ComputeGraph::new());
         let (plan, memory_plan, graph) = self
             .executor
             .compile_with_plan_and_quantize(graph, None, Some(calib))
@@ -2248,7 +2248,7 @@ impl AotExecutor {
                     .shape
                     .iter()
                     .filter_map(|d| match d {
-                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        crate::ir::DimExpr::Known(v) => Some(*v as i64),
                         _ => None,
                     })
                     .collect();
@@ -2308,12 +2308,12 @@ impl AotExecutor {
                 let ir_dtype = output_node.output_type.dtype.clone();
                 // Extract quantization metadata before ir_to_dtype strips it
                 let (q_scales, q_zero_points) = match &ir_dtype {
-                    crate::ir::node::IrDType::I4 {
+                    crate::ir::IrDType::I4 {
                         scales,
                         zero_points,
                         ..
                     }
-                    | crate::ir::node::IrDType::I8Scaled {
+                    | crate::ir::IrDType::I8Scaled {
                         scales,
                         zero_points,
                     } => (scales.clone(), zero_points.clone()),
@@ -2326,7 +2326,7 @@ impl AotExecutor {
                     .shape
                     .iter()
                     .filter_map(|d| match d {
-                        crate::ir::node::DimExpr::Known(v) => Some(*v as i64),
+                        crate::ir::DimExpr::Known(v) => Some(*v as i64),
                         _ => None,
                     })
                     .collect();

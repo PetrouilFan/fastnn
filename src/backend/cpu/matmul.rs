@@ -3,7 +3,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{BackendError, BufferSlice};
 use crate::dtypes::{I4x8, I8x4, PackedWord};
-use crate::ir::node::{DimExpr, ShapeEnv};
+use crate::ir::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
 use std::sync::Arc;
 

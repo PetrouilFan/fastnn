@@ -21,7 +21,7 @@
 //!   natural input type.
 
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Returns the dtype that `opcode` expects for its `input_index`-th input
 /// (0-based).  Returns `None` when the opcode treats all inputs uniformly
@@ -178,7 +178,7 @@ fn conversion_between(actual: &IrDType, expected: &IrDType) -> Option<Opcode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::DimExpr;
+    use crate::ir::DimExpr;
 
     /// Test insertion of Dequantize when a MatMul's weight is quantized
     /// but another consumer of that weight expects F32.
@@ -231,7 +231,7 @@ mod tests {
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Float(1.0)),
+            Opcode::Constant(crate::ir::TensorValue::Float(1.0)),
             vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
@@ -413,7 +413,7 @@ mod tests {
     fn test_type_inference_constants_unchanged() {
         let mut graph = ComputeGraph::new();
         let const_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Float(42.0)),
+            Opcode::Constant(crate::ir::TensorValue::Float(42.0)),
             vec![],
             TensorType::new(vec![], IrDType::F32),
         );

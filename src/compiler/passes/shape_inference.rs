@@ -1,5 +1,5 @@
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, DimExpr, IRNode, Opcode};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, Opcode};
 use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
 use std::collections::HashMap;
 

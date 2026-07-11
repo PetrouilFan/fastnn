@@ -9,7 +9,7 @@
 //!
 //! ```rust
 //! use fastnn::ir::builder::GraphBuilder;
-//! use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+//! use fastnn::ir::{DimExpr, IrDType, TensorType};
 //! use fastnn::backend::cpu::CpuBackend;
 //!
 //! let gb = GraphBuilder::new();

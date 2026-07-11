@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Insert gradient quantization for all optimizer update nodes.
 ///

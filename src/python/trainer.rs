@@ -1,7 +1,7 @@
 use crate::backend::cpu::CpuBackend;
 use crate::backend::executor::{CompiledTrainingModel, GraphExecutor};
 use crate::compiler::passes::training::{OptimizerConfig, TrainConfig};
-use crate::ir::node::ComputeGraph;
+use crate::ir::ComputeGraph;
 
 #[pyclass]
 pub struct PyCompiledTrainingModel {

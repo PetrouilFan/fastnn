@@ -1,5 +1,5 @@
 use crate::autograd::{self, AutogradMeta};
-use crate::ir::node::{DimExpr, IrDType, TensorType};
+use crate::ir::{DimExpr, IrDType, TensorType};
 use crate::tensor::Tensor;
 use crate::{
     impl_norm, impl_training_state,

@@ -499,7 +499,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 let scalar_bytes = scalar_val.to_le_bytes().to_vec();
                 let scalar_gt = forward_builder.constant(
                     &scalar_bytes,
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 );
                 forward_builder.add_scalar(&input_gts[0], &scalar_gt)
             }
@@ -508,7 +508,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 let scalar_bytes = scalar_val.to_le_bytes().to_vec();
                 let scalar_gt = forward_builder.constant(
                     &scalar_bytes,
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 );
                 forward_builder.div_scalar(&input_gts[0], &scalar_gt)
             }
@@ -567,7 +567,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                     let zero_bytes = 0.0f32.to_le_bytes().to_vec();
                     let zero_gt = forward_builder.constant(
                         &zero_bytes,
-                        crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                        crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                     );
                     forward_builder.add(&input_gts[0], &zero_gt)
                 }
@@ -579,7 +579,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 &input_gts[0],
                 &forward_builder.constant(
                     0.0f32.to_le_bytes().as_ref(),
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 ),
             ),
             // Norm/conv ops — pass through
@@ -593,7 +593,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 &input_gts[0],
                 &forward_builder.constant(
                     0.0f32.to_le_bytes().as_ref(),
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 ),
             ),
             // Pooling ops — reconstruct as actual pool operations so backward
@@ -638,7 +638,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                         &input_gts[0],
                         &forward_builder.constant(
                             0.0f32.to_le_bytes().as_ref(),
-                            crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                            crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                         ),
                     )
                 }
@@ -647,7 +647,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 &input_gts[0],
                 &forward_builder.constant(
                     0.0f32.to_le_bytes().as_ref(),
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 ),
             ),
             // Loss ops — reconstruct the full forward computation so that
@@ -661,7 +661,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 &input_gts[0],
                 &forward_builder.constant(
                     0.0f32.to_le_bytes().as_ref(),
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 ),
             ),
             "MSELossBackward" => {
@@ -688,7 +688,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                     &input_gts[0],
                     &forward_builder.constant(
                         0.0f32.to_le_bytes().as_ref(),
-                        crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                        crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                     ),
                 )
             }
@@ -696,7 +696,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                 &input_gts[0],
                 &forward_builder.constant(
                     0.0f32.to_le_bytes().as_ref(),
-                    crate::ir::node::TensorType::new(vec![], crate::ir::node::IrDType::F32),
+                    crate::ir::TensorType::new(vec![], crate::ir::IrDType::F32),
                 ),
             ),
         };
@@ -1279,7 +1279,7 @@ stub_backward!(ErfBackward, 1);
 stub_backward!(CumSumBackward, 1);
 stub_backward!(GatherBackward, 2);
 
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 
 /// Build a backward computation graph from a forward graph and a loss node.
 /// Returns a new graph that, when executed, computes gradients for all

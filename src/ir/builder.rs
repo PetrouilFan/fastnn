@@ -7,7 +7,7 @@
 //! # Example
 //! ```ignore
 //! use fastnn::ir::builder::GraphBuilder;
-//! use fastnn::ir::node::IrDType;
+//! use fastnn::ir::IrDType;
 //! use fastnn::backend::cpu::CpuBackend;
 //!
 //! let mut g = GraphBuilder::new();
@@ -35,7 +35,7 @@ use std::sync::atomic::Ordering;
 use crate::backend::executor::GraphExecutor;
 use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::compiler::passes::memory_planning::MemoryPlan;
-use crate::ir::node::*;
+use crate::ir::*;
 
 // ============================================================
 // Plan cache — avoids recompilation when the same graph is
@@ -2706,7 +2706,7 @@ mod tests {
     #[test]
     fn test_symbolic_flatten_conv_concat() {
         // Save/restore global dim-max so parallel test ordering doesn't break us
-        let saved_max = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+        let saved_max = crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
 
         let g = GraphBuilder::new();
         let n = DimExpr::Symbol("N".into());
@@ -2734,8 +2734,7 @@ mod tests {
         let y = g.input_with_dims(&[n, c, h, w], IrDType::F32);
         let cat = g.concat(&[&x, &y], 0);
         let cat_shape = cat.shape();
-        let expected_max =
-            2 * crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+        let expected_max = 2 * crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             cat_shape[0],
             DimExpr::Bounded {
@@ -2754,7 +2753,7 @@ mod tests {
             "concat along known dim should produce sum: 3+3=6"
         );
 
-        crate::ir::node::SYMBOL_DIM_MAX.store(saved_max, std::sync::atomic::Ordering::Relaxed);
+        crate::ir::SYMBOL_DIM_MAX.store(saved_max, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
@@ -3014,8 +3013,8 @@ mod tests {
     #[test]
     fn test_dynamic_multi_symbol() {
         // Lower SYMBOL_DIM_MAX to avoid OOM (2 symbolic dims blow up).
-        let prev = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
-        crate::ir::node::SYMBOL_DIM_MAX.store(128, std::sync::atomic::Ordering::Relaxed);
+        let prev = crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+        crate::ir::SYMBOL_DIM_MAX.store(128, std::sync::atomic::Ordering::Relaxed);
 
         let g = GraphBuilder::new();
         // Input A: [B, T, 64] — two symbolic dims
@@ -3052,7 +3051,7 @@ mod tests {
         );
 
         // Restore SYMBOL_DIM_MAX
-        crate::ir::node::SYMBOL_DIM_MAX.store(prev, std::sync::atomic::Ordering::Relaxed);
+        crate::ir::SYMBOL_DIM_MAX.store(prev, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::autograd::{self, Edge};
 use crate::impl_cpu_fast_path;
 use crate::impl_scalar_op;
-use crate::ir::node::{DimExpr, IrDType, TensorType};
+use crate::ir::{DimExpr, IrDType, TensorType};
 use crate::storage::{DType, Device, Storage};
 use std::sync::Arc;
 

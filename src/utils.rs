@@ -1,5 +1,5 @@
 use crate::autograd::{make_node_info, AutogradMeta};
-use crate::ir::node::{ComputeGraph, DimExpr, IRNode, NodeId};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, NodeId};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;

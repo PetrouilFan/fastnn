@@ -5,7 +5,7 @@ use fastnn::compiler::passes::activation_quantization;
 use fastnn::compiler::passes::shape_inference;
 use fastnn::dtypes::{F4x8, F8x4, F8x4R, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
 use half::f16;
 

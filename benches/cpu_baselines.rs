@@ -5,7 +5,7 @@ use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
 
 #[derive(Clone, Copy)]

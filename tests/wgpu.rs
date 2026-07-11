@@ -16,7 +16,7 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::wgpu::WgpuBackend;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::ir::{DimExpr, IrDType, TensorType};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 

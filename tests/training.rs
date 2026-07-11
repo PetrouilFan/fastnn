@@ -11,7 +11,7 @@ use fastnn::backend::executor::{CompiledTrainingModel, GraphExecutor};
 use fastnn::backend::Backend;
 use fastnn::compiler::passes::training::{OptimizerConfig, TrainConfig};
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, ShapeEnv};
+use fastnn::ir::{DimExpr, IrDType, ShapeEnv};
 
 /// Helper: create a Vec<u8> of f32 bytes from a slice of f32 values.
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
@@ -22,7 +22,7 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
 /// Build a tiny MLP: x(1,4) → W(4,2)+b(2) → logits → reduce_mean → scalar loss.
 /// Returns (graph, loss_node_id, params, batch_inputs, param_data).
 fn build_mlp() -> (
-    fastnn::ir::node::ComputeGraph,
+    fastnn::ir::ComputeGraph,
     usize,        // loss_node_id
     Vec<usize>,   // param ids
     Vec<Vec<u8>>, // param data
@@ -65,7 +65,7 @@ fn build_mlp() -> (
 /// Build a simple MLP: x(1,4) → W(4,1)+b(1) → logits → reduce_mean → scalar loss
 /// Single-output version makes loss calculation simpler.
 fn build_mlp_single_output() -> (
-    fastnn::ir::node::ComputeGraph,
+    fastnn::ir::ComputeGraph,
     usize,
     Vec<usize>,
     Vec<Vec<u8>>,

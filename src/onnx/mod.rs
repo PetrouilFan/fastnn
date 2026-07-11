@@ -1,5 +1,5 @@
 //! ONNX model converter — translates parsed ONNX graphs into the AOT IR
-//! [`ComputeGraph`](crate::ir::node::ComputeGraph) for compilation and
+//! [`ComputeGraph`](crate::ir::ComputeGraph) for compilation and
 //! execution through the v2.0 compiler pipeline.
 //!
 //! # Design

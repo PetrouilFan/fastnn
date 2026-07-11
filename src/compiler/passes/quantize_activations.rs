@@ -6,7 +6,7 @@
 
 use crate::compiler::passes::calibration::CalibrationData;
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
 
 #[cfg(test)]

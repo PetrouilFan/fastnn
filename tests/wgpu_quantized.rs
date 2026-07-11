@@ -8,7 +8,7 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::wgpu::WgpuBackend;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::ir::{DimExpr, IrDType, TensorType};
 
 /// Helper: run matmul through the full pipeline with a given backend and quantization.
 fn run_matmul<B: fastnn::backend::Backend>(

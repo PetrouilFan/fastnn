@@ -1,4 +1,4 @@
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
+use crate::ir::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -72,8 +72,8 @@ pub enum Instruction {
         node_id: Option<NodeId>,
         /// Symbolic dim expressions corresponding to `params`.
         /// When `Some`, the backend can re-evaluate these at dispatch time
-        /// using a [`ShapeEnv`](crate::ir::node::ShapeEnv) to resolve
-        /// any [`DimExpr::Symbol`](crate::ir::node::DimExpr::Symbol) dims
+        /// using a [`ShapeEnv`](crate::ir::ShapeEnv) to resolve
+        /// any [`DimExpr::Symbol`](crate::ir::DimExpr::Symbol) dims
         /// that were not known at compile time.
         param_dims: Option<Vec<DimExpr>>,
         /// Optional weight metadata for quantized matmul kernels.
@@ -88,8 +88,8 @@ pub enum Instruction {
         value: f32,
     },
     /// Materialise arbitrary byte payloads into the arena at dispatch time.
-    /// Used for [`Opcode::Constant`](crate::ir::node::Opcode::Constant) nodes
-    /// that carry [`TensorValue::Data`](crate::ir::node::TensorValue::Data).
+    /// Used for [`Opcode::Constant`](crate::ir::Opcode::Constant) nodes
+    /// that carry [`TensorValue::Data`](crate::ir::TensorValue::Data).
     WriteConst {
         dst: BufferSlice,
         data: Vec<u8>,

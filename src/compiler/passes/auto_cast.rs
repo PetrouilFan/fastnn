@@ -17,7 +17,7 @@
 //! compile) see the quantized representation.
 
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Options for the auto-cast pass.
 #[derive(Debug, Clone, Default)]
@@ -177,7 +177,7 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::{DimExpr, TensorValue};
+    use crate::ir::{DimExpr, TensorValue};
 
     /// Helper to create a weight Data constant with the given dimensions.
     fn make_weight_constant(
@@ -470,7 +470,7 @@ mod tests {
             IrDType::F32,
         );
         let weight_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Data {
+            Opcode::Constant(crate::ir::TensorValue::Data {
                 bytes: weight_data,
                 tensor_type: tt.clone(),
             }),

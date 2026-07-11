@@ -5,7 +5,7 @@
 //! QLinearMatMul / QLinearConv nodes appear in the JSON output.
 
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::*;
+use fastnn::ir::*;
 use fastnn::onnx::export::export_to_onnx_json;
 
 /// Helper: build a graph with a Dequantize → MatMul → Quantize pattern.

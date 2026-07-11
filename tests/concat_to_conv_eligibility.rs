@@ -7,7 +7,7 @@
 use fastnn::compiler::passes::concat_to_conv_eligibility::{
     check_concat_to_conv_eligibility, Ineligible,
 };
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
 
 fn nchw(n: u64, c: u64, h: u64, w: u64) -> TensorType {

@@ -6,7 +6,7 @@
 //! inference-only without the user's knowledge.
 
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::*;
+use fastnn::ir::*;
 use fastnn::onnx::export::{
     detect_training_ops, export_to_onnx_json, export_to_onnx_json_with_config, ExportConfig,
 };

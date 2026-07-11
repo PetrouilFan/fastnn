@@ -1,4 +1,4 @@
-use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::ir::{ComputeGraph, NodeId, Opcode};
 
 /// Reasons why a concat→Conv2d pattern is NOT eligible for segmented planning.
 ///
@@ -305,7 +305,7 @@ pub fn check_concat_to_conv_eligibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+    use crate::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
     use std::collections::HashMap;
 
     fn nchw(n: u64, c: u64, h: u64, w: u64) -> TensorType {
