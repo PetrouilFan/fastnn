@@ -91,6 +91,7 @@ pub fn random_f32() -> f32 {
     }
 }
 
+#[cfg(feature = "python")]
 pub(crate) fn set_seeded_rng(seed: u64) {
     use rand::SeedableRng;
     let rng = rand::rngs::StdRng::seed_from_u64(seed);

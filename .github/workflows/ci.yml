@@ -41,6 +41,25 @@ jobs:
       - name: Full Rust integration tests
         run: cargo test --tests -- --test-threads=1
 
+  feature-profiles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            features: simd,parallel,fusion-forward
+          - name: runtime
+            features: simd,parallel,fusion-forward,prepared-plan,cli
+          - name: gpu
+            features: simd,parallel,fusion-forward,gpu
+    name: feature profile (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --no-default-features --features "${{ matrix.features }}"
+
   python:
     needs: quality
     runs-on: ${{ matrix.os }}
