@@ -1,6 +1,11 @@
 //! Symbolic shapes and tensor value types used by the IR.
 
 use super::graph::{ComputeGraph, NodeId};
+use crate::types::{
+    QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
+    ValueRepresentation,
+};
+use crate::FastnnResult;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -500,7 +505,143 @@ impl_ir_dtype_props!(
     (Self::U8Scaled { .. }, 1, "u8", 8, 4),
 );
 
+fn quantization_granularity(parameter_count: usize) -> QuantizationGranularity {
+    if parameter_count <= 1 {
+        QuantizationGranularity::PerTensor
+    } else {
+        QuantizationGranularity::PerAxis { axis: 0 }
+    }
+}
+
+fn plain_representation(scalar: ScalarType) -> ValueRepresentation {
+    ValueRepresentation {
+        logical: scalar,
+        storage: scalar,
+        encoding: StorageEncoding::Plain,
+        transform: RepresentationTransform::None,
+    }
+}
+
+fn scaled_float_representation(
+    storage: ScalarType,
+    lanes: u8,
+    scales: &[f32],
+) -> FastnnResult<ValueRepresentation> {
+    Ok(ValueRepresentation {
+        logical: ScalarType::F32,
+        storage,
+        encoding: StorageEncoding::Packed {
+            word_bits: 32,
+            lanes,
+        },
+        transform: RepresentationTransform::Scaled {
+            scales: scales.to_vec(),
+        },
+    })
+}
+
+fn codebook_representation(
+    storage: ScalarType,
+    lanes: u8,
+    scales: &[f32],
+    offsets: &[f32],
+    codebooks: &[[f32; 16]],
+) -> FastnnResult<ValueRepresentation> {
+    Ok(ValueRepresentation {
+        logical: ScalarType::F32,
+        storage,
+        encoding: StorageEncoding::Packed {
+            word_bits: 32,
+            lanes,
+        },
+        transform: RepresentationTransform::Codebook {
+            granularity: QuantizationGranularity::PerGroup {
+                axis: 0,
+                group_size: 1,
+            },
+            entries: codebooks.iter().map(|entry| entry.to_vec()).collect(),
+            scales: scales.to_vec(),
+            offsets: offsets.to_vec(),
+        },
+    })
+}
+
 impl IrDType {
+    /// Translate the legacy IR dtype into the canonical orthogonal representation.
+    pub fn value_representation(&self) -> FastnnResult<ValueRepresentation> {
+        let packed = |lanes| StorageEncoding::Packed {
+            word_bits: 32,
+            lanes,
+        };
+        let affine = |storage, lanes, scales: &Vec<f32>, offsets: &Vec<f32>| {
+            Ok(ValueRepresentation {
+                logical: ScalarType::F32,
+                storage,
+                encoding: packed(lanes),
+                transform: RepresentationTransform::AffineDequantization {
+                    granularity: quantization_granularity(scales.len()),
+                    scales: scales.clone(),
+                    offsets: offsets.clone(),
+                },
+            })
+        };
+
+        match self {
+            Self::F32 => Ok(plain_representation(ScalarType::F32)),
+            Self::F16 => Ok(plain_representation(ScalarType::F16)),
+            Self::BF16 => Ok(plain_representation(ScalarType::BF16)),
+            Self::I32 => Ok(plain_representation(ScalarType::I32)),
+            Self::I64 => Ok(plain_representation(ScalarType::I64)),
+            Self::Bool => Ok(plain_representation(ScalarType::Bool)),
+            Self::I8 => Ok(ValueRepresentation {
+                logical: ScalarType::F32,
+                storage: ScalarType::I8,
+                encoding: StorageEncoding::Plain,
+                transform: RepresentationTransform::RuntimeAffineQuantization {
+                    granularity: QuantizationGranularity::PerTensor,
+                },
+            }),
+            Self::I4 {
+                scales,
+                zero_points,
+                codebooks,
+            } if !codebooks.is_empty() => Ok(codebook_representation(
+                ScalarType::I4,
+                8,
+                scales,
+                zero_points,
+                codebooks,
+            )?),
+            Self::I4 {
+                scales,
+                zero_points,
+                ..
+            } => affine(ScalarType::I4, 8, scales, zero_points),
+            Self::I8Scaled {
+                scales,
+                zero_points,
+            } => affine(ScalarType::I8, 4, scales, zero_points),
+            Self::U4Scaled {
+                scales,
+                zero_points,
+            } => affine(ScalarType::U4, 8, scales, zero_points),
+            Self::U8Scaled {
+                scales,
+                zero_points,
+            } => affine(ScalarType::U8, 4, scales, zero_points),
+            Self::F8 { scales } => scaled_float_representation(ScalarType::Fp8E4M3, 4, scales),
+            Self::F8R { scales } => scaled_float_representation(ScalarType::Fp8E5M2, 4, scales),
+            Self::F4 {
+                scales,
+                zeros,
+                codebooks,
+            } if !codebooks.is_empty() => {
+                codebook_representation(ScalarType::I4, 8, scales, zeros, codebooks)
+            }
+            Self::F4 { scales, .. } => scaled_float_representation(ScalarType::Fp4E2M1, 8, scales),
+        }
+    }
+
     /// Actual packed storage size in bytes for a given logical element
     /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
     /// For packed types it computes word-level packing plus the SIMD margin
@@ -715,5 +856,66 @@ impl TensorType {
             }
             _ => numel * self.dtype.byte_size(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_unsigned_affine_ir_dtype_to_canonical_representation() {
+        let representation = IrDType::U4Scaled {
+            scales: vec![0.25, 0.5],
+            zero_points: vec![8.0, 7.0],
+        }
+        .value_representation()
+        .unwrap();
+
+        assert_eq!(representation.logical, ScalarType::F32);
+        assert_eq!(representation.storage, ScalarType::U4);
+        assert_eq!(
+            representation.encoding,
+            StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            }
+        );
+        assert!(matches!(
+            representation.transform,
+            RepresentationTransform::AffineDequantization {
+                granularity: QuantizationGranularity::PerAxis { axis: 0 },
+                ..
+            }
+        ));
+        representation.validate().unwrap();
+    }
+
+    #[test]
+    fn maps_runtime_activation_quantization_without_inventing_static_scales() {
+        let representation = IrDType::I8.value_representation().unwrap();
+        assert!(matches!(
+            representation.transform,
+            RepresentationTransform::RuntimeAffineQuantization {
+                granularity: QuantizationGranularity::PerTensor
+            }
+        ));
+        representation.validate().unwrap();
+    }
+
+    #[test]
+    fn preserves_fractional_legacy_dequantization_offsets() {
+        let representation = IrDType::I8Scaled {
+            scales: vec![0.25],
+            zero_points: vec![1.5],
+        }
+        .value_representation()
+        .unwrap();
+        assert!(matches!(
+            representation.transform,
+            RepresentationTransform::AffineDequantization { ref offsets, .. }
+                if offsets == &[1.5]
+        ));
+        representation.validate().unwrap();
     }
 }

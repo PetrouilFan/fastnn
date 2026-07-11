@@ -300,6 +300,27 @@ impl<B: Backend> GraphExecutor<B> {
         // ── Phase 3: Dead code elimination ────────────────────────────────
         let _removed = dead_code_elimination::eliminate_dead_code(&mut graph);
 
+        // Reject malformed legacy dtype metadata at the compiler boundary while
+        // the graph is being migrated to the canonical representation model.
+        for node in &graph.nodes {
+            for tensor_type in
+                std::iter::once(&node.output_type).chain(node.secondary_output_type.as_ref())
+            {
+                let representation = tensor_type.dtype.value_representation().map_err(|error| {
+                    BackendError::Compilation(format!(
+                        "invalid dtype metadata on node {}: {error}",
+                        node.id
+                    ))
+                })?;
+                representation.validate().map_err(|error| {
+                    BackendError::Compilation(format!(
+                        "invalid value representation on node {}: {error}",
+                        node.id
+                    ))
+                })?;
+            }
+        }
+
         // ── Phase 4: Memory planning ──────────────────────────────────────
         let memory_plan = memory_planning::plan_memory(&graph)
             .map_err(|e| BackendError::Compilation(format!("memory planning: {e}")))?;

@@ -128,7 +128,7 @@ pub struct QuantizationSpec {
 
 impl QuantizationSpec {
     pub fn validate(&self) -> FastnnResult<()> {
-        if self.scales.is_empty() {
+        if !matches!(self.scheme, QuantizationScheme::Codebook { .. }) && self.scales.is_empty() {
             return Err(FastnnError::dtype(
                 "quantization requires at least one scale",
             ));
@@ -176,54 +176,154 @@ impl QuantizationSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ValueRepresentation {
-    Native {
-        scalar: ScalarType,
-        encoding: StorageEncoding,
+pub enum RepresentationTransform {
+    None,
+    AffineQuantization(QuantizationSpec),
+    /// Legacy packed formats use `real = q * scale + offset`, where offset
+    /// is a floating dequantization parameter rather than an integer zero point.
+    AffineDequantization {
+        granularity: QuantizationGranularity,
+        scales: Vec<f32>,
+        offsets: Vec<f32>,
     },
-    Quantized {
-        logical: ScalarType,
-        stored: ScalarType,
-        encoding: StorageEncoding,
-        quantization: QuantizationSpec,
+    Codebook {
+        granularity: QuantizationGranularity,
+        entries: Vec<Vec<f32>>,
+        scales: Vec<f32>,
+        offsets: Vec<f32>,
     },
+    /// Quantization parameters are carried in the runtime tensor payload.
+    RuntimeAffineQuantization {
+        granularity: QuantizationGranularity,
+    },
+    Scaled {
+        scales: Vec<f32>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValueRepresentation {
+    /// Mathematical value domain exposed to graph semantics.
+    pub logical: ScalarType,
+    /// Scalar format physically stored in memory.
+    pub storage: ScalarType,
+    pub encoding: StorageEncoding,
+    pub transform: RepresentationTransform,
 }
 
 impl ValueRepresentation {
     pub fn validate(&self) -> FastnnResult<()> {
-        match self {
-            Self::Native { scalar, encoding } => encoding.validate_for(*scalar),
-            Self::Quantized {
-                logical,
-                stored,
-                encoding,
-                quantization,
-            } => {
-                if !logical.is_float() {
+        self.encoding.validate_for(self.storage)?;
+        match &self.transform {
+            RepresentationTransform::None => {
+                if self.logical != self.storage {
+                    return Err(FastnnError::dtype(
+                        "an untransformed representation must use the same logical and storage scalar",
+                    ));
+                }
+                Ok(())
+            }
+            RepresentationTransform::AffineQuantization(quantization) => {
+                if !self.logical.is_float() {
                     return Err(FastnnError::dtype(
                         "quantized representation requires a floating logical type",
                     ));
                 }
-                if !stored.is_integer() {
+                if !self.storage.is_integer() {
                     return Err(FastnnError::dtype(
                         "quantized representation requires an integer stored type",
                     ));
                 }
-                encoding.validate_for(*stored)?;
                 quantization.validate()
+            }
+            RepresentationTransform::RuntimeAffineQuantization { .. } => {
+                if !self.logical.is_float() || !self.storage.is_integer() {
+                    return Err(FastnnError::dtype(
+                        "runtime affine quantization requires floating logical and integer storage types",
+                    ));
+                }
+                Ok(())
+            }
+            RepresentationTransform::AffineDequantization {
+                scales, offsets, ..
+            } => validate_scales_and_offsets(scales, offsets),
+            RepresentationTransform::Codebook {
+                entries,
+                scales,
+                offsets,
+                ..
+            } => {
+                if entries.is_empty()
+                    || entries.iter().any(|entry| {
+                        entry.is_empty() || entry.iter().any(|value| !value.is_finite())
+                    })
+                {
+                    return Err(FastnnError::dtype(
+                        "codebook representation requires non-empty finite entries",
+                    ));
+                }
+                if scales
+                    .iter()
+                    .any(|scale| !scale.is_finite() || *scale <= 0.0)
+                {
+                    return Err(FastnnError::dtype(
+                        "codebook representation scales must be finite and positive",
+                    ));
+                }
+                if !offsets.is_empty()
+                    && (offsets.len() != scales.len()
+                        || offsets.iter().any(|offset| !offset.is_finite()))
+                {
+                    return Err(FastnnError::dtype(
+                        "codebook representation offsets must be finite and match scale count",
+                    ));
+                }
+                Ok(())
+            }
+            RepresentationTransform::Scaled { scales } => {
+                if !self.logical.is_float() || !self.storage.is_float() {
+                    return Err(FastnnError::dtype(
+                        "scaled representation requires floating logical and storage types",
+                    ));
+                }
+                if scales.is_empty()
+                    || scales
+                        .iter()
+                        .any(|scale| !scale.is_finite() || *scale <= 0.0)
+                {
+                    return Err(FastnnError::dtype(
+                        "scaled representation requires finite positive scales",
+                    ));
+                }
+                Ok(())
             }
         }
     }
 
     pub fn storage_bytes(&self, numel: usize) -> FastnnResult<usize> {
         self.validate()?;
-        match self {
-            Self::Native { scalar, encoding } => encoding.storage_bytes(*scalar, numel),
-            Self::Quantized {
-                stored, encoding, ..
-            } => encoding.storage_bytes(*stored, numel),
-        }
+        self.encoding.storage_bytes(self.storage, numel)
     }
+}
+
+fn validate_scales_and_offsets(scales: &[f32], offsets: &[f32]) -> FastnnResult<()> {
+    if scales.is_empty()
+        || scales
+            .iter()
+            .any(|scale| !scale.is_finite() || *scale <= 0.0)
+    {
+        return Err(FastnnError::dtype(
+            "affine dequantization requires finite positive scales",
+        ));
+    }
+    if offsets.len() != scales.len() || offsets.iter().any(|offset| !offset.is_finite()) {
+        return Err(FastnnError::dtype(format!(
+            "affine dequantization has {} scales but {} finite offsets are required",
+            scales.len(),
+            offsets.len()
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -286,20 +386,34 @@ mod tests {
 
     #[test]
     fn validates_integer_backed_quantized_representation() {
-        let representation = ValueRepresentation::Quantized {
+        let representation = ValueRepresentation {
             logical: ScalarType::F32,
-            stored: ScalarType::U4,
+            storage: ScalarType::U4,
             encoding: StorageEncoding::Packed {
                 word_bits: 32,
                 lanes: 8,
             },
-            quantization: QuantizationSpec {
+            transform: RepresentationTransform::AffineQuantization(QuantizationSpec {
                 scheme: QuantizationScheme::Asymmetric,
                 granularity: QuantizationGranularity::PerTensor,
                 scales: vec![0.125],
                 zero_points: vec![8],
-            },
+            }),
         };
         assert_eq!(representation.storage_bytes(17).unwrap(), 12);
+    }
+
+    #[test]
+    fn validates_scaled_packed_float_representation() {
+        let representation = ValueRepresentation {
+            logical: ScalarType::F32,
+            storage: ScalarType::Fp8E4M3,
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+            transform: RepresentationTransform::Scaled { scales: vec![0.25] },
+        };
+        assert_eq!(representation.storage_bytes(5).unwrap(), 8);
     }
 }
