@@ -1,6 +1,6 @@
 //! Mathematical operation codes used by the intermediate representation.
 
-use super::node::TensorValue;
+use super::graph::TensorValue;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
