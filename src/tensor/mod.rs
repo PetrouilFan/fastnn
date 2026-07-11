@@ -531,8 +531,8 @@ impl Tensor {
         })
     }
 
-    pub fn to_numpy(&self) -> Vec<f32> {
-        match &self.inner.storage.as_ref() {
+    pub fn to_numpy(&self) -> FastnnResult<Vec<f32>> {
+        Ok(match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 // Fast path: contiguous F32 tensor - SIMD-accelerated copy
                 if self.inner.dtype == DType::F32 && self.inner.is_contiguous() {
@@ -549,7 +549,7 @@ impl Tensor {
                     {
                         memcpy_f32(src, dst, len);
                     }
-                    return result;
+                    return Ok(result);
                 }
 
                 match self.inner.dtype {
@@ -689,14 +689,20 @@ impl Tensor {
                         }
                         result
                     }
-                    _ => panic!("Unsupported dtype for to_numpy"),
+                    dtype => {
+                        return Err(FastnnError::dtype(format!(
+                            "to_numpy() does not support {dtype:?}"
+                        )))
+                    }
                 }
             }
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
-                panic!("Cannot convert GPU tensor to numpy directly. Use .cpu() first.");
+                return Err(FastnnError::device(
+                    "to_numpy() requires CPU storage; transfer the tensor to CPU first",
+                ));
             }
-        }
+        })
     }
 
     #[track_caller]

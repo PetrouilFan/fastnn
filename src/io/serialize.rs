@@ -128,7 +128,7 @@ pub fn save_state_dict(state_dict: Vec<(String, Tensor)>, path: &str) -> FastnnR
         if let Some(bytes) = tensor.as_byte_slice() {
             write_length_prefixed(&mut writer, bytes)?;
         } else {
-            let data = tensor.to_numpy();
+            let data = tensor.to_numpy()?;
             // Convert f32 vec to bytes using safe reinterpretation.
             let bytes = bytemuck::cast_slice(&data);
             write_length_prefixed(&mut writer, bytes)?;

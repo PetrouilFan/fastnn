@@ -7,6 +7,7 @@ use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::storage::{DType, Device};
 use fastnn::tensor::Tensor;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
@@ -30,6 +31,15 @@ fn conflicting_shape_binding_returns_error() {
         .try_bind("N", 3)
         .expect_err("conflicting shape binding must fail");
     assert!(error.contains("inconsistently"));
+}
+
+#[test]
+fn unsupported_numpy_dtype_returns_error() {
+    let tensor = Tensor::zeros(vec![1], DType::Bool, Device::Cpu);
+    let error = tensor
+        .to_numpy()
+        .expect_err("unsupported NumPy dtype must fail");
+    assert!(error.to_string().contains("does not support"));
 }
 
 #[test]

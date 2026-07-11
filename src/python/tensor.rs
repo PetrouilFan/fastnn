@@ -109,8 +109,8 @@ impl PyTensor {
         self.inner.item().map_err(Into::into)
     }
 
-    fn numpy(&self) -> Vec<f32> {
-        self.inner.to_numpy()
+    fn numpy(&self) -> PyResult<Vec<f32>> {
+        self.inner.to_numpy().map_err(Into::into)
     }
 
     /// DLPack protocol for zero-copy array exchange with NumPy, PyTorch, etc.
@@ -454,7 +454,7 @@ impl PyTensor {
             vec![scalar]
         } else if let Ok(t) = value.extract::<PyTensor>() {
             let tv = t.inner.to_cpu();
-            tv.to_numpy()
+            tv.to_numpy().map_err(PyErr::from)?
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
                 "Unsupported value type; expected float or Tensor",

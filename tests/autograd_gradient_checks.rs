@@ -28,7 +28,7 @@ where
     autograd::backward(&loss, None);
     tensors
         .iter()
-        .map(|tensor| tensor.grad().expect("missing gradient").to_numpy())
+        .map(|tensor| tensor.grad().expect("missing gradient").to_numpy().unwrap())
         .collect()
 }
 

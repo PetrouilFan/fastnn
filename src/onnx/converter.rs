@@ -497,7 +497,8 @@ impl<'a> OnnxConverter<'a> {
                     // Try to resolve it from params first (compile-time constant).
                     let shape_name = &node.inputs[1];
                     if let Some(shape_tensor) = self.params.get(shape_name) {
-                        let shape_data: Vec<f32> = shape_tensor.to_numpy();
+                        let shape_data: Vec<f32> =
+                            shape_tensor.to_numpy().map_err(|error| error.to_string())?;
                         let shape_i64: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
                         let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
                         self.out(node, self.graph.reshape(&ins[0], &dims));
@@ -727,7 +728,8 @@ impl<'a> OnnxConverter<'a> {
                 // Creates a tensor with the given shape filled with value.
                 // shape input (ins[0]) is 1D int64 from params; value attr is optional.
                 if let Some(shape_tensor) = self.params.get(&node.inputs[0]) {
-                    let shape_data: Vec<f32> = shape_tensor.to_numpy();
+                    let shape_data: Vec<f32> =
+                        shape_tensor.to_numpy().map_err(|error| error.to_string())?;
                     let output_shape: Vec<u64> = shape_data.iter().map(|&v| v as u64).collect();
                     let fill_value: f32 = node
                         .attrs
@@ -1012,7 +1014,8 @@ impl<'a> OnnxConverter<'a> {
                 } else if node.inputs.len() > 2 {
                     let scales_name = &node.inputs[2];
                     if let Some(scale_tensor) = self.params.get(scales_name.as_str()) {
-                        let data: Vec<f32> = scale_tensor.to_numpy();
+                        let data: Vec<f32> =
+                            scale_tensor.to_numpy().map_err(|error| error.to_string())?;
                         if data.len() >= 4 {
                             (
                                 data[2].round().max(1.0) as usize,
@@ -1593,7 +1596,7 @@ fn reduce_axes_from_attr_or_input(
     // "reduce over all dims" semantics.
     let axes_name = node.inputs.get(1)?;
     let axes_tensor = params.get(axes_name)?;
-    let raw = axes_tensor.to_numpy();
+    let raw = axes_tensor.to_numpy().ok()?;
     let parsed: Vec<i64> = raw.iter().map(|&v| v as i64).collect();
     if parsed.is_empty() {
         return None;
