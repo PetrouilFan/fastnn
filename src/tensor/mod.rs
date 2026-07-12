@@ -6,7 +6,6 @@ use crate::ir::builder::GraphBuilder;
 use crate::ir::{DimExpr, IrDType};
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
-use smallvec::smallvec;
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -107,15 +106,6 @@ impl TensorImpl {
             requires_grad: false,
             contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
         }
-    }
-
-    pub fn from_data(data: &[f32], dtype: DType, device: Device) -> Self {
-        let sizes: SmallVec<[i64; 8]> = smallvec![data.len() as i64];
-        let storage = match dtype {
-            DType::F32 => Arc::new(Storage::from_vec(data.to_vec(), DType::F32, device)),
-            _ => panic!("Unsupported dtype for from_data"),
-        };
-        TensorImpl::new(storage, sizes, dtype)
     }
 
     pub fn id(&self) -> usize {

@@ -105,12 +105,10 @@ fn test_cyclic_graph_detection() {
         n1_mut.inputs = vec![n2];
     }
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        shape_inference::infer_shapes(&mut graph)
-    }));
+    let result = shape_inference::infer_shapes(&mut graph);
     assert!(
         result.is_err(),
-        "cyclic graph should panic during topological sort"
+        "cyclic graph should return an error during topological sort"
     );
 }
 

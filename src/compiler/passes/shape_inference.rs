@@ -4,7 +4,7 @@ use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
 use std::collections::HashMap;
 
 pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
-    let order = graph.topological_sort();
+    let order = graph.try_topological_sort()?;
 
     for &node_id in &order {
         let node = graph.get_node(node_id).unwrap();

@@ -2,6 +2,7 @@
 
 use super::opcode::Opcode;
 use super::types::{DimExpr, IrDType, TensorType};
+use crate::error::{FastnnError, FastnnResult};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -261,12 +262,17 @@ impl ComputeGraph {
     }
 
     pub fn topological_sort(&self) -> Vec<NodeId> {
+        self.try_topological_sort()
+            .expect("ComputeGraph::topological_sort requires an acyclic graph")
+    }
+
+    pub fn try_topological_sort(&self) -> FastnnResult<Vec<NodeId>> {
         let gen = self.graph_gen.load(Ordering::Acquire);
         {
             let cache = self.sorted_nodes_cache.lock();
             if let Some(cached) = cache.as_ref() {
                 if self.sorted_nodes_gen.load(Ordering::Acquire) == gen {
-                    return cached.clone();
+                    return Ok(cached.clone());
                 }
             }
         }
@@ -319,13 +325,15 @@ impl ComputeGraph {
         }
 
         if sorted.len() != self.nodes.len() {
-            panic!("ComputeGraph::topological_sort: cycle detected in the computation graph");
+            return Err(FastnnError::compilation(
+                "cycle detected in the computation graph",
+            ));
         }
 
         let mut cache = self.sorted_nodes_cache.lock();
         *cache = Some(sorted.clone());
         self.sorted_nodes_gen.store(gen, Ordering::Release);
-        sorted
+        Ok(sorted)
     }
 
     pub fn consumers(&self, node_id: NodeId) -> Vec<NodeId> {
