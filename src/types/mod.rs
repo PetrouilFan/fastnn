@@ -199,6 +199,12 @@ pub enum RepresentationTransform {
     Scaled {
         scales: Vec<f32>,
     },
+    /// Floating storage with `real = stored_float * scale + offset`.
+    ScaledAffine {
+        granularity: QuantizationGranularity,
+        scales: Vec<f32>,
+        offsets: Vec<f32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -297,6 +303,16 @@ impl ValueRepresentation {
                 }
                 Ok(())
             }
+            RepresentationTransform::ScaledAffine {
+                scales, offsets, ..
+            } => {
+                if !self.logical.is_float() || !self.storage.is_float() {
+                    return Err(FastnnError::dtype(
+                        "scaled affine representation requires floating logical and storage types",
+                    ));
+                }
+                validate_scales_and_optional_offsets(scales, offsets)
+            }
         }
     }
 
@@ -324,6 +340,22 @@ fn validate_scales_and_offsets(scales: &[f32], offsets: &[f32]) -> FastnnResult<
         )));
     }
     Ok(())
+}
+
+fn validate_scales_and_optional_offsets(scales: &[f32], offsets: &[f32]) -> FastnnResult<()> {
+    if offsets.is_empty() {
+        if scales.is_empty()
+            || scales
+                .iter()
+                .any(|scale| !scale.is_finite() || *scale <= 0.0)
+        {
+            return Err(FastnnError::dtype(
+                "scaled affine representation requires finite positive scales",
+            ));
+        }
+        return Ok(());
+    }
+    validate_scales_and_offsets(scales, offsets)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

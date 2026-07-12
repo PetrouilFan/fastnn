@@ -402,7 +402,7 @@ pub enum IrDType {
     /// `scales` and `dequant_offsets` are per-output-channel vectors.
     /// When `codebooks` is non-empty, bits 0-3 are an unsigned 4-bit index
     /// (0-15) into `codebook[block_idx]`.  Dequant: `codebook[blk][nibble]`.
-    /// Replaces scales/zeros when present (they are ignored).
+    /// Replaces scales/dequant_offsets when present (they are ignored).
     I4 {
         scales: Vec<f32>,
         dequant_offsets: Vec<f32>,
@@ -440,10 +440,10 @@ pub enum IrDType {
     /// Uses 256-entry LUT for dot product. Block scales stored in PackedTensor.
     /// When `codebooks` is non-empty, bits 0-2 are a magnitude index into
     /// `codebook[block_idx]` and bit 3 is the sign.
-    /// Dequant: `sign * codebook[block][magnitude]`. Overrides scales/zeros.
+    /// Dequant: `sign * codebook[block][magnitude]`. Overrides scales/dequant_offsets.
     F4 {
         scales: Vec<f32>,
-        zeros: Vec<f32>,
+        dequant_offsets: Vec<f32>,
         codebooks: Vec<[f32; 16]>,
     },
 }
@@ -648,12 +648,25 @@ impl IrDType {
             Self::F8R { scales } => scaled_float_representation(ScalarType::Fp8E5M2, 4, scales),
             Self::F4 {
                 scales,
-                zeros,
+                dequant_offsets,
                 codebooks,
             } if !codebooks.is_empty() => {
-                codebook_representation(ScalarType::I4, 8, scales, zeros, codebooks)
+                codebook_representation(ScalarType::I4, 8, scales, dequant_offsets, codebooks)
             }
-            Self::F4 { scales, .. } => scaled_float_representation(ScalarType::Fp4E2M1, 8, scales),
+            Self::F4 {
+                scales,
+                dequant_offsets,
+                ..
+            } => Ok(ValueRepresentation {
+                logical: ScalarType::F32,
+                storage: ScalarType::Fp4E2M1,
+                encoding: packed(8),
+                transform: RepresentationTransform::ScaledAffine {
+                    granularity: quantization_granularity(scales.len()),
+                    scales: scales.clone(),
+                    offsets: dequant_offsets.clone(),
+                },
+            }),
         }
     }
 
@@ -934,6 +947,27 @@ mod tests {
             RepresentationTransform::AffineDequantization { ref offsets, .. }
                 if offsets == &[1.5]
         ));
+        representation.validate().unwrap();
+    }
+
+    #[test]
+    fn f4_preserves_affine_offsets_in_canonical_representation() {
+        let representation = IrDType::F4 {
+            scales: vec![0.25],
+            dequant_offsets: vec![1.5],
+            codebooks: vec![],
+        }
+        .value_representation()
+        .unwrap();
+
+        assert_eq!(
+            representation.transform,
+            RepresentationTransform::ScaledAffine {
+                granularity: QuantizationGranularity::PerTensor,
+                scales: vec![0.25],
+                offsets: vec![1.5],
+            }
+        );
         representation.validate().unwrap();
     }
 

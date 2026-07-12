@@ -1675,7 +1675,7 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         DType::F8R => IrDType::F8R { scales: vec![1.0] },
         DType::F4 => IrDType::F4 {
             scales: vec![1.0],
-            zeros: vec![],
+            dequant_offsets: vec![],
             codebooks: vec![],
         },
         DType::U4Scaled => IrDType::U4Scaled {

@@ -537,7 +537,7 @@ fn matmul_f4_reference_oracle() {
             n,
             |scales| IrDType::F4 {
                 scales,
-                zeros: vec![],
+                dequant_offsets: vec![],
                 codebooks: vec![],
             },
             "matmul_f4",

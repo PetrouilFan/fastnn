@@ -590,9 +590,11 @@ impl Backend for CpuBackend {
                                         scales,
                                         dequant_offsets,
                                     } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::F4 { scales, zeros, .. } => {
-                                        (4usize, scales.clone(), zeros.clone(), vec![])
-                                    }
+                                    IrDType::F4 {
+                                        scales,
+                                        dequant_offsets: zeros,
+                                        ..
+                                    } => (4usize, scales.clone(), zeros.clone(), vec![]),
                                     IrDType::F8 { scales } => {
                                         (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
                                     }
@@ -927,9 +929,11 @@ impl Backend for CpuBackend {
                                         scales,
                                         dequant_offsets,
                                     } => (4usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::F4 { scales, zeros, .. } => {
-                                        (4usize, scales.clone(), zeros.clone(), vec![])
-                                    }
+                                    IrDType::F4 {
+                                        scales,
+                                        dequant_offsets: zeros,
+                                        ..
+                                    } => (4usize, scales.clone(), zeros.clone(), vec![]),
                                     IrDType::F8 { scales } => {
                                         (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
                                     }

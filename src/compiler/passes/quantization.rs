@@ -452,7 +452,7 @@ pub fn quantize_weights_fp(
             FpDtype::F8x4R => IrDType::F8R { scales },
             FpDtype::F4x8 => IrDType::F4 {
                 scales,
-                zeros,
+                dequant_offsets: zeros,
                 codebooks: vec![],
             },
             FpDtype::I4Codebook => IrDType::I4 {

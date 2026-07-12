@@ -187,7 +187,11 @@ fn detect_qlinear_patterns(
                 scales,
                 dequant_offsets,
             } => (scales.clone(), dequant_offsets.clone()),
-            IrDType::F4 { scales, zeros, .. } => (
+            IrDType::F4 {
+                scales,
+                dequant_offsets: zeros,
+                ..
+            } => (
                 scales.clone(),
                 if zeros.is_empty() {
                     vec![0.0f32]
