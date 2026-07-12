@@ -6,14 +6,15 @@
 
 use std::collections::HashMap;
 
+use crate::error::FastnnResult;
 use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Insert gradient quantization for all optimizer update nodes.
 ///
 /// For each optimizer node, the gradient input (index 1) is wrapped with:
 ///   grad_f32 → QuantizeGradient → grad_f8x4r → DequantizeGradient → grad_f32'
-pub fn quantize_gradients(graph: &mut ComputeGraph) {
-    let node_ids = graph.topological_sort();
+pub fn quantize_gradients(graph: &mut ComputeGraph) -> FastnnResult<()> {
+    let node_ids = graph.try_topological_sort()?;
     let mut rewrites: Vec<(NodeId, NodeId, f32)> = Vec::with_capacity(graph.nodes.len());
 
     for &node_id in &node_ids {
@@ -58,6 +59,7 @@ pub fn quantize_gradients(graph: &mut ComputeGraph) {
             opt.inputs[1] = dq_id;
         }
     }
+    Ok(())
 }
 
 fn is_optimizer_op(opcode: &Opcode) -> bool {
@@ -129,7 +131,7 @@ mod tests {
     fn test_quantize_gradients_wraps_sgd_gradient() {
         let mut graph = make_sgd_graph();
         let count_before = graph.nodes.len();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         assert_eq!(graph.nodes.len(), count_before + 2, "Should add Q+DQ nodes");
         let sgd_node = graph.get_node(graph.outputs[0]).unwrap();
         let new_grad = sgd_node.inputs[1];
@@ -144,7 +146,7 @@ mod tests {
     #[test]
     fn test_quantize_gradients_f8r_output_type_has_scale() {
         let mut graph = make_sgd_graph();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         let q = graph
             .nodes
             .iter()
@@ -165,7 +167,7 @@ mod tests {
     #[test]
     fn test_quantize_gradients_deq_output_is_f32() {
         let mut graph = make_sgd_graph();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         let dq = graph
             .nodes
             .iter()
@@ -177,7 +179,7 @@ mod tests {
     #[test]
     fn test_quantize_gradients_q_has_scale_attr() {
         let mut graph = make_sgd_graph();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         let q = graph
             .nodes
             .iter()
@@ -190,7 +192,7 @@ mod tests {
     fn test_quantize_gradients_no_optimizer_noop() {
         let mut graph = make_graph_no_optimizer();
         let count_before = graph.nodes.len();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         assert_eq!(
             graph.nodes.len(),
             count_before,
@@ -269,7 +271,7 @@ mod tests {
             graph.set_inputs(vec![w, g]);
             graph.set_outputs(vec![opt_id]);
             let count_before = graph.nodes.len();
-            quantize_gradients(&mut graph);
+            quantize_gradients(&mut graph).unwrap();
             assert_eq!(
                 graph.nodes.len(),
                 count_before + 2,

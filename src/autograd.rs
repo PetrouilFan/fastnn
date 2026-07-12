@@ -1334,7 +1334,9 @@ pub fn build_backward_graph(
     grads.insert(loss_node, loss_grad_tensor);
 
     // Topological sort in REVERSE order (from output to input)
-    let forward_order = forward_graph.topological_sort();
+    let forward_order = forward_graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
 
     // Walk nodes in reverse order (skip Input/Constant — no backward computation)
     for &node_id in forward_order.iter().rev().filter(|&&id| {

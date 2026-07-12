@@ -2194,10 +2194,10 @@ impl AotExecutor {
 
     /// Debug method to print the compiled graph structure.
     #[cfg(feature = "prepared-plan")]
-    fn debug_graph(&self) -> String {
+    fn debug_graph(&self) -> pyo3::PyResult<String> {
         let mut out = String::new();
         out.push_str("=== COMPILED GRAPH ===\n");
-        for node_id in self.graph.topological_sort() {
+        for node_id in self.graph.try_topological_sort().map_err(PyErr::from)? {
             if let Some(node) = self.graph.get_node(node_id) {
                 out.push_str(&format!(
                     "  Node {}: {} / {:?} / inputs={:?}\n",
@@ -2214,12 +2214,14 @@ impl AotExecutor {
         }
         out.push_str(&format!("Inputs: {:?}\n", self.graph.inputs));
         out.push_str(&format!("Outputs: {:?}\n", self.graph.outputs));
-        out
+        Ok(out)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
-    fn debug_graph(&self) -> String {
-        "debug_graph requires 'prepared-plan' feature".to_string()
+    fn debug_graph(&self) -> pyo3::PyResult<String> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "debug_graph requires 'prepared-plan' feature",
+        ))
     }
 }
 

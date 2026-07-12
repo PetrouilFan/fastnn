@@ -321,7 +321,9 @@ impl Backend for CpuBackend {
         memory_plan: &MemoryPlan,
     ) -> Result<ExecutablePlan, BackendError> {
         let mut instructions = Vec::with_capacity(graph.nodes.len());
-        let order = graph.topological_sort();
+        let order = graph
+            .try_topological_sort()
+            .map_err(|error| BackendError::Compilation(error.to_string()))?;
 
         // â”€â”€ Preâ€‘compute topological levels for parallel dispatch â”€â”€â”€â”€â”€â”€
         // level[node] = max(level[input]) + 1   (with input level = 0 for graph inputs)

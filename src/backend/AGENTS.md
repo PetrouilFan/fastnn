@@ -1,8 +1,8 @@
 # Backend guide
 
 The backend translates compiled IR plus a memory plan into executable
-instructions and dispatches them. The authoritative AOT pass order is
-`GraphExecutor::compile_with_target` in `src/backend/executor.rs`.
+instructions and dispatches them. The authoritative AOT pass order belongs to
+`CompilerPipeline::run` in `src/compiler/pipeline.rs`.
 
 ## Ownership
 

@@ -732,7 +732,8 @@ impl<B: Backend> GraphExecutor<B> {
 
         // 4b. Insert F8x4R gradient quantization around optimizer gradient inputs
         use crate::compiler::passes::gradient_quantization;
-        gradient_quantization::quantize_gradients(&mut combined_graph);
+        gradient_quantization::quantize_gradients(&mut combined_graph)
+            .map_err(|error| BackendError::Compilation(error.to_string()))?;
 
         // 5. Set graph inputs and outputs
         combined_graph.outputs = vec![loss_node];
@@ -1141,7 +1142,9 @@ fn resolve_axis(
 /// Validate shape constraints for all ops in the graph at runtime.
 /// Called after ShapeEnv is built, before dispatch.
 fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), String> {
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
     for &node_id in &order {
         let node = graph
             .get_node(node_id)

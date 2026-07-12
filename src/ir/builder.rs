@@ -51,11 +51,17 @@ type PlanCache =
 static PLAN_CACHE: PlanCache = std::sync::LazyLock::new(|| Mutex::new(HashMap::with_capacity(64)));
 
 /// Compute a ~unique hash for a graph + its input shapes.
-fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]], quantize: Option<u8>) -> u64 {
+fn plan_cache_key(
+    graph: &ComputeGraph,
+    inputs: &[&[u8]],
+    quantize: Option<u8>,
+) -> Result<u64, BackendError> {
     use std::hash::Hash;
     let mut hasher = DefaultHasher::new();
     quantize.hash(&mut hasher);
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| BackendError::Compilation(error.to_string()))?;
     for &nid in &order {
         if let Some(node) = graph.get_node(nid) {
             // Hash the opcode discriminant (ignoring data in e.g. Constant)
@@ -83,7 +89,7 @@ fn plan_cache_key(graph: &ComputeGraph, inputs: &[&[u8]], quantize: Option<u8>) 
     for bytes in inputs {
         bytes.len().hash(&mut hasher);
     }
-    hasher.finish()
+    Ok(hasher.finish())
 }
 
 /// Insert a plan into the cache.
@@ -2398,7 +2404,7 @@ impl GraphBuilder {
         graph.outputs = outputs.iter().map(|t| t.node_id).collect();
 
         // ── Plan cache: skip compilation when graph+shapes match ──
-        let cache_key = plan_cache_key(&graph, inputs, quantize);
+        let cache_key = plan_cache_key(&graph, inputs, quantize)?;
         if let Some((mut plan, memory_plan, compiled_graph)) = lookup_plan(cache_key) {
             return GraphExecutor::new(backend).execute(
                 &compiled_graph,

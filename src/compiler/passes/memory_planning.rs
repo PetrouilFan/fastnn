@@ -363,7 +363,7 @@ pub fn plan_memory_with_env(
         });
     }
 
-    let order = graph.topological_sort();
+    let order = graph.try_topological_sort()?;
 
     let position: HashMap<NodeId, usize> =
         order.iter().enumerate().map(|(i, &id)| (id, i)).collect();

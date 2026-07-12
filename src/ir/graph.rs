@@ -261,11 +261,6 @@ impl ComputeGraph {
         self.required_nodes.insert(node_id);
     }
 
-    pub fn topological_sort(&self) -> Vec<NodeId> {
-        self.try_topological_sort()
-            .expect("ComputeGraph::topological_sort requires an acyclic graph")
-    }
-
     pub fn try_topological_sort(&self) -> FastnnResult<Vec<NodeId>> {
         let gen = self.graph_gen.load(Ordering::Acquire);
         {

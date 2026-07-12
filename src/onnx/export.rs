@@ -68,8 +68,10 @@ const TRAINING_ONLY_OPCODES: &[fn(&Opcode) -> bool] = &[
 /// training (optimizer updates, gradient scaling).
 ///
 /// An empty return value means the graph is safe for ONNX inference export.
-pub fn detect_training_ops(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
-    let order = graph.topological_sort();
+pub fn detect_training_ops(graph: &ComputeGraph) -> Result<Vec<(NodeId, String)>, String> {
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
     let mut found = Vec::new();
 
     for &node_id in &order {
@@ -85,7 +87,7 @@ pub fn detect_training_ops(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
         }
     }
 
-    found
+    Ok(found)
 }
 
 /// ONNX node representation for export JSON.
@@ -350,7 +352,7 @@ pub fn export_to_onnx_json_with_config(
     config: &ExportConfig,
 ) -> Result<String, String> {
     // ── Phase 0: Training safety check ──────────────────────────────
-    let training_ops = detect_training_ops(graph);
+    let training_ops = detect_training_ops(graph)?;
     if config.fail_on_training_ops && !training_ops.is_empty() {
         let opcodes: Vec<String> = training_ops
             .iter()
@@ -373,7 +375,9 @@ pub fn export_to_onnx_json_with_config(
         ));
     }
 
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
 
     // Phase 1: detect quantized patterns
     let (skip_nodes, qlinear_patterns) = detect_qlinear_patterns(graph, &order);

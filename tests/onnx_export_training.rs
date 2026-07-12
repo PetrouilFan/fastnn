@@ -156,7 +156,7 @@ fn test_gradient_scale_fails_export() {
 #[test]
 fn test_detect_training_ops_inference_clean() {
     let graph = build_inference_graph();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(
         ops.is_empty(),
         "Inference graph should have no training ops"
@@ -166,7 +166,7 @@ fn test_detect_training_ops_inference_clean() {
 #[test]
 fn test_detect_training_ops_sgd() {
     let graph = build_training_graph_sgd();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(!ops.is_empty(), "SGD graph should detect training ops");
     assert!(
         ops.iter().any(|(_, name)| name.contains("SgdUpdate")),
@@ -178,7 +178,7 @@ fn test_detect_training_ops_sgd() {
 #[test]
 fn test_detect_training_ops_adam() {
     let graph = build_training_graph_adam();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(!ops.is_empty(), "Adam graph should detect training ops");
     assert!(
         ops.iter().any(|(_, name)| name.contains("AdamUpdate")),
@@ -190,7 +190,7 @@ fn test_detect_training_ops_adam() {
 #[test]
 fn test_detect_training_ops_gradient_scale() {
     let graph = build_training_graph_gradient_scale();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(
         !ops.is_empty(),
         "GradientScale graph should detect training ops"
