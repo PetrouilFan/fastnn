@@ -43,6 +43,22 @@ fn unsupported_numpy_dtype_returns_error() {
 }
 
 #[test]
+fn invalid_graph_quantization_width_returns_error() {
+    let graph = GraphBuilder::new();
+    let input = graph.input(&[4], IrDType::F32);
+
+    let signed_error = graph
+        .quantize(&input, 3)
+        .expect_err("invalid signed quantization width must fail");
+    assert!(signed_error.to_string().contains("must be 4 or 8"));
+
+    let unsigned_error = graph
+        .quantize_unsigned(&input, 16)
+        .expect_err("invalid unsigned quantization width must fail");
+    assert!(unsigned_error.to_string().contains("must be 4 or 8"));
+}
+
+#[test]
 fn symbolic_input_size_conflict_returns_dispatch_error_instead_of_panicking() {
     let g = GraphBuilder::new();
     let x = g.input_with_dims(

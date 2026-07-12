@@ -35,7 +35,7 @@ fn build_qmatmul_graph() -> ComputeGraph {
     let mm = gb.matmul(&input, &deq_weight);
 
     // Quantize output F32 → U4
-    let _q_out = gb.quantize(&mm, 4);
+    let _q_out = gb.quantize(&mm, 4).unwrap();
 
     gb.to_graph()
 }
@@ -197,7 +197,7 @@ fn test_export_qlinear_conv_detected() {
     let conv = gb.conv2d_with_params(&input, &deq_weight, 1, 0, 1, 1);
 
     // Quantize output
-    let _q_out = gb.quantize(&conv, 4);
+    let _q_out = gb.quantize(&conv, 4).unwrap();
 
     let graph = gb.to_graph();
 

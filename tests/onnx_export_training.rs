@@ -263,7 +263,7 @@ fn test_quantized_matmul_export_still_works() {
     let weight = gb.constant(&weight_data, weight_tt);
     let deq_weight = gb.dequantize(&weight);
     let mm = gb.matmul(&input, &deq_weight);
-    let _q_out = gb.quantize(&mm, 4);
+    let _q_out = gb.quantize(&mm, 4).unwrap();
     let graph = gb.to_graph();
 
     let result = export_to_onnx_json(&graph);

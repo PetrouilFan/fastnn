@@ -35,6 +35,7 @@ use std::sync::atomic::Ordering;
 use crate::backend::executor::GraphExecutor;
 use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::compiler::passes::memory_planning::MemoryPlan;
+use crate::error::{FastnnError, FastnnResult};
 use crate::ir::*;
 
 // ============================================================
@@ -1232,7 +1233,7 @@ impl GraphBuilder {
     ///
     /// `bit_width` must be 4 or 8.  The output tensor carries `IrDType::I4` or
     /// `IrDType::I8` packed weight type with per-channel scale/zero-point metadata.
-    pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
+    pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> FastnnResult<GraphTensor> {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
             4 => IrDType::I4 {
@@ -1244,7 +1245,11 @@ impl GraphBuilder {
                 scales: vec![],
                 dequant_offsets: vec![],
             },
-            _ => panic!("quantize: bit_width must be 4 or 8, got {}", bit_width),
+            _ => {
+                return Err(FastnnError::dtype(format!(
+                    "quantize bit width must be 4 or 8, got {bit_width}"
+                )))
+            }
         };
         let output_type = TensorType::new(output_shape, output_dtype);
         let mut attrs = std::collections::HashMap::new();
@@ -1256,12 +1261,16 @@ impl GraphBuilder {
             output_type.clone(),
             attrs,
         );
-        GraphTensor::new(self.clone(), node_id, output_type)
+        Ok(GraphTensor::new(self.clone(), node_id, output_type))
     }
 
     /// Quantize F32 → unsigned packed U4/U8 (U4x8 or U8x4).
     /// Use signed `quantize()` for I4/I8.
-    pub fn quantize_unsigned(&self, input: &GraphTensor, bit_width: usize) -> GraphTensor {
+    pub fn quantize_unsigned(
+        &self,
+        input: &GraphTensor,
+        bit_width: usize,
+    ) -> FastnnResult<GraphTensor> {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
             4 => IrDType::U4Scaled {
@@ -1272,10 +1281,11 @@ impl GraphBuilder {
                 scales: vec![],
                 dequant_offsets: vec![],
             },
-            _ => panic!(
-                "quantize_unsigned: bit_width must be 4 or 8, got {}",
-                bit_width
-            ),
+            _ => {
+                return Err(FastnnError::dtype(format!(
+                    "unsigned quantize bit width must be 4 or 8, got {bit_width}"
+                )))
+            }
         };
         let output_type = TensorType::new(output_shape, output_dtype);
         let mut attrs = std::collections::HashMap::new();
@@ -1288,7 +1298,7 @@ impl GraphBuilder {
             output_type.clone(),
             attrs,
         );
-        GraphTensor::new(self.clone(), node_id, output_type)
+        Ok(GraphTensor::new(self.clone(), node_id, output_type))
     }
 
     /// Dequantize U4/U8 → F32 using the scales/dequant_offsets from the input dtype.
@@ -2009,23 +2019,12 @@ impl GraphBuilder {
 
     // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
 
-    /// Detect if a tensor has a packed quantized dtype (U4 or U8).
-    fn is_packed_dtype(dtype: &IrDType) -> bool {
-        matches!(
-            dtype,
-            IrDType::I4 { .. }
-                | IrDType::I8Scaled { .. }
-                | IrDType::U4Scaled { .. }
-                | IrDType::U8Scaled { .. }
-        )
-    }
-
-    /// Extract the bit width from a packed dtype (4 for U4, 8 for U8).
-    fn packed_bit_width(dtype: &IrDType) -> usize {
+    /// Extract the bit width from a packed dtype.
+    fn packed_bit_width(dtype: &IrDType) -> Option<usize> {
         match dtype {
-            IrDType::I4 { .. } | IrDType::U4Scaled { .. } => 4,
-            IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. } => 8,
-            _ => panic!("packed_bit_width called on non-packed dtype: {:?}", dtype),
+            IrDType::I4 { .. } | IrDType::U4Scaled { .. } => Some(4),
+            IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. } => Some(8),
+            _ => None,
         }
     }
 
@@ -2037,9 +2036,8 @@ impl GraphBuilder {
     /// should quantize the optimizer's output.
     fn unwrap_quantized_weight(&self, weight: &GraphTensor) -> (GraphTensor, Option<usize>) {
         let dtype = weight.tensor_type().dtype.clone();
-        if Self::is_packed_dtype(&dtype) {
-            let bw = Self::packed_bit_width(&dtype);
-            (self.dequantize(weight), Some(bw))
+        if let Some(bit_width) = Self::packed_bit_width(&dtype) {
+            (self.dequantize(weight), Some(bit_width))
         } else {
             (weight.clone(), None)
         }
@@ -2074,6 +2072,7 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
+                .expect("packed dtype bit width must be valid")
         } else {
             result
         }
@@ -2117,6 +2116,7 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
+                .expect("packed dtype bit width must be valid")
         } else {
             result
         }
@@ -2161,6 +2161,7 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
+                .expect("packed dtype bit width must be valid")
         } else {
             result
         }
@@ -2199,6 +2200,7 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
+                .expect("packed dtype bit width must be valid")
         } else {
             result
         }
@@ -2239,6 +2241,7 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
+                .expect("packed dtype bit width must be valid")
         } else {
             result
         }
@@ -2277,6 +2280,7 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
+                .expect("packed dtype bit width must be valid")
         } else {
             result
         }

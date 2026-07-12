@@ -40,16 +40,6 @@ impl IRNode {
             1
         }
     }
-    pub fn output_type_for_index(&self, idx: usize) -> &TensorType {
-        match idx {
-            0 => &self.output_type,
-            1 => self
-                .secondary_output_type
-                .as_ref()
-                .expect("secondary output requested but not set"),
-            _ => panic!("output index {} out of range (max 1)", idx),
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
