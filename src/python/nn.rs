@@ -2321,7 +2321,8 @@ impl AotExecutor {
                     } => (scales.clone(), dequant_offsets.clone()),
                     _ => (vec![], vec![]),
                 };
-                let dtype: crate::storage::DType = crate::tensor::ir_to_dtype(ir_dtype);
+                let dtype: crate::storage::DType =
+                    crate::tensor::ir_to_dtype(ir_dtype).map_err(PyErr::from)?;
                 // Resolve shape from DimExpr (all should be Known after compilation).
                 let shape: Vec<i64> = output_node
                     .output_type

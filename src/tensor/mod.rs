@@ -1035,15 +1035,19 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
     }
 }
 
-pub fn ir_to_dtype(idt: IrDType) -> DType {
-    match idt {
+pub fn ir_to_dtype(idt: IrDType) -> FastnnResult<DType> {
+    Ok(match idt {
         IrDType::F32 => DType::F32,
         IrDType::F16 => DType::F16,
         IrDType::BF16 => DType::BF16,
         IrDType::I32 => DType::I32,
         IrDType::I64 => DType::I64,
         IrDType::Bool => DType::Bool,
-        IrDType::I8 => panic!("ir_to_dtype: I8 is IR-only, not a Tensor-level DType"),
+        IrDType::I8 => {
+            return Err(FastnnError::dtype(
+                "runtime activation I8 is not a Tensor-level dtype",
+            ))
+        }
         // Packed types round-trip back to simple DType variants. Per-channel metadata
         // stays in the IR node; Tensor-level storage uses the packed dtype.
         IrDType::I4 { .. } => DType::I4,
@@ -1053,7 +1057,7 @@ pub fn ir_to_dtype(idt: IrDType) -> DType {
         IrDType::F4 { .. } => DType::F4,
         IrDType::U4Scaled { .. } => DType::U4Scaled,
         IrDType::U8Scaled { .. } => DType::U8Scaled,
-    }
+    })
 }
 
 impl Tensor {
@@ -1108,7 +1112,7 @@ impl Tensor {
         Ok(graph_outputs
             .into_iter()
             .zip(result_bytes)
-            .map(|(gt, bytes)| {
+            .map(|(gt, bytes)| -> Result<Tensor, BackendError> {
                 let shape: SmallVec<[i64; 8]> = gt
                     .shape()
                     .iter()
@@ -1117,7 +1121,8 @@ impl Tensor {
                         _ => unreachable!("AOT bridge: graph op output has concrete shape"),
                     })
                     .collect();
-                let dt = ir_to_dtype(gt.dtype());
+                let dt = ir_to_dtype(gt.dtype())
+                    .map_err(|error| BackendError::Compilation(error.to_string()))?;
                 let numel: usize = shape.iter().map(|&s| s as usize).product();
                 let expected_bytes = numel * dt.size();
                 let num_bytes = bytes.len();
@@ -1140,9 +1145,9 @@ impl Tensor {
                 );
                 let data = bytes.to_vec();
                 let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));
-                Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
+                Ok(Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt)))
             })
-            .collect())
+            .collect::<Result<Vec<_>, _>>()?)
     }
 }
 

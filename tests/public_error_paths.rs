@@ -8,7 +8,7 @@ use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::storage::{DType, Device};
-use fastnn::tensor::Tensor;
+use fastnn::tensor::{ir_to_dtype, Tensor};
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(values).to_vec()
@@ -56,6 +56,13 @@ fn invalid_graph_quantization_width_returns_error() {
         .quantize_unsigned(&input, 16)
         .expect_err("invalid unsigned quantization width must fail");
     assert!(unsigned_error.to_string().contains("must be 4 or 8"));
+}
+
+#[test]
+fn runtime_activation_dtype_cannot_escape_to_eager_tensor() {
+    let error = ir_to_dtype(IrDType::I8)
+        .expect_err("runtime activation dtype must not become an eager tensor dtype");
+    assert!(error.to_string().contains("not a Tensor-level dtype"));
 }
 
 #[test]
