@@ -113,6 +113,29 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .try_as_f32_slice_mut()
         .expect_err("mutable typed slice access must validate dtype");
     assert!(mutable_dtype.to_string().contains("requires F32"));
+
+    let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
+    let packed_pointer = packed
+        .inner
+        .try_data_ptr()
+        .expect_err("packed raw pointer access must fail");
+    assert!(packed_pointer.to_string().contains("plain scalar storage"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut pointer_bounds = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
+    pointer_bounds.storage_offset = 2;
+    let immutable_pointer = pointer_bounds
+        .try_data_ptr_f32()
+        .expect_err("immutable pointer access must validate bounds");
+    assert!(immutable_pointer
+        .to_string()
+        .contains("exceeds storage length"));
+    let mutable_pointer = pointer_bounds
+        .try_data_ptr_f32_mut()
+        .expect_err("mutable pointer access must validate bounds");
+    assert!(mutable_pointer
+        .to_string()
+        .contains("exceeds storage length"));
 }
 
 #[test]

@@ -266,90 +266,120 @@ impl TensorImpl {
 
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
-        match &self.storage.as_ref() {
+        self.try_data_ptr().expect("TensorImpl::data_ptr failed")
+    }
+
+    pub fn try_data_ptr(&self) -> FastnnResult<*const u8> {
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot produce a data pointer",
+                self.storage_offset
+            )));
+        }
+        let element_size = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("raw pointer access requires plain scalar storage")
+        })?;
+        let byte_offset = (self.storage_offset as usize)
+            .checked_mul(element_size)
+            .ok_or_else(|| FastnnError::Overflow("data pointer byte offset overflow".into()))?;
+        match self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr();
-                let elem_size = self
-                    .dtype
-                    .scalar_byte_width()
-                    .expect("tensor byte access requires plain scalar storage");
-                // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
-                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
+                if byte_offset > cpu.data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "data pointer byte offset {byte_offset} exceeds storage length {}",
+                        cpu.data.len()
+                    )));
+                }
+                // SAFETY: the checked offset is within or one past the CPU allocation,
+                // and the pointer lifetime remains tied to the borrowed tensor storage.
+                Ok(unsafe { cpu.data.as_ref().as_ptr().add(byte_offset) })
             }
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                let location = std::panic::Location::caller();
-                panic!(
-                    "Cannot get CPU pointer from GPU storage. Use .to_cpu() first.\nCalled from: {}:{}",
-                    location.file(),
-                    location.line()
-                );
-            }
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot get a CPU pointer from GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
     #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
-        match &self.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr();
-                let byte_offset = self.storage_offset as usize
-                    * self
-                        .dtype
-                        .scalar_byte_width()
-                        .expect("tensor byte access requires plain scalar storage");
-                unsafe { ptr.add(byte_offset) as *const f32 }
-            }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                let location = std::panic::Location::caller();
-                panic!(
-                    "Cannot get CPU pointer from GPU storage. Device: {:?}, Storage: {:?}\nLocation: {}:{}",
-                    self.device,
-                    self.storage.as_ref(),
-                    location.file(),
-                    location.line()
-                );
-            }
+        self.try_data_ptr_f32()
+            .expect("TensorImpl::data_ptr_f32 failed")
+    }
+
+    pub fn try_data_ptr_f32(&self) -> FastnnResult<*const f32> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "F32 pointer access requires F32 storage, got {:?}",
+                self.dtype
+            )));
         }
+        let ptr = self.try_data_ptr()? as *const f32;
+        if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+            return Err(FastnnError::Internal(
+                "CPU storage is not aligned for F32 pointer access".into(),
+            ));
+        }
+        Ok(ptr)
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        let storage = Arc::make_mut(&mut self.storage);
-        match storage {
-            Storage::Cpu(cpu) => {
-                let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr();
-                let byte_offset = self.storage_offset as usize
-                    * self
-                        .dtype
-                        .scalar_byte_width()
-                        .expect("tensor byte access requires plain scalar storage");
-                unsafe { ptr.add(byte_offset) as *mut f32 }
-            }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
+        self.try_data_ptr_f32_mut()
+            .expect("TensorImpl::data_ptr_f32_mut failed")
+    }
+
+    pub fn try_data_ptr_f32_mut(&mut self) -> FastnnResult<*mut f32> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "mutable F32 pointer access requires F32 storage, got {:?}",
+                self.dtype
+            )));
         }
+        let ptr = self.try_data_ptr_mut()? as *mut f32;
+        if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+            return Err(FastnnError::Internal(
+                "CPU storage is not aligned for mutable F32 pointer access".into(),
+            ));
+        }
+        Ok(ptr)
     }
 
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
+        self.try_data_ptr_mut()
+            .expect("TensorImpl::data_ptr_mut failed")
+    }
+
+    pub fn try_data_ptr_mut(&mut self) -> FastnnResult<*mut u8> {
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot produce a mutable data pointer",
+                self.storage_offset
+            )));
+        }
+        let element_size = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("mutable raw pointer access requires plain scalar storage")
+        })?;
+        let byte_offset = (self.storage_offset as usize)
+            .checked_mul(element_size)
+            .ok_or_else(|| FastnnError::Overflow("mutable pointer byte offset overflow".into()))?;
         let storage = Arc::make_mut(&mut self.storage);
         match storage {
             Storage::Cpu(cpu) => {
                 let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr();
-                let elem_size = self
-                    .dtype
-                    .scalar_byte_width()
-                    .expect("tensor byte access requires plain scalar storage");
-                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
+                if byte_offset > data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "mutable pointer byte offset {byte_offset} exceeds storage length {}",
+                        data.len()
+                    )));
+                }
+                // SAFETY: the checked offset is within or one past the allocation;
+                // `&mut self` and `Arc::make_mut` establish exclusive backing access.
+                Ok(unsafe { data.as_mut_ptr().add(byte_offset) })
             }
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot get a mutable CPU pointer from GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
