@@ -197,13 +197,28 @@ impl Tensor {
     }
 
     pub fn argmax(&self, dim: Option<usize>) -> Tensor {
+        self.try_argmax(dim).expect("Tensor::argmax failed")
+    }
+
+    pub fn try_argmax(&self, dim: Option<usize>) -> FastnnResult<Tensor> {
+        if let Some(axis) = dim {
+            if axis >= self.ndim() {
+                return Err(FastnnError::shape(format!(
+                    "argmax dimension {axis} is out of range for {} dimensions",
+                    self.ndim()
+                )));
+            }
+        }
         let result = Tensor::exec_aot(&[self], |g, ins| {
             let axis = dim.map(|d| DimExpr::Known(d as u64));
             let out = g.argmax(&ins[0], axis);
             vec![out]
         })
-        .expect("Tensor::argmax: AOT execution failed");
-        result.into_iter().next().unwrap()
+        .map_err(|error| FastnnError::Computation(error.to_string()))?;
+        result
+            .into_iter()
+            .next()
+            .ok_or_else(|| FastnnError::Internal("argmax execution returned no output".into()))
     }
 
     pub fn cat(tensors: &[Tensor], dim: i32) -> Tensor {
@@ -372,24 +387,44 @@ impl Tensor {
     }
 
     pub fn gather(&self, axis: i64, indices: &Tensor) -> Tensor {
-        let norm_axis = if axis < 0 {
-            (self.ndim() as i64 + axis) as usize
-        } else {
-            axis as usize
-        };
+        self.try_gather(axis, indices)
+            .expect("Tensor::gather failed")
+    }
+
+    pub fn try_gather(&self, axis: i64, indices: &Tensor) -> FastnnResult<Tensor> {
+        let rank = self.ndim() as i64;
+        let normalized_axis = if axis < 0 { rank + axis } else { axis };
+        if normalized_axis < 0 || normalized_axis >= rank {
+            return Err(FastnnError::shape(format!(
+                "gather axis {axis} is out of range for {rank} dimensions"
+            )));
+        }
+        if self.device() != indices.device() {
+            return Err(FastnnError::device(
+                "gather data and indices must be on the same device",
+            ));
+        }
+        if indices.dtype() != DType::F32 {
+            return Err(FastnnError::dtype(
+                "gather currently requires F32 index tensors",
+            ));
+        }
+        let normalized_axis = normalized_axis as usize;
         let output = Tensor::exec_aot(&[self, indices], |g, ins| {
-            vec![g.gather(&ins[0], &ins[1], norm_axis)]
+            vec![g.gather(&ins[0], &ins[1], normalized_axis)]
         })
-        .expect("Tensor::gather: AOT failed")
+        .map_err(|error| FastnnError::Computation(error.to_string()))?
         .into_iter()
         .next()
-        .unwrap();
-        if autograd::is_grad_enabled() && (self.requires_grad() || indices.requires_grad()) {
-            let inputs = vec![self.clone(), indices.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("GatherBackward", inputs))
-        } else {
-            output
-        }
+        .ok_or_else(|| FastnnError::Internal("gather execution returned no output".into()))?;
+        Ok(
+            if autograd::is_grad_enabled() && (self.requires_grad() || indices.requires_grad()) {
+                let inputs = vec![self.clone(), indices.clone()];
+                Self::attach_grad_fn(output, autograd::make_node_info("GatherBackward", inputs))
+            } else {
+                output
+            },
+        )
     }
 
     pub fn nonzero(&self) -> Vec<i64> {

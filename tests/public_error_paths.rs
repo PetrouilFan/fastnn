@@ -192,6 +192,28 @@ fn invalid_slice_returns_structured_errors() {
 }
 
 #[test]
+fn invalid_argmax_and_gather_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let indices = Tensor::from_vec(vec![0.0], vec![1]);
+
+    let argmax = tensor
+        .try_argmax(Some(2))
+        .expect_err("out-of-range argmax dimension must fail");
+    assert!(argmax.to_string().contains("out of range"));
+
+    let gather = tensor
+        .try_gather(-3, &indices)
+        .expect_err("out-of-range gather axis must fail");
+    assert!(gather.to_string().contains("out of range"));
+
+    let invalid_indices = Tensor::zeros(vec![1], DType::I64, Device::Cpu);
+    let dtype = tensor
+        .try_gather(0, &invalid_indices)
+        .expect_err("unsupported gather index dtype must fail");
+    assert!(dtype.to_string().contains("requires F32"));
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);

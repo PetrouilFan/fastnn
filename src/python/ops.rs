@@ -115,9 +115,24 @@ macro_rules! arg_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         #[pyo3(signature = (a, dim = None))]
-        fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
-            let dim = dim.unwrap_or(0) as usize;
-            PyTensor::from_tensor(a.inner.$method(Some(dim)))
+        fn $name(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
+            let rank = a.inner.ndim() as i64;
+            let requested = i64::from(dim.unwrap_or(0));
+            let normalized = if requested < 0 {
+                rank + requested
+            } else {
+                requested
+            };
+            if normalized < 0 || normalized >= rank {
+                return Err(crate::error::FastnnError::shape(format!(
+                    "{} dimension {requested} is out of range for {rank} dimensions",
+                    stringify!($name)
+                ))
+                .into());
+            }
+            Ok(PyTensor::from_tensor(
+                a.inner.try_argmax(Some(normalized as usize))?,
+            ))
         }
     };
 }
@@ -362,10 +377,20 @@ arg_op!(argmax, argmax);
 // argmin is argmax of negated input (no Tensor::argmin method)
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
-fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+fn argmin(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
     let a_inner = a.inner.clone();
-    let d = dim.unwrap_or(0) as usize;
-    PyTensor::from_tensor(a_inner.neg().argmax(Some(d)))
+    let rank = a_inner.ndim() as i64;
+    let requested = i64::from(dim.unwrap_or(0));
+    let normalized = if requested < 0 { rank + requested } else { requested };
+    if normalized < 0 || normalized >= rank {
+        return Err(crate::error::FastnnError::shape(format!(
+            "argmin dimension {requested} is out of range for {rank} dimensions"
+        ))
+        .into());
+    }
+    Ok(PyTensor::from_tensor(
+        a_inner.neg().try_argmax(Some(normalized as usize))?,
+    ))
 }
 
 // Loss functions
@@ -696,8 +721,10 @@ fn topk(tensor: &PyTensor, k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
 
 #[pyfunction]
 #[pyo3(signature = (tensor, axis, indices))]
-fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.gather(axis, &indices.inner))
+fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        tensor.inner.try_gather(axis, &indices.inner)?,
+    ))
 }
 
 #[pyfunction]
