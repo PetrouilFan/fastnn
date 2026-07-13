@@ -54,6 +54,11 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .expect("mismatched value count must fail");
     assert!(value_count.to_string().contains("2 were provided"));
 
+    let device_value_count = Tensor::try_from_vec_with_device(vec![1.0], vec![2], Device::Cpu)
+        .err()
+        .expect("device vector value-count mismatch must fail");
+    assert!(device_value_count.to_string().contains("1 were provided"));
+
     let negative_factory = Tensor::try_zeros(vec![-1], DType::F32, Device::Cpu)
         .err()
         .expect("negative zero shape must fail");

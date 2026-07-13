@@ -127,23 +127,41 @@ impl Tensor {
     }
 
     pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
+        Self::try_from_vec_with_device(values, shape, device)
+            .expect("Tensor::from_vec_with_device failed")
+    }
+
+    pub fn try_from_vec_with_device(
+        values: Vec<f32>,
+        shape: Vec<i64>,
+        device: Device,
+    ) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
+        let (numel, _nbytes) = validate_tensor_shape(&sizes, DType::F32)?;
+        if values.len() != numel {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {numel} values, but {} were provided",
+                values.len()
+            )));
+        }
         match device {
-            Device::Cpu => {
-                let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
-            }
+            Device::Cpu => Self::try_from_vec(values, sizes.into_vec()),
             #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_gpu_buffer_from_data(&values, "from_vec");
                 let storage = Arc::new(Storage::Wgpu(GpuStorage {
                     buffer: buffer.buffer,
-                    nbytes: values.len() * 4,
+                    nbytes: _nbytes,
                     device_id,
                     staging: RwLock::new(None),
                 }));
-                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+                Ok(Tensor::new(TensorImpl::try_new_with_device(
+                    storage,
+                    sizes,
+                    device,
+                    DType::F32,
+                )?))
             }
         }
     }

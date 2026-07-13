@@ -26,9 +26,9 @@ fn tensor_from_data<'py>(
     let data: Vec<f32> = data.extract()?;
     let shape: Vec<i64> = shape.extract()?;
     let device = resolve_device(device);
-    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+    Ok(PyTensor::from_tensor(Tensor::try_from_vec_with_device(
         data, shape, device,
-    )))
+    )?))
 }
 
 #[pyfunction]
