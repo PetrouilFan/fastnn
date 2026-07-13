@@ -344,6 +344,32 @@ fn invalid_argmax_and_gather_return_structured_errors() {
 }
 
 #[test]
+fn invalid_binary_shapes_return_dispatch_errors() {
+    let matrix = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+
+    for error in [
+        matrix.try_add(&incompatible).unwrap_err(),
+        matrix.try_sub(&incompatible).unwrap_err(),
+        matrix.try_mul(&incompatible).unwrap_err(),
+        matrix.try_div(&incompatible).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("broadcast"));
+    }
+
+    let matmul = matrix
+        .try_matmul(&incompatible)
+        .expect_err("mismatched matmul contraction must fail");
+    assert!(matmul.to_string().contains("contracting dimensions differ"));
+
+    let vector = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    let rank = vector
+        .try_matmul(&incompatible)
+        .expect_err("rank-one eager matmul must fail explicitly");
+    assert!(rank.to_string().contains("at least two dimensions"));
+}
+
+#[test]
 fn invalid_reduction_dimensions_return_structured_errors() {
     let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
 

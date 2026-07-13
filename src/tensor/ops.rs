@@ -199,14 +199,56 @@ macro_rules! impl_inplace_binary_op {
 }
 
 impl Tensor {
+    fn validate_binary_inputs(&self, other: &Tensor, operation: &str) -> Result<(), BackendError> {
+        if self.device() != other.device() {
+            return Err(BackendError::Dispatch(format!(
+                "{operation}: tensors must be on the same device"
+            )));
+        }
+        if self.dtype() != other.dtype() {
+            return Err(BackendError::Dispatch(format!(
+                "{operation}: tensor dtypes must match, got {:?} and {:?}",
+                self.dtype(),
+                other.dtype()
+            )));
+        }
+        Self::broadcast_shapes(&self.shape(), &other.shape())
+            .map_err(|error| BackendError::Dispatch(format!("{operation}: {error}")))?;
+        Ok(())
+    }
+
+    fn validate_matmul_inputs(&self, other: &Tensor) -> Result<(), BackendError> {
+        if self.device() != other.device() || self.dtype() != other.dtype() {
+            return Err(BackendError::Dispatch(
+                "matmul: tensors must have matching devices and dtypes".into(),
+            ));
+        }
+        let left = self.shape();
+        let right = other.shape();
+        if left.len() < 2 || right.len() < 2 {
+            return Err(BackendError::Dispatch(
+                "matmul: both tensors must have at least two dimensions".into(),
+            ));
+        }
+        if left[left.len() - 1] != right[right.len() - 2] {
+            return Err(BackendError::Dispatch(format!(
+                "matmul: contracting dimensions differ: {} and {}",
+                left[left.len() - 1],
+                right[right.len() - 2]
+            )));
+        }
+        Self::broadcast_shapes(&left[..left.len() - 2], &right[..right.len() - 2])
+            .map_err(|error| BackendError::Dispatch(format!("matmul batch dimensions: {error}")))?;
+        Ok(())
+    }
+
     pub fn add(&self, other: &Tensor) -> Tensor {
         self.try_add(other)
             .expect("Tensor::add: AOT execution failed")
     }
 
     pub fn try_add(&self, other: &Tensor) -> Result<Tensor, BackendError> {
-        Self::broadcast_shapes(&self.shape(), &other.shape())
-            .map_err(|e| BackendError::Dispatch(format!("shape broadcast: {e}")))?;
+        self.validate_binary_inputs(other, "add")?;
         // Fast path: CPU contiguous same-shape add, skip dispatch overhead
         if self.device() == Device::Cpu
             && other.device() == Device::Cpu
@@ -497,6 +539,7 @@ impl Tensor {
     }
 
     pub fn try_sub(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_binary_inputs(other, "sub")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.sub(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -515,6 +558,7 @@ impl Tensor {
     }
 
     pub fn try_mul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_binary_inputs(other, "mul")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.mul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -533,6 +577,7 @@ impl Tensor {
     }
 
     pub fn try_div(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_binary_inputs(other, "div")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.div(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -551,6 +596,7 @@ impl Tensor {
     }
 
     pub fn try_matmul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_matmul_inputs(other)?;
         let output = exec_single(&[self, other], |g, ins| vec![g.matmul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
