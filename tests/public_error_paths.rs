@@ -1,3 +1,4 @@
+use fastnn::autograd;
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::Backend;
@@ -63,6 +64,17 @@ fn runtime_activation_dtype_cannot_escape_to_eager_tensor() {
     let error = ir_to_dtype(IrDType::I8)
         .expect_err("runtime activation dtype must not become an eager tensor dtype");
     assert!(error.to_string().contains("not a Tensor-level dtype"));
+}
+
+#[test]
+fn backward_rejects_mismatched_gradient_shape() {
+    let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
+    let loss = input.sum(0, false);
+    let wrong_gradient = Tensor::from_vec(vec![1.0], vec![1]);
+
+    let error = autograd::backward(&loss, Some(wrong_gradient))
+        .expect_err("mismatched backward gradient must fail");
+    assert!(error.to_string().contains("gradient shape"));
 }
 
 #[test]

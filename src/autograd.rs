@@ -4,6 +4,7 @@
 // They will be removed once all code uses the compile-time IR.
 // =============================================================================
 
+use crate::error::{FastnnError, FastnnResult};
 use crate::ir::builder::GraphBuilder;
 use crate::storage::{Device, Storage};
 use crate::tensor::{dtype_to_ir, Tensor, TensorImpl};
@@ -289,9 +290,9 @@ fn infer_reduction_params(input_shape: &[i64], output_shape: &[i64]) -> (usize, 
 ///   so that repeated backward() calls with the same graph skip the replay.
 /// - Prunes nodes that do not contribute to any `requires_grad=true` leaf.
 /// - Uses fused backward nodes for activations (Sigmoid, Tanh, SiLU, Mish).
-pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
+pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> {
     if !is_grad_enabled() {
-        return;
+        return Ok(());
     }
 
     // ── Step 1: DFS-collect the tape ──────────────────────────────────
@@ -319,12 +320,12 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     dfs_collect(root, &mut visited, &mut all_nodes, &mut grad_fn_to_tensor);
 
     if all_nodes.is_empty() {
-        return;
+        return Ok(());
     }
 
     let leaf_inputs = collect_leaf_tensors(&all_nodes);
     if leaf_inputs.is_empty() {
-        return;
+        return Ok(());
     }
 
     // ── Step 2: collect external input tensors (not produced by a backward node) ──
@@ -391,7 +392,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     }
 
     if all_nodes.is_empty() {
-        return;
+        return Ok(());
     }
 
     // ── Step 4: try the backward plan cache ───────────────────────────
@@ -441,7 +442,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
                         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
                     {
                         store_gradients(&leaf_inputs, &mut r);
-                        return;
+                        return Ok(());
                     }
                 }
             }
@@ -469,18 +470,18 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         let input_gts: Vec<GraphTensor> = inputs
             .iter()
             .map(|t| {
-                tensor_map
-                    .get(&t.id())
-                    .cloned()
-                    .expect("backward: missing input tensor in tensor_map")
+                tensor_map.get(&t.id()).cloned().ok_or_else(|| {
+                    FastnnError::Autograd(
+                        "backward input tensor is missing from the replay map".to_string(),
+                    )
+                })
             })
-            .collect();
+            .collect::<FastnnResult<Vec<_>>>()?;
 
         let node_ptr = Arc::as_ptr(node) as usize;
-        let forward_tensor = grad_fn_to_tensor
-            .get(&node_ptr)
-            .cloned()
-            .expect("backward: forward tensor not found for backward node");
+        let forward_tensor = grad_fn_to_tensor.get(&node_ptr).cloned().ok_or_else(|| {
+            FastnnError::Autograd("forward tensor is missing for a backward node".to_string())
+        })?;
 
         let output_gt = match node.op_name {
             "AddBackward" => forward_builder.add(&input_gts[0], &input_gts[1]),
@@ -704,10 +705,9 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         tensor_map.insert(forward_tensor.id(), output_gt);
     }
 
-    let loss_gt = match tensor_map.get(&root.id()) {
-        Some(gt) => gt.clone(),
-        None => return,
-    };
+    let loss_gt = tensor_map.get(&root.id()).cloned().ok_or_else(|| {
+        FastnnError::Autograd("loss tensor is missing from the replay graph".to_string())
+    })?;
 
     // Get forward graph and recorded input IDs.
     // Set forward_graph.inputs so build_backward_graph can identify
@@ -721,11 +721,18 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         let loss_shape = root.shape();
         let go_shape = go.shape();
         if go_shape.len() != loss_shape.len() {
-            return;
+            return Err(FastnnError::shape(format!(
+                "gradient rank {} does not match loss rank {}",
+                go_shape.len(),
+                loss_shape.len()
+            )));
         }
         for (a, b) in go_shape.iter().zip(loss_shape.iter()) {
             if a != b {
-                return;
+                return Err(FastnnError::shape(format!(
+                    "gradient shape {:?} does not match loss shape {:?}",
+                    go_shape, loss_shape
+                )));
             }
         }
     }
@@ -733,7 +740,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
     let (combined_graph, grads) =
         match build_backward_graph(&forward_graph, loss_gt.node_id(), grad_output.as_ref()) {
             Ok(g) => g,
-            Err(_) => return,
+            Err(error) => return Err(FastnnError::Autograd(error)),
         };
 
     // Execute combined graph via executor
@@ -747,7 +754,9 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         })
         .collect();
     if grad_output_ids.len() != leaf_inputs.len() {
-        return;
+        return Err(FastnnError::Autograd(
+            "failed to construct gradients for every trainable leaf".to_string(),
+        ));
     }
     combined.set_inputs(recorded_input_ids.clone());
     combined.set_outputs(grad_output_ids);
@@ -764,7 +773,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
     })() {
         Ok(r) => r,
-        Err(_) => return,
+        Err(error) => return Err(FastnnError::Autograd(error.to_string())),
     };
 
     // Cache for future calls with LRU eviction
@@ -788,6 +797,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) {
 
     // ── Step 5: Store gradients on leaf tensors ───────────────────────
     store_gradients(&leaf_inputs, &mut results);
+    Ok(())
 }
 
 /// Extract gradient results (aligned 1:1 with `leaf_inputs`) and accumulate onto leaf tensors.
@@ -849,7 +859,7 @@ mod tests {
         let c = a.add(&b);
         let loss = c.mean(0, false);
 
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
 
         let grad_a = a.grad().expect("a should have grad");
         let grad_vals_a: Vec<f32> = unsafe {
@@ -879,7 +889,7 @@ mod tests {
         let c = a.mul(&b);
         let loss = c.mean(0, false);
 
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
 
         let grad_a = a.grad().expect("a should have grad");
         let _grad_b = b.grad().expect("b should have grad");
@@ -923,7 +933,7 @@ mod tests {
         let c = a.matmul(&b);
         let loss = c.mean(0, false); // shape [2, 2] → [2]
 
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
 
         let grad_a = a.grad().expect("a should have grad");
         // Shape check: grad_a should be [2, 3] (same as a)
@@ -944,7 +954,7 @@ mod tests {
         let r = a.relu();
         let loss = r.mean(0, false);
 
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
 
         let grad_a = a.grad().expect("a should have grad");
         assert_eq!(a.shape(), grad_a.shape(), "grad shape should match input");
@@ -989,7 +999,7 @@ mod tests {
         let loss = c.sum(0, false);
 
         // First backward
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
         let grad_a_1 = a.grad().expect("a should have grad after first backward");
         let val_1: f32 = unsafe { *grad_a_1.data_ptr_f32() };
         // d(sum(a+b))/da = 1 for each element → sum of grads = 4
@@ -1000,7 +1010,7 @@ mod tests {
         );
 
         // Second backward (gradients accumulate)
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
         let grad_a_2 = a.grad().expect("a should have grad after second backward");
         let val_2: f32 = unsafe { *grad_a_2.data_ptr_f32() };
         // Should accumulate: 1 + 1 = 2
@@ -1020,7 +1030,7 @@ mod tests {
         // With no_grad guard
         {
             let _guard = NoGradGuard::new();
-            backward(&loss, None);
+            backward(&loss, None).unwrap();
         }
 
         // No gradients should have been computed
@@ -1068,7 +1078,7 @@ mod tests {
         assert!(w1_init.is_none(), "w1 should not have grad before backward");
 
         // Backward pass
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
 
         let w1_grad = w1.grad().expect("w1 should have grad after backward");
         let w2_grad = w2.grad().expect("w2 should have grad after backward");
@@ -1096,7 +1106,7 @@ mod tests {
         let loss = c.mean(0, false);
 
         // This should not panic
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
         // All grads should be None
         assert!(a.grad().is_none(), "a should not have grad");
         assert!(b.grad().is_none(), "b should not have grad");
@@ -1116,7 +1126,7 @@ mod tests {
         let c = a.mul(&b);
         let loss = c.mean(0, false);
 
-        backward(&loss, None);
+        backward(&loss, None).unwrap();
 
         let grad_a = a.grad().expect("a should have grad");
         let grad_b = b.grad().expect("b should have grad");

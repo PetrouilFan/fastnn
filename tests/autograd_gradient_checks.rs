@@ -25,7 +25,7 @@ where
         .map(|(data, shape)| Tensor::from_vec(data.to_vec(), shape.to_vec()).requires_grad_(true))
         .collect();
     let loss = build_loss(&tensors);
-    autograd::backward(&loss, None);
+    autograd::backward(&loss, None).unwrap();
     tensors
         .iter()
         .map(|tensor| tensor.grad().expect("missing gradient").to_numpy().unwrap())

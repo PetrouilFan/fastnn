@@ -228,11 +228,11 @@ impl PyTensor {
         let grad_tensor = grad.map(|g| g.inner);
         let result = py.detach(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                crate::autograd::backward(&inner, grad_tensor);
+                crate::autograd::backward(&inner, grad_tensor)
             }))
         });
         match result {
-            Ok(()) => Ok(()),
+            Ok(result) => result.map_err(PyErr::from),
             Err(panic_err) => {
                 let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
                     s.to_string()
