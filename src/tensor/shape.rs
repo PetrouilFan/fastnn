@@ -13,13 +13,62 @@ pub(crate) fn compute_strides(sizes: &[i64]) -> SmallVec<[i64; 8]> {
     if sizes.is_empty() {
         return strides;
     }
-
     let mut stride = 1i64;
     for i in (0..sizes.len()).rev() {
         strides[i] = stride;
         stride = stride.saturating_mul(sizes[i]);
     }
     strides
+}
+
+fn resolve_reshape_sizes(
+    source_numel: i64,
+    mut sizes: SmallVec<[i64; 8]>,
+    operation: &str,
+) -> FastnnResult<SmallVec<[i64; 8]>> {
+    let mut known_product = 1_i64;
+    let mut inferred = None;
+
+    for (index, &size) in sizes.iter().enumerate() {
+        match size {
+            -1 if inferred.is_some() => {
+                return Err(FastnnError::shape(format!(
+                    "{operation} can only infer one dimension"
+                )))
+            }
+            -1 => inferred = Some(index),
+            value if value < 0 => {
+                return Err(FastnnError::shape(format!(
+                    "{operation} dimension {index} has invalid size {value}"
+                )))
+            }
+            value => {
+                known_product = known_product.checked_mul(value).ok_or_else(|| {
+                    FastnnError::Overflow(format!("{operation} shape product overflow"))
+                })?;
+            }
+        }
+    }
+
+    if let Some(index) = inferred {
+        if known_product == 0 {
+            return Err(FastnnError::shape(format!(
+                "{operation} cannot infer a dimension when known dimensions have zero elements"
+            )));
+        }
+        if source_numel % known_product != 0 {
+            return Err(FastnnError::shape(format!(
+                "{operation} cannot map {source_numel} elements to shape {sizes:?}"
+            )));
+        }
+        sizes[index] = source_numel / known_product;
+    } else if known_product != source_numel {
+        return Err(FastnnError::shape(format!(
+            "{operation} cannot map {source_numel} elements to shape {sizes:?} ({known_product} elements)"
+        )));
+    }
+
+    Ok(sizes)
 }
 
 impl TensorImpl {
@@ -110,109 +159,34 @@ impl TensorImpl {
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
+        self.try_view(sizes).expect("Tensor::view failed")
+    }
+
+    pub fn try_view(&self, sizes: SmallVec<[i64; 8]>) -> FastnnResult<TensorImpl> {
         if !self.is_contiguous() {
-            panic!("view() requires contiguous tensor, use reshape() instead");
+            return Err(FastnnError::shape(
+                "view requires a contiguous tensor; use reshape instead",
+            ));
         }
-        let mut new_sizes = sizes.clone();
-        let mut product: i64 = 1;
-        let mut minus_one_idx = None;
-
-        for (i, s) in new_sizes.iter().enumerate() {
-            if *s == -1 {
-                if minus_one_idx.is_some() {
-                    panic!("view: can only specify one unknown dimension (-1), got multiple");
-                }
-                minus_one_idx = Some(i);
-            } else if *s < 0 {
-                panic!("view: negative dimension size not allowed (got {})", s);
-            } else {
-                product *= s;
-            }
-        }
-
-        if let Some(idx) = minus_one_idx {
-            if product == 0 {
-                panic!("view: cannot infer dimension with zero-sized dimensions");
-            }
-            if self.numel() % product != 0 {
-                panic!(
-                    "view: size mismatch, cannot reshape tensor of {} elements into shape {:?} ({} is not divisible by {})",
-                    self.numel(),
-                    new_sizes,
-                    self.numel(),
-                    product
-                );
-            }
-            new_sizes[idx] = self.numel() / product;
-        }
-
-        let numel: i64 = new_sizes.iter().product();
-        if numel != self.numel() {
-            panic!(
-                "view: size mismatch, cannot reshape tensor of {} elements into shape {:?} (target has {} elements)",
-                self.numel(),
-                new_sizes,
-                numel
-            );
-        }
-
-        self.new_view_from(
+        let new_sizes = resolve_reshape_sizes(self.numel(), sizes, "view")?;
+        Ok(self.new_view_from(
             new_sizes.clone(),
             compute_strides(&new_sizes),
             self.storage_offset,
-        )
+        ))
     }
 
     pub fn reshape(&self, sizes: SmallVec<[i64; 8]>) -> Tensor {
+        self.try_reshape(sizes).expect("Tensor::reshape failed")
+    }
+
+    pub fn try_reshape(&self, sizes: SmallVec<[i64; 8]>) -> FastnnResult<Tensor> {
+        let new_sizes = resolve_reshape_sizes(self.numel(), sizes, "reshape")?;
         if !self.is_contiguous() {
-            let t = self.contiguous();
-            return t.inner.reshape(sizes);
+            let tensor = self.contiguous();
+            return tensor.inner.try_reshape(new_sizes);
         }
-        let mut new_sizes = sizes.clone();
-        let mut product: i64 = 1;
-        let mut minus_one_idx = None;
-
-        for (i, s) in new_sizes.iter().enumerate() {
-            if *s == -1 {
-                if minus_one_idx.is_some() {
-                    panic!("reshape: can only specify one unknown dimension (-1), got multiple");
-                }
-                minus_one_idx = Some(i);
-            } else if *s < 0 {
-                panic!("reshape: negative dimension size not allowed (got {})", s);
-            } else {
-                product *= s;
-            }
-        }
-
-        if let Some(idx) = minus_one_idx {
-            if product == 0 {
-                panic!("reshape: cannot infer dimension with zero-sized dimensions");
-            }
-            if self.numel() % product != 0 {
-                panic!(
-                    "reshape: size mismatch, cannot reshape tensor of {} elements into shape {:?} ({} is not divisible by {})",
-                    self.numel(),
-                    new_sizes,
-                    self.numel(),
-                    product
-                );
-            }
-            let known: i64 = self.numel() / product;
-            new_sizes[idx] = known;
-        } else {
-            let numel: i64 = sizes.iter().product();
-            if numel != self.numel() {
-                panic!(
-                    "reshape: size mismatch, cannot reshape tensor of {} elements into shape {:?} (target has {} elements)",
-                    self.numel(),
-                    sizes,
-                    numel
-                );
-            }
-        }
-
-        self.view(new_sizes).into()
+        Ok(self.try_view(new_sizes)?.into())
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
@@ -396,27 +370,35 @@ impl Tensor {
     }
 
     pub fn view(&self, shape: Vec<i64>) -> Tensor {
-        let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output: Tensor = self.inner.view(sizes).into();
+        self.try_view(shape).expect("Tensor::view failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_view(&self, shape: Vec<i64>) -> FastnnResult<Tensor> {
+        let sizes: SmallVec<[i64; 8]> = shape.into();
+        let output: Tensor = self.inner.try_view(sizes)?.into();
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
-        }
+        })
     }
 
     pub fn reshape(&self, shape: Vec<i64>) -> Tensor {
-        let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output = self.inner.reshape(sizes);
+        self.try_reshape(shape).expect("Tensor::reshape failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_reshape(&self, shape: Vec<i64>) -> FastnnResult<Tensor> {
+        let sizes: SmallVec<[i64; 8]> = shape.into();
+        let output = self.inner.try_reshape(sizes)?;
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
-        }
+        })
     }
 
     pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {

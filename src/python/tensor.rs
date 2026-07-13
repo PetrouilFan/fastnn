@@ -272,12 +272,13 @@ impl PyTensor {
         }
     }
 
-    fn view(&self, shape: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.view(shape))
+    fn view(&self, shape: Vec<i64>) -> PyResult<PyTensor> {
+        let tensor: Tensor = self.inner.try_view(shape)?.into();
+        Ok(PyTensor::from_tensor(tensor))
     }
 
-    fn reshape(&self, shape: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.reshape(shape))
+    fn reshape(&self, shape: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_reshape(shape)?))
     }
 
     fn transpose(&self, dim0: i64, dim1: i64) -> PyTensor {

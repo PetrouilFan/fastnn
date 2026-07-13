@@ -74,6 +74,28 @@ fn unsupported_eager_dtype_cannot_enter_executable_ir() {
 }
 
 #[test]
+fn malformed_reshape_returns_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+
+    let mismatch = tensor
+        .try_reshape(vec![3])
+        .expect_err("mismatched reshape must fail");
+    assert!(mismatch.to_string().contains("Shape error"));
+
+    let multiple_inferred = tensor
+        .try_view(vec![-1, -1])
+        .expect_err("multiple inferred dimensions must fail");
+    assert!(multiple_inferred
+        .to_string()
+        .contains("infer one dimension"));
+
+    let overflow = tensor
+        .try_reshape(vec![i64::MAX, 2])
+        .expect_err("overflowing shape product must fail");
+    assert!(overflow.to_string().contains("overflow"));
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);
