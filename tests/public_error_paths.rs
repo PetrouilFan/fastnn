@@ -53,6 +53,16 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .err()
         .expect("mismatched value count must fail");
     assert!(value_count.to_string().contains("2 were provided"));
+
+    let negative_factory = Tensor::try_zeros(vec![-1], DType::F32, Device::Cpu)
+        .err()
+        .expect("negative zero shape must fail");
+    assert!(negative_factory.to_string().contains("negative size"));
+
+    let overflowing_factory = Tensor::try_empty(vec![i64::MAX, i64::MAX], DType::F32, Device::Cpu)
+        .err()
+        .expect("overflowing empty shape must fail");
+    assert!(overflowing_factory.to_string().contains("overflow"));
 }
 
 #[test]

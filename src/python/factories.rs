@@ -32,24 +32,28 @@ fn tensor_from_data<'py>(
 }
 
 #[pyfunction]
-fn tensor_factory(data: Vec<f32>, shape: Vec<i64>) -> PyTensor {
-    PyTensor::from_tensor(Tensor::from_vec(data, shape))
+fn tensor_factory(data: Vec<f32>, shape: Vec<i64>) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(Tensor::try_from_vec(data, shape)?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
-fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
+fn zeros(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyResult<PyTensor> {
     let dtype = resolve_dtype(dtype);
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::zeros(shape, dtype, device))
+    Ok(PyTensor::from_tensor(Tensor::try_zeros(
+        shape, dtype, device,
+    )?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
-fn empty(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
+fn empty(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyResult<PyTensor> {
     let dtype = resolve_dtype(dtype);
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::empty(shape, dtype, device))
+    Ok(PyTensor::from_tensor(Tensor::try_empty(
+        shape, dtype, device,
+    )?))
 }
 
 #[pyfunction]

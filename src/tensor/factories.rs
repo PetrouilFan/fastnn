@@ -149,9 +149,12 @@ impl Tensor {
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        Self::try_zeros(shape, dtype, device).expect("Tensor::zeros failed")
+    }
+
+    pub fn try_zeros(shape: Vec<i64>, dtype: DType, device: Device) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let numel: i64 = sizes.iter().product();
-        let nbytes = dtype.storage_bytes(numel as usize);
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
@@ -168,25 +171,21 @@ impl Tensor {
             }
         };
 
-        let strides = compute_strides(&sizes);
-        Tensor::new(TensorImpl {
-            storage,
-            sizes,
-            strides,
-            storage_offset: 0,
-            dtype,
-            device,
-            version_counter: Arc::new(AtomicU64::new(0)),
-            autograd_meta: None,
-            requires_grad: false,
-            contiguous_cache: AtomicI8::new(1),
-        })
+        let inner = match device {
+            Device::Cpu => TensorImpl::try_new(storage, sizes, dtype)?,
+            #[cfg(feature = "gpu")]
+            Device::Wgpu(_) => TensorImpl::try_new_with_device(storage, sizes, device, dtype)?,
+        };
+        Ok(Tensor::new(inner))
     }
 
     pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        Self::try_empty(shape, dtype, device).expect("Tensor::empty failed")
+    }
+
+    pub fn try_empty(shape: Vec<i64>, dtype: DType, device: Device) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let numel: i64 = sizes.iter().product();
-        let nbytes = dtype.storage_bytes(numel as usize);
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
@@ -203,13 +202,12 @@ impl Tensor {
             }
         };
 
-        match device {
-            Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+        let inner = match device {
+            Device::Cpu => TensorImpl::try_new(storage, sizes, dtype)?,
             #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => {
-                Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
-            }
-        }
+            Device::Wgpu(_) => TensorImpl::try_new_with_device(storage, sizes, device, dtype)?,
+        };
+        Ok(Tensor::new(inner))
     }
 
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
