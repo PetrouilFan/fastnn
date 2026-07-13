@@ -214,6 +214,26 @@ fn invalid_argmax_and_gather_return_structured_errors() {
 }
 
 #[test]
+fn invalid_reduction_dimensions_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+
+    for error in [
+        tensor.try_sum(2, false).unwrap_err(),
+        tensor.try_mean(-3, false).unwrap_err(),
+        tensor.try_max(4, true).unwrap_err(),
+        tensor.try_cumsum(-3, false, false).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("out of range"));
+    }
+
+    assert_eq!(tensor.try_sum(-1, false).unwrap().shape(), vec![2]);
+    assert_eq!(
+        tensor.try_cumsum(-1, false, false).unwrap().shape(),
+        vec![2, 2]
+    );
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);

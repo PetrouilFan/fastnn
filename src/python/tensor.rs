@@ -257,19 +257,19 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
-    fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        match dim {
-            Some(d) => PyTensor::from_tensor(self.inner.sum(d, keepdim)),
+    fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+        Ok(match dim {
+            Some(dimension) => PyTensor::from_tensor(self.inner.try_sum(dimension, keepdim)?),
             None => PyTensor::from_tensor(reduce_sum_all(&self.inner)),
-        }
+        })
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
-    fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        match dim {
-            Some(d) => PyTensor::from_tensor(self.inner.mean(d, keepdim)),
+    fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+        Ok(match dim {
+            Some(dimension) => PyTensor::from_tensor(self.inner.try_mean(dimension, keepdim)?),
             None => PyTensor::from_tensor(reduce_mean_all(&self.inner)),
-        }
+        })
     }
 
     fn view(&self, shape: Vec<i64>) -> PyResult<PyTensor> {

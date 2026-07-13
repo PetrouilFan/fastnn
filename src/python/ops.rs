@@ -325,29 +325,29 @@ fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.sum(d, keepdim)),
+fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.try_sum(d, keepdim)?),
         None => PyTensor::from_tensor(reduce_sum_all(&a.inner)),
-    }
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.mean(d, keepdim)),
+fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.try_mean(d, keepdim)?),
         None => PyTensor::from_tensor(reduce_mean_all(&a.inner)),
-    }
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.max(d, keepdim)),
+fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.try_max(d, keepdim)?),
         None => PyTensor::from_tensor(reduce_max_all(&a.inner)),
-    }
+    })
 }
 
 #[pyfunction]
@@ -364,11 +364,11 @@ fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.neg().max(d, keepdim).neg()),
+fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.neg().try_max(d, keepdim)?.neg()),
         None => PyTensor::from_tensor(reduce_min_all(&a.inner)),
-    }
+    })
 }
 
 // Argmax and argmin using macro
@@ -822,8 +822,15 @@ fn flash_attention(
 }
 
 #[pyfunction]
-fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.cumsum(dim, exclusive, reverse))
+fn cumsum(
+    tensor: &PyTensor,
+    dim: i64,
+    exclusive: bool,
+    reverse: bool,
+) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        tensor.inner.try_cumsum(dim, exclusive, reverse)?,
+    ))
 }
 
 #[pyfunction]
