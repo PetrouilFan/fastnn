@@ -1287,7 +1287,9 @@ stub_backward!(ErfBackward, 1);
 stub_backward!(CumSumBackward, 1);
 stub_backward!(GatherBackward, 2);
 
-use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::ir::{
+    ComputeGraph, DimExpr, GraphKind, IrDType, NodeId, Opcode, TensorType, TensorValue,
+};
 
 /// Build a backward computation graph from a forward graph and a loss node.
 /// Returns a new graph that, when executed, computes gradients for all
@@ -1304,7 +1306,7 @@ pub fn build_backward_graph(
     }
 
     // Create a new graph that contains all forward nodes + backward nodes
-    let mut grad_graph = ComputeGraph::new();
+    let mut grad_graph = ComputeGraph::with_kind(GraphKind::Backward);
 
     // Map from old node IDs to new node IDs (we reuse the same IDs)
     // Clone all forward nodes into the grad graph

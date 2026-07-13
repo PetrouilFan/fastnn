@@ -232,6 +232,7 @@ pub fn inject_optimizer(
         }
     }
 
+    graph.set_kind(GraphKind::OptimizerUpdate);
     Ok(OptimizerInjection {
         updated_param_nodes,
         state_input_nodes,

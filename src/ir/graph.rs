@@ -11,6 +11,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub type NodeId = usize;
 
+/// Declared semantic role of a graph. Compiler passes use this instead of
+/// inferring training/backward/update intent from whichever opcodes are present.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GraphKind {
+    #[default]
+    Inference,
+    TrainingForward,
+    Backward,
+    OptimizerUpdate,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TensorValue {
     Float(f32),
@@ -44,6 +55,8 @@ impl IRNode {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ComputeGraph {
+    #[serde(default)]
+    pub kind: GraphKind,
     pub nodes: Vec<IRNode>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
@@ -66,6 +79,7 @@ pub struct ComputeGraph {
 impl Clone for ComputeGraph {
     fn clone(&self) -> Self {
         ComputeGraph {
+            kind: self.kind,
             nodes: self.nodes.clone(),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
@@ -85,6 +99,7 @@ impl ComputeGraph {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         ComputeGraph {
+            kind: GraphKind::Inference,
             nodes: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -97,6 +112,16 @@ impl ComputeGraph {
             sorted_nodes_gen: AtomicU64::new(0),
             graph_gen: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_kind(kind: GraphKind) -> Self {
+        let mut graph = Self::new();
+        graph.kind = kind;
+        graph
+    }
+
+    pub fn set_kind(&mut self, kind: GraphKind) {
+        self.kind = kind;
     }
 
     pub(crate) fn mark_mutated(&mut self) {
@@ -379,5 +404,20 @@ impl ComputeGraph {
                 .iter()
                 .all(|d| matches!(d, DimExpr::Known(_)))
         })
+    }
+}
+
+#[cfg(test)]
+mod graph_kind_tests {
+    use super::{ComputeGraph, GraphKind};
+
+    #[test]
+    fn graph_kind_is_preserved_by_clone_and_serialization() {
+        let graph = ComputeGraph::with_kind(GraphKind::TrainingForward);
+        assert_eq!(graph.clone().kind, GraphKind::TrainingForward);
+
+        let bytes = bincode::serialize(&graph).unwrap();
+        let decoded: ComputeGraph = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.kind, GraphKind::TrainingForward);
     }
 }

@@ -293,14 +293,26 @@ macro_rules! impl_binary_op {
 }
 
 impl GraphBuilder {
-    /// Create a new empty graph builder.
+    /// Create a new empty inference graph builder.
     pub fn new() -> Self {
+        Self::with_kind(GraphKind::Inference)
+    }
+
+    pub fn with_kind(kind: GraphKind) -> Self {
         Self {
             inner: Rc::new(RefCell::new(BuilderInner {
-                graph: ComputeGraph::new(),
+                graph: ComputeGraph::with_kind(kind),
                 recorded_inputs: Vec::new(),
             })),
         }
+    }
+
+    pub fn graph_kind(&self) -> GraphKind {
+        self.inner.borrow().graph.kind
+    }
+
+    pub fn set_graph_kind(&self, kind: GraphKind) {
+        self.inner.borrow_mut().graph.set_kind(kind);
     }
 
     // ── Input & Parameter registration ────────────────────────────────────
