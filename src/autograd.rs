@@ -461,7 +461,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> 
             .iter()
             .map(|&s| DimExpr::Known(s as u64))
             .collect();
-        let gt = forward_builder.input_with_dims(&shape, dtype_to_ir(tensor.dtype()));
+        let gt = forward_builder.input_with_dims(&shape, dtype_to_ir(tensor.dtype())?);
         tensor_map.insert(tensor.id(), gt);
     }
 
@@ -1333,7 +1333,7 @@ pub fn build_backward_graph(
                 .iter()
                 .map(|&d| DimExpr::Known(d as u64))
                 .collect();
-            let dtype = dtype_to_ir(tensor.dtype());
+            let dtype = dtype_to_ir(tensor.dtype()).map_err(|error| error.to_string())?;
             grad_graph.add_constant(TensorValue::Data {
                 bytes,
                 tensor_type: TensorType::new(shape, dtype),

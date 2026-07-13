@@ -996,10 +996,10 @@ pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
 // AOT pipeline bridge — replace eager dispatcher calls with graph lowering
 // =============================================================================
 
-pub fn dtype_to_ir(dt: DType) -> IrDType {
-    match dt {
+pub fn dtype_to_ir(dt: DType) -> FastnnResult<IrDType> {
+    Ok(match dt {
         DType::F32 => IrDType::F32,
-        DType::F64 => panic!("dtype_to_ir: F64 not supported in IR"),
+        DType::F64 => return Err(FastnnError::dtype("F64 is not supported in executable IR")),
         DType::I32 => IrDType::I32,
         DType::I64 => IrDType::I64,
         DType::Bool => IrDType::Bool,
@@ -1032,7 +1032,7 @@ pub fn dtype_to_ir(dt: DType) -> IrDType {
             scales: vec![1.0],
             dequant_offsets: vec![0.0],
         },
-    }
+    })
 }
 
 pub fn ir_to_dtype(idt: IrDType) -> FastnnResult<DType> {
@@ -1096,9 +1096,11 @@ impl Tensor {
                     .iter()
                     .map(|&s| DimExpr::Known(s as u64))
                     .collect();
-                g.input_with_dims(&dims, dtype_to_ir(t.dtype()))
+                let dtype = dtype_to_ir(t.dtype())
+                    .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                Ok(g.input_with_dims(&dims, dtype))
             })
-            .collect();
+            .collect::<Result<Vec<_>, BackendError>>()?;
 
         let graph_outputs = build_graph(&g, &graph_inputs);
 

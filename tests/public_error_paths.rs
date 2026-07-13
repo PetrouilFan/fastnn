@@ -9,7 +9,7 @@ use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::storage::{DType, Device};
-use fastnn::tensor::{ir_to_dtype, Tensor};
+use fastnn::tensor::{dtype_to_ir, ir_to_dtype, Tensor};
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(values).to_vec()
@@ -64,6 +64,13 @@ fn runtime_activation_dtype_cannot_escape_to_eager_tensor() {
     let error = ir_to_dtype(IrDType::I8)
         .expect_err("runtime activation dtype must not become an eager tensor dtype");
     assert!(error.to_string().contains("not a Tensor-level dtype"));
+}
+
+#[test]
+fn unsupported_eager_dtype_cannot_enter_executable_ir() {
+    let error =
+        dtype_to_ir(DType::F64).expect_err("unsupported eager dtype must not enter executable IR");
+    assert!(error.to_string().contains("not supported in executable IR"));
 }
 
 #[test]
