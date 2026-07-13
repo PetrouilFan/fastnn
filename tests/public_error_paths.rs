@@ -141,6 +141,32 @@ fn invalid_expand_and_unsqueeze_return_structured_errors() {
 }
 
 #[test]
+fn invalid_cat_stack_and_repeat_return_structured_errors() {
+    let a = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+    let b = Tensor::from_vec(vec![3.0, 4.0, 5.0], vec![1, 3]);
+
+    let empty = Tensor::try_cat(&[], 0).expect_err("empty cat must fail");
+    assert!(empty.to_string().contains("at least one"));
+
+    let mismatch =
+        Tensor::try_cat(&[a.clone(), b.clone()], 0).expect_err("cat shape mismatch must fail");
+    assert!(mismatch.to_string().contains("differ at dimension"));
+
+    let stack = Tensor::try_stack(&[a.clone(), b], 0).expect_err("stack shape mismatch must fail");
+    assert!(stack.to_string().contains("same shape"));
+
+    let repeat_rank = a
+        .try_repeat(&[2])
+        .expect_err("too few repeat dimensions must fail");
+    assert!(repeat_rank.to_string().contains("at least 2"));
+
+    let repeat_negative = a
+        .try_repeat(&[1, -1])
+        .expect_err("negative repeat must fail");
+    assert!(repeat_negative.to_string().contains("non-negative"));
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);

@@ -592,15 +592,21 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    PyTensor::from_tensor(core_tensor::Tensor::cat(&tensors_inner, dim))
+    Ok(PyTensor::from_tensor(core_tensor::Tensor::try_cat(
+        &tensors_inner,
+        dim,
+    )?))
 }
 
 #[pyfunction]
-fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    PyTensor::from_tensor(core_tensor::Tensor::stack(&tensors_inner, dim))
+    Ok(PyTensor::from_tensor(core_tensor::Tensor::try_stack(
+        &tensors_inner,
+        dim,
+    )?))
 }
 
 #[pyfunction]
@@ -645,13 +651,13 @@ fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.repeat(&repeats))
+fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(tensor.inner.try_repeat(&repeats)?))
 }
 
 #[pyfunction]
-fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.expand(shape))
+fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(tensor.inner.try_expand(shape)?))
 }
 
 #[pyfunction]

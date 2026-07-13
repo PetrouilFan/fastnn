@@ -328,8 +328,8 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.log_softmax(dim))
     }
 
-    fn repeat(&self, repeats: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.repeat(&repeats))
+    fn repeat(&self, repeats: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_repeat(&repeats)?))
     }
 
     fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyTensor {

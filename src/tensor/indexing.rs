@@ -1,4 +1,5 @@
 use crate::autograd::{self, Edge};
+use crate::error::{FastnnError, FastnnResult};
 use crate::impl_cpu_fast_path;
 use crate::impl_scalar_op;
 use crate::ir::{DimExpr, IrDType, TensorType};
@@ -177,21 +178,42 @@ impl Tensor {
     }
 
     pub fn cat(tensors: &[Tensor], dim: i32) -> Tensor {
+        Self::try_cat(tensors, dim).expect("Tensor::cat failed")
+    }
+
+    pub fn try_cat(tensors: &[Tensor], dim: i32) -> FastnnResult<Tensor> {
         if tensors.is_empty() {
-            panic!("Tensor::cat: empty input");
+            return Err(FastnnError::shape("cat requires at least one tensor"));
         }
         let ndim = tensors[0].ndim();
-        let dim = if dim < 0 { ndim as i32 + dim } else { dim } as usize;
-        if dim >= ndim {
-            panic!("Tensor::cat: dimension out of range");
+        let normalized_dim = if dim < 0 {
+            ndim as i64 + i64::from(dim)
+        } else {
+            i64::from(dim)
+        };
+        if normalized_dim < 0 || normalized_dim as usize >= ndim {
+            return Err(FastnnError::shape(format!(
+                "cat dimension {dim} is out of range for {ndim} dimensions"
+            )));
         }
+        let dim = normalized_dim as usize;
         for t in tensors {
             if t.ndim() != ndim {
-                panic!("Tensor::cat: tensors must have same number of dimensions");
+                return Err(FastnnError::shape("cat tensors must have the same rank"));
+            }
+            if t.dtype() != tensors[0].dtype() {
+                return Err(FastnnError::dtype("cat tensors must have the same dtype"));
+            }
+            if t.device() != tensors[0].device() {
+                return Err(FastnnError::device(
+                    "cat tensors must be on the same device",
+                ));
             }
             for d in 0..ndim {
                 if d != dim && tensors[0].inner.sizes[d] != t.inner.sizes[d] {
-                    panic!("Tensor::cat: tensor sizes mismatch at dimension {}", d);
+                    return Err(FastnnError::shape(format!(
+                        "cat tensor sizes differ at dimension {d}"
+                    )));
                 }
             }
         }
@@ -201,10 +223,10 @@ impl Tensor {
             let refs: Vec<_> = ins.iter().collect();
             vec![g.concat(&refs, dim)]
         })
-        .expect("Tensor::cat: AOT execution failed")
+        .map_err(|error| FastnnError::Computation(error.to_string()))?
         .into_iter()
         .next()
-        .unwrap();
+        .ok_or_else(|| FastnnError::Internal("cat execution returned no output".into()))?;
 
         if autograd::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad()) {
             let _split_sizes: Vec<usize> = tensors
@@ -218,57 +240,87 @@ impl Tensor {
                 }
             }
             let inputs = tensors.to_vec();
-            Self::attach_grad_fn(output, autograd::make_node_info("CatBackward", inputs))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("CatBackward", inputs),
+            ))
         } else {
-            output
+            Ok(output)
         }
     }
 
     pub fn stack(tensors: &[Tensor], dim: i32) -> Tensor {
+        Self::try_stack(tensors, dim).expect("Tensor::stack failed")
+    }
+
+    pub fn try_stack(tensors: &[Tensor], dim: i32) -> FastnnResult<Tensor> {
         if tensors.is_empty() {
-            panic!("stack: need at least one tensor");
+            return Err(FastnnError::shape("stack requires at least one tensor"));
         }
 
         let first_shape = tensors[0].shape();
         let ndim = first_shape.len();
 
-        let dim = if dim < 0 {
-            (ndim as i32 + dim + 1) as usize
+        let normalized_dim = if dim < 0 {
+            ndim as i64 + i64::from(dim) + 1
         } else {
-            dim as usize
+            i64::from(dim)
         };
-        if dim > ndim {
-            panic!("stack: dimension out of range");
+        if normalized_dim < 0 || normalized_dim as usize > ndim {
+            return Err(FastnnError::shape(format!(
+                "stack dimension {dim} is out of range for output rank {}",
+                ndim + 1
+            )));
         }
+        let dim = normalized_dim as usize;
 
         for t in tensors {
             if t.shape() != first_shape {
-                panic!("stack: tensors must have same shape");
+                return Err(FastnnError::shape("stack tensors must have the same shape"));
             }
         }
 
-        let unsqueezed: Vec<Tensor> = tensors.iter().map(|t| t.unsqueeze(dim)).collect();
+        let unsqueezed: Vec<Tensor> = tensors
+            .iter()
+            .map(|tensor| tensor.try_unsqueeze(dim))
+            .collect::<FastnnResult<_>>()?;
 
-        Tensor::cat(&unsqueezed, dim as i32)
+        Tensor::try_cat(&unsqueezed, dim as i32)
     }
 
     pub fn repeat(&self, repeats: &[i64]) -> Tensor {
+        self.try_repeat(repeats).expect("Tensor::repeat failed")
+    }
+
+    pub fn try_repeat(&self, repeats: &[i64]) -> FastnnResult<Tensor> {
         if repeats.len() < self.ndim() {
-            panic!("repeat: number of repeats must be >= number of dimensions");
+            return Err(FastnnError::shape(format!(
+                "repeat requires at least {} repeat values, got {}",
+                self.ndim(),
+                repeats.len()
+            )));
+        }
+        if repeats.iter().any(|&repeat| repeat < 0) {
+            return Err(FastnnError::shape(format!(
+                "repeat values must be non-negative, got {repeats:?}"
+            )));
         }
         let reps: Vec<usize> = repeats.iter().map(|&r| r as usize).collect();
         let output = Tensor::exec_aot(&[self], |g, ins| vec![g.repeat(&ins[0], &reps)])
-            .expect("Tensor::repeat: AOT failed")
+            .map_err(|error| FastnnError::Computation(error.to_string()))?
             .into_iter()
             .next()
-            .unwrap();
+            .ok_or_else(|| FastnnError::Internal("repeat execution returned no output".into()))?;
 
         if autograd::is_grad_enabled() && self.requires_grad() {
             let _edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("RepeatBackward", inputs))
+            Ok(Self::attach_grad_fn(
+                output,
+                autograd::make_node_info("RepeatBackward", inputs),
+            ))
         } else {
-            output
+            Ok(output)
         }
     }
 
