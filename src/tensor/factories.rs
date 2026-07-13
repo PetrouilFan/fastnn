@@ -6,6 +6,7 @@ use crate::backend::wgpu::context::get_wgpu_context;
 use crate::storage::GpuStorage;
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
+use crate::{FastnnError, FastnnResult};
 #[cfg(feature = "gpu")]
 use parking_lot::RwLock;
 use smallvec::smallvec;
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicI8, AtomicU64};
 use std::sync::Arc;
 
 use super::shape::compute_strides;
-use super::{Tensor, TensorImpl};
+use super::{validate_tensor_shape, Tensor, TensorImpl};
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::{_mm256_loadu_ps, _mm256_storeu_ps};
@@ -91,12 +92,24 @@ impl Tensor {
     }
 
     pub fn from_vec(values: Vec<f32>, shape: Vec<i64>) -> Self {
+        Self::try_from_vec(values, shape).expect("Tensor::from_vec failed")
+    }
+
+    pub fn try_from_vec(values: Vec<f32>, shape: Vec<i64>) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let nbytes = values.len() * 4;
+        let (numel, nbytes) = validate_tensor_shape(&sizes, DType::F32)?;
+        if values.len() != numel {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {numel} values, but {} were provided",
+                values.len()
+            )));
+        }
         let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
         #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
         let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) else {
-            panic!("Expected CPU storage");
+            return Err(FastnnError::device(
+                "CPU storage pool returned non-CPU storage",
+            ));
         };
         let data = Arc::make_mut(&mut cpu.data);
         unsafe {
@@ -106,7 +119,11 @@ impl Tensor {
                 values.len(),
             );
         }
-        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+        Ok(Tensor::new(TensorImpl::try_new(
+            storage,
+            sizes,
+            DType::F32,
+        )?))
     }
 
     pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {

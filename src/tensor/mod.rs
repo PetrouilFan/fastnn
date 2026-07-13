@@ -23,7 +23,7 @@ mod ops;
 mod reductions;
 mod shape;
 
-fn validate_tensor_shape(sizes: &[i64], dtype: DType) -> FastnnResult<(usize, usize)> {
+pub(super) fn validate_tensor_shape(sizes: &[i64], dtype: DType) -> FastnnResult<(usize, usize)> {
     let mut numel = 1_usize;
     for (dimension, &size) in sizes.iter().enumerate() {
         if size < 0 {

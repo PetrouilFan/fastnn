@@ -48,6 +48,11 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .try_storage_bytes(usize::MAX)
         .expect_err("overflowing storage size must fail");
     assert!(byte_overflow.to_string().contains("overflow"));
+
+    let value_count = Tensor::try_from_vec(vec![1.0, 2.0], vec![3])
+        .err()
+        .expect("mismatched value count must fail");
+    assert!(value_count.to_string().contains("2 were provided"));
 }
 
 #[test]
