@@ -45,7 +45,8 @@ mod softmax;
 mod transpose;
 
 use crate::backend::cpu::CpuBackend;
-use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, MemoryPlan};
+use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
+use crate::compiler::MemoryPlan;
 use crate::ir::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use bytemuck;
 use context::{with_wgpu_context, WgpuContext};

@@ -34,7 +34,7 @@ use std::sync::atomic::Ordering;
 
 use crate::backend::executor::GraphExecutor;
 use crate::backend::{Backend, BackendError, ExecutablePlan};
-use crate::compiler::passes::memory_planning::MemoryPlan;
+use crate::compiler::plan::MemoryPlan;
 use crate::error::{FastnnError, FastnnResult};
 use crate::ir::*;
 

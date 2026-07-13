@@ -15,11 +15,10 @@
 //! ```
 
 use crate::autograd::build_backward_graph;
-use crate::backend::{
-    Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan, ProfileEntry,
-};
+use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, ProfileEntry};
 use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
+use crate::compiler::MemoryPlan;
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
@@ -2022,7 +2021,7 @@ mod prepared_fallback_tests {
         executor: &mut GraphExecutor<CpuBackend>,
         graph: &crate::ir::ComputeGraph,
         plan: &mut crate::backend::ExecutablePlan,
-        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        memory_plan: &crate::compiler::plan::MemoryPlan,
         inputs: &[&[u8]],
     ) -> Vec<Vec<u8>> {
         executor
@@ -2034,7 +2033,7 @@ mod prepared_fallback_tests {
         executor: &mut GraphExecutor<CpuBackend>,
         graph: &crate::ir::ComputeGraph,
         plan: &mut crate::backend::ExecutablePlan,
-        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        memory_plan: &crate::compiler::plan::MemoryPlan,
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Vec<Vec<u8>> {

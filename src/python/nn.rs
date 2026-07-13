@@ -1208,7 +1208,7 @@ impl_nn_module!(PyTransformerEncoder {
 #[pyclass]
 pub struct AotExecutor {
     plan: crate::backend::ExecutablePlan,
-    memory_plan: crate::compiler::passes::memory_planning::MemoryPlan,
+    memory_plan: crate::compiler::plan::MemoryPlan,
     graph: crate::ir::ComputeGraph,
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,

@@ -13,7 +13,7 @@ use crate::backend::cpu::microkernels::{
 };
 use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
-use crate::compiler::passes::memory_planning::MemoryPlan;
+use crate::compiler::plan::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;

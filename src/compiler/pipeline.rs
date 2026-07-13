@@ -3,12 +3,12 @@
 //! This module owns pass ordering and representation-policy application. Backends
 //! consume the normalized graph and memory plan; they do not choose compiler passes.
 
-use crate::compiler::passes::memory_planning::MemoryPlan;
 use crate::compiler::passes::{
     activation_quantization, arithmetic_simplify, calibration, constant_folding,
     dead_code_elimination, memory_planning, operator_fusion, prune_qdq_pairs, quantization,
     shape_inference,
 };
+use crate::compiler::plan::MemoryPlan;
 use crate::compiler::{CompilerError, CompilerResult};
 use crate::ir::ComputeGraph;
 use crate::types::{CompileTarget, QuantTarget};
