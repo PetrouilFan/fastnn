@@ -9,6 +9,7 @@ use crate::compiler::passes::{
     shape_inference,
 };
 use crate::compiler::plan::MemoryPlan;
+use crate::compiler::report::CompileReport;
 use crate::compiler::{CompilerError, CompilerResult};
 use crate::ir::ComputeGraph;
 use crate::types::{CompileTarget, QuantTarget};
@@ -21,6 +22,7 @@ pub struct CompilerPipeline {
 pub struct CompiledGraph {
     pub graph: ComputeGraph,
     pub memory_plan: MemoryPlan,
+    pub report: CompileReport,
 }
 
 impl CompilerPipeline {
@@ -32,6 +34,7 @@ impl CompilerPipeline {
     }
 
     pub fn run(self, mut graph: ComputeGraph) -> CompilerResult<CompiledGraph> {
+        let mut report = CompileReport::new(graph.kind, graph.nodes.len());
         let quant_target = match self.target {
             CompileTarget::Native => None,
             CompileTarget::WeightOnly(target) => Some(target),
@@ -50,37 +53,71 @@ impl CompilerPipeline {
             }
         };
 
+        let mut before = graph.nodes.len();
         shape_inference::infer_shapes(&mut graph)
             .map_err(|error| CompilerError::pass("shape inference", error))?;
+        report.record("shape inference", before, graph.nodes.len());
+
+        before = graph.nodes.len();
         constant_folding::constant_fold(&mut graph);
+        report.record("constant folding", before, graph.nodes.len());
+
+        before = graph.nodes.len();
         arithmetic_simplify::arithmetic_simplify(&mut graph);
+        report.record("arithmetic simplification", before, graph.nodes.len());
+
+        before = graph.nodes.len();
         operator_fusion::fuse_operators(&mut graph)
             .map_err(|error| CompilerError::pass("operator fusion", error))?;
+        report.record("operator fusion", before, graph.nodes.len());
+
+        before = graph.nodes.len();
         dead_code_elimination::eliminate_dead_code(&mut graph);
+        report.record("dead code elimination", before, graph.nodes.len());
 
         if quant_target.is_some() || self.calibration.is_some() {
             if let Some(target) = quant_target {
+                before = graph.nodes.len();
                 apply_weight_quantization(&mut graph, target)?;
+                report.record("weight quantization", before, graph.nodes.len());
             }
+            before = graph.nodes.len();
             quantization::wrap_quantized_optimizer(&mut graph)
                 .map_err(|error| CompilerError::pass("optimizer wrapping", error))?;
+            report.record("optimizer wrapping", before, graph.nodes.len());
             if let Some(calibration) = self.calibration.as_ref() {
+                before = graph.nodes.len();
                 activation_quantization::quantize_activations_with_calibration(
                     &mut graph,
                     calibration,
                 )
                 .map_err(|error| CompilerError::pass("activation quantization", error))?;
+                report.record("activation quantization", before, graph.nodes.len());
             }
+            before = graph.nodes.len();
             prune_qdq_pairs::prune_qdq_pairs(&mut graph)
                 .map_err(|error| CompilerError::pass("prune qdq pairs", error))?;
+            report.record("prune qdq pairs", before, graph.nodes.len());
         }
 
+        before = graph.nodes.len();
         dead_code_elimination::eliminate_dead_code(&mut graph);
+        report.record("final dead code elimination", before, graph.nodes.len());
         validate_representations(&graph)?;
+        report.record(
+            "representation validation",
+            graph.nodes.len(),
+            graph.nodes.len(),
+        );
         let memory_plan = memory_planning::plan_memory(&graph)
             .map_err(|error| CompilerError::pass("memory planning", error))?;
+        report.record("memory planning", graph.nodes.len(), graph.nodes.len());
 
-        Ok(CompiledGraph { graph, memory_plan })
+        Ok(CompiledGraph {
+            graph,
+            memory_plan,
+            report,
+        })
     }
 }
 
