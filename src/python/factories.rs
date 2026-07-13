@@ -83,21 +83,36 @@ fn full(
 
 #[pyfunction]
 #[pyo3(signature = (start, end, step = None, device = None))]
-fn arange(start: f32, end: f32, step: Option<f32>, device: Option<String>) -> PyTensor {
+fn arange(
+    start: f32,
+    end: f32,
+    step: Option<f32>,
+    device: Option<String>,
+) -> PyResult<PyTensor> {
     let step = step.unwrap_or(1.0);
+    if !start.is_finite() || !end.is_finite() || !step.is_finite() {
+        return Err(PyValueError::new_err(
+            "arange(): start, end, and step must be finite",
+        ));
+    }
+    if step == 0.0 {
+        return Err(PyValueError::new_err("arange(): step must be nonzero"));
+    }
     let start_f64 = start as f64;
     let end_f64 = end as f64;
     let step_f64 = step as f64;
-    let numel = ((end_f64 - start_f64) / step_f64).ceil() as usize;
+    let span = (end_f64 - start_f64) / step_f64;
+    let numel = if span <= 0.0 { 0 } else { span.ceil() as usize };
+    crate::tensor::validate_tensor_shape(&[numel as i64], DType::F32)?;
     let values: Vec<f32> = (0..numel)
         .map(|i| (start_f64 + i as f64 * step_f64) as f32)
         .collect();
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::from_vec_with_device(
+    Ok(PyTensor::from_tensor(Tensor::try_from_vec_with_device(
         values,
         vec![numel as i64],
         device,
-    ))
+    )?))
 }
 
 #[pyfunction]
@@ -133,7 +148,8 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyResult<PyTensor> {
             n, m
         )));
     }
-    let mut values = vec![0.0f32; (n * m) as usize];
+    let (numel, _) = crate::tensor::validate_tensor_shape(&[n, m], DType::F32)?;
+    let mut values = vec![0.0f32; numel];
     for i in 0..n.min(m) {
         values[(i * m + i) as usize] = 1.0;
     }
@@ -147,9 +163,9 @@ fn eye(n: i64, m: Option<i64>, device: Option<String>) -> PyResult<PyTensor> {
 
 #[pyfunction]
 #[pyo3(signature = (shape, device = None))]
-fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
-    let numel: i64 = shape.iter().product();
-    let values: Vec<f32> = (0..numel as usize)
+fn randn(shape: Vec<i64>, device: Option<String>) -> PyResult<PyTensor> {
+    let (numel, _) = crate::tensor::validate_tensor_shape(&shape, DType::F32)?;
+    let values: Vec<f32> = (0..numel)
         .map(|_| {
             let u1 = crate::random_f32();
             let u2 = crate::random_f32();
@@ -157,16 +173,20 @@ fn randn(shape: Vec<i64>, device: Option<String>) -> PyTensor {
         })
         .collect();
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
+    Ok(PyTensor::from_tensor(Tensor::try_from_vec_with_device(
+        values, shape, device,
+    )?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, device = None))]
-fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyTensor {
-    let numel: i64 = shape.iter().product();
-    let values: Vec<f32> = (0..numel as usize).map(|_| crate::random_f32()).collect();
+fn rand_uniform(shape: Vec<i64>, device: Option<String>) -> PyResult<PyTensor> {
+    let (numel, _) = crate::tensor::validate_tensor_shape(&shape, DType::F32)?;
+    let values: Vec<f32> = (0..numel).map(|_| crate::random_f32()).collect();
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::from_vec_with_device(values, shape, device))
+    Ok(PyTensor::from_tensor(Tensor::try_from_vec_with_device(
+        values, shape, device,
+    )?))
 }
 
 #[pyfunction]
@@ -178,27 +198,26 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyRe
             low, high
         )));
     }
-    let numel: i64 = shape.iter().product();
+    let (numel, _) = crate::tensor::validate_tensor_shape(&shape, DType::F32)?;
     let range = (high - low) as u32;
     let values: Vec<f32> = if range == 0 {
-        vec![low as f32; numel as usize]
+        vec![low as f32; numel]
     } else {
-        (0..numel as usize)
+        (0..numel)
             .map(|_| ((crate::random_f32() * range as f32) as i32 + low) as f32)
             .collect()
     };
     let device = resolve_device(device);
-    Ok(PyTensor::from_tensor(Tensor::from_vec_with_device(
+    Ok(PyTensor::from_tensor(Tensor::try_from_vec_with_device(
         values, shape, device,
-    )))
+    )?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (data, shape, dtype = None))]
 fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> PyResult<PyTensor> {
     let dtype = resolve_dtype(dtype);
-    let n: usize = shape.iter().product::<i64>() as usize;
-    let expected_bytes = dtype.storage_bytes(n);
+    let (_, expected_bytes) = crate::tensor::validate_tensor_shape(&shape, dtype)?;
     if data.len() != expected_bytes {
         return Err(PyValueError::new_err(format!(
             "tensor_from_bytes: expected {expected_bytes} bytes for shape {:?} and dtype {}, got {}",
@@ -209,7 +228,9 @@ fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> P
     let storage = Arc::new(crate::storage::Storage::Cpu(
         crate::storage::CpuStorage::from_vec(data, expected_bytes),
     ));
-    let tensor = Tensor::new(crate::tensor::TensorImpl::new(storage, sizes, dtype));
+    let tensor = Tensor::new(crate::tensor::TensorImpl::try_new(
+        storage, sizes, dtype,
+    )?);
     Ok(PyTensor::from_tensor(tensor))
 }
 
