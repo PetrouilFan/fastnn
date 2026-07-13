@@ -388,7 +388,7 @@ impl PyTensor {
             let start = indices.start as i64;
             let stop = indices.stop as i64;
             let step = indices.step as i64;
-            let sliced = self.inner.slice(0, start, stop, step);
+            let sliced = self.inner.try_slice(0, start, stop, step)?;
             Ok(PyTensor::from_tensor(sliced))
         } else {
             // Assume it's an integer index
@@ -409,7 +409,9 @@ impl PyTensor {
             // For 2D tensor [N, D], t[idx] returns [D] (the row)
             // For 1D tensor [N], t[idx] returns scalar (0-dim)
             // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
-            let sliced = self.inner.slice(0, idx_val as i64, (idx_val + 1) as i64, 1);
+            let sliced = self
+                .inner
+                .try_slice(0, idx_val as i64, (idx_val + 1) as i64, 1)?;
             Ok(PyTensor::from_tensor(sliced.squeeze(Some(0))))
         }
     }

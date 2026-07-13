@@ -33,54 +33,83 @@ fn cpu_f32_fast_path_setup(t: &Tensor) -> Option<(usize, *const f32, *mut f32, T
 
 impl TensorImpl {
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
+        self.try_slice(dim, start, end, step)
+            .expect("Tensor::slice failed")
+    }
+
+    pub fn try_slice(&self, dim: usize, start: i64, end: i64, step: i64) -> FastnnResult<Tensor> {
         if dim >= self.ndim() {
-            panic!(
-                "slice: dimension {} is out of range for {}-dimensional tensor",
-                dim,
+            return Err(FastnnError::shape(format!(
+                "slice dimension {dim} is out of range for {} dimensions",
                 self.ndim()
-            );
+            )));
+        }
+        if step <= 0 {
+            return Err(FastnnError::InvalidArgument(format!(
+                "slice step must be positive, got {step}"
+            )));
         }
 
         let size = self.sizes[dim];
-        let start = if start < 0 { size + start } else { start };
-        let end = if end < 0 { size + end } else { end };
-        let start = start.max(0) as usize;
-        let end = (end.min(size)) as usize;
+        let start = if start < 0 {
+            size.saturating_add(start)
+        } else {
+            start
+        }
+        .clamp(0, size);
+        let end = if end < 0 {
+            size.saturating_add(end)
+        } else {
+            end
+        }
+        .clamp(0, size);
 
         if start > end {
-            panic!(
-                "slice: invalid range [{}, {}) for dimension {} of size {}",
-                start, end, dim, size
-            );
+            return Err(FastnnError::OutOfBounds(format!(
+                "slice range [{start}, {end}) is reversed for dimension {dim} of size {size}"
+            )));
         }
 
         let mut sizes = self.sizes.clone();
-        let numel = ((end as i64 - start as i64 + step - 1) / step) as usize;
-        sizes[dim] = numel as i64;
+        let span = end - start;
+        sizes[dim] = span
+            .checked_add(step - 1)
+            .ok_or_else(|| FastnnError::Overflow("slice length overflow".into()))?
+            / step;
 
-        let storage_offset = self.storage_offset + (start as i64) * self.strides[dim];
+        let storage_offset = start
+            .checked_mul(self.strides[dim])
+            .and_then(|offset| self.storage_offset.checked_add(offset))
+            .ok_or_else(|| FastnnError::Overflow("slice storage offset overflow".into()))?;
 
         let mut strides = self.strides.clone();
-        strides[dim] *= step;
+        strides[dim] = strides[dim]
+            .checked_mul(step)
+            .ok_or_else(|| FastnnError::Overflow("slice stride overflow".into()))?;
 
-        let mut t = self.new_view_from(sizes, strides, storage_offset);
-        t.autograd_meta = None;
-        t.requires_grad = false;
-        t.into()
+        let mut tensor = self.new_view_from(sizes, strides, storage_offset);
+        tensor.autograd_meta = None;
+        tensor.requires_grad = false;
+        Ok(tensor.into())
     }
 }
 
 impl Tensor {
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
-        let output = self.inner.slice(dim, start, end, step);
+        self.try_slice(dim, start, end, step)
+            .expect("Tensor::slice failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_slice(&self, dim: usize, start: i64, end: i64, step: i64) -> FastnnResult<Tensor> {
+        let output = self.inner.try_slice(dim, start, end, step)?;
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let _edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(output, autograd::make_node_info("SliceBackward", inputs))
         } else {
             output
-        }
+        })
     }
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {

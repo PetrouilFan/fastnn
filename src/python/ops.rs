@@ -662,8 +662,16 @@ fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyResult<PyTensor> {
 
 #[pyfunction]
 #[pyo3(signature = (tensor, dim, start, end, step = 1))]
-fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.slice(dim, start, end, step))
+fn slice(
+    tensor: &PyTensor,
+    dim: usize,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        tensor.inner.try_slice(dim, start, end, step)?,
+    ))
 }
 
 #[pyfunction]

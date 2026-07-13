@@ -167,6 +167,31 @@ fn invalid_cat_stack_and_repeat_return_structured_errors() {
 }
 
 #[test]
+fn invalid_slice_returns_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+
+    let dimension = tensor
+        .try_slice(2, 0, 1, 1)
+        .expect_err("out-of-range slice dimension must fail");
+    assert!(dimension.to_string().contains("out of range"));
+
+    let zero_step = tensor
+        .try_slice(0, 0, 1, 0)
+        .expect_err("zero slice step must fail");
+    assert!(zero_step.to_string().contains("must be positive"));
+
+    let reversed = tensor
+        .try_slice(0, 2, 1, 1)
+        .expect_err("reversed slice range must fail");
+    assert!(reversed.to_string().contains("reversed"));
+
+    let clamped = tensor
+        .try_slice(0, i64::MIN, i64::MAX, 1)
+        .expect("extreme bounds should clamp safely");
+    assert_eq!(clamped.shape(), vec![2, 2]);
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);
