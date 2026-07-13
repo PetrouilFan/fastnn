@@ -30,6 +30,10 @@ lowers it; it does not own graph optimization policy.
 Execute `dtype-redesign.md` before further quantized-kernel expansion. Dtype,
 packing, quantization metadata, and compile policy must become orthogonal typed
 concepts with explicit integer accumulator/requantization contracts.
+The CPU execution extension is specified in
+[`cpu-low-bit-engine.md`](cpu-low-bit-engine.md): storage format, decode family,
+workload phase, and ISA requirements are separate compiler concepts, and a
+measured W4 path gates more experimental sub-4-bit families.
 
 ## P1 — remove duplicate semantic ownership
 
@@ -91,6 +95,12 @@ host-staged fallback architecture presented as general GPU execution.
 Add generated small-graph differential tests, ONNX Runtime comparisons for the
 supported operator set, graph-rewrite idempotence tests, shape/execution
 agreement checks, and integer quantization reference tests.
+
+Low-bit benchmarks must separate decode from prefill and distinguish storage,
+microkernel, operator, and end-to-end wins. Report payload width and effective
+bits including metadata, scratch allocation, cache behavior where available,
+quality delta, and AOT code size. A model-file-size win alone does not promote a
+format to production support.
 
 ### Structured profiling
 

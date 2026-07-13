@@ -20,7 +20,8 @@ the associated behavior.
 The broader engineering changes are tracked in
 `docs/roadmap/architecture-improvements.md`. The dtype/quantization redesign is
 specified in `docs/roadmap/dtype-redesign.md` and precedes further quantized
-kernel expansion.
+kernel expansion. CPU low-bit storage/compute-family policy is evaluated in
+`docs/roadmap/cpu-low-bit-engine.md`.
 
 ## Non-goals
 
@@ -117,6 +118,9 @@ Current coupling requiring attention:
 3. Split IR types, graph storage, builder operation families, compile/cache, and builder tests; remove obsolete paths instead of retaining compatibility facades.
 4. Replace stringly IR attributes with typed, opcode-owned attributes.
 5. Rework quantization around the canonical dtype model; enforce integer U4/U8 accumulator and requantization contracts.
+   Establish typed storage/decode/kernel-family capability selection and a
+   measured W4 production baseline before adding production INT3/INT2/ternary
+   formats.
 6. Separate autograd compatibility stubs, tape metadata, and backward-rule families.
 7. Split prepared-plan data, constants, construction, and execution; redesign its serialized representation if the new ownership warrants it.
 8. Replace PyO3 `include!` with normal modules and registration functions, then simplify the Python facade.

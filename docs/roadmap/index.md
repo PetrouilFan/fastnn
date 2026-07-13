@@ -23,7 +23,9 @@ ownership decisions required before mechanical module moves.
 The broader engineering backlog is in
 [Architecture Improvement Backlog](architecture-improvements.md). The dtype and
 quantization redesign is separately specified in
-[Dtype and Quantization Redesign](dtype-redesign.md).
+[Dtype and Quantization Redesign](dtype-redesign.md). CPU low-bit storage,
+compute-family, and benchmark policy is evaluated in
+[CPU Low-Bit Engine Direction](cpu-low-bit-engine.md).
 
 **Upcoming:**
 

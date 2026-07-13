@@ -8,6 +8,11 @@ The current dtype model mixes four independent concerns:
 2. The physical storage encoding (plain bytes versus packed words).
 3. Quantization semantics (signedness, scale, zero point, axis, group, codebook).
 4. Compilation policy (which target representation the compiler should select).
+5. The executable storage layout selected for a kernel family.
+6. The decode/compute pathway used to reach the accumulator.
+
+CPU low-bit execution makes the last two distinctions essential: a nominal bit
+width does not identify either the physical layout or the inner loop.
 
 These must not be represented by overlapping enums with embedded metadata.
 
@@ -29,7 +34,12 @@ Quantization     numerical mapping between logical and stored values
 TensorLayout     shape, strides, order, alignment requirements
 Device           execution location
 CompileTarget    requested optimization/quantization policy
+StorageFormat    executable payload and metadata layout
+DecodeFamily     unpack, lookup, masked, codebook, or floating fallback path
 ```
+
+For CPU-first sub-8-bit planning and the evidence accepted from the external
+research report, see [`cpu-low-bit-engine.md`](cpu-low-bit-engine.md).
 
 Suggested core types:
 
@@ -92,6 +102,12 @@ packing geometry, and compilation intent.
   representation schema but have distinct compiler policies.
 - Kernels consume an explicit typed operand contract. They do not infer signedness,
   scales, packing, or accumulator requirements from strings or scattered attrs.
+- Logical alphabet width, physical payload width, and effective bits per value
+  including metadata are separate measurements.
+- A nominal bit width does not identify an executable layout. Different kernel
+  families may require different layouts for the same logical quantization.
+- Cold-storage/distribution compression and hot executable packing may use
+  different formats.
 
 ## Integer-space U4/U8 policy
 
@@ -145,10 +161,13 @@ metadata, shape, and conversion behavior.
    canonicalization, and lowering stages.
 7. Change CPU kernels to accept typed quantized operand descriptors and explicit
    integer accumulator/requantization contracts.
-8. Replace Python `Precision` duplication with a thin Rust-backed configuration
+8. Add typed storage-format, decode-family, workload-phase, and ISA capability
+   selection; establish one measured production W4 path before adding sub-4-bit
+   production formats.
+9. Replace Python `Precision` duplication with a thin Rust-backed configuration
    API; remove manually synchronized dtype tags.
-9. Version the resulting model/plan format once; no legacy reader is required.
-10. Delete obsolete aliases, duplicate size calculations, and type conversions.
+10. Version the resulting model/plan format once; no legacy reader is required.
+11. Delete obsolete aliases, duplicate size calculations, and type conversions.
 
 ## Required tests
 
@@ -163,6 +182,10 @@ metadata, shape, and conversion behavior.
   quantizer and accumulator implementation.
 - Property tests for Q/DQ canonicalization and representation-preserving graph
   rewrites.
+- Effective-bits accounting tests that include metadata and alignment.
+- Workload-separated benchmarks for decode, prefill, convolution, and attention.
+- Kernel-family promotion gates comparing microkernel, operator, and end-to-end
+  results against wider baselines.
 
 ## Explicit deletions
 
