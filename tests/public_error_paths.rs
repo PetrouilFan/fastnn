@@ -116,6 +116,31 @@ fn invalid_dimension_reordering_returns_structured_errors() {
 }
 
 #[test]
+fn invalid_expand_and_unsqueeze_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+
+    let unsqueeze = tensor
+        .try_unsqueeze(3)
+        .expect_err("out-of-range unsqueeze must fail");
+    assert!(unsqueeze.to_string().contains("out of range"));
+
+    let rank = tensor
+        .try_expand(vec![2])
+        .expect_err("lower-rank expansion must fail");
+    assert!(rank.to_string().contains("target has 1 dimensions"));
+
+    let incompatible = tensor
+        .try_expand(vec![3, 3])
+        .expect_err("non-singleton expansion must fail");
+    assert!(incompatible.to_string().contains("only size-1 dimensions"));
+
+    let negative = tensor
+        .try_expand(vec![-1, 2])
+        .expect_err("negative expansion dimension must fail");
+    assert!(negative.to_string().contains("non-negative"));
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);

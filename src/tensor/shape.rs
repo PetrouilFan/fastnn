@@ -248,8 +248,16 @@ impl TensorImpl {
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
+        self.try_unsqueeze(dim).expect("Tensor::unsqueeze failed")
+    }
+
+    pub fn try_unsqueeze(&self, dim: usize) -> FastnnResult<Tensor> {
         let ndim = self.ndim();
-        let dim = if dim > ndim { ndim } else { dim };
+        if dim > ndim {
+            return Err(FastnnError::shape(format!(
+                "unsqueeze dimension {dim} is out of range for a {ndim}-dimensional tensor"
+            )));
+        }
 
         let mut sizes = self.sizes.clone();
         let mut strides = self.strides.clone();
@@ -271,7 +279,7 @@ impl TensorImpl {
             tensor.set_autograd_meta(meta);
         }
 
-        tensor.into()
+        Ok(tensor.into())
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
@@ -310,12 +318,21 @@ impl TensorImpl {
     }
 
     pub fn expand(&self, sizes: SmallVec<[i64; 8]>) -> Tensor {
+        self.try_expand(sizes).expect("Tensor::expand failed")
+    }
+
+    pub fn try_expand(&self, sizes: SmallVec<[i64; 8]>) -> FastnnResult<Tensor> {
         if sizes.len() < self.ndim() {
-            panic!(
-                "expand: target shape has {} dimensions but tensor has {} dimensions",
+            return Err(FastnnError::shape(format!(
+                "expand target has {} dimensions but the tensor has {}",
                 sizes.len(),
                 self.ndim()
-            );
+            )));
+        }
+        if sizes.iter().any(|&size| size < 0) {
+            return Err(FastnnError::shape(format!(
+                "expand target dimensions must be non-negative, got {sizes:?}"
+            )));
         }
 
         let new_sizes = sizes.clone();
@@ -325,10 +342,9 @@ impl TensorImpl {
             let target = new_sizes[offset + i];
             let source = self.sizes[i];
             if target != source && source != 1 {
-                panic!(
-                    "expand: cannot expand dimension {} from {} to {} (only size-1 dimensions can be expanded)",
-                    i, source, target
-                );
+                return Err(FastnnError::shape(format!(
+                    "expand cannot change dimension {i} from {source} to {target}; only size-1 dimensions are expandable"
+                )));
             }
         }
 
@@ -341,8 +357,9 @@ impl TensorImpl {
             };
         }
 
-        self.new_view_from(sizes, new_strides, self.storage_offset)
-            .into()
+        Ok(self
+            .new_view_from(sizes, new_strides, self.storage_offset)
+            .into())
     }
 }
 
@@ -466,19 +483,27 @@ impl Tensor {
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
-        self.inner.unsqueeze(dim)
+        self.try_unsqueeze(dim).expect("Tensor::unsqueeze failed")
+    }
+
+    pub fn try_unsqueeze(&self, dim: usize) -> FastnnResult<Tensor> {
+        self.inner.try_unsqueeze(dim)
     }
 
     pub fn expand(&self, shape: Vec<i64>) -> Tensor {
-        let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output = self.inner.expand(sizes);
+        self.try_expand(shape).expect("Tensor::expand failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_expand(&self, shape: Vec<i64>) -> FastnnResult<Tensor> {
+        let sizes: SmallVec<[i64; 8]> = shape.into();
+        let output = self.inner.try_expand(sizes)?;
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(output, autograd::make_node_info("ExpandBackward", inputs))
         } else {
             output
-        }
+        })
     }
 
     pub fn flip(&self, dims: &[usize]) -> Tensor {

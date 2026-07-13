@@ -297,8 +297,15 @@ impl PyTensor {
         Ok(PyTensor::from_tensor(self.inner.try_permute(dims)?))
     }
 
-    fn unsqueeze(&self, dim: i64) -> PyTensor {
-        PyTensor::from_tensor(self.inner.unsqueeze(dim as usize))
+    fn unsqueeze(&self, dim: i64) -> PyResult<PyTensor> {
+        if dim < 0 {
+            return Err(
+                crate::error::FastnnError::shape("unsqueeze dimension must be non-negative").into(),
+            );
+        }
+        Ok(PyTensor::from_tensor(
+            self.inner.try_unsqueeze(dim as usize)?,
+        ))
     }
 
     fn squeeze(&self, dim: Option<i64>) -> PyTensor {
