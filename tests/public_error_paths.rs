@@ -96,6 +96,26 @@ fn malformed_reshape_returns_structured_errors() {
 }
 
 #[test]
+fn invalid_dimension_reordering_returns_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+
+    let transpose = tensor
+        .try_transpose(0, 2)
+        .expect_err("out-of-range transpose must fail");
+    assert!(transpose.to_string().contains("out of range"));
+
+    let duplicate = tensor
+        .try_permute(vec![0, 0])
+        .expect_err("duplicate permutation dimensions must fail");
+    assert!(duplicate.to_string().contains("not a permutation"));
+
+    let wrong_rank = tensor
+        .try_permute(vec![0])
+        .expect_err("wrong-rank permutation must fail");
+    assert!(wrong_rank.to_string().contains("requires 2 dimensions"));
+}
+
+#[test]
 fn backward_rejects_mismatched_gradient_shape() {
     let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
     let loss = input.sum(0, false);

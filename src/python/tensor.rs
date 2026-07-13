@@ -281,12 +281,20 @@ impl PyTensor {
         Ok(PyTensor::from_tensor(self.inner.try_reshape(shape)?))
     }
 
-    fn transpose(&self, dim0: i64, dim1: i64) -> PyTensor {
-        PyTensor::from_tensor(self.inner.transpose(dim0 as usize, dim1 as usize))
+    fn transpose(&self, dim0: i64, dim1: i64) -> PyResult<PyTensor> {
+        if dim0 < 0 || dim1 < 0 {
+            return Err(crate::error::FastnnError::shape(
+                "transpose dimensions must be non-negative",
+            )
+            .into());
+        }
+        Ok(PyTensor::from_tensor(
+            self.inner.try_transpose(dim0 as usize, dim1 as usize)?,
+        ))
     }
 
-    fn permute(&self, dims: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.permute(dims))
+    fn permute(&self, dims: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_permute(dims)?))
     }
 
     fn unsqueeze(&self, dim: i64) -> PyTensor {

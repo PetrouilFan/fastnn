@@ -190,55 +190,61 @@ impl TensorImpl {
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
+        self.try_transpose(dim0, dim1)
+            .expect("Tensor::transpose failed")
+    }
+
+    pub fn try_transpose(&self, dim0: usize, dim1: usize) -> FastnnResult<Tensor> {
         let ndim = self.ndim();
         if dim0 >= ndim || dim1 >= ndim {
-            panic!(
-                "transpose: dimension {} or {} is out of range for {}-dimensional tensor",
-                dim0, dim1, ndim
-            );
+            return Err(FastnnError::shape(format!(
+                "transpose dimensions {dim0} and {dim1} are out of range for a {ndim}-dimensional tensor"
+            )));
         }
 
         let mut sizes = self.sizes.clone();
         let mut strides = self.strides.clone();
-
         sizes.swap(dim0, dim1);
         strides.swap(dim0, dim1);
 
-        self.new_view_from(sizes, strides, self.storage_offset)
-            .into()
+        Ok(self
+            .new_view_from(sizes, strides, self.storage_offset)
+            .into())
     }
 
     pub fn permute(&self, dims: SmallVec<[i64; 8]>) -> Tensor {
+        self.try_permute(dims).expect("Tensor::permute failed")
+    }
+
+    pub fn try_permute(&self, dims: SmallVec<[i64; 8]>) -> FastnnResult<Tensor> {
         let ndim = self.ndim();
         if dims.len() != ndim {
-            panic!(
-                "permute: number of dimensions mismatch (tensor has {} dims, got {} dims)",
-                ndim,
+            return Err(FastnnError::shape(format!(
+                "permute requires {ndim} dimensions, got {}",
                 dims.len()
-            );
+            )));
         }
 
         let mut seen = vec![false; ndim];
-        for &d in &dims {
-            if d < 0 || (d as usize) >= ndim || seen[d as usize] {
-                panic!(
-                    "permute: invalid permutation {:?} for {}-dimensional tensor",
-                    dims, ndim
-                );
+        for &dimension in &dims {
+            if dimension < 0 || (dimension as usize) >= ndim || seen[dimension as usize] {
+                return Err(FastnnError::shape(format!(
+                    "{dims:?} is not a permutation of dimensions 0..{ndim}"
+                )));
             }
-            seen[d as usize] = true;
+            seen[dimension as usize] = true;
         }
 
         let mut sizes = SmallVec::new();
         let mut strides = SmallVec::new();
-
-        for &d in &dims {
-            sizes.push(self.sizes[d as usize]);
-            strides.push(self.strides[d as usize]);
+        for &dimension in &dims {
+            sizes.push(self.sizes[dimension as usize]);
+            strides.push(self.strides[dimension as usize]);
         }
 
-        self.new_view_from(sizes, strides, self.storage_offset)
-            .into()
+        Ok(self
+            .new_view_from(sizes, strides, self.storage_offset)
+            .into())
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
@@ -414,9 +420,14 @@ impl Tensor {
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
-        let output = self.inner.transpose(dim0, dim1);
+        self.try_transpose(dim0, dim1)
+            .expect("Tensor::transpose failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_transpose(&self, dim0: usize, dim1: usize) -> FastnnResult<Tensor> {
+        let output = self.inner.try_transpose(dim0, dim1)?;
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(
                 output,
@@ -424,19 +435,23 @@ impl Tensor {
             )
         } else {
             output
-        }
+        })
     }
 
     pub fn permute(&self, dims: Vec<i64>) -> Tensor {
-        let sizes: SmallVec<[i64; 8]> = dims.clone().into();
-        let output = self.inner.permute(sizes);
+        self.try_permute(dims).expect("Tensor::permute failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_permute(&self, dims: Vec<i64>) -> FastnnResult<Tensor> {
+        let sizes: SmallVec<[i64; 8]> = dims.into();
+        let output = self.inner.try_permute(sizes)?;
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(output, autograd::make_node_info("PermuteBackward", inputs))
         } else {
             output
-        }
+        })
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
