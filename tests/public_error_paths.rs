@@ -93,6 +93,26 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .try_as_f32_slice()
         .expect_err("typed slice access must validate storage bounds");
     assert!(bounds_error.to_string().contains("exceeds storage length"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut mutable = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
+    mutable.try_as_f32_slice_mut().unwrap()[0] = 3.0;
+    assert_eq!(mutable.try_as_f32_slice().unwrap(), &[3.0]);
+
+    mutable.storage_offset = 1;
+    let mutable_bounds = mutable
+        .try_as_f32_slice_mut()
+        .expect_err("mutable typed slice access must validate storage bounds");
+    assert!(mutable_bounds
+        .to_string()
+        .contains("exceeds storage length"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut wrong_dtype = TensorImpl::try_new(storage, vec![1].into(), DType::I32).unwrap();
+    let mutable_dtype = wrong_dtype
+        .try_as_f32_slice_mut()
+        .expect_err("mutable typed slice access must validate dtype");
+    assert!(mutable_dtype.to_string().contains("requires F32"));
 }
 
 #[test]

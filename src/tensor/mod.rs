@@ -411,29 +411,59 @@ impl TensorImpl {
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        let ptr = self.data_ptr_f32_mut();
+        self.try_as_f32_slice_mut()
+            .expect("TensorImpl::as_f32_slice_mut failed")
+    }
+
+    pub fn try_as_f32_slice_mut(&mut self) -> FastnnResult<&mut [f32]> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "mutable F32 slice access requires F32 storage, got {:?}",
+                self.dtype
+            )));
+        }
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot be sliced",
+                self.storage_offset
+            )));
+        }
+        let offset = self.storage_offset as usize;
         let numel = self.numel() as usize;
-        // SAFETY: We validate bounds below before creating the slice. The pointer
-        // is derived from `data_ptr_f32_mut()` which ensures exclusive ownership.
-        unsafe {
-            // Unconditional bounds validation to prevent UB in release builds
-            #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-            if let Storage::Cpu(cpu) = self.storage.as_ref() {
-                let elem_size = self
-                    .dtype
-                    .scalar_byte_width()
-                    .expect("tensor byte access requires plain scalar storage");
-                let storage_len = cpu.data.len() / elem_size;
-                assert!(
-                    self.storage_offset as usize + numel <= storage_len,
-                    "as_f32_slice_mut: offset + numel exceeds storage bounds. \
-                     offset={}, numel={}, storage_len={}",
-                    self.storage_offset,
-                    numel,
-                    storage_len
-                );
+        let end = offset
+            .checked_add(numel)
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 slice range overflow".into()))?;
+        let byte_offset = offset
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 byte offset overflow".into()))?;
+
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
+            Storage::Cpu(cpu) => {
+                let data = Arc::make_mut(&mut cpu.data);
+                let storage_len = data.len() / std::mem::size_of::<f32>();
+                if end > storage_len {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "mutable F32 slice range {offset}..{end} exceeds storage length {storage_len}"
+                    )));
+                }
+                let base = data.as_mut_ptr();
+                // SAFETY: dtype is F32, byte offset arithmetic and the complete element
+                // range are checked against the allocation, and `&mut self` plus
+                // `Arc::make_mut` guarantee exclusive access for the returned lifetime.
+                let ptr = unsafe { base.add(byte_offset) as *mut f32 };
+                if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+                    return Err(FastnnError::Internal(
+                        "CPU storage is not aligned for mutable F32 access".into(),
+                    ));
+                }
+                // SAFETY: bounds, alignment, type, exclusivity, and lifetime are validated above.
+                Ok(unsafe { std::slice::from_raw_parts_mut(ptr, numel) })
             }
-            std::slice::from_raw_parts_mut(ptr, numel)
+            #[cfg(feature = "gpu")]
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot mutably slice GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 }
