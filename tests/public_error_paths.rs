@@ -78,6 +78,21 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .err()
         .expect("nonzero packed full must fail");
     assert!(packed_full.to_string().contains("packed dtypes"));
+
+    let non_f32 = Tensor::try_zeros(vec![1], DType::I32, Device::Cpu).unwrap();
+    let dtype_error = non_f32
+        .inner
+        .try_as_f32_slice()
+        .expect_err("typed slice access must validate dtype");
+    assert!(dtype_error.to_string().contains("requires F32"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut out_of_bounds = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
+    out_of_bounds.storage_offset = 1;
+    let bounds_error = out_of_bounds
+        .try_as_f32_slice()
+        .expect_err("typed slice access must validate storage bounds");
+    assert!(bounds_error.to_string().contains("exceeds storage length"));
 }
 
 #[test]

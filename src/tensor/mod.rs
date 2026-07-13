@@ -354,41 +354,59 @@ impl TensorImpl {
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        match &self.storage.as_ref() {
-            // SAFETY: We validate bounds below before creating the slice. The pointer
-            // is derived from the CPU storage's backing `Vec<u8>` and is valid for
-            // the lifetime of `self`.
-            Storage::Cpu(cpu) => unsafe {
-                let ptr = cpu.data.as_ref().as_ptr();
-                let byte_offset = self.storage_offset as usize
-                    * self
-                        .dtype
-                        .scalar_byte_width()
-                        .expect("tensor byte access requires plain scalar storage");
-                let ptr = ptr.add(byte_offset) as *const f32;
+        self.try_as_f32_slice()
+            .expect("TensorImpl::as_f32_slice failed")
+    }
+
+    pub fn try_as_f32_slice(&self) -> FastnnResult<&[f32]> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "F32 slice access requires F32 storage, got {:?}",
+                self.dtype
+            )));
+        }
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot be sliced",
+                self.storage_offset
+            )));
+        }
+        match self.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let offset = self.storage_offset as usize;
                 let numel = self.numel() as usize;
-                // Unconditional bounds validation to prevent UB in release builds
-                let elem_size = self
-                    .dtype
-                    .scalar_byte_width()
-                    .expect("tensor byte access requires plain scalar storage");
-                let storage_len = cpu.data.len() / elem_size;
-                assert!(
-                    self.storage_offset as usize + numel <= storage_len,
-                    "as_f32_slice: offset + numel exceeds storage bounds. \
-                     offset={}, numel={}, storage_len={}, shape={:?}, dtype={:?}",
-                    self.storage_offset,
-                    numel,
-                    storage_len,
-                    self.sizes,
-                    self.dtype
-                );
-                std::slice::from_raw_parts(ptr, numel)
-            },
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot slice GPU storage. Use .to_cpu() first.");
+                let end = offset.checked_add(numel).ok_or_else(|| {
+                    FastnnError::Overflow("F32 slice element range overflow".into())
+                })?;
+                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
+                if end > storage_len {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "F32 slice range {offset}..{end} exceeds storage length {storage_len}"
+                    )));
+                }
+                let byte_offset =
+                    offset
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            FastnnError::Overflow("F32 slice byte offset overflow".into())
+                        })?;
+                let base = cpu.data.as_ref().as_ptr();
+                // SAFETY: dtype is F32, the checked element range is within the backing
+                // allocation, the byte offset is checked, and the returned lifetime is
+                // bounded by `self`. CPU allocations used by Storage are suitably aligned.
+                let ptr = unsafe { base.add(byte_offset) as *const f32 };
+                if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+                    return Err(FastnnError::Internal(
+                        "CPU storage is not aligned for F32 access".into(),
+                    ));
+                }
+                // SAFETY: bounds, alignment, element type, and lifetime are validated above.
+                Ok(unsafe { std::slice::from_raw_parts(ptr, numel) })
             }
+            #[cfg(feature = "gpu")]
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot slice GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
