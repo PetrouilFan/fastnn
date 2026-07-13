@@ -827,46 +827,48 @@ impl Tensor {
 
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
-        self.inner.data_ptr()
+        self.try_data_ptr().expect("Tensor::data_ptr failed")
+    }
+
+    pub fn try_data_ptr(&self) -> FastnnResult<*const u8> {
+        self.inner.try_data_ptr()
     }
 
     #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
-        self.inner.data_ptr_f32()
+        self.try_data_ptr_f32()
+            .expect("Tensor::data_ptr_f32 failed")
+    }
+
+    pub fn try_data_ptr_f32(&self) -> FastnnResult<*const f32> {
+        self.inner.try_data_ptr_f32()
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        let inner = Arc::make_mut(&mut self.inner);
-        inner.data_ptr_f32_mut()
+        self.try_data_ptr_f32_mut()
+            .expect("Tensor::data_ptr_f32_mut failed")
     }
 
-    /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
-    /// Note: storage_offset is in elements, so we need to multiply by element size
+    pub fn try_data_ptr_f32_mut(&mut self) -> FastnnResult<*mut f32> {
+        Arc::make_mut(&mut self.inner).try_data_ptr_f32_mut()
+    }
+
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        let inner = Arc::make_mut(&mut self.inner);
-        inner.data_ptr_mut()
+        self.try_data_ptr_mut()
+            .expect("Tensor::data_ptr_mut failed")
+    }
+
+    pub fn try_data_ptr_mut(&mut self) -> FastnnResult<*mut u8> {
+        Arc::make_mut(&mut self.inner).try_data_ptr_mut()
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        match self.inner.dtype {
-            DType::F32 => self.inner.as_f32_slice(),
-            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                panic!("as_f32_slice: use dtype-specific access methods instead of f32 reinterpretation. \
-                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
-            }
-            DType::BF16 | DType::F16 => {
-                panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
-            }
-            DType::I4
-            | DType::I8Scaled
-            | DType::U4Scaled
-            | DType::U8Scaled
-            | DType::F8
-            | DType::F8R
-            | DType::F4 => {
-                panic!("as_f32_slice: packed/FP tensors cannot be viewed as f32.");
-            }
-        }
+        self.try_as_f32_slice()
+            .expect("Tensor::as_f32_slice failed")
+    }
+
+    pub fn try_as_f32_slice(&self) -> FastnnResult<&[f32]> {
+        self.inner.try_as_f32_slice()
     }
 
     /// Get a direct byte slice view of contiguous CPU tensor data.
@@ -920,32 +922,12 @@ impl Tensor {
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        match self.inner.dtype {
-            DType::F32 => {
-                let inner = if Arc::strong_count(&self.inner) == 1 {
-                    Arc::get_mut(&mut self.inner).unwrap()
-                } else {
-                    Arc::make_mut(&mut self.inner)
-                };
-                inner.as_f32_slice_mut()
-            }
-            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                panic!("as_f32_slice_mut: use dtype-specific access methods instead of f32 reinterpretation. \
-                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
-            }
-            DType::BF16 | DType::F16 => {
-                panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
-            }
-            DType::I4
-            | DType::I8Scaled
-            | DType::U4Scaled
-            | DType::U8Scaled
-            | DType::F8
-            | DType::F8R
-            | DType::F4 => {
-                panic!("as_f32_slice_mut: packed/FP tensors cannot be viewed as f32.");
-            }
-        }
+        self.try_as_f32_slice_mut()
+            .expect("Tensor::as_f32_slice_mut failed")
+    }
+
+    pub fn try_as_f32_slice_mut(&mut self) -> FastnnResult<&mut [f32]> {
+        Arc::make_mut(&mut self.inner).try_as_f32_slice_mut()
     }
 
     pub fn increment_version(&self) {

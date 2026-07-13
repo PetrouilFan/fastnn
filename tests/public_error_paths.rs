@@ -81,7 +81,6 @@ fn malformed_tensor_construction_returns_structured_errors() {
 
     let non_f32 = Tensor::try_zeros(vec![1], DType::I32, Device::Cpu).unwrap();
     let dtype_error = non_f32
-        .inner
         .try_as_f32_slice()
         .expect_err("typed slice access must validate dtype");
     assert!(dtype_error.to_string().contains("requires F32"));
@@ -116,7 +115,6 @@ fn malformed_tensor_construction_returns_structured_errors() {
 
     let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
     let packed_pointer = packed
-        .inner
         .try_data_ptr()
         .expect_err("packed raw pointer access must fail");
     assert!(packed_pointer.to_string().contains("plain scalar storage"));
