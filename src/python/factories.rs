@@ -58,18 +58,27 @@ fn empty(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyRe
 
 #[pyfunction]
 #[pyo3(signature = (shape, dtype = None, device = None))]
-fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyTensor {
+fn ones(shape: Vec<i64>, dtype: Option<String>, device: Option<String>) -> PyResult<PyTensor> {
     let dtype = resolve_dtype(dtype);
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::ones(shape, dtype, device))
+    Ok(PyTensor::from_tensor(Tensor::try_ones(
+        shape, dtype, device,
+    )?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (shape, value, dtype = None, device = None))]
-fn full(shape: Vec<i64>, value: f32, dtype: Option<String>, device: Option<String>) -> PyTensor {
+fn full(
+    shape: Vec<i64>,
+    value: f32,
+    dtype: Option<String>,
+    device: Option<String>,
+) -> PyResult<PyTensor> {
     let dtype = resolve_dtype(dtype);
     let device = resolve_device(device);
-    PyTensor::from_tensor(Tensor::full(shape, value, dtype, device))
+    Ok(PyTensor::from_tensor(Tensor::try_full(
+        shape, value, dtype, device,
+    )?))
 }
 
 #[pyfunction]

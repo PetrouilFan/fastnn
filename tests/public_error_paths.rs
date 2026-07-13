@@ -63,6 +63,16 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .err()
         .expect("overflowing empty shape must fail");
     assert!(overflowing_factory.to_string().contains("overflow"));
+
+    let negative_ones = Tensor::try_ones(vec![-1], DType::F32, Device::Cpu)
+        .err()
+        .expect("negative ones shape must fail");
+    assert!(negative_ones.to_string().contains("negative size"));
+
+    let packed_full = Tensor::try_full(vec![8], 1.0, DType::I4, Device::Cpu)
+        .err()
+        .expect("nonzero packed full must fail");
+    assert!(packed_full.to_string().contains("packed dtypes"));
 }
 
 #[test]

@@ -211,6 +211,20 @@ impl Tensor {
     }
 
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        Self::try_ones(shape, dtype, device).expect("Tensor::ones failed")
+    }
+
+    pub fn try_ones(shape: Vec<i64>, dtype: DType, device: Device) -> FastnnResult<Self> {
+        validate_tensor_shape(&shape, dtype)?;
+        if dtype.scalar_byte_width().is_none() {
+            return Err(FastnnError::dtype(
+                "ones does not support packed dtypes; create packed weights through quantization",
+            ));
+        }
+        Ok(Self::ones_validated(shape, dtype, device))
+    }
+
+    fn ones_validated(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         match device {
             Device::Cpu => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
@@ -307,6 +321,25 @@ impl Tensor {
     }
 
     pub fn full(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
+        Self::try_full(shape, value, dtype, device).expect("Tensor::full failed")
+    }
+
+    pub fn try_full(
+        shape: Vec<i64>,
+        value: f32,
+        dtype: DType,
+        device: Device,
+    ) -> FastnnResult<Self> {
+        validate_tensor_shape(&shape, dtype)?;
+        if value != 0.0 && dtype.scalar_byte_width().is_none() {
+            return Err(FastnnError::dtype(
+                "full with a nonzero value does not support packed dtypes",
+            ));
+        }
+        Ok(Self::full_validated(shape, value, dtype, device))
+    }
+
+    fn full_validated(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
         if value == 0.0 {
             return Self::zeros(shape, dtype, device);
         }
