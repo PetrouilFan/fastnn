@@ -8,8 +8,9 @@ use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
-use fastnn::storage::{DType, Device};
-use fastnn::tensor::{dtype_to_ir, ir_to_dtype, Tensor};
+use fastnn::storage::{CpuStorage, DType, Device, Storage};
+use fastnn::tensor::{dtype_to_ir, ir_to_dtype, Tensor, TensorImpl};
+use std::sync::Arc;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(values).to_vec()
@@ -22,6 +23,31 @@ fn item_on_non_scalar_tensor_returns_shape_error() {
         .item()
         .expect_err("item on a multi-element tensor must fail");
     assert!(error.to_string().contains("requires one element"));
+}
+
+#[test]
+fn malformed_tensor_construction_returns_structured_errors() {
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+
+    let negative = TensorImpl::try_new(storage.clone(), vec![-1].into(), DType::F32)
+        .err()
+        .expect("negative tensor dimensions must fail");
+    assert!(negative.to_string().contains("negative size"));
+
+    let oversized = TensorImpl::try_new(storage.clone(), vec![2].into(), DType::F32)
+        .err()
+        .expect("undersized storage must fail");
+    assert!(oversized.to_string().contains("only 4 bytes"));
+
+    let overflow = TensorImpl::try_new(storage, vec![i64::MAX, i64::MAX].into(), DType::F32)
+        .err()
+        .expect("overflowing tensor shape must fail");
+    assert!(overflow.to_string().contains("overflow"));
+
+    let byte_overflow = DType::F64
+        .try_storage_bytes(usize::MAX)
+        .expect_err("overflowing storage size must fail");
+    assert!(byte_overflow.to_string().contains("overflow"));
 }
 
 #[test]

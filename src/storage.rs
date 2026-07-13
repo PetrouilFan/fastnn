@@ -164,32 +164,22 @@ impl DType {
 
     /// Exact bytes required for `numel` values, including packed-word rounding.
     pub fn storage_bytes(self, numel: usize) -> usize {
-        match self {
-            DType::F32 | DType::I32 => numel * 4,
-            DType::F64 | DType::I64 => numel * 8,
-            DType::F16 | DType::BF16 => numel * 2,
-            DType::Bool => numel,
-            DType::I4 => {
-                let words = numel.div_ceil(8);
-                words * 4
+        self.try_storage_bytes(numel)
+            .expect("dtype storage size overflow")
+    }
+
+    pub fn try_storage_bytes(self, numel: usize) -> crate::FastnnResult<usize> {
+        let bytes = match self {
+            DType::F32 | DType::I32 => numel.checked_mul(4),
+            DType::F64 | DType::I64 => numel.checked_mul(8),
+            DType::F16 | DType::BF16 => numel.checked_mul(2),
+            DType::Bool => Some(numel),
+            DType::I4 | DType::F4 | DType::U4Scaled => numel.div_ceil(8).checked_mul(4),
+            DType::I8Scaled | DType::F8 | DType::F8R | DType::U8Scaled => {
+                numel.div_ceil(4).checked_mul(4)
             }
-            DType::I8Scaled | DType::F8 | DType::F8R => {
-                let words = numel.div_ceil(4);
-                words * 4
-            }
-            DType::F4 => {
-                let words = numel.div_ceil(8);
-                words * 4
-            }
-            DType::U4Scaled => {
-                let words = numel.div_ceil(8);
-                words * 4
-            }
-            DType::U8Scaled => {
-                let words = numel.div_ceil(4);
-                words * 4
-            }
-        }
+        };
+        bytes.ok_or_else(|| crate::FastnnError::Overflow("tensor storage size overflow".into()))
     }
 
     pub fn as_str(&self) -> &'static str {

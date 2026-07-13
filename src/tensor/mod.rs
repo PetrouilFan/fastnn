@@ -23,6 +23,27 @@ mod ops;
 mod reductions;
 mod shape;
 
+fn validate_tensor_shape(sizes: &[i64], dtype: DType) -> FastnnResult<(usize, usize)> {
+    let mut numel = 1_usize;
+    for (dimension, &size) in sizes.iter().enumerate() {
+        if size < 0 {
+            return Err(FastnnError::shape(format!(
+                "tensor dimension {dimension} has negative size {size}"
+            )));
+        }
+        numel = numel
+            .checked_mul(size as usize)
+            .ok_or_else(|| FastnnError::Overflow("tensor element count overflow".into()))?;
+    }
+    if numel > i64::MAX as usize {
+        return Err(FastnnError::Overflow(
+            "tensor element count exceeds i64::MAX".into(),
+        ));
+    }
+    let nbytes = dtype.try_storage_bytes(numel)?;
+    Ok((numel, nbytes))
+}
+
 pub struct TensorImpl {
     pub storage: Arc<Storage>,
     pub sizes: SmallVec<[i64; 8]>,
@@ -41,30 +62,26 @@ pub struct TensorImpl {
 
 impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
-        let device = storage.device(); // Get device from storage
-        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
-        if numel > i64::MAX as i128 {
-            panic!("Tensor too large");
-        }
-        let numel = numel as i64;
-        let nbytes = dtype.storage_bytes(numel as usize);
-        // Validate storage is large enough for the declared shape.
-        // This catches mismatches between shape inference and actual data size.
+        Self::try_new(storage, sizes, dtype).expect("TensorImpl::new failed")
+    }
+
+    pub fn try_new(
+        storage: Arc<Storage>,
+        sizes: SmallVec<[i64; 8]>,
+        dtype: DType,
+    ) -> FastnnResult<Self> {
+        let device = storage.device();
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
         let storage_nbytes = storage.nbytes();
-        assert!(
-            nbytes <= storage_nbytes,
-            "TensorImpl::new: shape {:?} requires {} bytes for {} elements of {:?}, \
-             but storage only has {} bytes. This is a shape-inference or data-pipeline bug.",
-            sizes,
-            nbytes,
-            numel,
-            dtype,
-            storage_nbytes
-        );
+        if nbytes > storage_nbytes {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {nbytes} bytes of {dtype:?} storage, but only {storage_nbytes} bytes are available"
+            )));
+        }
 
         let strides = compute_strides(&sizes);
 
-        TensorImpl {
+        Ok(TensorImpl {
             storage,
             sizes,
             strides,
@@ -74,8 +91,8 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
-            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
-        }
+            contiguous_cache: AtomicI8::new(1),
+        })
     }
 
     /// Create TensorImpl with specific device (ignoring storage device)
@@ -85,16 +102,27 @@ impl TensorImpl {
         device: Device,
         dtype: DType,
     ) -> Self {
-        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
-        if numel > i64::MAX as i128 {
-            panic!("Tensor too large");
+        Self::try_new_with_device(storage, sizes, device, dtype)
+            .expect("TensorImpl::new_with_device failed")
+    }
+
+    pub fn try_new_with_device(
+        storage: Arc<Storage>,
+        sizes: SmallVec<[i64; 8]>,
+        device: Device,
+        dtype: DType,
+    ) -> FastnnResult<Self> {
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
+        let storage_nbytes = storage.nbytes();
+        if nbytes > storage_nbytes {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {nbytes} bytes of {dtype:?} storage, but only {storage_nbytes} bytes are available"
+            )));
         }
-        let numel = numel as i64;
-        let _nbytes = dtype.storage_bytes(numel as usize);
 
         let strides = compute_strides(&sizes);
 
-        TensorImpl {
+        Ok(TensorImpl {
             storage,
             sizes,
             strides,
@@ -104,8 +132,8 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
-            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
-        }
+            contiguous_cache: AtomicI8::new(1),
+        })
     }
 
     pub fn id(&self) -> usize {
