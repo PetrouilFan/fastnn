@@ -869,32 +869,53 @@ impl Tensor {
         }
     }
 
-    /// Get a direct byte slice view of the tensor data for efficient serialization.
-    /// Only works for contiguous CPU tensors.
-    /// Returns None for GPU tensors or non-contiguous tensors.
+    /// Get a direct byte slice view of contiguous CPU tensor data.
     pub fn as_byte_slice(&self) -> Option<&[u8]> {
-        match &self.inner.storage.as_ref() {
+        self.try_as_bytes().ok()
+    }
+
+    pub fn try_as_bytes(&self) -> FastnnResult<&[u8]> {
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "byte slice access requires a contiguous tensor",
+            ));
+        }
+        if self.inner.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot be sliced",
+                self.inner.storage_offset
+            )));
+        }
+        match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                if !self.is_contiguous() {
-                    return None;
-                }
-                let data = cpu.data.as_ref();
                 let numel = self.inner.numel() as usize;
-                let elem_size = self
-                    .inner
-                    .dtype
-                    .scalar_byte_width()
-                    .expect("tensor byte access requires plain scalar storage");
-                let byte_len = numel * elem_size;
-                let start = self.inner.storage_offset as usize * elem_size;
-                // Ensure we don't read past the storage
-                if start + byte_len > data.len() {
-                    return None;
+                let byte_len = self.inner.dtype.try_storage_bytes(numel)?;
+                let start = if let Some(element_size) = self.inner.dtype.scalar_byte_width() {
+                    (self.inner.storage_offset as usize)
+                        .checked_mul(element_size)
+                        .ok_or_else(|| FastnnError::Overflow("byte slice offset overflow".into()))?
+                } else if self.inner.storage_offset == 0 {
+                    0
+                } else {
+                    return Err(FastnnError::dtype(
+                        "nonzero storage offsets are unsupported for packed byte slices",
+                    ));
+                };
+                let end = start
+                    .checked_add(byte_len)
+                    .ok_or_else(|| FastnnError::Overflow("byte slice range overflow".into()))?;
+                if end > cpu.data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "byte slice range {start}..{end} exceeds storage length {}",
+                        cpu.data.len()
+                    )));
                 }
-                Some(&data[start..][..byte_len])
+                Ok(&cpu.data[start..end])
             }
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => None,
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot slice GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
@@ -1195,22 +1216,9 @@ pub fn ir_to_dtype(idt: IrDType) -> FastnnResult<DType> {
 }
 
 impl Tensor {
-    /// Expose the tensor's data as a raw byte slice (CPU only).
+    /// Expose the tensor's contiguous CPU data as raw bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        match self.inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                let elem_size = self
-                    .inner
-                    .dtype
-                    .scalar_byte_width()
-                    .expect("tensor byte access requires plain scalar storage");
-                let offset = self.inner.storage_offset as usize * elem_size;
-                let num_bytes = self.inner.numel() as usize * elem_size;
-                &cpu.data[offset..offset + num_bytes]
-            }
-            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
-            _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
-        }
+        self.try_as_bytes().expect("Tensor::as_bytes failed")
     }
 
     /// Build a single-op graph, compile it with the AOT pipeline, execute,

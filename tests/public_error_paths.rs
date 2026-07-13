@@ -120,6 +120,24 @@ fn malformed_tensor_construction_returns_structured_errors() {
         .try_data_ptr()
         .expect_err("packed raw pointer access must fail");
     assert!(packed_pointer.to_string().contains("plain scalar storage"));
+    assert_eq!(packed.try_as_bytes().unwrap().len(), 4);
+
+    let mut packed_offset = packed.inner.as_ref().clone();
+    packed_offset.storage_offset = 1;
+    let packed_offset = Tensor::new(packed_offset)
+        .try_as_bytes()
+        .expect_err("packed byte slices with offsets must fail");
+    assert!(packed_offset
+        .to_string()
+        .contains("nonzero storage offsets"));
+
+    let noncontiguous = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])
+        .try_transpose(0, 1)
+        .unwrap();
+    let contiguity = noncontiguous
+        .try_as_bytes()
+        .expect_err("non-contiguous byte slices must fail");
+    assert!(contiguity.to_string().contains("contiguous"));
 
     let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
     let mut pointer_bounds = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
