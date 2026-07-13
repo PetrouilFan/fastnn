@@ -60,7 +60,10 @@ impl TensorImpl {
         }
         let numel = self.numel() as usize;
         let ndim = self.ndim();
-        let elem_size = self.dtype.size();
+        let elem_size = self
+            .dtype
+            .scalar_byte_width()
+            .expect("contiguous conversion requires plain scalar storage");
         let mut data = vec![0u8; numel * elem_size];
         let src_ptr = match self.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),

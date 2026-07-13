@@ -47,7 +47,7 @@ impl TensorImpl {
             panic!("Tensor too large");
         }
         let numel = numel as i64;
-        let nbytes = (numel * dtype.size() as i64) as usize;
+        let nbytes = dtype.storage_bytes(numel as usize);
         // Validate storage is large enough for the declared shape.
         // This catches mismatches between shape inference and actual data size.
         let storage_nbytes = storage.nbytes();
@@ -90,7 +90,7 @@ impl TensorImpl {
             panic!("Tensor too large");
         }
         let numel = numel as i64;
-        let _nbytes = (numel * dtype.size() as i64) as usize;
+        let _nbytes = dtype.storage_bytes(numel as usize);
 
         let strides = compute_strides(&sizes);
 
@@ -241,7 +241,10 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr();
-                let elem_size = self.dtype.size();
+                let elem_size = self
+                    .dtype
+                    .scalar_byte_width()
+                    .expect("tensor byte access requires plain scalar storage");
                 // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
@@ -262,7 +265,11 @@ impl TensorImpl {
         match &self.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 let ptr = cpu.data.as_ref().as_ptr();
-                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                let byte_offset = self.storage_offset as usize
+                    * self
+                        .dtype
+                        .scalar_byte_width()
+                        .expect("tensor byte access requires plain scalar storage");
                 unsafe { ptr.add(byte_offset) as *const f32 }
             }
             #[cfg(feature = "gpu")]
@@ -285,7 +292,11 @@ impl TensorImpl {
             Storage::Cpu(cpu) => {
                 let data = Arc::make_mut(&mut cpu.data);
                 let ptr = data.as_mut_ptr();
-                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                let byte_offset = self.storage_offset as usize
+                    * self
+                        .dtype
+                        .scalar_byte_width()
+                        .expect("tensor byte access requires plain scalar storage");
                 unsafe { ptr.add(byte_offset) as *mut f32 }
             }
             #[cfg(feature = "gpu")]
@@ -301,7 +312,10 @@ impl TensorImpl {
             Storage::Cpu(cpu) => {
                 let data = Arc::make_mut(&mut cpu.data);
                 let ptr = data.as_mut_ptr();
-                let elem_size = self.dtype.size();
+                let elem_size = self
+                    .dtype
+                    .scalar_byte_width()
+                    .expect("tensor byte access requires plain scalar storage");
                 unsafe { ptr.add(self.storage_offset as usize * elem_size) }
             }
             #[cfg(feature = "gpu")]
@@ -318,11 +332,18 @@ impl TensorImpl {
             // the lifetime of `self`.
             Storage::Cpu(cpu) => unsafe {
                 let ptr = cpu.data.as_ref().as_ptr();
-                let byte_offset = self.storage_offset as usize * self.dtype.size();
+                let byte_offset = self.storage_offset as usize
+                    * self
+                        .dtype
+                        .scalar_byte_width()
+                        .expect("tensor byte access requires plain scalar storage");
                 let ptr = ptr.add(byte_offset) as *const f32;
                 let numel = self.numel() as usize;
                 // Unconditional bounds validation to prevent UB in release builds
-                let elem_size = self.dtype.size();
+                let elem_size = self
+                    .dtype
+                    .scalar_byte_width()
+                    .expect("tensor byte access requires plain scalar storage");
                 let storage_len = cpu.data.len() / elem_size;
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
@@ -352,7 +373,10 @@ impl TensorImpl {
             // Unconditional bounds validation to prevent UB in release builds
             #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
             if let Storage::Cpu(cpu) = self.storage.as_ref() {
-                let elem_size = self.dtype.size();
+                let elem_size = self
+                    .dtype
+                    .scalar_byte_width()
+                    .expect("tensor byte access requires plain scalar storage");
                 let storage_len = cpu.data.len() / elem_size;
                 assert!(
                     self.storage_offset as usize + numel <= storage_len,
@@ -750,7 +774,11 @@ impl Tensor {
                 }
                 let data = cpu.data.as_ref();
                 let numel = self.inner.numel() as usize;
-                let elem_size = self.inner.dtype.size();
+                let elem_size = self
+                    .inner
+                    .dtype
+                    .scalar_byte_width()
+                    .expect("tensor byte access requires plain scalar storage");
                 let byte_len = numel * elem_size;
                 let start = self.inner.storage_offset as usize * elem_size;
                 // Ensure we don't read past the storage
@@ -1065,7 +1093,11 @@ impl Tensor {
     pub fn as_bytes(&self) -> &[u8] {
         match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let elem_size = self.inner.dtype.size();
+                let elem_size = self
+                    .inner
+                    .dtype
+                    .scalar_byte_width()
+                    .expect("tensor byte access requires plain scalar storage");
                 let offset = self.inner.storage_offset as usize * elem_size;
                 let num_bytes = self.inner.numel() as usize * elem_size;
                 &cpu.data[offset..offset + num_bytes]
@@ -1126,24 +1158,18 @@ impl Tensor {
                 let dt = ir_to_dtype(gt.dtype())
                     .map_err(|error| BackendError::Compilation(error.to_string()))?;
                 let numel: usize = shape.iter().map(|&s| s as usize).product();
-                let expected_bytes = numel * dt.size();
+                let expected_bytes = dt.storage_bytes(numel);
                 let num_bytes = bytes.len();
                 // Validate that the AOT pipeline produced the right number of
                 // bytes for the shape inferred during graph construction.
                 // A mismatch here indicates a shape-inference or memory-planning
                 // bug in the compiler pipeline.
                 assert_eq!(
-                    num_bytes,
-                    expected_bytes,
+                    num_bytes, expected_bytes,
                     "AOT bridge: output byte size mismatch for shape {:?}, dtype {:?}: \
-                     got {} bytes but expected {} ({} elements × {} bytes/elem). \
+                     got {} bytes but expected {} for {} logical elements. \
                      This is likely a shape-inference bug in the compiler pass.",
-                    shape,
-                    dt,
-                    num_bytes,
-                    expected_bytes,
-                    numel,
-                    dt.size()
+                    shape, dt, num_bytes, expected_bytes, numel
                 );
                 let data = bytes.to_vec();
                 let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));

@@ -228,7 +228,6 @@ fn collect_leaf_tensors(nodes: &[Arc<NodeInfo>]) -> Vec<Tensor> {
 fn scalar_from_tensor(t: &Tensor) -> f32 {
     let cpu_t = t.to_cpu();
     let data = cpu_t.as_bytes();
-    let _dtype_size = t.dtype().size();
     let offset = 0; // storage_offset not available on current Tensor API
     if data.len() >= offset + 4 {
         f32::from_le_bytes([
@@ -805,8 +804,7 @@ fn store_gradients(leaf_inputs: &[Tensor], results: &mut [Vec<u8>]) {
     for (tensor, result_bytes) in leaf_inputs.iter().zip(results.iter_mut()) {
         let result_bytes = std::mem::take(result_bytes);
         let numel = tensor.shape().iter().product::<i64>() as usize;
-        let dtype_size = tensor.dtype().size();
-        let expected_bytes = numel * dtype_size;
+        let expected_bytes = tensor.dtype().storage_bytes(numel);
 
         if result_bytes.len() != expected_bytes {
             continue;

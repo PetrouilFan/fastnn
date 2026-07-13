@@ -134,7 +134,7 @@ impl Tensor {
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
-        let nbytes = (numel * dtype.size() as i64) as usize;
+        let nbytes = dtype.storage_bytes(numel as usize);
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
@@ -169,7 +169,7 @@ impl Tensor {
     pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         let sizes: SmallVec<[i64; 8]> = shape.into();
         let numel: i64 = sizes.iter().product();
-        let nbytes = (numel * dtype.size() as i64) as usize;
+        let nbytes = dtype.storage_bytes(numel as usize);
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
@@ -200,7 +200,7 @@ impl Tensor {
             Device::Cpu => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
                 let numel: i64 = sizes.iter().product();
-                let nbytes = (numel * dtype.size() as i64) as usize;
+                let nbytes = dtype.storage_bytes(numel as usize);
                 let numel = numel as usize;
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
@@ -300,7 +300,7 @@ impl Tensor {
             Device::Cpu => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
                 let numel: i64 = sizes.iter().product();
-                let nbytes = (numel * dtype.size() as i64) as usize;
+                let nbytes = dtype.storage_bytes(numel as usize);
                 let numel = numel as usize;
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);

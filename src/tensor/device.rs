@@ -78,7 +78,7 @@ impl TensorImpl {
                 };
 
                 // Convert f32 to target dtype
-                let nbytes = numel * dtype.size();
+                let nbytes = dtype.storage_bytes(numel);
                 let mut new_bytes = vec![0u8; nbytes];
 
                 match dtype {
@@ -108,7 +108,7 @@ impl TensorImpl {
                         let dst = new_bytes.as_mut_ptr() as *mut half::f16;
                         for (i, &v) in f32_data.iter().enumerate() {
                             // SAFETY: The `dst` pointer is derived from `new_bytes` which has been allocated
-                            // with `nbytes = numel * dtype.size()`, ensuring `dst.add(i)` is valid for all `i < numel`.
+                            // with `nbytes = dtype.storage_bytes(numel)`, ensuring `dst.add(i)` is valid for all `i < numel`.
                             unsafe {
                                 *dst.add(i) = half::f16::from_f32(v);
                             }
@@ -118,7 +118,7 @@ impl TensorImpl {
                         let dst = new_bytes.as_mut_ptr() as *mut half::bf16;
                         for (i, &v) in f32_data.iter().enumerate() {
                             // SAFETY: The `dst` pointer is derived from `new_bytes` which has been allocated
-                            // with `nbytes = numel * dtype.size()`, ensuring `dst.add(i)` is valid for all `i < numel`.
+                            // with `nbytes = dtype.storage_bytes(numel)`, ensuring `dst.add(i)` is valid for all `i < numel`.
                             unsafe {
                                 *dst.add(i) = half::bf16::from_f32(v);
                             }

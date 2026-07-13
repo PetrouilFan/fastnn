@@ -134,23 +134,36 @@ pub enum DType {
 }
 
 impl DType {
-    pub fn size(&self) -> usize {
+    /// Logical width of one encoded value.
+    pub fn logical_bit_width(self) -> usize {
         match self {
-            DType::F32 | DType::I32 => 4,
-            DType::F64 | DType::I64 => 8,
-            DType::F16 | DType::BF16 => 2,
-            DType::Bool => 1,
-            DType::I4 => 1,
-            DType::I8Scaled => 1,
-            DType::F8 => 1,
-            DType::F8R => 1,
-            DType::F4 => 1,
-            DType::U4Scaled => 1,
-            DType::U8Scaled => 1,
+            DType::F64 | DType::I64 => 64,
+            DType::F32 | DType::I32 => 32,
+            DType::F16 | DType::BF16 => 16,
+            DType::Bool | DType::I8Scaled | DType::F8 | DType::F8R | DType::U8Scaled => 8,
+            DType::I4 | DType::F4 | DType::U4Scaled => 4,
         }
     }
 
-    pub fn packed_size(&self, numel: usize) -> usize {
+    /// Byte width for plain scalar storage. Packed representations return `None`.
+    pub fn scalar_byte_width(self) -> Option<usize> {
+        match self {
+            DType::F32 | DType::I32 => Some(4),
+            DType::F64 | DType::I64 => Some(8),
+            DType::F16 | DType::BF16 => Some(2),
+            DType::Bool => Some(1),
+            DType::I4
+            | DType::I8Scaled
+            | DType::F8
+            | DType::F8R
+            | DType::F4
+            | DType::U4Scaled
+            | DType::U8Scaled => None,
+        }
+    }
+
+    /// Exact bytes required for `numel` values, including packed-word rounding.
+    pub fn storage_bytes(self, numel: usize) -> usize {
         match self {
             DType::F32 | DType::I32 => numel * 4,
             DType::F64 | DType::I64 => numel * 8,
@@ -502,4 +515,25 @@ pub fn allocator_stats() -> String {
         stats.total_freed(),
         stats.current_bytes(),
         stats.num_allocs())
+}
+
+#[cfg(test)]
+mod dtype_tests {
+    use super::DType;
+
+    #[test]
+    fn separates_logical_width_from_scalar_storage_width() {
+        assert_eq!(DType::F32.logical_bit_width(), 32);
+        assert_eq!(DType::F32.scalar_byte_width(), Some(4));
+        assert_eq!(DType::U4Scaled.logical_bit_width(), 4);
+        assert_eq!(DType::U4Scaled.scalar_byte_width(), None);
+    }
+
+    #[test]
+    fn packed_storage_size_rounds_to_complete_words() {
+        assert_eq!(DType::U4Scaled.storage_bytes(1), 4);
+        assert_eq!(DType::U4Scaled.storage_bytes(8), 4);
+        assert_eq!(DType::U4Scaled.storage_bytes(9), 8);
+        assert_eq!(DType::U8Scaled.storage_bytes(5), 8);
+    }
 }

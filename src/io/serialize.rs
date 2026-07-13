@@ -263,12 +263,11 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                         shape, name
                     ))
                 })?;
-            let elem_size = dtype.size();
-            let data_len = nbytes / elem_size;
-            if expected_numel != data_len {
+            let expected_bytes = dtype.storage_bytes(expected_numel);
+            if expected_bytes != nbytes {
                 return Err(FastnnError::Serialization(format!(
-                    "Shape mismatch for parameter '{}': shape {:?} expects {} elements of {:?}, but data has {} elements",
-                    name, shape, expected_numel, dtype, data_len
+                    "Shape mismatch for parameter '{}': shape {:?} and dtype {:?} require {} bytes, but data has {} bytes",
+                    name, shape, dtype, expected_bytes, nbytes
                 )));
             }
 

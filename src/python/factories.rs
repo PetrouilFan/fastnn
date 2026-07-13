@@ -185,7 +185,7 @@ fn randint(shape: Vec<i64>, low: i32, high: i32, device: Option<String>) -> PyRe
 fn tensor_from_bytes(data: Vec<u8>, shape: Vec<i64>, dtype: Option<String>) -> PyResult<PyTensor> {
     let dtype = resolve_dtype(dtype);
     let n: usize = shape.iter().product::<i64>() as usize;
-    let expected_bytes = n * dtype.size();
+    let expected_bytes = dtype.storage_bytes(n);
     if data.len() != expected_bytes {
         return Err(PyValueError::new_err(format!(
             "tensor_from_bytes: expected {expected_bytes} bytes for shape {:?} and dtype {}, got {}",
