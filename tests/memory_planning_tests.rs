@@ -533,8 +533,10 @@ fn test_memory_plan_zero_sized_tensor() {
 
     shape_inference::infer_shapes(&mut graph).unwrap();
     let plan = memory_planning::plan_memory(&graph).unwrap();
-    // Zero-sized tensors may be skipped, but the plan should still be valid
+    // Zero-sized interfaces retain explicit slots for persisted runtimes.
     assert_eq!(plan.total_size, 0);
+    assert_eq!(plan.slots.get(&input_id).map(|slot| slot.size), Some(0));
+    assert!(plan.validate().is_ok());
 }
 
 #[test]

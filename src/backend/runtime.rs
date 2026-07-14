@@ -154,9 +154,9 @@ impl<B: Backend> Runtime<B> {
                     "runtime input {input_index} node {node_id} has no slot"
                 ))
             })?;
-            if input_bytes.len() > slot.size {
+            if input_bytes.len() != slot.size {
                 return Err(BackendError::Dispatch(format!(
-                    "runtime input {input_index} has {} bytes but its slot holds {}",
+                    "runtime input {input_index} has {} bytes but its slot requires {}",
                     input_bytes.len(),
                     slot.size
                 )));
@@ -219,6 +219,8 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert!(runtime.run(&[]).is_err());
 
+        let undersized = vec![0u8; input_bytes.len() - 1];
+        assert!(runtime.run(&[&undersized]).is_err());
         let oversized = vec![0u8; input_bytes.len() + 1];
         assert!(runtime.run(&[&oversized]).is_err());
     }

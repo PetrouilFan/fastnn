@@ -582,9 +582,9 @@ impl<B: Backend> GraphExecutor<B> {
                         input_node_id
                     ))
                 })?;
-            if input_bytes.len() > slot.size {
+            if input_bytes.len() != slot.size {
                 return Err(BackendError::Dispatch(format!(
-                    "input {i} for node {input_node_id} has {} bytes but its memory slot holds {}",
+                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}",
                     input_bytes.len(),
                     slot.size
                 )));

@@ -499,6 +499,17 @@ pub fn plan_memory_with_env(
         }
     }
 
+    // Keep zero-sized graph interfaces explicit so persisted runtimes can map
+    // inputs and outputs by node ID without relying on slot ordering.
+    for &node_id in graph.inputs.iter().chain(graph.outputs.iter()) {
+        slots.entry(node_id).or_insert(AllocSlot {
+            offset: 0,
+            size: 0,
+            node_id,
+            output_index: 0,
+        });
+    }
+
     Ok(MemoryPlan {
         total_size: arena_top,
         slots,
