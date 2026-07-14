@@ -2325,6 +2325,46 @@ impl GraphBuilder {
         beta1: f32,
         weight_decay: f32,
     ) -> GraphTensor {
+        self.try_apply_muon(weight, grad, m, lr, beta1, weight_decay)
+            .expect("GraphBuilder::apply_muon received invalid inputs")
+    }
+
+    pub fn try_apply_muon(
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        m: &GraphTensor,
+        lr: f32,
+        beta1: f32,
+        weight_decay: f32,
+    ) -> FastnnResult<GraphTensor> {
+        if !lr.is_finite() || lr < 0.0 {
+            return Err(FastnnError::shape(
+                "Muon learning rate must be finite and non-negative",
+            ));
+        }
+        if !beta1.is_finite() || !(0.0..1.0).contains(&beta1) {
+            return Err(FastnnError::shape("Muon beta1 must be in [0, 1)"));
+        }
+        if !weight_decay.is_finite() || weight_decay < 0.0 {
+            return Err(FastnnError::shape(
+                "Muon weight decay must be finite and non-negative",
+            ));
+        }
+        for (name, tensor) in [("gradient", grad), ("momentum", m)] {
+            if tensor.tensor_type().shape != weight.tensor_type().shape {
+                return Err(FastnnError::shape(format!(
+                    "Muon {name} shape {:?} does not match weight shape {:?}",
+                    tensor.tensor_type().shape,
+                    weight.tensor_type().shape
+                )));
+            }
+            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
+                return Err(FastnnError::dtype(format!(
+                    "Muon {name} dtype does not match weight dtype"
+                )));
+            }
+        }
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
@@ -2343,9 +2383,8 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
-                .expect("packed dtype bit width must be valid")
         } else {
-            result
+            Ok(result)
         }
     }
 
