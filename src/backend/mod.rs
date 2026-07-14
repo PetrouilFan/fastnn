@@ -362,6 +362,10 @@ pub trait Backend {
 
     fn allocate_arena(&self, total_bytes: usize) -> Self::Buffer;
 
+    fn try_allocate_arena(&self, total_bytes: usize) -> Result<Self::Buffer, BackendError> {
+        Ok(self.allocate_arena(total_bytes))
+    }
+
     fn compile(
         &self,
         graph: &ComputeGraph,

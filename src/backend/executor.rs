@@ -552,9 +552,15 @@ impl<B: Backend> GraphExecutor<B> {
             .as_ref()
             .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
-            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+            self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
         }
-        let arena = &self.cached_arena.as_ref().unwrap().1;
+        let arena = &self
+            .cached_arena
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::Dispatch("backend arena allocation returned no buffer".into())
+            })?
+            .1;
 
         if inputs.len() != graph.inputs.len() {
             return Err(BackendError::Dispatch(format!(
@@ -874,7 +880,7 @@ impl<B: Backend> GraphExecutor<B> {
         let model_shape_env = batch_shape_env.cloned().unwrap_or_default();
 
         // 9. Allocate arena and write initial values
-        let arena = self.backend.allocate_arena(plan.arena_size);
+        let arena = self.backend.try_allocate_arena(plan.arena_size)?;
 
         // Write param data
         for (i, data) in param_data.iter().enumerate() {
@@ -2238,6 +2244,9 @@ mod execution_storage_size_tests {
     fn checked_storage_sizes_reject_overflow() {
         assert!(IrDType::F32.try_packed_byte_size(usize::MAX).is_none());
         assert!(checked_execution_storage_size(&IrDType::I8, usize::MAX).is_err());
+        assert!(crate::backend::cpu::CpuBackend
+            .try_allocate_arena(usize::MAX)
+            .is_err());
     }
 
     #[test]

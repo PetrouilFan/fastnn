@@ -316,6 +316,17 @@ impl Backend for CpuBackend {
         CpuBuffer::new(buf)
     }
 
+    fn try_allocate_arena(&self, total_bytes: usize) -> Result<CpuBuffer, BackendError> {
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(total_bytes).map_err(|error| {
+            BackendError::Dispatch(format!(
+                "failed to allocate {total_bytes}-byte CPU arena: {error}"
+            ))
+        })?;
+        buf.resize(total_bytes, 0);
+        Ok(CpuBuffer::new(buf))
+    }
+
     fn compile(
         &self,
         graph: &ComputeGraph,

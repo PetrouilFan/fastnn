@@ -117,12 +117,24 @@ impl<B: Backend> Runtime<B> {
             .as_ref()
             .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
-            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+            self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
         }
-        let arena_ref = &self.cached_arena.as_ref().unwrap().1;
+        let arena_ref = &self
+            .cached_arena
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::Dispatch("runtime arena allocation returned no buffer".into())
+            })?
+            .1;
         if enough_capacity {
-            self.backend
-                .write_arena(arena_ref, 0, &vec![0u8; arena_size]);
+            let mut zeroed = Vec::new();
+            zeroed.try_reserve_exact(arena_size).map_err(|error| {
+                BackendError::Dispatch(format!(
+                    "failed to allocate {arena_size}-byte arena reset buffer: {error}"
+                ))
+            })?;
+            zeroed.resize(arena_size, 0);
+            self.backend.write_arena(arena_ref, 0, &zeroed);
         }
 
         // Write inputs into earliest slots (ordering cached at construction).
