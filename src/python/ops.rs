@@ -779,10 +779,12 @@ fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyResult<PyTensor
 }
 
 #[pyfunction]
-fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
-    let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    let eq = equation.to_string();
-    PyTensor::from_tensor(core_tensor::einsum(&eq, &tensors_inner))
+fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyResult<PyTensor> {
+    let tensors_inner: Vec<Tensor> = tensors.into_iter().map(|t| t.inner).collect();
+    Ok(PyTensor::from_tensor(core_tensor::try_einsum(
+        equation,
+        &tensors_inner,
+    )?))
 }
 
 #[pyfunction]

@@ -451,6 +451,17 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_einsum_inputs_return_structured_errors() {
+    let left = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let right = Tensor::from_vec(vec![1.0; 8], vec![4, 2]);
+
+    assert!(fastnn::tensor::try_einsum("ij,jk", &[left.clone(), right.clone()]).is_err());
+    assert!(fastnn::tensor::try_einsum("ij,jk->ik", &[left.clone()]).is_err());
+    assert!(fastnn::tensor::try_einsum("ii,ij->ij", &[left.clone(), left.clone()]).is_err());
+    assert!(fastnn::tensor::try_einsum("ij,jk->iz", &[left, right]).is_err());
+}
+
+#[test]
 fn invalid_squeeze_dimensions_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
     assert_eq!(values.try_squeeze(Some(0)).unwrap().shape(), &[2]);

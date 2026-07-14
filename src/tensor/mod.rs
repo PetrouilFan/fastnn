@@ -968,6 +968,84 @@ impl std::fmt::Debug for Tensor {
 }
 
 pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
+    try_einsum(equation, tensors).expect("einsum received invalid inputs")
+}
+
+pub fn try_einsum(equation: &str, tensors: &[Tensor]) -> FastnnResult<Tensor> {
+    let (inputs, output) = equation
+        .split_once("->")
+        .ok_or_else(|| FastnnError::shape("einsum equation must contain exactly one '->'"))?;
+    if output.contains("->") {
+        return Err(FastnnError::shape(
+            "einsum equation must contain exactly one '->'",
+        ));
+    }
+    let labels: Vec<&str> = inputs.split(',').map(str::trim).collect();
+    if tensors.len() != 2 || labels.len() != 2 {
+        return Err(FastnnError::shape(
+            "einsum currently requires exactly two tensors and two input terms",
+        ));
+    }
+    for (index, (term, tensor)) in labels.iter().zip(tensors).enumerate() {
+        if term.len() != tensor.ndim() {
+            return Err(FastnnError::shape(format!(
+                "einsum input {index} has {} labels but tensor rank {}",
+                term.len(),
+                tensor.ndim()
+            )));
+        }
+        let mut seen = [false; 26];
+        for byte in term.bytes() {
+            if !byte.is_ascii_lowercase() {
+                return Err(FastnnError::shape(
+                    "einsum labels must be lowercase ASCII letters",
+                ));
+            }
+            let position = usize::from(byte - b'a');
+            if std::mem::replace(&mut seen[position], true) {
+                return Err(FastnnError::shape(
+                    "repeated labels within one einsum input are not supported",
+                ));
+            }
+        }
+    }
+    let mut output_seen = [false; 26];
+    for byte in output.bytes() {
+        if !byte.is_ascii_lowercase() {
+            return Err(FastnnError::shape(
+                "einsum labels must be lowercase ASCII letters",
+            ));
+        }
+        let position = usize::from(byte - b'a');
+        if std::mem::replace(&mut output_seen[position], true)
+            || !labels.iter().any(|term| term.as_bytes().contains(&byte))
+        {
+            return Err(FastnnError::shape(
+                "einsum output labels must be unique and present in an input",
+            ));
+        }
+    }
+    if tensors[0].dtype() != tensors[1].dtype() || tensors[0].device() != tensors[1].device() {
+        return Err(FastnnError::dtype(
+            "einsum input tensors must have matching dtypes and devices",
+        ));
+    }
+    for (left, byte) in labels[0].bytes().enumerate() {
+        if let Some(right) = labels[1].bytes().position(|candidate| candidate == byte) {
+            if tensors[0].shape()[left] != tensors[1].shape()[right] {
+                return Err(FastnnError::shape(format!(
+                    "einsum label '{}' has mismatched dimensions {} and {}",
+                    char::from(byte),
+                    tensors[0].shape()[left],
+                    tensors[1].shape()[right]
+                )));
+            }
+        }
+    }
+    Ok(einsum_validated(equation, tensors))
+}
+
+fn einsum_validated(equation: &str, tensors: &[Tensor]) -> Tensor {
     let parts: Vec<&str> = equation.split("->").collect();
     let (input_str, output_str) = if parts.len() == 2 {
         (parts[0], parts[1])
