@@ -1246,13 +1246,22 @@ impl Tensor {
             .iter()
             .map(|tensor| {
                 if tensor.is_contiguous() {
-                    (*tensor).clone()
+                    Ok((*tensor).clone())
                 } else {
-                    tensor.contiguous()
+                    tensor
+                        .try_contiguous()
+                        .map_err(|error| BackendError::Dispatch(error.to_string()))
                 }
             })
-            .collect();
-        let input_bytes: Vec<&[u8]> = materialized_inputs.iter().map(Tensor::as_bytes).collect();
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        let input_bytes: Vec<&[u8]> = materialized_inputs
+            .iter()
+            .map(|tensor| {
+                tensor
+                    .try_as_bytes()
+                    .map_err(|error| BackendError::Dispatch(error.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
         let result_bytes = g.compile_and_execute::<CpuBackend>(
             &graph_outputs.iter().collect::<Vec<_>>(),
             CpuBackend,

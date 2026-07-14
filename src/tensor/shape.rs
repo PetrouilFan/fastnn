@@ -216,7 +216,7 @@ impl TensorImpl {
     pub fn try_reshape(&self, sizes: SmallVec<[i64; 8]>) -> FastnnResult<Tensor> {
         let new_sizes = resolve_reshape_sizes(self.numel(), sizes, "reshape")?;
         if !self.is_contiguous() {
-            let tensor = self.contiguous();
+            let tensor = self.try_contiguous()?;
             return tensor.inner.try_reshape(new_sizes);
         }
         Ok(self.try_view(new_sizes)?.into())

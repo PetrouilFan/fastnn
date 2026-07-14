@@ -464,6 +464,7 @@ fn contiguous_conversion_returns_structured_errors() {
     let packed = Tensor::try_zeros(vec![2, 8], DType::I4, Device::Cpu).unwrap();
     let packed_view = packed.try_transpose(0, 1).unwrap();
     assert!(packed_view.try_contiguous().is_err());
+    assert!(packed_view.try_reshape(vec![16]).is_err());
 }
 
 #[test]
