@@ -2301,51 +2301,79 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Dequantize => {
-                    let numel = input_shapes
-                        .first()
-                        .map(|s| s.iter().product::<u64>() as usize)
-                        .unwrap_or(1);
-                    // Check if the input has per-channel scale metadata (from
-                    // quantized Constants or Quantize ops). These are passed as
-                    // additional params so the dequantize kernel can reconstruct
-                    // f32 values without relying on an inline header.
-                    let (scales, dequant_offsets) = node
+                    let input_node = node
                         .inputs
                         .first()
                         .and_then(|&input_id| graph.get_node(input_id))
-                        .map(|n| match &n.output_type.dtype {
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "dequantize node {node_id} has no input metadata"
+                            ))
+                        })?;
+                    let input_shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "dequantize node {node_id} has no resolved input shape"
+                        ))
+                    })?;
+                    let numel_u64 = input_shape.iter().try_fold(1u64, |acc, value| {
+                        acc.checked_mul(*value).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "dequantize node {node_id} element count overflows"
+                            ))
+                        })
+                    })?;
+                    let numel = usize::try_from(numel_u64).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "dequantize node {node_id} element count exceeds this platform"
+                        ))
+                    })?;
+                    // Preserve the storage width explicitly; dispatch must not infer
+                    // representation from payload length.
+                    let (scales, mut dequant_offsets, bit_width) =
+                        match &input_node.output_type.dtype {
                             IrDType::I4 {
                                 scales,
                                 dequant_offsets,
                                 ..
-                            } => (scales.clone(), dequant_offsets.clone()),
-                            IrDType::U4Scaled {
+                            }
+                            | IrDType::U4Scaled {
                                 scales,
                                 dequant_offsets,
                                 ..
-                            } => (scales.clone(), dequant_offsets.clone()),
+                            } => (scales.clone(), dequant_offsets.clone(), 4usize),
                             IrDType::I8Scaled {
                                 scales,
                                 dequant_offsets,
-                            } => (scales.clone(), dequant_offsets.clone()),
-                            IrDType::U8Scaled {
+                            }
+                            | IrDType::U8Scaled {
                                 scales,
                                 dequant_offsets,
-                            } => (scales.clone(), dequant_offsets.clone()),
-                            _ => (vec![], vec![]),
-                        })
-                        .unwrap_or_default();
-                    let has_metadata = !scales.is_empty() && !dequant_offsets.is_empty();
-                    let format_flag: usize = if has_metadata { 1 } else { 0 }; // 0=header, 1=metadata
-                                                                               // Flatten scales and zero_points into params (f32 bits as usize)
-                    let mut params = vec![numel, format_flag];
+                            } => (scales.clone(), dequant_offsets.clone(), 8usize),
+                            dtype => {
+                                return Err(BackendError::Compilation(format!(
+                                "dequantize node {node_id} has unsupported input dtype {dtype:?}"
+                            )))
+                            }
+                        };
+                    if dequant_offsets.is_empty() && !scales.is_empty() {
+                        dequant_offsets.resize(scales.len(), 0.0);
+                    }
+                    if scales.len() != dequant_offsets.len() {
+                        return Err(BackendError::Compilation(format!(
+                            "dequantize node {node_id} scale and offset counts differ"
+                        )));
+                    }
+                    let has_metadata = !scales.is_empty();
+                    let format_flag: usize = usize::from(has_metadata);
+                    // [numel, format, bit_width, channels, scales..., offsets...]
+                    let mut params = vec![numel, format_flag, bit_width];
                     let num_channels = scales.len();
                     params.push(num_channels);
-                    for &s in &scales {
-                        params.push(s.to_bits() as usize);
+                    for &scale in &scales {
+                        params.push(scale.to_bits() as usize);
                     }
-                    for &zp in &dequant_offsets {
-                        params.push(zp.to_bits() as usize);
+                    for &offset in &dequant_offsets {
+                        params.push(offset.to_bits() as usize);
                     }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -6913,9 +6941,36 @@ impl Backend for CpuBackend {
                             }
                         }
                         "dequantize_kernel" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let numel = *params.first().unwrap_or(&0);
-                                let format_flag = *params.get(1).unwrap_or(&0); // 0=header, 1=metadata
+                            let input_slice = input_slices.first().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "dequantize_kernel: missing input slice".into(),
+                                )
+                            })?;
+                            if params.len() < 4 {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_kernel: expected numel, format, bit width, and channel count".into(),
+                                ));
+                            }
+                            let numel = params[0];
+                            let format_flag = params[1];
+                            let bit_width = params[2];
+                            if format_flag > 1 || !matches!(bit_width, 4 | 8) {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_kernel: invalid format or bit width".into(),
+                                ));
+                            }
+                            let expected_output = numel.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "dequantize_kernel: output size overflows".into(),
+                                )
+                            })?;
+                            if output_slice.size != expected_output || output_slice.offset % 4 != 0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_kernel: output slice does not match numel".into(),
+                                ));
+                            }
+                            {
                                 let in_data = {
                                     let d = arena.data_mut();
                                     let mut buf = tls_alloc_u8(input_slice.size);
@@ -6935,16 +6990,31 @@ impl Backend for CpuBackend {
                                     bit_width,
                                 ) = if format_flag == 1 {
                                     // Metadata-based: scales/zero_points passed as params
-                                    let num_channels = *params.get(2).unwrap_or(&0);
+                                    let num_channels = params[3];
+                                    let expected_params = num_channels
+                                        .checked_mul(2)
+                                        .and_then(|value| value.checked_add(4))
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "dequantize_kernel: metadata parameter count overflows"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    if params.len() != expected_params || num_channels == 0 {
+                                        return Err(BackendError::Dispatch(
+                                            "dequantize_kernel: metadata parameter count mismatch"
+                                                .into(),
+                                        ));
+                                    }
                                     let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
                                     for j in 0..num_channels {
-                                        let bits = *params.get(3 + j).unwrap_or(&0);
+                                        let bits = params[4 + j];
                                         scales.push(f32::from_bits(bits as u32));
                                     }
                                     let mut zero_points: Vec<f32> =
                                         Vec::with_capacity(num_channels);
                                     for j in 0..num_channels {
-                                        let bits = *params.get(3 + num_channels + j).unwrap_or(&0);
+                                        let bits = params[4 + num_channels + j];
                                         zero_points.push(f32::from_bits(bits as u32));
                                     }
                                     // The packed data starts at offset 0 (no header)
@@ -6955,20 +7025,7 @@ impl Backend for CpuBackend {
                                     } else {
                                         numel
                                     };
-                                    // Infer bit_width from packed byte ratio
-                                    let total_packed_bytes =
-                                        in_data.len().saturating_sub(data_offset);
-                                    let packed_words = total_packed_bytes / 4;
-                                    let bit_width = if packed_words > 0 && numel > 0 {
-                                        let ratio = (packed_words * 4) as f64 / numel as f64;
-                                        if ratio < 0.6 {
-                                            4
-                                        } else {
-                                            8
-                                        }
-                                    } else {
-                                        8
-                                    };
+
                                     (
                                         num_channels,
                                         num_elems_per_channel,
@@ -6979,48 +7036,55 @@ impl Backend for CpuBackend {
                                     )
                                 } else {
                                     // Header-based: parse [num_channels][num_elems][scales...][zps...][packed_data]
-                                    let num_channels = u32::from_le_bytes(
-                                        in_data[0..4].try_into().unwrap_or([0u8; 4]),
-                                    )
+                                    if params.len() != 4 || in_data.len() < 8 {
+                                        return Err(BackendError::Dispatch(
+                                            "dequantize_kernel: truncated header payload".into(),
+                                        ));
+                                    }
+                                    let num_channels = u32::from_le_bytes([
+                                        in_data[0], in_data[1], in_data[2], in_data[3],
+                                    ])
                                         as usize;
-                                    let num_elems_per_channel = u32::from_le_bytes(
-                                        in_data[4..8].try_into().unwrap_or([0u8; 4]),
-                                    )
+                                    let num_elems_per_channel = u32::from_le_bytes([
+                                        in_data[4], in_data[5], in_data[6], in_data[7],
+                                    ])
                                         as usize;
+                                    let metadata_bytes = num_channels
+                                        .checked_mul(8)
+                                        .and_then(|value| value.checked_add(8))
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "dequantize_kernel: header size overflows".into(),
+                                            )
+                                        })?;
+                                    if num_channels == 0
+                                        || num_elems_per_channel == 0
+                                        || metadata_bytes > in_data.len()
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "dequantize_kernel: invalid channel header".into(),
+                                        ));
+                                    }
                                     let mut hdr_offset = 8usize;
                                     let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
                                     for _ in 0..num_channels {
-                                        if hdr_offset + 4 <= in_data.len() {
-                                            let s = f32::from_le_bytes(
-                                                in_data[hdr_offset..hdr_offset + 4]
-                                                    .try_into()
-                                                    .unwrap(),
-                                            );
-                                            scales.push(s);
-                                            hdr_offset += 4;
-                                        }
+                                        let bytes = &in_data[hdr_offset..hdr_offset + 4];
+                                        scales.push(f32::from_le_bytes([
+                                            bytes[0], bytes[1], bytes[2], bytes[3],
+                                        ]));
+                                        hdr_offset += 4;
                                     }
-                                    // zero_points (currently all zero for symmetric quant)
+                                    let mut zero_points: Vec<f32> =
+                                        Vec::with_capacity(num_channels);
                                     for _ in 0..num_channels {
-                                        if hdr_offset + 4 <= in_data.len() {
-                                            hdr_offset += 4;
-                                        }
+                                        let bytes = &in_data[hdr_offset..hdr_offset + 4];
+                                        zero_points.push(f32::from_le_bytes([
+                                            bytes[0], bytes[1], bytes[2], bytes[3],
+                                        ]));
+                                        hdr_offset += 4;
                                     }
-                                    let zero_points: Vec<f32> = vec![0.0; num_channels];
                                     let data_offset = hdr_offset;
-                                    let total_packed_bytes =
-                                        in_data.len().saturating_sub(data_offset);
-                                    let packed_words = total_packed_bytes / 4;
-                                    let bit_width = if packed_words > 0 && numel > 0 {
-                                        let ratio = (packed_words * 4) as f64 / numel as f64;
-                                        if ratio < 0.6 {
-                                            4
-                                        } else {
-                                            8
-                                        }
-                                    } else {
-                                        8
-                                    };
+
                                     (
                                         num_channels,
                                         num_elems_per_channel,
@@ -7031,8 +7095,59 @@ impl Backend for CpuBackend {
                                     )
                                 };
 
+                                let declared_values = num_channels
+                                    .checked_mul(num_elems_per_channel)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_kernel: channel element count overflows"
+                                                .into(),
+                                        )
+                                    })?;
+                                if num_channels == 0
+                                    || num_elems_per_channel == 0
+                                    || declared_values != numel
+                                    || scales.len() != num_channels
+                                    || zero_points.len() != num_channels
+                                    || scales
+                                        .iter()
+                                        .any(|scale| !scale.is_finite() || *scale <= 0.0)
+                                    || zero_points.iter().any(|offset| !offset.is_finite())
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "dequantize_kernel: invalid channel or affine metadata"
+                                            .into(),
+                                    ));
+                                }
                                 let items_per_word = 32 / bit_width;
-                                let total_packed_bytes = in_data.len().saturating_sub(data_offset);
+                                let packed_words_required = numel
+                                    .checked_add(items_per_word - 1)
+                                    .map(|value| value / items_per_word)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_kernel: packed word count overflows".into(),
+                                        )
+                                    })?;
+                                let packed_bytes_required =
+                                    packed_words_required.checked_mul(4).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_kernel: packed byte count overflows".into(),
+                                        )
+                                    })?;
+                                let packed_end = data_offset
+                                    .checked_add(packed_bytes_required)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_kernel: packed payload range overflows"
+                                                .into(),
+                                        )
+                                    })?;
+                                if packed_end > in_data.len() {
+                                    return Err(BackendError::Dispatch(
+                                        "dequantize_kernel: truncated packed payload".into(),
+                                    ));
+                                }
+
+                                let total_packed_bytes = in_data.len() - data_offset;
                                 let packed_words = total_packed_bytes / 4;
 
                                 // Write output

@@ -2248,6 +2248,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn packed_dequantization_rejects_implicit_storage_width() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "dequantize_kernel".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 1, 3, 1, 1.0f32.to_bits() as usize, 0],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn quantized_matmul_rejects_truncated_activation_metadata() {
         let backend = crate::backend::cpu::CpuBackend;
         let plan = ExecutablePlan {
