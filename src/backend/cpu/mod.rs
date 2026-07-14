@@ -78,7 +78,7 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
     let mut cache = CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(arc_any) = cache.get(&cache_key) {
         if let Ok(arc_vec) = arc_any.clone().downcast::<Vec<T>>() {
             return arc_vec;
@@ -106,7 +106,10 @@ static F32_WEIGHT_CACHE: OnceLock<
 /// to prevent unbounded memory growth.
 pub fn clear_f32_weight_cache() {
     if let Some(cache) = F32_WEIGHT_CACHE.get() {
-        cache.lock().unwrap().clear();
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -134,7 +137,7 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     let mut cache = F32_WEIGHT_CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(arc_any) = cache.get(&cache_key) {
         if let Ok(arc_pt) = arc_any.clone().downcast::<PackedTensor<T>>() {
             return arc_pt;
@@ -342,16 +345,24 @@ impl Backend for CpuBackend {
         let mut node_level: std::collections::HashMap<NodeId, usize> =
             std::collections::HashMap::new();
         for &node_id in &order {
-            let node = graph
-                .get_node(node_id)
-                .expect("node in topological order must exist");
+            let node = graph.get_node(node_id).ok_or_else(|| {
+                BackendError::Compilation(format!(
+                    "topological order references missing node {node_id}"
+                ))
+            })?;
             let level = node
                 .inputs
                 .iter()
                 .filter_map(|id| node_level.get(id))
                 .max()
-                .map(|l| l + 1)
-                .unwrap_or(0);
+                .copied()
+                .map_or(Ok(0), |level| {
+                    level.checked_add(1).ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "topological level for node {node_id} overflows"
+                        ))
+                    })
+                })?;
             node_level.insert(node_id, level);
         }
         let mut instruction_levels: Vec<usize> = Vec::with_capacity(order.len());
@@ -360,7 +371,11 @@ impl Backend for CpuBackend {
             let node = graph
                 .get_node(node_id)
                 .ok_or_else(|| BackendError::Compilation(format!("Node {} not found", node_id)))?;
-            let level = node_level[&node_id];
+            let level = node_level.get(&node_id).copied().ok_or_else(|| {
+                BackendError::Compilation(format!(
+                    "topological level for node {node_id} is missing"
+                ))
+            })?;
 
             let input_slices: Vec<BufferSlice> = node
                 .inputs
@@ -866,7 +881,11 @@ impl Backend for CpuBackend {
                         )
                     });
                     let (kernel_name, weight_meta) = if is_quantized {
-                        let dtype = weight_dtype.as_ref().unwrap();
+                        let dtype = weight_dtype.as_ref().ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "quantized convolution node {node_id} has no weight dtype"
+                            ))
+                        })?;
                         let mut kernel = if matches!(dtype, IrDType::F4 { .. }) {
                             "conv2d_f4".to_string()
                         } else if matches!(dtype, IrDType::F8 { .. }) {
