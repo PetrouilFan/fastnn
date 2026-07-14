@@ -126,7 +126,119 @@ impl ExecutablePlan {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
         let plan: ExecutablePlan = bincode::deserialize(&bytes)?;
+        plan.validate()?;
         Ok(plan)
+    }
+
+    pub fn validate(&self) -> Result<(), BackendError> {
+        if self.levels.windows(2).any(|levels| levels[0] > levels[1]) {
+            return Err(BackendError::Dispatch(
+                "executable plan scheduling levels are not monotonic".into(),
+            ));
+        }
+
+        let validate_slice = |slice: BufferSlice, instruction_index: usize, label: &str| {
+            let end = slice.offset.checked_add(slice.size).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "instruction {instruction_index} {label} range overflows"
+                ))
+            })?;
+            if end > self.arena_size {
+                return Err(BackendError::Dispatch(format!(
+                    "instruction {instruction_index} {label} range {}..{end} exceeds arena size {}",
+                    slice.offset, self.arena_size
+                )));
+            }
+            Ok(())
+        };
+
+        for (instruction_index, instruction) in self.instructions.iter().enumerate() {
+            match instruction {
+                Instruction::CallKernel {
+                    input_slices,
+                    output_slice,
+                    secondary_output_slice,
+                    params,
+                    param_dims,
+                    ..
+                } => {
+                    for (input_index, &slice) in input_slices.iter().enumerate() {
+                        validate_slice(slice, instruction_index, &format!("input {input_index}"))?;
+                    }
+                    validate_slice(*output_slice, instruction_index, "output")?;
+                    if let Some(slice) = secondary_output_slice {
+                        validate_slice(*slice, instruction_index, "secondary output")?;
+                    }
+                    if let Some(param_dims) = param_dims {
+                        if param_dims.len() != params.len() {
+                            return Err(BackendError::Dispatch(format!(
+                                "instruction {instruction_index} has {} params but {} parameter dimensions",
+                                params.len(), param_dims.len()
+                            )));
+                        }
+                    }
+                }
+                Instruction::MemCopy { dst, src } => {
+                    validate_slice(*dst, instruction_index, "memcopy destination")?;
+                    validate_slice(*src, instruction_index, "memcopy source")?;
+                    if dst.size != src.size {
+                        return Err(BackendError::Dispatch(format!(
+                            "instruction {instruction_index} memcopy size mismatch: destination {}, source {}",
+                            dst.size, src.size
+                        )));
+                    }
+                }
+                Instruction::Fill { dst, .. } => {
+                    validate_slice(*dst, instruction_index, "fill destination")?;
+                }
+                Instruction::WriteConst { dst, data } => {
+                    validate_slice(*dst, instruction_index, "constant destination")?;
+                    if data.len() > dst.size {
+                        return Err(BackendError::Dispatch(format!(
+                            "instruction {instruction_index} constant data size {} exceeds destination size {}",
+                            data.len(),
+                            dst.size,
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod executable_plan_validation_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_malformed_executable_plan_metadata() {
+        let nonmonotonic_levels = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 4,
+            levels: vec![1, 0],
+        };
+        assert!(nonmonotonic_levels.validate().is_err());
+
+        let out_of_bounds = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(usize::MAX, 4),
+                data: vec![0; 4],
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        assert!(out_of_bounds.validate().is_err());
+
+        let mismatched_copy = ExecutablePlan {
+            instructions: vec![Instruction::MemCopy {
+                dst: BufferSlice::new(0, 4),
+                src: BufferSlice::new(4, 8),
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        assert!(mismatched_copy.validate().is_err());
     }
 }
 

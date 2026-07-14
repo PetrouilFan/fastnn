@@ -407,6 +407,7 @@ impl<B: Backend> GraphExecutor<B> {
         #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        plan.validate()?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
         let (tightened_memory_plan, shape_env, cached_filtered_plan) =
             if let Some(StaticShapeCache {
