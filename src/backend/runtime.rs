@@ -18,8 +18,8 @@
 //! it just loads the plan, maps the arena, and dispatches.
 
 use crate::backend::{Backend, BackendError, ExecutablePlan};
-use crate::compiler::{AllocSlot, MemoryPlan};
-use crate::ir::{NodeId, ShapeEnv};
+use crate::compiler::MemoryPlan;
+use crate::ir::ShapeEnv;
 
 /// A minimal runtime that loads and executes pre-compiled plans.
 ///
@@ -30,31 +30,32 @@ pub struct Runtime<B: Backend> {
     backend: B,
     plan: ExecutablePlan,
     memory_plan: MemoryPlan,
-    slots_sorted: Vec<(NodeId, AllocSlot)>,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
 }
 
 impl<B: Backend> Runtime<B> {
-    fn build_sorted_slots(memory_plan: &MemoryPlan) -> Vec<(NodeId, AllocSlot)> {
-        let mut slots: Vec<_> = memory_plan
-            .slots
-            .iter()
-            .map(|(&nid, s)| (nid, s.clone()))
-            .collect();
-        slots.sort_by_key(|&(_, ref s)| s.offset);
-        slots
-    }
-
     /// Create a new runtime from an already-loaded plan and memory plan.
-    pub fn new(backend: B, plan: ExecutablePlan, memory_plan: MemoryPlan) -> Self {
-        let slots_sorted = Self::build_sorted_slots(&memory_plan);
-        Runtime {
+    pub fn new(
+        backend: B,
+        plan: ExecutablePlan,
+        memory_plan: MemoryPlan,
+    ) -> Result<Self, BackendError> {
+        plan.validate()?;
+        memory_plan
+            .validate()
+            .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+        if memory_plan.total_size > plan.arena_size {
+            return Err(BackendError::Dispatch(format!(
+                "memory plan arena size {} exceeds executable arena size {}",
+                memory_plan.total_size, plan.arena_size
+            )));
+        }
+        Ok(Runtime {
             backend,
             plan,
             memory_plan,
-            slots_sorted,
             cached_arena: None,
-        }
+        })
     }
 
     /// Load a plan and memory plan from files saved by the compiler pipeline.
@@ -73,14 +74,7 @@ impl<B: Backend> Runtime<B> {
         let memory_json = std::fs::read_to_string(memory_path)?;
         let memory_plan: MemoryPlan = serde_json::from_str(&memory_json)?;
 
-        let slots_sorted = Self::build_sorted_slots(&memory_plan);
-        Ok(Runtime {
-            backend,
-            plan,
-            memory_plan,
-            slots_sorted,
-            cached_arena: None,
-        })
+        Ok(Self::new(backend, plan, memory_plan)?)
     }
 
     /// Save the plan and memory plan to files for later use by the runtime.
@@ -111,6 +105,10 @@ impl<B: Backend> Runtime<B> {
     ///
     /// Returns the output data for each graph output.
     pub fn run(&mut self, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>, BackendError> {
+        self.plan.validate()?;
+        self.memory_plan
+            .validate()
+            .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
         let arena_size = self.plan.arena_size;
         let enough_capacity = self
             .cached_arena
@@ -137,12 +135,34 @@ impl<B: Backend> Runtime<B> {
             self.backend.write_arena(arena_ref, 0, &zeroed);
         }
 
-        // Write inputs into earliest slots (ordering cached at construction).
-        for (i, input_bytes) in inputs.iter().enumerate() {
-            if let Some((_nid, slot)) = self.slots_sorted.get(i) {
-                self.backend
-                    .write_arena(arena_ref, slot.offset, input_bytes);
+        if inputs.len() != self.memory_plan.inputs.len() {
+            return Err(BackendError::Dispatch(format!(
+                "runtime expected {} inputs, received {}",
+                self.memory_plan.inputs.len(),
+                inputs.len()
+            )));
+        }
+        for (input_index, (&node_id, input_bytes)) in self
+            .memory_plan
+            .inputs
+            .iter()
+            .zip(inputs.iter())
+            .enumerate()
+        {
+            let slot = self.memory_plan.slots.get(&node_id).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "runtime input {input_index} node {node_id} has no slot"
+                ))
+            })?;
+            if input_bytes.len() > slot.size {
+                return Err(BackendError::Dispatch(format!(
+                    "runtime input {input_index} has {} bytes but its slot holds {}",
+                    input_bytes.len(),
+                    slot.size
+                )));
             }
+            self.backend
+                .write_arena(arena_ref, slot.offset, input_bytes);
         }
 
         // Dispatch with an empty shape env.
@@ -153,10 +173,11 @@ impl<B: Backend> Runtime<B> {
         // Read only graph output slots (not all intermediate tensors).
         let mut outputs = Vec::with_capacity(self.memory_plan.outputs.len());
         for &node_id in &self.memory_plan.outputs {
-            if let Some(slot) = self.memory_plan.slots.get(&node_id) {
-                let data = self.backend.read_arena(arena_ref, slot.offset, slot.size);
-                outputs.push(data);
-            }
+            let slot = self.memory_plan.slots.get(&node_id).ok_or_else(|| {
+                BackendError::Dispatch(format!("runtime output node {node_id} has no slot"))
+            })?;
+            let data = self.backend.read_arena(arena_ref, slot.offset, slot.size);
+            outputs.push(data);
         }
 
         Ok(outputs)
@@ -170,5 +191,53 @@ impl<B: Backend> Runtime<B> {
     /// Return a reference to the loaded memory plan.
     pub fn memory_plan(&self) -> &MemoryPlan {
         &self.memory_plan
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::cpu::CpuBackend;
+    use crate::ir::builder::GraphBuilder;
+    use crate::ir::IrDType;
+
+    #[test]
+    fn runtime_uses_declared_inputs_and_validates_payloads() {
+        let builder = GraphBuilder::new();
+        let input = builder.input(&[1, 4], IrDType::F32);
+        let output = builder.relu(&input);
+        let (plan, memory_plan, _) = builder
+            .compile(&[&output], CpuBackend)
+            .expect("compile must succeed");
+        let mut runtime = Runtime::new(CpuBackend, plan, memory_plan)
+            .expect("valid plans must construct a runtime");
+        let input_bytes: Vec<u8> = [1.0f32, -2.0, 3.0, -4.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let outputs = runtime.run(&[&input_bytes]).expect("runtime must execute");
+        assert_eq!(outputs.len(), 1);
+        assert!(runtime.run(&[]).is_err());
+
+        let oversized = vec![0u8; input_bytes.len() + 1];
+        assert!(runtime.run(&[&oversized]).is_err());
+    }
+
+    #[test]
+    fn runtime_rejects_inconsistent_memory_metadata() {
+        let plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 4,
+            levels: vec![],
+        };
+        let memory_plan = MemoryPlan {
+            total_size: 4,
+            slots: std::collections::HashMap::new(),
+            inputs: vec![1],
+            secondary_slots: std::collections::HashMap::new(),
+            outputs: vec![],
+            tightened_params: std::collections::HashMap::new(),
+        };
+        assert!(Runtime::new(CpuBackend, plan, memory_plan).is_err());
     }
 }

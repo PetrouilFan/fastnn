@@ -135,6 +135,7 @@ pub fn plan_memory_with_env(
         return Ok(MemoryPlan {
             total_size: 0,
             slots: HashMap::new(),
+            inputs: graph.inputs.clone(),
             secondary_slots: HashMap::new(),
             outputs: graph.outputs.clone(),
             tightened_params: HashMap::new(),
@@ -501,6 +502,7 @@ pub fn plan_memory_with_env(
     Ok(MemoryPlan {
         total_size: arena_top,
         slots,
+        inputs: graph.inputs.clone(),
         secondary_slots,
         outputs: graph.outputs.clone(),
         tightened_params: HashMap::new(),

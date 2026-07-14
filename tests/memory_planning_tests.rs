@@ -607,6 +607,7 @@ fn test_memory_plan_tighten_rejects_slot_range_overflow() {
         total_size: usize::MAX,
         slots,
         secondary_slots: HashMap::new(),
+        inputs: vec![],
         outputs: vec![],
         tightened_params: HashMap::new(),
     };
@@ -661,6 +662,7 @@ fn test_memory_plan_tighten_rejects_malformed_conv_parameters() {
         total_size: 0,
         slots: HashMap::new(),
         secondary_slots: HashMap::new(),
+        inputs: vec![],
         outputs: vec![],
         tightened_params: HashMap::new(),
     };
@@ -692,6 +694,7 @@ fn test_memory_planning_rejects_arena_alignment_overflow() {
         total_size: usize::MAX,
         slots,
         secondary_slots: HashMap::new(),
+        inputs: vec![],
         outputs: vec![input],
         tightened_params: HashMap::new(),
     };
@@ -720,6 +723,7 @@ fn test_memory_plan_tighten_rejects_malformed_shape_parameters() {
         total_size: 0,
         slots: HashMap::new(),
         secondary_slots: HashMap::new(),
+        inputs: vec![],
         outputs: vec![],
         tightened_params: HashMap::new(),
     };

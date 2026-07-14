@@ -16,6 +16,8 @@ pub struct AllocSlot {
 pub struct MemoryPlan {
     pub total_size: usize,
     pub slots: HashMap<NodeId, AllocSlot>,
+    /// Graph input node IDs in registration order.
+    pub inputs: Vec<NodeId>,
     /// Secondary output slots for multi-output nodes (e.g. MaxPool argmax indices).
     /// Key is (node_id, output_index).
     pub secondary_slots: HashMap<(NodeId, usize), AllocSlot>,
@@ -28,6 +30,55 @@ pub struct MemoryPlan {
 }
 
 impl MemoryPlan {
+    pub fn validate(&self) -> Result<(), String> {
+        for (&node_id, slot) in &self.slots {
+            if slot.node_id != node_id || slot.output_index != 0 {
+                return Err(format!(
+                    "primary slot metadata for node {node_id} is inconsistent"
+                ));
+            }
+            let end = slot
+                .offset
+                .checked_add(slot.size)
+                .ok_or_else(|| format!("primary slot for node {node_id} range overflows"))?;
+            if end > self.total_size {
+                return Err(format!(
+                    "primary slot for node {node_id} range {}..{end} exceeds arena size {}",
+                    slot.offset, self.total_size
+                ));
+            }
+        }
+        for (&(node_id, output_index), slot) in &self.secondary_slots {
+            if slot.node_id != node_id || slot.output_index != output_index || output_index == 0 {
+                return Err(format!(
+                    "secondary slot metadata for node {node_id} output {output_index} is inconsistent"
+                ));
+            }
+            let end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+                format!("secondary slot for node {node_id} output {output_index} range overflows")
+            })?;
+            if end > self.total_size {
+                return Err(format!(
+                    "secondary slot for node {node_id} output {output_index} range {}..{end} exceeds arena size {}",
+                    slot.offset, self.total_size
+                ));
+            }
+        }
+        for (&node_id, label) in self
+            .inputs
+            .iter()
+            .map(|node_id| (node_id, "input"))
+            .chain(self.outputs.iter().map(|node_id| (node_id, "output")))
+        {
+            if !self.slots.contains_key(&node_id) {
+                return Err(format!(
+                    "memory plan {label} node {node_id} has no primary slot"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Tighten slot sizes using runtime-resolved shape information.
     ///
     /// Slots whose symbolic dims resolved to smaller concrete values are
