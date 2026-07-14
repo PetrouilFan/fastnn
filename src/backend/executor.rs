@@ -505,6 +505,13 @@ impl<B: Backend> GraphExecutor<B> {
         }
         let arena = &self.cached_arena.as_ref().unwrap().1;
 
+        if inputs.len() != graph.inputs.len() {
+            return Err(BackendError::Dispatch(format!(
+                "expected {} graph inputs, received {}",
+                graph.inputs.len(),
+                inputs.len()
+            )));
+        }
         for (i, &input_node_id) in graph.inputs.iter().enumerate() {
             let input_bytes = inputs.get(i).ok_or_else(|| {
                 BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
@@ -518,6 +525,24 @@ impl<B: Backend> GraphExecutor<B> {
                         input_node_id
                     ))
                 })?;
+            if input_bytes.len() > slot.size {
+                return Err(BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} has {} bytes but its memory slot holds {}",
+                    input_bytes.len(),
+                    slot.size
+                )));
+            }
+            let input_end = slot.offset.checked_add(input_bytes.len()).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} arena range overflows"
+                ))
+            })?;
+            if input_end > arena_size {
+                return Err(BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} range {}..{input_end} exceeds arena size {arena_size}",
+                    slot.offset
+                )));
+            }
             self.backend.write_arena(arena, slot.offset, input_bytes);
         }
 
@@ -1750,6 +1775,26 @@ mod prepared_fallback_tests {
 
     fn read_f32(bytes: &[u8]) -> Vec<f32> {
         bytemuck::cast_slice(bytes).to_vec()
+    }
+
+    #[test]
+    fn execute_rejects_extra_and_oversized_inputs() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let y = g.relu(&x);
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let input = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let extra = f32_data(&[5.0]);
+        assert!(executor
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&input, &extra],)
+            .is_err());
+
+        let oversized = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert!(executor
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&oversized])
+            .is_err());
     }
 
     #[test]

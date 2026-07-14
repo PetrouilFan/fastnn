@@ -232,8 +232,6 @@ impl ExecutablePlan {
                     input_slices,
                     output_slice,
                     secondary_output_slice,
-                    params,
-                    param_dims,
                     weight_meta,
                     ..
                 } => {
@@ -246,14 +244,6 @@ impl ExecutablePlan {
                     }
                     if let Some(weight_meta) = weight_meta {
                         weight_meta.validate(instruction_index)?;
-                    }
-                    if let Some(param_dims) = param_dims {
-                        if param_dims.len() != params.len() {
-                            return Err(BackendError::Dispatch(format!(
-                                "instruction {instruction_index} has {} params but {} parameter dimensions",
-                                params.len(), param_dims.len()
-                            )));
-                        }
                     }
                 }
                 Instruction::MemCopy { dst, src } => {
