@@ -1091,16 +1091,25 @@ pub fn tighten_slices(
             } => {
                 if let Some(nid) = node_id {
                     // ── Update output_slice from tightened memory plan ──
-                    if let Some(slot) = tightened_memory_plan.slots.get(nid) {
-                        output_slice.offset = slot.offset;
-                        output_slice.size = slot.size;
-                    }
+                    let slot = tightened_memory_plan.slots.get(nid).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "cannot tighten instruction for node {nid}: output slot is missing"
+                        ))
+                    })?;
+                    output_slice.offset = slot.offset;
+                    output_slice.size = slot.size;
                     // ── Update secondary_output_slice ──
                     if let Some(sec_slice) = secondary_output_slice.as_mut() {
-                        if let Some(slot) = tightened_memory_plan.secondary_slots.get(&(*nid, 1)) {
-                            sec_slice.offset = slot.offset;
-                            sec_slice.size = slot.size;
-                        }
+                        let slot = tightened_memory_plan
+                            .secondary_slots
+                            .get(&(*nid, 1))
+                            .ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "cannot tighten instruction for node {nid}: secondary output slot is missing"
+                                ))
+                            })?;
+                        sec_slice.offset = slot.offset;
+                        sec_slice.size = slot.size;
                     }
                     // ── Update input slices from the graph ──
                     // IMPORTANT: Must use the same filter_map logic as compilation
@@ -1111,17 +1120,28 @@ pub fn tighten_slices(
                     // enumerate() would map input_slices[0]→A (skipped) and
                     // input_slices[1]→B, so C never gets updated and B's offset
                     // is written to C's slice, causing buffer aliasing.
-                    if let Some(node) = graph.get_node(*nid) {
-                        let mut slice_iter = input_slices.iter_mut();
-                        for &input_nid in &node.inputs {
-                            if tightened_memory_plan.slots.contains_key(&input_nid) {
-                                if let Some(slice) = slice_iter.next() {
-                                    if let Some(slot) = tightened_memory_plan.slots.get(&input_nid)
-                                    {
-                                        slice.offset = slot.offset;
-                                        slice.size = slot.size;
-                                    }
-                                }
+                    let node = graph.get_node(*nid).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "cannot tighten instruction for missing node {nid}"
+                        ))
+                    })?;
+                    let expected_inputs = node
+                        .inputs
+                        .iter()
+                        .filter(|input_nid| tightened_memory_plan.slots.contains_key(input_nid))
+                        .count();
+                    if input_slices.len() != expected_inputs {
+                        return Err(BackendError::Dispatch(format!(
+                            "cannot tighten instruction for node {nid}: expected {expected_inputs} input slices, found {}",
+                            input_slices.len()
+                        )));
+                    }
+                    let mut slice_iter = input_slices.iter_mut();
+                    for &input_nid in &node.inputs {
+                        if let Some(slot) = tightened_memory_plan.slots.get(&input_nid) {
+                            if let Some(slice) = slice_iter.next() {
+                                slice.offset = slot.offset;
+                                slice.size = slot.size;
                             }
                         }
                     }

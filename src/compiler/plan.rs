@@ -40,11 +40,6 @@ impl MemoryPlan {
     /// depends on shape information.  These are stored so that
     /// [`tighten_slices`](crate::backend::executor::tighten_slices) can
     /// update [`Instruction::CallKernel`] params without a full recompile.
-    pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> MemoryPlan {
-        self.try_tighten(graph, shape_env)
-            .expect("MemoryPlan::tighten failed")
-    }
-
     pub fn try_tighten(
         &self,
         graph: &ComputeGraph,
