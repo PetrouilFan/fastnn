@@ -188,43 +188,84 @@ impl MemoryPlan {
                     vec![group_size, is_mean, is_max]
                 }
                 Opcode::Conv2d => {
-                    let get_attr_usize = |name: &str| -> usize {
+                    let get_attr = |name: &str| -> Result<usize, String> {
                         node.attrs
                             .get(name)
-                            .and_then(|a| a.parse().ok())
-                            .unwrap_or(0)
+                            .ok_or_else(|| {
+                                format!("conv2d node {node_id} missing {name} attribute")
+                            })?
+                            .parse::<usize>()
+                            .map_err(|_| {
+                                format!("conv2d node {node_id} has invalid {name} attribute")
+                            })
                     };
-                    let stride = get_attr_usize("stride");
-                    let padding = get_attr_usize("padding");
-                    let dilation = get_attr_usize("dilation");
-                    let groups = get_attr_usize("groups").max(1);
+                    let stride = get_attr("stride")?;
+                    let padding = get_attr("padding")?;
+                    let dilation = get_attr("dilation")?;
+                    let groups = get_attr("groups")?;
+                    if stride == 0 || dilation == 0 || groups == 0 {
+                        return Err(format!(
+                            "conv2d node {node_id} requires positive stride, dilation, and groups"
+                        ));
+                    }
 
                     let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
                     let weight_shape = resolved_input_shapes.get(1).cloned().unwrap_or_default();
+                    let dimension = |shape: &[u64], index: usize, label: &str| {
+                        let value = shape.get(index).copied().ok_or_else(|| {
+                            format!("conv2d node {node_id} missing {label} dimension")
+                        })?;
+                        usize::try_from(value).map_err(|_| {
+                            format!("conv2d node {node_id} {label} dimension does not fit usize")
+                        })
+                    };
 
-                    let n_in = input_shape.first().copied().unwrap_or(1) as usize;
-                    let c = input_shape.get(1).copied().unwrap_or(1) as usize;
-                    let h = input_shape.get(2).copied().unwrap_or(1) as usize;
-                    let w = input_shape.get(3).copied().unwrap_or(1) as usize;
-                    // kernel_h/kw come from weight shape, not attrs (matches compile-time code)
-                    let kh = weight_shape.get(2).copied().unwrap_or(0) as usize;
-                    let kw = weight_shape.get(3).copied().unwrap_or(0) as usize;
+                    let n_in = dimension(&input_shape, 0, "batch")?;
+                    let c = dimension(&input_shape, 1, "channels")?;
+                    let h = dimension(&input_shape, 2, "height")?;
+                    let w = dimension(&input_shape, 3, "width")?;
+                    let f_out = dimension(&weight_shape, 0, "output channels")?;
+                    let kh = dimension(&weight_shape, 2, "kernel height")?;
+                    let kw = dimension(&weight_shape, 3, "kernel width")?;
+                    if c % groups != 0 {
+                        return Err(format!(
+                            "conv2d node {node_id} channels {c} are not divisible by groups {groups}"
+                        ));
+                    }
                     let c_per_group = c / groups;
-                    let f_out = weight_shape.first().copied().unwrap_or(1) as usize;
-                    let h_out = (h + 2 * padding)
-                        .saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
+                    let padded_h = padding
+                        .checked_mul(2)
+                        .and_then(|padding| h.checked_add(padding))
+                        .ok_or_else(|| format!("conv2d node {node_id} padded height overflows"))?;
+                    let padded_w = padding
+                        .checked_mul(2)
+                        .and_then(|padding| w.checked_add(padding))
+                        .ok_or_else(|| format!("conv2d node {node_id} padded width overflows"))?;
+                    let kernel_h = dilation
+                        .checked_mul(kh.saturating_sub(1))
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| format!("conv2d node {node_id} kernel height overflows"))?;
+                    let kernel_w = dilation
+                        .checked_mul(kw.saturating_sub(1))
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| format!("conv2d node {node_id} kernel width overflows"))?;
+                    let h_out = padded_h
+                        .saturating_sub(kernel_h)
                         .checked_div(stride)
-                        .map(|v| v + 1)
-                        .unwrap_or(1);
-                    let w_out = (w + 2 * padding)
-                        .saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| format!("conv2d node {node_id} output height is invalid"))?;
+                    let w_out = padded_w
+                        .saturating_sub(kernel_w)
                         .checked_div(stride)
-                        .map(|v| v + 1)
-                        .unwrap_or(1);
-                    let spatial_size = h_out * w_out;
-                    let col_w = c_per_group * kh * kw;
-                    // Layout: [stride, padding, dilation, groups, c, h, w, kh, kw,
-                    //          n_in, f_out, h_out, w_out, spatial_size, col_w]
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| format!("conv2d node {node_id} output width is invalid"))?;
+                    let spatial_size = h_out.checked_mul(w_out).ok_or_else(|| {
+                        format!("conv2d node {node_id} output spatial size overflows")
+                    })?;
+                    let col_w = c_per_group
+                        .checked_mul(kh)
+                        .and_then(|value| value.checked_mul(kw))
+                        .ok_or_else(|| format!("conv2d node {node_id} column width overflows"))?;
                     vec![
                         stride,
                         padding,

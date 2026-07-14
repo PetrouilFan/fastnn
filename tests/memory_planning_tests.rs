@@ -614,3 +614,55 @@ fn test_memory_plan_tighten_rejects_slot_range_overflow() {
         .try_tighten(&ComputeGraph::new(), &ShapeEnv::new())
         .is_err());
 }
+
+#[test]
+fn test_memory_plan_tighten_rejects_malformed_conv_parameters() {
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![
+                DimExpr::Known(1),
+                DimExpr::Known(4),
+                DimExpr::Known(8),
+                DimExpr::Known(8),
+            ],
+            IrDType::F32,
+        ),
+    );
+    let weight = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![
+                DimExpr::Known(8),
+                DimExpr::Known(4),
+                DimExpr::Known(3),
+                DimExpr::Known(3),
+            ],
+            IrDType::F32,
+        ),
+    );
+    graph.add_node(
+        Opcode::Conv2d,
+        vec![input, weight],
+        TensorType::new(
+            vec![
+                DimExpr::Known(1),
+                DimExpr::Known(8),
+                DimExpr::Known(6),
+                DimExpr::Known(6),
+            ],
+            IrDType::F32,
+        ),
+    );
+    let plan = MemoryPlan {
+        total_size: 0,
+        slots: HashMap::new(),
+        secondary_slots: HashMap::new(),
+        outputs: vec![],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
+}
