@@ -528,6 +528,21 @@ fn contiguous_conversion_returns_structured_errors() {
 fn invalid_dtype_conversions_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     assert_eq!(values.try_to_dtype(DType::I32).unwrap().dtype(), DType::I32);
+    for dtype in [
+        DType::F64,
+        DType::I32,
+        DType::I64,
+        DType::F16,
+        DType::BF16,
+        DType::Bool,
+    ] {
+        let converted = values.try_to_dtype(dtype).unwrap();
+        assert_eq!(converted.dtype(), dtype);
+        assert_eq!(converted.try_to_dtype(DType::F32).unwrap().shape(), &[2, 2]);
+    }
+    let offset_view = values.try_slice(0, 1, 2, 1).unwrap();
+    let offset_i32 = offset_view.try_to_dtype(DType::I32).unwrap();
+    assert_eq!(offset_i32.try_as_i64_slice().unwrap(), vec![3, 4]);
 
     let packed_target = values
         .try_to_dtype(DType::I4)
