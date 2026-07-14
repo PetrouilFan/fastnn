@@ -24,7 +24,7 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BufferSlice {
     pub offset: usize,
     pub size: usize,

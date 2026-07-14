@@ -38,7 +38,7 @@ pub enum PreparedConvKernelKind {
     FuturePackedU4,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedConv2d {
     pub instruction_index: usize,
     pub node_id: Option<NodeId>,
@@ -72,7 +72,7 @@ pub struct PreparedConv2d {
     pub scratch_len: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedMatMul {
     pub instruction_index: usize,
     pub node_id: Option<NodeId>,
@@ -1009,6 +1009,12 @@ pub fn validate_prepared_against_plan(
     plan: &ExecutablePlan,
 ) -> Result<(), crate::backend::BackendError> {
     use crate::backend::BackendError;
+    if prepared.arena_size < plan.arena_size {
+        return Err(BackendError::Dispatch(format!(
+            "prepared fallback: prepared arena size {} is smaller than plan arena size {}",
+            prepared.arena_size, plan.arena_size
+        )));
+    }
     let order = prepared.original_instruction_order();
     if order.len() != plan.instructions.len() {
         return Err(BackendError::Dispatch(format!(
@@ -1023,6 +1029,42 @@ pub fn validate_prepared_against_plan(
                 "prepared fallback: order mismatch at slot {}: prepared says {}, expected {}",
                 i, idx, i
             )));
+        }
+        match &prepared.instructions[i] {
+            PreparedInstruction::Generic { .. } => {}
+            PreparedInstruction::Conv2d(actual) => {
+                let Some(PreparedInstruction::Conv2d(mut expected)) =
+                    try_prepare_conv2d(&plan.instructions[i], i)
+                else {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: conv metadata at slot {i} does not match the source instruction"
+                    )));
+                };
+                expected.packed_weight = actual.packed_weight;
+                expected.packed_bias = actual.packed_bias;
+                expected.transposed_weight = actual.transposed_weight;
+                if actual != &expected {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: conv payload mismatch at slot {i}"
+                    )));
+                }
+            }
+            PreparedInstruction::MatMul(actual) => {
+                let Some(PreparedInstruction::MatMul(mut expected)) =
+                    try_prepare_matmul(&plan.instructions[i], i)
+                else {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: matmul metadata at slot {i} does not match the source instruction"
+                    )));
+                };
+                expected.packed_weight = actual.packed_weight;
+                expected.packed_bias = actual.packed_bias;
+                if actual != &expected {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: matmul payload mismatch at slot {i}"
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -3407,6 +3449,25 @@ mod tests {
         let prepared = prepare_executable_plan(&plan);
         validate_prepared_against_plan(&prepared, &plan)
             .expect("consistent plan must validate cleanly");
+    }
+
+    #[test]
+    fn validate_prepared_against_plan_rejects_arena_and_payload_mismatches() {
+        let plan = ExecutablePlan {
+            instructions: vec![make_conv2d_instruction("conv2d", Conv2dParams::default())],
+            arena_size: 4096,
+            levels: vec![0],
+        };
+        let mut wrong_arena = prepare_executable_plan(&plan);
+        wrong_arena.arena_size = plan.arena_size - 1;
+        assert!(validate_prepared_against_plan(&wrong_arena, &plan).is_err());
+
+        let mut wrong_payload = prepare_executable_plan(&plan);
+        let PreparedInstruction::Conv2d(conv) = &mut wrong_payload.instructions[0] else {
+            panic!("expected prepared conv2d");
+        };
+        conv.stride += 1;
+        assert!(validate_prepared_against_plan(&wrong_payload, &plan).is_err());
     }
 
     /// `validate_prepared_against_plan` returns `Err` when the prepared
