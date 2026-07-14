@@ -102,7 +102,7 @@ fn read_execution_outputs<B: Backend>(
                 slot.offset, tightened_memory_plan.total_size
             )));
         }
-        let data = backend.read_arena(arena, slot.offset, actual_size);
+        let data = backend.try_read_arena(arena, slot.offset, actual_size)?;
         outputs.push(data);
     }
     Ok(outputs)
@@ -600,7 +600,8 @@ impl<B: Backend> GraphExecutor<B> {
                     slot.offset
                 )));
             }
-            self.backend.write_arena(arena, slot.offset, input_bytes);
+            self.backend
+                .try_write_arena(arena, slot.offset, input_bytes)?;
         }
 
         // ── Dispatch: no-copy persistent view path vs standard path ──
@@ -887,7 +888,7 @@ impl<B: Backend> GraphExecutor<B> {
             let slot = memory_plan.slots.get(&params[i]).ok_or_else(|| {
                 BackendError::Compilation(format!("param {} slot not found", params[i]))
             })?;
-            self.backend.write_arena(&arena, slot.offset, data);
+            self.backend.try_write_arena(&arena, slot.offset, data)?;
         }
 
         // Write zero-initialized optimizer state (m, v for AdamW),
@@ -906,7 +907,8 @@ impl<B: Backend> GraphExecutor<B> {
                 } else {
                     vec![0u8; slot.size]
                 };
-                self.backend.write_arena(&arena, slot.offset, &init_data);
+                self.backend
+                    .try_write_arena(&arena, slot.offset, &init_data)?;
             }
         }
 
@@ -971,7 +973,7 @@ impl<B: Backend> CompiledTrainingModel<B> {
                     data.len()
                 )));
             }
-            self.backend.write_arena(&self.arena, off, data);
+            self.backend.try_write_arena(&self.arena, off, data)?;
         }
 
         // 3. Dispatch the full train-step graph
@@ -980,10 +982,10 @@ impl<B: Backend> CompiledTrainingModel<B> {
             .map_err(|e| BackendError::Dispatch(format!("train_step dispatch: {e}")))?;
 
         // 4. Read loss immediately (before any post-dispatch writes)
-        let loss_raw = self
+        let loss_bytes = self
             .backend
-            .read_arena(&self.arena, self.loss_slot_offset, 4);
-        let loss_arr: [u8; 4] = loss_raw
+            .try_read_arena(&self.arena, self.loss_slot_offset, 4)?;
+        let loss_arr: [u8; 4] = loss_bytes
             .get(..4)
             .ok_or_else(|| BackendError::Dispatch("train_step: loss buffer too small".into()))?
             .try_into()
@@ -1033,7 +1035,9 @@ impl<B: Backend> CompiledTrainingModel<B> {
                             )));
                         }
                         let t_slice = &input_slices[4];
-                        let t_bytes = self.backend.read_arena(&self.arena, t_slice.offset, 8);
+                        let t_bytes =
+                            self.backend
+                                .try_read_arena(&self.arena, t_slice.offset, 8)?;
                         let t_arr: [u8; 8] = t_bytes[..8]
                             .try_into()
                             .map_err(|_| BackendError::Dispatch("invalid t step value".into()))?;
@@ -1043,8 +1047,11 @@ impl<B: Backend> CompiledTrainingModel<B> {
                                 "train_step: AdamW step overflow (t > u64::MAX)".into(),
                             )
                         })?;
-                        self.backend
-                            .write_arena(&self.arena, t_slice.offset, &new_t.to_le_bytes());
+                        self.backend.try_write_arena(
+                            &self.arena,
+                            t_slice.offset,
+                            &new_t.to_le_bytes(),
+                        )?;
                     }
                     _ => {}
                 }
@@ -1710,7 +1717,7 @@ fn preload_prepared_fp32_slot<B: Backend>(
             slot.offset, slot_end
         )));
     }
-    backend.write_arena(arena, slot.offset, bytes);
+    backend.try_write_arena(arena, slot.offset, bytes)?;
     preloaded_slots.insert((slot.offset, slot.size));
     Ok(())
 }
@@ -2238,6 +2245,26 @@ mod execution_storage_size_tests {
                 u8.packed_byte_size(numel)
             );
         }
+    }
+
+    #[test]
+    fn cpu_arena_transfers_reject_invalid_ranges() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(4).unwrap();
+        assert!(backend.try_write_arena(&arena, 5, &[1]).is_err());
+        assert!(backend.try_write_arena(&arena, usize::MAX, &[1]).is_err());
+        assert!(backend.try_read_arena(&arena, 5, 1).is_err());
+        assert!(backend.try_read_arena(&arena, usize::MAX, 1).is_err());
+
+        let malformed_fill = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: crate::backend::BufferSlice::new(0, 3),
+                value: 0.0,
+            }],
+            arena_size: 3,
+            levels: vec![0],
+        };
+        assert!(malformed_fill.validate().is_err());
     }
 
     #[test]

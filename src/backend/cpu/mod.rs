@@ -7424,10 +7424,49 @@ impl Backend for CpuBackend {
         buf[offset..end].copy_from_slice(&data[..end - offset]);
     }
 
+    fn try_write_arena(
+        &self,
+        arena: &CpuBuffer,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), BackendError> {
+        let end = offset
+            .checked_add(data.len())
+            .ok_or_else(|| BackendError::Dispatch("CPU arena write range overflows".into()))?;
+        let buf = arena.data_mut();
+        let capacity = buf.len();
+        let destination = buf.get_mut(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "CPU arena write range {offset}..{end} exceeds {capacity} bytes"
+            ))
+        })?;
+        destination.copy_from_slice(data);
+        Ok(())
+    }
+
     fn read_arena(&self, arena: &CpuBuffer, offset: usize, size: usize) -> Vec<u8> {
         let buf = arena.data_mut();
         let end = (offset + size).min(buf.len());
         buf[offset..end].to_vec()
+    }
+
+    fn try_read_arena(
+        &self,
+        arena: &CpuBuffer,
+        offset: usize,
+        size: usize,
+    ) -> Result<Vec<u8>, BackendError> {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| BackendError::Dispatch("CPU arena read range overflows".into()))?;
+        let buf = arena.data_mut();
+        let source = buf.get(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "CPU arena read range {offset}..{end} exceeds {} bytes",
+                buf.len()
+            ))
+        })?;
+        Ok(source.to_vec())
     }
 
     #[cfg(feature = "prepared-plan")]

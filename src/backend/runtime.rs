@@ -132,7 +132,7 @@ impl<B: Backend> Runtime<B> {
                 ))
             })?;
             zeroed.resize(arena_size, 0);
-            self.backend.write_arena(arena_ref, 0, &zeroed);
+            self.backend.try_write_arena(arena_ref, 0, &zeroed)?;
         }
 
         if inputs.len() != self.memory_plan.inputs.len() {
@@ -162,7 +162,7 @@ impl<B: Backend> Runtime<B> {
                 )));
             }
             self.backend
-                .write_arena(arena_ref, slot.offset, input_bytes);
+                .try_write_arena(arena_ref, slot.offset, input_bytes)?;
         }
 
         // Dispatch with an empty shape env.
@@ -176,7 +176,9 @@ impl<B: Backend> Runtime<B> {
             let slot = self.memory_plan.slots.get(&node_id).ok_or_else(|| {
                 BackendError::Dispatch(format!("runtime output node {node_id} has no slot"))
             })?;
-            let data = self.backend.read_arena(arena_ref, slot.offset, slot.size);
+            let data = self
+                .backend
+                .try_read_arena(arena_ref, slot.offset, slot.size)?;
             outputs.push(data);
         }
 

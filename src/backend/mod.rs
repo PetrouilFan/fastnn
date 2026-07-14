@@ -258,6 +258,13 @@ impl ExecutablePlan {
                 }
                 Instruction::Fill { dst, .. } => {
                     validate_slice(*dst, instruction_index, "fill destination")?;
+                    if dst.offset % std::mem::align_of::<f32>() != 0
+                        || dst.size % std::mem::size_of::<f32>() != 0
+                    {
+                        return Err(BackendError::Dispatch(format!(
+                            "instruction {instruction_index} fill destination is not f32-aligned"
+                        )));
+                    }
                 }
                 Instruction::WriteConst { dst, data } => {
                     validate_slice(*dst, instruction_index, "constant destination")?;
@@ -453,7 +460,26 @@ pub trait Backend {
     /// Backends must define their host-transfer behavior explicitly.
     fn write_arena(&self, arena: &Self::Buffer, offset: usize, data: &[u8]);
 
+    fn try_write_arena(
+        &self,
+        arena: &Self::Buffer,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), BackendError> {
+        self.write_arena(arena, offset, data);
+        Ok(())
+    }
+
     /// Read `size` bytes from the arena starting at `offset`.
     /// Used by the executor to extract graph outputs.
     fn read_arena(&self, arena: &Self::Buffer, offset: usize, size: usize) -> Vec<u8>;
+
+    fn try_read_arena(
+        &self,
+        arena: &Self::Buffer,
+        offset: usize,
+        size: usize,
+    ) -> Result<Vec<u8>, BackendError> {
+        Ok(self.read_arena(arena, offset, size))
+    }
 }
