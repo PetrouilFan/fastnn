@@ -1579,6 +1579,7 @@ fn preload_prepared_fp32_slot<B: Backend>(
     label: &str,
     preloaded_slots: &mut std::collections::HashSet<(usize, usize)>,
     plan_len: usize,
+    arena_size: usize,
 ) -> Result<(), BackendError> {
     use crate::backend::prepared::PackedWeightKind;
 
@@ -1589,7 +1590,10 @@ fn preload_prepared_fp32_slot<B: Backend>(
         return Ok(());
     }
     let Some(values) = constant_arena.get(id) else {
-        return Ok(());
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} references missing fp32 constant slot {} at instruction {instruction_index}",
+            id.index
+        )));
     };
     let bytes = bytemuck::cast_slice(values);
     if bytes.len() != slot.size {
@@ -1602,6 +1606,17 @@ fn preload_prepared_fp32_slot<B: Backend>(
     if instruction_index >= plan_len {
         return Err(BackendError::Dispatch(format!(
             "prepared arena {label} instruction index {instruction_index} out of bounds for plan length {plan_len}"
+        )));
+    }
+    let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+        BackendError::Dispatch(format!(
+            "prepared arena {label} slot range overflows at instruction {instruction_index}"
+        ))
+    })?;
+    if slot_end > arena_size {
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} slot range {}..{} exceeds plan arena size {arena_size} at instruction {instruction_index}",
+            slot.offset, slot_end
         )));
     }
     backend.write_arena(arena, slot.offset, bytes);
@@ -1637,6 +1652,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                     "conv weight",
                     &mut preloaded_slots,
                     plan.instructions.len(),
+                    plan.arena_size,
                 )?;
                 if let Some(bias) = conv.bias {
                     preload_prepared_fp32_slot(
@@ -1649,6 +1665,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                         "conv bias",
                         &mut preloaded_slots,
                         plan.instructions.len(),
+                        plan.arena_size,
                     )?;
                 }
             }
@@ -1663,6 +1680,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                     "matmul weight",
                     &mut preloaded_slots,
                     plan.instructions.len(),
+                    plan.arena_size,
                 )?;
                 if let Some(bias) = matmul.bias {
                     preload_prepared_fp32_slot(
@@ -1675,6 +1693,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                         "matmul bias",
                         &mut preloaded_slots,
                         plan.instructions.len(),
+                        plan.arena_size,
                     )?;
                 }
             }
@@ -1730,6 +1749,46 @@ mod prepared_fallback_tests {
 
     fn read_f32(bytes: &[u8]) -> Vec<f32> {
         bytemuck::cast_slice(bytes).to_vec()
+    }
+
+    #[test]
+    fn prepared_constant_preload_rejects_invalid_slots() {
+        use crate::backend::prepared::{PackedWeightId, PreparedConstantArena};
+        use crate::backend::BufferSlice;
+        use std::collections::HashSet;
+
+        let backend = CpuBackend;
+        let arena_buffer = backend.allocate_arena(4);
+        let empty_arena = PreparedConstantArena::new();
+        let missing = preload_prepared_fp32_slot(
+            &backend,
+            &arena_buffer,
+            &empty_arena,
+            0,
+            Some(PackedWeightId::new(9)),
+            BufferSlice { offset: 0, size: 4 },
+            "test constant",
+            &mut HashSet::new(),
+            1,
+            4,
+        );
+        assert!(matches!(missing, Err(BackendError::Dispatch(_))));
+
+        let mut constant_arena = PreparedConstantArena::new();
+        let id = constant_arena.insert("weight", vec![1.0]);
+        let out_of_bounds = preload_prepared_fp32_slot(
+            &backend,
+            &arena_buffer,
+            &constant_arena,
+            0,
+            Some(id),
+            BufferSlice { offset: 4, size: 4 },
+            "test constant",
+            &mut HashSet::new(),
+            1,
+            4,
+        );
+        assert!(matches!(out_of_bounds, Err(BackendError::Dispatch(_))));
     }
 
     /// `execute_prepared_fallback` returns **byte-identical** output to
