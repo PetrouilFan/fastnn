@@ -136,6 +136,14 @@ impl Backend for WgpuBackend {
         arena: &WgpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
+        plan.validate()?;
+        let arena_size = arena.data_mut().len();
+        if arena_size < plan.arena_size {
+            return Err(BackendError::Dispatch(format!(
+                "WGPU arena has {arena_size} bytes but plan requires {}",
+                plan.arena_size
+            )));
+        }
         with_wgpu_context(|ctx| {
             let mut encoder = ctx
                 .device
@@ -287,15 +295,50 @@ impl Backend for WgpuBackend {
     }
 
     fn write_arena(&self, arena: &WgpuBuffer, offset: usize, data: &[u8]) {
+        let _ = self.try_write_arena(arena, offset, data);
+    }
+
+    fn try_write_arena(
+        &self,
+        arena: &WgpuBuffer,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), BackendError> {
+        let end = offset
+            .checked_add(data.len())
+            .ok_or_else(|| BackendError::Dispatch("WGPU arena write range overflows".into()))?;
         let buf = arena.data_mut();
-        let end = (offset + data.len()).min(buf.len());
-        buf[offset..end].copy_from_slice(&data[..end - offset]);
+        let capacity = buf.len();
+        let destination = buf.get_mut(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU arena write range {offset}..{end} exceeds {capacity} bytes"
+            ))
+        })?;
+        destination.copy_from_slice(data);
+        Ok(())
     }
 
     fn read_arena(&self, arena: &WgpuBuffer, offset: usize, size: usize) -> Vec<u8> {
+        self.try_read_arena(arena, offset, size).unwrap_or_default()
+    }
+
+    fn try_read_arena(
+        &self,
+        arena: &WgpuBuffer,
+        offset: usize,
+        size: usize,
+    ) -> Result<Vec<u8>, BackendError> {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| BackendError::Dispatch("WGPU arena read range overflows".into()))?;
         let buf = arena.data_mut();
-        let end = (offset + size).min(buf.len());
-        buf[offset..end].to_vec()
+        let source = buf.get(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU arena read range {offset}..{end} exceeds {} bytes",
+                buf.len()
+            ))
+        })?;
+        Ok(source.to_vec())
     }
 }
 

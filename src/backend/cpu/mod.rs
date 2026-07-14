@@ -2721,6 +2721,14 @@ impl Backend for CpuBackend {
         arena: &CpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
+        plan.validate()?;
+        let arena_size = arena.data_mut().len();
+        if arena_size < plan.arena_size {
+            return Err(BackendError::Dispatch(format!(
+                "CPU arena has {arena_size} bytes but plan requires {}",
+                plan.arena_size
+            )));
+        }
         // Ensure the global thread pool is initialized with pinned physical cores.
         #[cfg(feature = "parallel")]
         crate::backend::cpu::affinity::ensure_global_pool_initialized();
@@ -7419,9 +7427,7 @@ impl Backend for CpuBackend {
     }
 
     fn write_arena(&self, arena: &CpuBuffer, offset: usize, data: &[u8]) {
-        let buf = arena.data_mut();
-        let end = (offset + data.len()).min(buf.len());
-        buf[offset..end].copy_from_slice(&data[..end - offset]);
+        let _ = self.try_write_arena(arena, offset, data);
     }
 
     fn try_write_arena(
@@ -7445,9 +7451,7 @@ impl Backend for CpuBackend {
     }
 
     fn read_arena(&self, arena: &CpuBuffer, offset: usize, size: usize) -> Vec<u8> {
-        let buf = arena.data_mut();
-        let end = (offset + size).min(buf.len());
-        buf[offset..end].to_vec()
+        self.try_read_arena(arena, offset, size).unwrap_or_default()
     }
 
     fn try_read_arena(

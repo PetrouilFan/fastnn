@@ -2265,6 +2265,16 @@ mod execution_storage_size_tests {
             levels: vec![0],
         };
         assert!(malformed_fill.validate().is_err());
+
+        let undersized_plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 4,
+            levels: vec![],
+        };
+        let undersized_arena = backend.try_allocate_arena(3).unwrap();
+        assert!(backend
+            .dispatch(&undersized_plan, &undersized_arena, &ShapeEnv::new())
+            .is_err());
     }
 
     #[test]
