@@ -45,6 +45,7 @@ mod elementwise;
 use elementwise::fused_binary_activation_dispatch;
 mod scalar;
 use scalar::{scalar_kernel_instruction, scalar_op_dispatch, unary_op_dispatch};
+#[cfg(feature = "parallel")]
 pub mod affinity;
 mod params;
 pub mod topology;
@@ -4437,6 +4438,7 @@ impl Backend for CpuBackend {
                                     (h + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
                                 let w_out =
                                     (w + 2 * padding_val).saturating_sub(kernel) / stride_val + 1;
+                                #[cfg(feature = "parallel")]
                                 let hw_out = h_out * w_out;
                                 // â”€â”€ Sequential path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                                 #[cfg(not(feature = "parallel"))]

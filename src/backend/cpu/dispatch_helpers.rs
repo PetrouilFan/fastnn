@@ -48,6 +48,7 @@ macro_rules! impl_simd_binary_wrapper {
             {
                 return unsafe { $avx2(a, b, output) };
             }
+            #[cfg(feature = "parallel")]
             let len = output.len().min(a.len().max(b.len()));
             #[cfg(feature = "parallel")]
             if len >= 4096 {
@@ -78,6 +79,7 @@ macro_rules! impl_simd_scalar_wrapper {
             if microkernels::simd_avx2_available() {
                 return unsafe { $avx2(data, s, output) };
             }
+            #[cfg(feature = "parallel")]
             let len = output.len().min(data.len());
             #[cfg(feature = "parallel")]
             if len >= 4096 {
@@ -348,6 +350,7 @@ pub(super) fn biasadd_f32(data: &[f32], bias: &[f32], output: &mut [f32], channe
 
 #[inline]
 pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    #[cfg(feature = "parallel")]
     let num_rows = input.len() / row_size;
 
     #[cfg(feature = "parallel")]
@@ -396,6 +399,7 @@ pub(super) fn rms_norm_f32(
     row_size: usize,
     eps: f32,
 ) {
+    #[cfg(feature = "parallel")]
     let num_rows = input.len() / row_size;
 
     #[cfg(feature = "parallel")]

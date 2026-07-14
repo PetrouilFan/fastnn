@@ -4,7 +4,9 @@
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::dtypes::F16x2;
-use crate::dtypes::{F32x1, F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
+#[cfg(feature = "simd")]
+use crate::dtypes::{F4x8, F8x4, F8x4R};
 use crate::packed_tensor::PackedTensor;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -2024,10 +2026,12 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
     output: &mut [f32],
-    _n: usize,
+    n: usize,
     k: usize,
     m: usize,
 ) {
+    debug_assert_eq!(activation.len(), n.saturating_mul(k));
+    debug_assert_eq!(output.len(), n.saturating_mul(m));
     let k_packed = k.div_ceil(T::ITEMS);
 
     for o in output.iter_mut() {
