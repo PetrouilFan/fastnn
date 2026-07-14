@@ -451,6 +451,18 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn nonzero_conversion_returns_structured_errors() {
+    let values = Tensor::from_vec(vec![0.0, 2.0, 3.0, 0.0, 5.0, 0.0], vec![2, 3]);
+    assert_eq!(values.try_nonzero().unwrap(), vec![0, 1, 0, 2, 1, 1]);
+
+    let transposed = values.try_transpose(0, 1).unwrap();
+    assert_eq!(transposed.try_nonzero().unwrap(), vec![1, 0, 1, 1, 2, 0]);
+
+    let unsupported = Tensor::try_zeros(vec![2], DType::Bool, Device::Cpu).unwrap();
+    assert!(unsupported.try_nonzero().is_err());
+}
+
+#[test]
 fn contiguous_conversion_returns_structured_errors() {
     let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
     let transposed = values.try_transpose(0, 1).unwrap();

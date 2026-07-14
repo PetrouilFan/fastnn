@@ -471,36 +471,53 @@ impl Tensor {
     }
 
     pub fn nonzero(&self) -> Vec<i64> {
+        self.try_nonzero().expect("Tensor::nonzero failed")
+    }
+
+    pub fn try_nonzero(&self) -> FastnnResult<Vec<i64>> {
         let cpu_t = if !self.is_contiguous() {
-            self.contiguous()
+            self.try_contiguous()?
         } else {
             self.clone()
         };
-        let data = cpu_t.as_f32_slice();
+        let data = cpu_t.try_as_f32_slice()?;
         let shape = cpu_t.shape_ref();
         let ndim = shape.len();
 
         if ndim == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
-        // Precompute strides for fast flat-index decomposition
         let mut strides = vec![1usize; ndim];
         for i in (0..ndim - 1).rev() {
-            strides[i] = strides[i + 1] * shape[i + 1] as usize;
+            let next = usize::try_from(shape[i + 1])
+                .map_err(|_| FastnnError::shape("nonzero shape contains a negative dimension"))?;
+            strides[i] = strides[i + 1]
+                .checked_mul(next)
+                .ok_or_else(|| FastnnError::Overflow("nonzero stride overflow".into()))?;
         }
 
-        let total = data.len();
-        let mut result = Vec::with_capacity(total.saturating_mul(ndim));
-        for i in 0..total {
-            if data[i] != 0.0 {
+        let capacity = data
+            .len()
+            .checked_mul(ndim)
+            .ok_or_else(|| FastnnError::Overflow("nonzero output capacity overflow".into()))?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(capacity)
+            .map_err(|error| FastnnError::Allocation(error.to_string()))?;
+        for (i, &value) in data.iter().enumerate() {
+            if value != 0.0 {
                 let mut remaining = i;
-                for d in 0..ndim {
-                    result.push((remaining / strides[d]) as i64);
-                    remaining %= strides[d];
+                for &stride in &strides {
+                    result.push(
+                        i64::try_from(remaining / stride).map_err(|_| {
+                            FastnnError::Overflow("nonzero index exceeds i64".into())
+                        })?,
+                    );
+                    remaining %= stride;
                 }
             }
         }
-        result
+        Ok(result)
     }
 }
