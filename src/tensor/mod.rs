@@ -395,6 +395,11 @@ impl TensorImpl {
                 self.dtype
             )));
         }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "F32 slice access requires a contiguous tensor",
+            ));
+        }
         if self.storage_offset < 0 {
             return Err(FastnnError::shape(format!(
                 "negative storage offset {} cannot be sliced",
@@ -451,6 +456,11 @@ impl TensorImpl {
                 "mutable F32 slice access requires F32 storage, got {:?}",
                 self.dtype
             )));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "mutable F32 slice access requires a contiguous tensor",
+            ));
         }
         if self.storage_offset < 0 {
             return Err(FastnnError::shape(format!(

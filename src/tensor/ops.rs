@@ -2,6 +2,7 @@
 
 use crate::autograd;
 use crate::backend::BackendError;
+use crate::error::{FastnnError, FastnnResult};
 
 use crate::ir::builder::{GraphBuilder, GraphTensor};
 use crate::storage::{DType, Device, Storage};
@@ -811,29 +812,48 @@ impl Tensor {
     }
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
-        let src = self.to_cpu();
-        match src.inner.dtype {
+        self.try_as_i64_slice()
+            .expect("Tensor::as_i64_slice failed")
+    }
+
+    pub fn try_as_i64_slice(&self) -> FastnnResult<Vec<i64>> {
+        if self.device() != Device::Cpu {
+            return Err(FastnnError::device(
+                "integer slice access requires CPU storage",
+            ));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "integer slice access requires a contiguous tensor",
+            ));
+        }
+        match self.inner.dtype {
             DType::I32 => {
-                let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i32>(data)
-                    .iter()
-                    .map(|&v| v as i64)
-                    .collect()
+                let data = self.try_as_bytes()?;
+                let values = bytemuck::try_cast_slice::<_, i32>(data).map_err(|error| {
+                    FastnnError::dtype(format!(
+                        "I32 storage cannot be reinterpreted safely: {error}"
+                    ))
+                })?;
+                Ok(values.iter().map(|&value| i64::from(value)).collect())
             }
             DType::I64 => {
-                let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i64>(data).to_vec()
+                let data = self.try_as_bytes()?;
+                let values = bytemuck::try_cast_slice::<_, i64>(data).map_err(|error| {
+                    FastnnError::dtype(format!(
+                        "I64 storage cannot be reinterpreted safely: {error}"
+                    ))
+                })?;
+                Ok(values.to_vec())
             }
-            DType::F32 => {
-                let data = src.as_f32_slice();
-                data.iter().map(|&v| v as i64).collect()
-            }
-            _ => {
-                panic!(
-                    "as_i64_slice: unsupported dtype {:?}. Use explicit conversion.",
-                    src.inner.dtype
-                )
-            }
+            DType::F32 => Ok(self
+                .try_as_f32_slice()?
+                .iter()
+                .map(|&value| value as i64)
+                .collect()),
+            dtype => Err(FastnnError::dtype(format!(
+                "integer slice conversion does not support {dtype:?}"
+            ))),
         }
     }
 

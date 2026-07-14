@@ -451,6 +451,23 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn integer_slice_conversion_returns_structured_errors() {
+    let values = Tensor::from_vec(vec![1.9, -2.1, 3.0], vec![3]);
+    assert_eq!(values.try_as_i64_slice().unwrap(), vec![1, -2, 3]);
+
+    let unsupported = Tensor::try_zeros(vec![3], DType::Bool, Device::Cpu).unwrap();
+    let dtype = unsupported
+        .try_as_i64_slice()
+        .expect_err("unsupported integer conversion dtype must fail");
+    assert!(dtype.to_string().contains("does not support"));
+
+    let noncontiguous = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])
+        .try_transpose(0, 1)
+        .unwrap();
+    assert!(noncontiguous.try_as_i64_slice().is_err());
+}
+
+#[test]
 fn invalid_fused_optimizer_tensors_return_dispatch_errors() {
     let weight = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
     let gradient = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
