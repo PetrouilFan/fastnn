@@ -451,6 +451,25 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_lion_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let momentum = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_lion(&weight, &wrong_shape, &momentum, 0.01, 0.9, 0.99, 0.0)
+        .is_err());
+    assert!(graph
+        .try_apply_lion(&weight, &gradient, &momentum, 0.01, 0.9, 1.0, 0.0)
+        .is_err());
+    assert!(graph
+        .try_apply_lion(&weight, &gradient, &momentum, 0.01, 0.9, 0.99, -0.1)
+        .is_err());
+}
+
+#[test]
 fn invalid_muon_inputs_return_structured_errors() {
     let graph = GraphBuilder::new();
     let weight = graph.input(&[2, 2], IrDType::F32);
