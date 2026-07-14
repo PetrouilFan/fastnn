@@ -158,28 +158,57 @@ binary_op!(mul, try_mul);
 binary_op!(div, try_div);
 
 #[pyfunction]
-fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.add(&b.inner).relu())
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+    let added = a
+        .inner
+        .try_add(&b.inner)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let output = added
+        .try_relu()
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[pyfunction]
-fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let out = x.inner.matmul(&w.inner);
-    let out = match bias {
-        Some(b) => out.add(&b.inner),
-        None => out,
-    };
-    PyTensor::from_tensor(out.relu())
+fn fused_linear_relu(
+    x: &PyTensor,
+    w: &PyTensor,
+    bias: Option<&PyTensor>,
+) -> PyResult<PyTensor> {
+    let mut output = x
+        .inner
+        .try_matmul(&w.inner)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    if let Some(bias) = bias {
+        output = output
+            .try_add(&bias.inner)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    }
+    output = output
+        .try_relu()
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[pyfunction]
-fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let out = x.inner.matmul(&w.inner);
-    let out = match bias {
-        Some(b) => out.add(&b.inner),
-        None => out,
-    };
-    PyTensor::from_tensor(out.gelu())
+fn fused_linear_gelu(
+    x: &PyTensor,
+    w: &PyTensor,
+    bias: Option<&PyTensor>,
+) -> PyResult<PyTensor> {
+    let mut output = x
+        .inner
+        .try_matmul(&w.inner)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    if let Some(bias) = bias {
+        output = output
+            .try_add(&bias.inner)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    }
+    output = output
+        .try_gelu()
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[allow(clippy::too_many_arguments)]
