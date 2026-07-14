@@ -136,14 +136,19 @@ impl TensorImpl {
     }
 
     pub fn to_device(&self, device: Device) -> Tensor {
+        self.try_to_device(device)
+            .expect("TensorImpl::to_device failed")
+    }
+
+    pub fn try_to_device(&self, device: Device) -> FastnnResult<Tensor> {
         if device == self.device {
-            return self.clone().into();
+            return Ok(self.clone().into());
         }
         let tensor: Tensor = self.clone().into();
         match device {
-            Device::Cpu => tensor.to_cpu(),
+            Device::Cpu => tensor.try_to_cpu(),
             #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => tensor.to_gpu(device_id),
+            Device::Wgpu(device_id) => tensor.try_to_gpu(device_id),
         }
     }
 
@@ -208,29 +213,75 @@ impl Tensor {
     }
 
     pub fn to_device(&self, device: Device) -> Tensor {
-        self.inner.to_device(device)
+        self.try_to_device(device)
+            .expect("Tensor::to_device failed")
+    }
+
+    pub fn try_to_device(&self, device: Device) -> FastnnResult<Tensor> {
+        self.inner.try_to_device(device)
     }
 
     pub fn to_cpu(&self) -> Tensor {
+        self.try_to_cpu().expect("Tensor::to_cpu failed")
+    }
+
+    pub fn try_to_cpu(&self) -> FastnnResult<Tensor> {
         match self.inner.storage.as_ref() {
-            Storage::Cpu(_) => Tensor::new(
+            Storage::Cpu(_) => Ok(Tensor::new(
                 self.inner
                     .new_on_device(self.inner.storage.clone(), Device::Cpu),
-            ),
+            )),
             #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => {
-                use crate::backend::wgpu::context::get_wgpu_context;
-                let ctx = get_wgpu_context(gpu.device_id);
+                use crate::backend::wgpu::context::try_get_wgpu_context;
+                let ctx = try_get_wgpu_context(gpu.device_id).ok_or_else(|| {
+                    FastnnError::device(format!("WGPU device {} is not initialized", gpu.device_id))
+                })?;
                 let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let byte_data = bytemuck::cast_slice(&data).to_vec();
                 let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(byte_data, gpu.nbytes)));
-                Tensor::new(self.inner.new_on_device(storage, Device::Cpu))
+                Ok(Tensor::new(self.inner.new_on_device(storage, Device::Cpu)))
             }
         }
     }
 
     #[cfg(feature = "gpu")]
     pub fn to_gpu(&self, device_id: usize) -> Tensor {
+        self.try_to_gpu(device_id).expect("Tensor::to_gpu failed")
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn try_to_gpu(&self, device_id: usize) -> FastnnResult<Tensor> {
+        if matches!(self.device(), Device::Wgpu(current) if current == device_id) {
+            return Ok(self.clone());
+        }
+        if self.dtype() != DType::F32 {
+            return Err(FastnnError::dtype(
+                "WGPU transfer currently requires F32 tensors",
+            ));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "WGPU transfer currently requires contiguous tensors",
+            ));
+        }
+        if let Device::Wgpu(current) = self.device() {
+            if crate::backend::wgpu::context::try_get_wgpu_context(current).is_none() {
+                return Err(FastnnError::device(format!(
+                    "source WGPU device {current} is not initialized"
+                )));
+            }
+        }
+        if crate::backend::wgpu::context::try_get_wgpu_context(device_id).is_none() {
+            return Err(FastnnError::device(format!(
+                "WGPU device {device_id} is not initialized"
+            )));
+        }
+        Ok(self.to_gpu_validated(device_id))
+    }
+
+    #[cfg(feature = "gpu")]
+    fn to_gpu_validated(&self, device_id: usize) -> Tensor {
         match self.inner.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
             Storage::Wgpu(gpu) => {
