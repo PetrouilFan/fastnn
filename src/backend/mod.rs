@@ -57,6 +57,80 @@ pub struct QuantizedWeightMeta {
     pub codebooks: Vec<[f32; 16]>,
 }
 
+impl QuantizedWeightMeta {
+    fn validate(&self, instruction_index: usize) -> Result<(), BackendError> {
+        if !matches!(self.bit_width, 4 | 8) {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} has unsupported quantized weight bit width {}",
+                self.bit_width
+            )));
+        }
+        let Some((&rows, inner_shape)) = self.shape.split_first() else {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} quantized weight shape must not be empty"
+            )));
+        };
+        let columns = inner_shape.iter().try_fold(1usize, |count, &dimension| {
+            count.checked_mul(dimension).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "instruction {instruction_index} quantized weight shape overflows"
+                ))
+            })
+        })?;
+        let blocks_per_row = if self.quant_block_size == 0 {
+            1
+        } else {
+            columns.div_ceil(self.quant_block_size)
+        };
+        let metadata_len = rows.checked_mul(blocks_per_row).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "instruction {instruction_index} quantized metadata size overflows"
+            ))
+        })?;
+        let offsets_valid =
+            self.dequant_offsets.len() == metadata_len || self.dequant_offsets.is_empty();
+        if self.scales.len() != metadata_len || !offsets_valid {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} quantized metadata length mismatch: expected {metadata_len}, scales {}, offsets {}",
+                self.scales.len(), self.dequant_offsets.len()
+            )));
+        }
+        if self
+            .scales
+            .iter()
+            .any(|scale| !scale.is_finite() || *scale <= 0.0)
+            || self
+                .dequant_offsets
+                .iter()
+                .any(|offset| !offset.is_finite())
+        {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} quantized metadata contains invalid affine values"
+            )));
+        }
+        if !self.codebooks.is_empty() {
+            if self.bit_width != 4
+                || !(self.codebooks.len() == 1 || self.codebooks.len() == metadata_len)
+            {
+                return Err(BackendError::Dispatch(format!(
+                    "instruction {instruction_index} quantized codebook metadata is inconsistent"
+                )));
+            }
+            if self
+                .codebooks
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+            {
+                return Err(BackendError::Dispatch(format!(
+                    "instruction {instruction_index} quantized codebook contains non-finite values"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Instruction {
     CallKernel {
@@ -160,6 +234,7 @@ impl ExecutablePlan {
                     secondary_output_slice,
                     params,
                     param_dims,
+                    weight_meta,
                     ..
                 } => {
                     for (input_index, &slice) in input_slices.iter().enumerate() {
@@ -168,6 +243,9 @@ impl ExecutablePlan {
                     validate_slice(*output_slice, instruction_index, "output")?;
                     if let Some(slice) = secondary_output_slice {
                         validate_slice(*slice, instruction_index, "secondary output")?;
+                    }
+                    if let Some(weight_meta) = weight_meta {
+                        weight_meta.validate(instruction_index)?;
                     }
                     if let Some(param_dims) = param_dims {
                         if param_dims.len() != params.len() {
@@ -193,11 +271,15 @@ impl ExecutablePlan {
                 }
                 Instruction::WriteConst { dst, data } => {
                     validate_slice(*dst, instruction_index, "constant destination")?;
-                    if data.len() > dst.size {
+                    let data_end = dst.offset.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "instruction {instruction_index} constant data range overflows"
+                        ))
+                    })?;
+                    if data_end > self.arena_size {
                         return Err(BackendError::Dispatch(format!(
-                            "instruction {instruction_index} constant data size {} exceeds destination size {}",
-                            data.len(),
-                            dst.size,
+                            "instruction {instruction_index} constant data range {}..{data_end} exceeds arena size {}",
+                            dst.offset, self.arena_size
                         )));
                     }
                 }
@@ -210,6 +292,29 @@ impl ExecutablePlan {
 #[cfg(test)]
 mod executable_plan_validation_tests {
     use super::*;
+
+    #[test]
+    fn rejects_malformed_quantized_weight_metadata() {
+        let invalid = QuantizedWeightMeta {
+            bit_width: 4,
+            scales: vec![1.0],
+            dequant_offsets: vec![],
+            shape: vec![2, 4],
+            quant_block_size: 0,
+            codebooks: vec![],
+        };
+        assert!(invalid.validate(0).is_err());
+
+        let non_finite = QuantizedWeightMeta {
+            bit_width: 8,
+            scales: vec![f32::NAN],
+            dequant_offsets: vec![0.0],
+            shape: vec![1, 4],
+            quant_block_size: 0,
+            codebooks: vec![],
+        };
+        assert!(non_finite.validate(0).is_err());
+    }
 
     #[test]
     fn rejects_malformed_executable_plan_metadata() {
