@@ -451,6 +451,13 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_flip_dimensions_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    assert!(values.try_flip(&[2]).is_err());
+    assert!(values.try_flip(&[0, 0]).is_err());
+}
+
+#[test]
 fn nonzero_conversion_returns_structured_errors() {
     let values = Tensor::from_vec(vec![0.0, 2.0, 3.0, 0.0, 5.0, 0.0], vec![2, 3]);
     assert_eq!(values.try_nonzero().unwrap(), vec![0, 1, 0, 2, 1, 1]);

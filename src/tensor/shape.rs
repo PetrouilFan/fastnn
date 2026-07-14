@@ -544,9 +544,29 @@ impl Tensor {
     }
 
     pub fn flip(&self, dims: &[usize]) -> Tensor {
-        let result = Tensor::exec_aot(&[self], |g, ins| vec![g.flip(&ins[0], dims)])
-            .expect("Tensor::flip: AOT execution failed");
-        result.into_iter().next().unwrap()
+        self.try_flip(dims).expect("Tensor::flip failed")
+    }
+
+    pub fn try_flip(&self, dims: &[usize]) -> FastnnResult<Tensor> {
+        let rank = self.ndim();
+        let mut seen = vec![false; rank];
+        for &dim in dims {
+            if dim >= rank {
+                return Err(FastnnError::shape(format!(
+                    "flip dimension {dim} is out of range for rank {rank}"
+                )));
+            }
+            if std::mem::replace(&mut seen[dim], true) {
+                return Err(FastnnError::shape(format!(
+                    "flip dimension {dim} appears more than once"
+                )));
+            }
+        }
+        Tensor::exec_aot(&[self], |g, ins| vec![g.flip(&ins[0], dims)])
+            .map_err(|error| FastnnError::Computation(error.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| FastnnError::Internal("flip execution returned no output".into()))
     }
 
     pub(crate) fn broadcast_shapes(a: &[i64], b: &[i64]) -> FastnnResult<Vec<i64>> {

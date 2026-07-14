@@ -312,8 +312,22 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.squeeze(dim.map(|d| d as usize)))
     }
 
-    fn flip(&self, dim: i32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.flip(&[dim as usize]))
+    fn flip(&self, dim: i32) -> PyResult<PyTensor> {
+        let rank = self.inner.ndim() as i64;
+        let requested = i64::from(dim);
+        let normalized = if requested < 0 {
+            requested + rank
+        } else {
+            requested
+        };
+        if normalized < 0 || normalized >= rank {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "flip dimension {dim} is out of range for rank {rank}"
+            )));
+        }
+        Ok(PyTensor::from_tensor(
+            self.inner.try_flip(&[normalized as usize])?,
+        ))
     }
 
     fn maximum(&self, other: &PyTensor) -> PyResult<PyTensor> {
