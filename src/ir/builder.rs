@@ -2122,6 +2122,65 @@ impl GraphBuilder {
         }
     }
 
+    fn validate_adam_inputs(
+        &self,
+        operation: &str,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        m: &GraphTensor,
+        v: &GraphTensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+    ) -> FastnnResult<()> {
+        if !lr.is_finite() || lr < 0.0 {
+            return Err(FastnnError::shape(format!(
+                "{operation} learning rate must be finite and non-negative"
+            )));
+        }
+        if !beta1.is_finite() || !(0.0..1.0).contains(&beta1) {
+            return Err(FastnnError::shape(format!(
+                "{operation} beta1 must be in [0, 1)"
+            )));
+        }
+        if !beta2.is_finite() || !(0.0..1.0).contains(&beta2) {
+            return Err(FastnnError::shape(format!(
+                "{operation} beta2 must be in [0, 1)"
+            )));
+        }
+        if !eps.is_finite() || eps <= 0.0 {
+            return Err(FastnnError::shape(format!(
+                "{operation} epsilon must be finite and positive"
+            )));
+        }
+        if t == 0 {
+            return Err(FastnnError::shape(format!(
+                "{operation} step must be positive"
+            )));
+        }
+        for (name, tensor) in [
+            ("gradient", grad),
+            ("first moment", m),
+            ("second moment", v),
+        ] {
+            if tensor.tensor_type().shape != weight.tensor_type().shape {
+                return Err(FastnnError::shape(format!(
+                    "{operation} {name} shape {:?} does not match weight shape {:?}",
+                    tensor.tensor_type().shape,
+                    weight.tensor_type().shape
+                )));
+            }
+            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
+                return Err(FastnnError::dtype(format!(
+                    "{operation} {name} dtype does not match weight dtype"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Adam weight update: full Adam optimizer step.
     /// weight -= lr * (m / (1 - beta1^t)) / (sqrt(v / (1 - beta2^t)) + eps)
     ///
@@ -2157,43 +2216,7 @@ impl GraphBuilder {
         eps: f32,
         t: u64,
     ) -> FastnnResult<GraphTensor> {
-        if !lr.is_finite() || lr < 0.0 {
-            return Err(FastnnError::shape(
-                "Adam learning rate must be finite and non-negative",
-            ));
-        }
-        if !beta1.is_finite() || !(0.0..1.0).contains(&beta1) {
-            return Err(FastnnError::shape("Adam beta1 must be in [0, 1)"));
-        }
-        if !beta2.is_finite() || !(0.0..1.0).contains(&beta2) {
-            return Err(FastnnError::shape("Adam beta2 must be in [0, 1)"));
-        }
-        if !eps.is_finite() || eps <= 0.0 {
-            return Err(FastnnError::shape(
-                "Adam epsilon must be finite and positive",
-            ));
-        }
-        if t == 0 {
-            return Err(FastnnError::shape("Adam step must be positive"));
-        }
-        for (name, tensor) in [
-            ("gradient", grad),
-            ("first moment", m),
-            ("second moment", v),
-        ] {
-            if tensor.tensor_type().shape != weight.tensor_type().shape {
-                return Err(FastnnError::shape(format!(
-                    "Adam {name} shape {:?} does not match weight shape {:?}",
-                    tensor.tensor_type().shape,
-                    weight.tensor_type().shape
-                )));
-            }
-            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
-                return Err(FastnnError::dtype(format!(
-                    "Adam {name} dtype does not match weight dtype"
-                )));
-            }
-        }
+        self.validate_adam_inputs("Adam", weight, grad, m, v, lr, beta1, beta2, eps, t)?;
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
@@ -2237,6 +2260,30 @@ impl GraphBuilder {
         t: u64,
         weight_decay: f32,
     ) -> GraphTensor {
+        self.try_apply_adamw(weight, grad, m, v, lr, beta1, beta2, eps, t, weight_decay)
+            .expect("GraphBuilder::apply_adamw received invalid inputs")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_apply_adamw(
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        m: &GraphTensor,
+        v: &GraphTensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+        weight_decay: f32,
+    ) -> FastnnResult<GraphTensor> {
+        self.validate_adam_inputs("AdamW", weight, grad, m, v, lr, beta1, beta2, eps, t)?;
+        if !weight_decay.is_finite() || weight_decay < 0.0 {
+            return Err(FastnnError::shape(
+                "AdamW weight decay must be finite and non-negative",
+            ));
+        }
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
@@ -2258,9 +2305,8 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
-                .expect("packed dtype bit width must be valid")
         } else {
-            result
+            Ok(result)
         }
     }
 

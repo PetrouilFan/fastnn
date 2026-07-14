@@ -434,6 +434,20 @@ fn invalid_adam_inputs_return_structured_errors() {
             0,
         )
         .is_err());
+    assert!(graph
+        .try_apply_adamw(
+            &weight,
+            &gradient,
+            &first_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            1e-8,
+            1,
+            -0.01,
+        )
+        .is_err());
 }
 
 #[test]
