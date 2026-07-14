@@ -6562,10 +6562,23 @@ impl Backend for CpuBackend {
                             let max_rank = *params.first().ok_or_else(|| {
                                 BackendError::Dispatch("expand_f32: missing max_rank".into())
                             })?;
-                            if params.len() < 1 + max_rank * 2 {
+                            if max_rank > 8 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "expand_f32: rank {max_rank} exceeds the supported rank 8"
+                                )));
+                            }
+                            let expected_params = max_rank
+                                .checked_mul(2)
+                                .and_then(|value| value.checked_add(1))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "expand_f32: parameter count overflows".into(),
+                                    )
+                                })?;
+                            if params.len() < expected_params {
                                 return Err(BackendError::Dispatch(format!(
                                     "expand_f32: expected {} params, got {}",
-                                    1 + max_rank * 2,
+                                    expected_params,
                                     params.len()
                                 )));
                             }
@@ -6576,6 +6589,58 @@ impl Backend for CpuBackend {
 
                             let data_slice = &input_slices[0];
                             let _shape_slice = &input_slices[1];
+                            for (input_dim, output_dim) in in_dims.iter().zip(&out_dims) {
+                                if input_dim != output_dim && *input_dim != 1 {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "expand_f32: input dimension {input_dim} cannot expand to {output_dim}"
+                                    )));
+                                }
+                            }
+                            let expected_input_numel =
+                                in_dims.iter().try_fold(1usize, |acc, dim| {
+                                    acc.checked_mul(*dim).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "expand_f32: input element count overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let expected_output_numel =
+                                out_dims.iter().try_fold(1usize, |acc, dim| {
+                                    acc.checked_mul(*dim).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "expand_f32: output element count overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let expected_input_size =
+                                expected_input_numel.checked_mul(4).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "expand_f32: input size overflows".into(),
+                                    )
+                                })?;
+                            let expected_output_size =
+                                expected_output_numel.checked_mul(4).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "expand_f32: output size overflows".into(),
+                                    )
+                                })?;
+                            if data_slice.size != expected_input_size
+                                || output_slice.size != expected_output_size
+                                || data_slice.offset % 4 != 0
+                                || output_slice.offset % 4 != 0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "expand_f32: tensor slices do not match declared dimensions"
+                                        .into(),
+                                ));
+                            }
+                            let input_end = data_slice.offset + data_slice.size;
+                            let output_end = output_slice.offset + output_slice.size;
+                            if data_slice.offset < output_end && output_slice.offset < input_end {
+                                return Err(BackendError::Dispatch(
+                                    "expand_f32: input and output slices overlap".into(),
+                                ));
+                            }
                             let data_numel = data_slice.size / 4; // f32 = 4 bytes
                             let out_numel = output_slice.size / 4;
 
@@ -6605,7 +6670,7 @@ impl Backend for CpuBackend {
                                         } else if in_dim == 1 {
                                             0
                                         } else {
-                                            panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
+                                            0
                                         };
                                         in_linear += in_coord * in_stride;
                                         in_stride *= in_dim;
@@ -6638,7 +6703,7 @@ impl Backend for CpuBackend {
                                             } else if in_dim == 1 {
                                                 0
                                             } else {
-                                                panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
+                                                0
                                             };
                                             in_linear += in_coord * in_stride;
                                             in_stride *= in_dim;
@@ -6668,7 +6733,7 @@ impl Backend for CpuBackend {
                                             } else if in_dim == 1 {
                                                 0
                                             } else {
-                                                panic!("expand_f32: invalid broadcast: input dim {} cannot expand to output dim {} (must be 1 or match)", in_dim, out_dim);
+                                                0
                                             };
                                             in_linear += in_coord * in_stride;
                                             in_stride *= in_dim;

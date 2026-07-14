@@ -2248,6 +2248,30 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn expand_rejects_invalid_broadcast_metadata() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "expand_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(20, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 12),
+                secondary_output_slice: None,
+                params: vec![1, 2, 3],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 20,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn cpu_arena_transfers_reject_invalid_ranges() {
         let backend = crate::backend::cpu::CpuBackend;
         let arena = backend.try_allocate_arena(4).unwrap();
