@@ -26,8 +26,10 @@ struct FreeBlock {
 }
 
 /// Align a value up to the next multiple of `alignment` (must be power of 2).
-fn align_up(val: usize, alignment: usize) -> usize {
-    (val + alignment - 1) & !(alignment - 1)
+fn align_up(val: usize, alignment: usize) -> Result<usize, FastnnError> {
+    val.checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| FastnnError::Internal("memory allocation alignment overflows".into()))
 }
 
 /// Size-segregated free list allocator backed by a `BTreeMap`.
@@ -47,21 +49,22 @@ impl SegFreeList {
         }
     }
 
-    fn add(&mut self, offset: usize, size: usize) {
+    fn add(&mut self, offset: usize, size: usize) -> Result<(), FastnnError> {
         if size == 0 {
-            return;
+            return Ok(());
         }
-        let aligned = align_up(size, 8);
+        let aligned = align_up(size, 8)?;
         self.buckets.entry(aligned).or_default().push(FreeBlock {
             offset,
             size: aligned,
         });
+        Ok(())
     }
 
-    fn alloc(&mut self, size: usize) -> Option<usize> {
-        let aligned = align_up(size, 8);
+    fn alloc(&mut self, size: usize) -> Result<Option<usize>, FastnnError> {
+        let aligned = align_up(size, 8)?;
         if aligned == 0 {
-            return None;
+            return Ok(None);
         }
 
         let target_key = self.buckets.range(aligned..).next().map(|(&k, _)| k);
@@ -75,9 +78,12 @@ impl SegFreeList {
                     self.buckets.remove(&key);
                 }
                 if extra > 0 {
-                    self.add(off + aligned, extra);
+                    let split_offset = off.checked_add(aligned).ok_or_else(|| {
+                        FastnnError::Internal("free-list split offset overflows".into())
+                    })?;
+                    self.add(split_offset, extra)?;
                 }
-                return Some(off);
+                return Ok(Some(off));
             }
         }
 
@@ -91,19 +97,23 @@ impl SegFreeList {
             let off = block.offset;
             let extra = block.size - aligned;
             if extra > 0 {
-                self.add(off + aligned, extra);
+                let split_offset = off.checked_add(aligned).ok_or_else(|| {
+                    FastnnError::Internal("large free-list split offset overflows".into())
+                })?;
+                self.add(split_offset, extra)?;
             }
-            return Some(off);
+            return Ok(Some(off));
         }
 
-        None
+        Ok(None)
     }
 }
 
 /// Compute the byte size of a tensor's storage, optionally using a ShapeEnv
 /// to resolve symbolic dims to tighter bounds.
-fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> usize {
-    t.byte_size_with_env(shape_env)
+fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> Result<usize, FastnnError> {
+    t.try_byte_size_with_env(shape_env)
+        .ok_or_else(|| FastnnError::Internal("tensor storage size overflows".into()))
 }
 
 /// Plan memory using max estimates (no ShapeEnv).  Equivalent to
@@ -168,7 +178,7 @@ pub fn plan_memory_with_env(
 
     crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
-        let size = tensor_byte_size(&node.output_type, shape_env);
+        let size = tensor_byte_size(&node.output_type, shape_env).map_err(|e| e.to_string())?;
         if size > 0 {
             // Input nodes have their data written by the executor before any
             // instruction runs, so their lifetime starts at position 0 — not
@@ -201,7 +211,7 @@ pub fn plan_memory_with_env(
 
         // Secondary output (if any)
         if let Some(sec_type) = &node.secondary_output_type {
-            let sec_size = tensor_byte_size(sec_type, shape_env);
+            let sec_size = tensor_byte_size(sec_type, shape_env).map_err(|e| e.to_string())?;
             if sec_size > 0 {
                 let first_use = position.get(&node_id).copied().unwrap_or(0);
                 // Use transitive consumer analysis for secondary output too
@@ -219,7 +229,7 @@ pub fn plan_memory_with_env(
         }
         Ok(())
     })
-    .unwrap_or(());
+    .map_err(FastnnError::Internal)?;
 
     // Sort by (start_time, primary-first, size-desc).
     // The primary-first tiebreaker ensures that a node's primary output
@@ -336,7 +346,7 @@ pub fn plan_memory_with_env(
             if input_type != &node.output_type {
                 continue;
             }
-            let input_size = tensor_byte_size(input_type, shape_env);
+            let input_size = tensor_byte_size(input_type, shape_env)?;
             if input_size != info.size || input_size == 0 {
                 continue;
             }
@@ -407,10 +417,10 @@ pub fn plan_memory_with_env(
                 // live ranges.
                 if was_secondary {
                     if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                        free_list.add(slot.offset, align_up(slot.size, 8));
+                        free_list.add(slot.offset, align_up(slot.size, 8)?)?;
                     }
                 } else if let Some(slot) = slots.get(&expired_id) {
-                    free_list.add(slot.offset, align_up(slot.size, 8));
+                    free_list.add(slot.offset, align_up(slot.size, 8)?)?;
                 }
             } else {
                 i += 1;
@@ -419,13 +429,15 @@ pub fn plan_memory_with_env(
 
         // Round up to 64 bytes (cache line alignment) so all allocations
         // satisfy both SIMD (32-byte) alignment and cache line boundaries.
-        let size_aligned = align_up(info.size, 64);
+        let size_aligned = align_up(info.size, 64)?;
 
-        let offset = match free_list.alloc(size_aligned) {
+        let offset = match free_list.alloc(size_aligned)? {
             Some(off) => off,
             None => {
-                let off = align_up(arena_top, 64);
-                arena_top = off + size_aligned;
+                let off = align_up(arena_top, 64)?;
+                arena_top = off
+                    .checked_add(size_aligned)
+                    .ok_or_else(|| FastnnError::Internal("memory arena size overflows".into()))?;
                 off
             }
         };

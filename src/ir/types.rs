@@ -733,6 +733,26 @@ impl TensorType {
     ///
     /// For packed types (U4/U8), this computes the actual packed storage size
     /// including the SIMD margin, which is needed for correct arena allocation.
+    pub fn try_byte_size_with_env(&self, env: Option<&ShapeEnv>) -> Option<usize> {
+        let symbol_max = SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize;
+        let numel = self.shape.iter().try_fold(1usize, |count, dimension| {
+            let value = match dimension {
+                DimExpr::Known(value) => usize::try_from(*value).ok()?,
+                DimExpr::Bounded { max, .. } => usize::try_from(*max).ok()?,
+                DimExpr::Symbol(_) => match env {
+                    Some(env) => usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?,
+                    None => symbol_max,
+                },
+            };
+            count.checked_mul(value)
+        })?;
+        let conservative_limit = usize::MAX.checked_sub(64)?.checked_div(8)?;
+        if numel > conservative_limit {
+            return None;
+        }
+        Some(self.byte_size_with_env(env))
+    }
+
     pub fn byte_size_with_env(&self, env: Option<&ShapeEnv>) -> usize {
         let symbol_max = SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize;
         let numel: usize = self

@@ -668,6 +668,18 @@ fn test_memory_plan_tighten_rejects_malformed_conv_parameters() {
 }
 
 #[test]
+fn test_memory_planning_rejects_arena_alignment_overflow() {
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(u64::MAX)], IrDType::F32),
+    );
+    graph.set_outputs(vec![input]);
+    assert!(memory_planning::plan_memory(&graph).is_err());
+}
+
+#[test]
 fn test_memory_plan_tighten_rejects_malformed_shape_parameters() {
     let mut graph = ComputeGraph::new();
     let input = graph.add_node(

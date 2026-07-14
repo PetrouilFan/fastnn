@@ -22,7 +22,6 @@ use crate::compiler::MemoryPlan;
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 
 /// Cached state for an all-Known-shape model so that every forward call
 /// after the first can skip ShapeEnv resolution, shape validation, and
@@ -1175,20 +1174,6 @@ pub fn tighten_slices(
 
     plan.arena_size = tightened_memory_plan.total_size;
     Ok(())
-}
-
-/// Compute the byte size of a tensor described by shape dims and element size.
-/// Uses [`TensorType::byte_size`] under the hood.
-pub fn tensor_byte_size(shape: &[DimExpr], elem_byte_size: usize) -> usize {
-    let numel: usize = shape
-        .iter()
-        .map(|d| match d {
-            DimExpr::Known(v) => *v as usize,
-            DimExpr::Bounded { max, .. } => *max as usize,
-            DimExpr::Symbol(_) => crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize,
-        })
-        .product();
-    numel * elem_byte_size
 }
 
 /// Resolve a shape to concrete values using a runtime ShapeEnv.
