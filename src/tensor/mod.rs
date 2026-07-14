@@ -1232,7 +1232,17 @@ impl Tensor {
 
         let graph_outputs = build_graph(&g, &graph_inputs);
 
-        let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
+        let materialized_inputs: Vec<Tensor> = inputs
+            .iter()
+            .map(|tensor| {
+                if tensor.is_contiguous() {
+                    (*tensor).clone()
+                } else {
+                    tensor.contiguous()
+                }
+            })
+            .collect();
+        let input_bytes: Vec<&[u8]> = materialized_inputs.iter().map(Tensor::as_bytes).collect();
         let result_bytes = g.compile_and_execute::<CpuBackend>(
             &graph_outputs.iter().collect::<Vec<_>>(),
             CpuBackend,
