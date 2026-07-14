@@ -451,6 +451,23 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_dtype_conversions_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    assert_eq!(values.try_to_dtype(DType::I32).unwrap().dtype(), DType::I32);
+
+    let packed_target = values
+        .try_to_dtype(DType::I4)
+        .expect_err("packed conversion target must fail");
+    assert!(packed_target.to_string().contains("quantize/dequantize"));
+
+    let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
+    assert!(packed.try_to_dtype(DType::F32).is_err());
+
+    let noncontiguous = values.try_transpose(0, 1).unwrap();
+    assert!(noncontiguous.try_to_dtype(DType::I32).is_err());
+}
+
+#[test]
 fn integer_slice_conversion_returns_structured_errors() {
     let values = Tensor::from_vec(vec![1.9, -2.1, 3.0], vec![3]);
     assert_eq!(values.try_as_i64_slice().unwrap(), vec![1, -2, 3]);

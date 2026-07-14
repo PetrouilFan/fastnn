@@ -1,3 +1,4 @@
+use crate::error::{FastnnError, FastnnResult};
 use crate::storage::{CpuStorage, DType, Device, Storage};
 use std::sync::Arc;
 
@@ -9,6 +10,31 @@ use parking_lot::RwLock;
 
 impl TensorImpl {
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
+        self.try_to_dtype(dtype)
+            .expect("TensorImpl::to_dtype failed")
+    }
+
+    pub fn try_to_dtype(&self, dtype: DType) -> FastnnResult<Tensor> {
+        if dtype == self.dtype {
+            return Ok(self.clone().into());
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "dtype conversion requires a contiguous tensor",
+            ));
+        }
+        if self.dtype.scalar_byte_width().is_none() || dtype.scalar_byte_width().is_none() {
+            return Err(FastnnError::dtype(
+                "packed tensor dtype conversion requires explicit quantize/dequantize operations",
+            ));
+        }
+        if !matches!(self.storage.as_ref(), Storage::Cpu(_)) {
+            return Err(FastnnError::device("dtype conversion requires CPU storage"));
+        }
+        Ok(self.to_dtype_validated(dtype))
+    }
+
+    fn to_dtype_validated(&self, dtype: DType) -> Tensor {
         if dtype == self.dtype {
             return self.clone().into();
         }
@@ -216,7 +242,11 @@ impl TensorImpl {
 
 impl Tensor {
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
-        self.inner.to_dtype(dtype)
+        self.try_to_dtype(dtype).expect("Tensor::to_dtype failed")
+    }
+
+    pub fn try_to_dtype(&self, dtype: DType) -> FastnnResult<Tensor> {
+        self.inner.try_to_dtype(dtype)
     }
 
     pub fn to_device(&self, device: Device) -> Tensor {
