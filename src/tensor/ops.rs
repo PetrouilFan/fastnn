@@ -199,6 +199,33 @@ macro_rules! impl_inplace_binary_op {
 }
 
 impl Tensor {
+    fn normalize_axis(&self, axis: i32, operation: &str) -> Result<usize, BackendError> {
+        let rank = self.ndim() as i64;
+        let requested = i64::from(axis);
+        let normalized = if requested < 0 {
+            rank + requested
+        } else {
+            requested
+        };
+        if normalized < 0 || normalized >= rank {
+            return Err(BackendError::Dispatch(format!(
+                "{operation}: dimension {axis} is out of range for {rank} dimensions"
+            )));
+        }
+        Ok(normalized as usize)
+    }
+
+    fn attach_unary_grad(&self, output: Tensor, backward: &'static str) -> Tensor {
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info(backward, vec![self.clone()]),
+            )
+        } else {
+            output
+        }
+    }
+
     fn validate_binary_inputs(&self, other: &Tensor, operation: &str) -> Result<(), BackendError> {
         if self.device() != other.device() {
             return Err(BackendError::Dispatch(format!(
@@ -627,7 +654,18 @@ impl Tensor {
     impl_unary_op!(try_hardswish, hardswish, hardswish, "HardswishBackward");
     impl_unary_op!(try_mish, mish, mish, "MishBackward");
     impl_unary_op_extra!(try_elu, elu, "EluBackward", (alpha: f32), elu, alpha);
-    impl_unary_op_extra!(try_softmax, softmax, "SoftmaxBackward", (dim: i32), softmax, dim as i64);
+    pub fn try_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
+        let dim = self.normalize_axis(dim, "softmax")?;
+        let output = exec_single(&[self], |graph, inputs| {
+            vec![graph.softmax(&inputs[0], dim as i64)]
+        })?;
+        Ok(self.attach_unary_grad(output, "SoftmaxBackward"))
+    }
+
+    pub fn softmax(&self, dim: i32) -> Tensor {
+        self.try_softmax(dim)
+            .expect("Tensor::softmax: AOT execution failed")
+    }
     impl_unary_op!(try_sqrt, sqrt, sqrt, "SqrtBackward");
 
     /// Fused linear + gelu — single graph node.
@@ -675,7 +713,18 @@ impl Tensor {
     }
 
     impl_unary_op!(try_abs, abs, abs, "AbsBackward");
-    impl_unary_op_extra!(try_log_softmax, log_softmax, "LogSoftmaxBackward", (dim: i32), log_softmax, dim as i64);
+    pub fn try_log_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
+        let dim = self.normalize_axis(dim, "log_softmax")?;
+        let output = exec_single(&[self], |graph, inputs| {
+            vec![graph.log_softmax(&inputs[0], dim as i64)]
+        })?;
+        Ok(self.attach_unary_grad(output, "LogSoftmaxBackward"))
+    }
+
+    pub fn log_softmax(&self, dim: i32) -> Tensor {
+        self.try_log_softmax(dim)
+            .expect("Tensor::log_softmax: AOT execution failed")
+    }
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
         let src = self.to_cpu();

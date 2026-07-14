@@ -314,13 +314,13 @@ fn hardswish(a: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.softmax(dim))
+fn softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_softmax(dim).map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?))
 }
 
 #[pyfunction]
-fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.log_softmax(dim))
+fn log_softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_log_softmax(dim).map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?))
 }
 
 #[pyfunction]

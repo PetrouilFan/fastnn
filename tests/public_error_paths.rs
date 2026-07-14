@@ -370,6 +370,22 @@ fn invalid_binary_shapes_return_dispatch_errors() {
 }
 
 #[test]
+fn invalid_softmax_dimensions_return_dispatch_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let softmax = tensor
+        .try_softmax(2)
+        .expect_err("out-of-range softmax dimension must fail");
+    assert!(softmax.to_string().contains("out of range"));
+
+    let log_softmax = tensor
+        .try_log_softmax(-3)
+        .expect_err("out-of-range log-softmax dimension must fail");
+    assert!(log_softmax.to_string().contains("out of range"));
+
+    assert_eq!(tensor.try_softmax(-1).unwrap().shape(), vec![2, 2]);
+}
+
+#[test]
 fn invalid_reduction_dimensions_return_structured_errors() {
     let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
 
