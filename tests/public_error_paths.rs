@@ -451,6 +451,21 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_fused_optimizer_tensors_return_dispatch_errors() {
+    let weight = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    let gradient = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    let moment = Tensor::from_vec(vec![0.0; 4], vec![2, 2]);
+    let wrong_shape = Tensor::from_vec(vec![0.0; 2], vec![2]);
+
+    assert!(weight
+        .try_adam_update(&wrong_shape, &moment, &moment, 0.001, 0.9, 0.999, 1e-8, 1)
+        .is_err());
+    assert!(weight
+        .try_adamw_update(&gradient, &moment, &moment, 0.001, 0.9, 0.999, 1e-8, 1, -0.1,)
+        .is_err());
+}
+
+#[test]
 fn invalid_rmsprop_inputs_return_structured_errors() {
     let graph = GraphBuilder::new();
     let weight = graph.input(&[2, 2], IrDType::F32);

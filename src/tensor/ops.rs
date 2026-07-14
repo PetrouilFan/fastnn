@@ -229,6 +229,34 @@ macro_rules! impl_inplace_binary_op {
 }
 
 impl Tensor {
+    fn validate_optimizer_tensors(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        operation: &str,
+    ) -> Result<(), BackendError> {
+        for (name, tensor) in [
+            ("gradient", grad),
+            ("first moment", m),
+            ("second moment", v),
+        ] {
+            if tensor.shape() != self.shape() {
+                return Err(BackendError::Dispatch(format!(
+                    "{operation}: {name} shape {:?} does not match weight shape {:?}",
+                    tensor.shape(),
+                    self.shape()
+                )));
+            }
+            if tensor.dtype() != self.dtype() || tensor.device() != self.device() {
+                return Err(BackendError::Dispatch(format!(
+                    "{operation}: {name} dtype and device must match the weight"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn normalize_axis(&self, axis: i32, operation: &str) -> Result<usize, BackendError> {
         let rank = self.ndim() as i64;
         let requested = i64::from(axis);
@@ -825,6 +853,40 @@ impl Tensor {
         t: u64,
         weight_decay: f32,
     ) -> Vec<Tensor> {
+        self.try_adamw_update(grad, m, v, lr, beta1, beta2, eps, t, weight_decay)
+            .expect("Tensor::adamw_update failed")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_adamw_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+        weight_decay: f32,
+    ) -> Result<Vec<Tensor>, BackendError> {
+        self.validate_optimizer_tensors(grad, m, v, "adamw_update")?;
+        if !lr.is_finite()
+            || lr < 0.0
+            || !beta1.is_finite()
+            || !(0.0..1.0).contains(&beta1)
+            || !beta2.is_finite()
+            || !(0.0..1.0).contains(&beta2)
+            || !eps.is_finite()
+            || eps <= 0.0
+            || t == 0
+            || !weight_decay.is_finite()
+            || weight_decay < 0.0
+        {
+            return Err(BackendError::Dispatch(
+                "adamw_update: invalid optimizer hyperparameters".into(),
+            ));
+        }
         Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
             let updated = g.apply_adamw(
                 &ins[0],
@@ -840,7 +902,6 @@ impl Tensor {
             );
             vec![updated, ins[2].clone(), ins[3].clone()]
         })
-        .expect("Tensor::adamw_update: AOT execution failed")
     }
 
     /// Fused Adam weight update — single graph node replaces ~12 intermediate tensors.
@@ -856,12 +917,42 @@ impl Tensor {
         eps: f32,
         t: u64,
     ) -> Vec<Tensor> {
+        self.try_adam_update(grad, m, v, lr, beta1, beta2, eps, t)
+            .expect("Tensor::adam_update failed")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_adam_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+    ) -> Result<Vec<Tensor>, BackendError> {
+        self.validate_optimizer_tensors(grad, m, v, "adam_update")?;
+        if !lr.is_finite()
+            || lr < 0.0
+            || !beta1.is_finite()
+            || !(0.0..1.0).contains(&beta1)
+            || !beta2.is_finite()
+            || !(0.0..1.0).contains(&beta2)
+            || !eps.is_finite()
+            || eps <= 0.0
+            || t == 0
+        {
+            return Err(BackendError::Dispatch(
+                "adam_update: invalid optimizer hyperparameters".into(),
+            ));
+        }
         Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
             let updated =
                 g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
             vec![updated, ins[2].clone(), ins[3].clone()]
         })
-        .expect("Tensor::adam_update: AOT execution failed")
     }
 }
 
