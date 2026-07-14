@@ -675,43 +675,25 @@ impl IrDType {
     /// For packed types it computes word-level packing plus the SIMD margin
     /// that [`PackedTensor`] allocates (16 extra u32 words = 64 bytes).
     pub fn packed_byte_size(&self, numel: usize) -> usize {
+        self.try_packed_byte_size(numel)
+            .expect("packed dtype storage size overflow")
+    }
+
+    pub fn try_packed_byte_size(&self, numel: usize) -> Option<usize> {
+        let packed_words = |items_per_word: usize| {
+            let words = numel / items_per_word + usize::from(numel % items_per_word != 0);
+            words.checked_add(16)?.checked_mul(4)
+        };
         match self {
-            IrDType::F32 => numel * 4,
-            IrDType::F16 | IrDType::BF16 => numel * 2,
-            IrDType::I32 => numel * 4,
-            IrDType::I64 => numel * 8,
-            IrDType::Bool => numel,
-            IrDType::I8 => numel,
-            // I4x8: 8 nibbles per u32 word (4 bytes)
-            // packed_len = ceil(numel / 8) words + SIMD_MARGIN(16)
-            IrDType::I4 { .. } => {
-                let words = numel.div_ceil(8) + 16;
-                words * 4
-            }
-            // I8x4/Scaled: 4 values per u32 word (4 bytes)
-            // packed_len = ceil(numel / 4) words + SIMD_MARGIN(16)
-            IrDType::I8Scaled { .. } => {
-                let words = numel.div_ceil(4) + 16;
-                words * 4
-            }
-            // F8x4/F8x4R: 4 values per u32 word (4 bytes)
-            IrDType::F8 { .. } | IrDType::F8R { .. } => {
-                let words = numel.div_ceil(4) + 16;
-                words * 4
-            }
-            // F4x8: 8 nibbles per u32 word (4 bytes)
-            IrDType::F4 { .. } => {
-                let words = numel.div_ceil(8) + 16;
-                words * 4
-            }
-            IrDType::U4Scaled { .. } => {
-                let words = numel.div_ceil(8) + 16;
-                words * 4
-            }
-            IrDType::U8Scaled { .. } => {
-                let words = numel.div_ceil(4) + 16;
-                words * 4
-            }
+            IrDType::F32 | IrDType::I32 => numel.checked_mul(4),
+            IrDType::F16 | IrDType::BF16 => numel.checked_mul(2),
+            IrDType::I64 => numel.checked_mul(8),
+            IrDType::Bool | IrDType::I8 => Some(numel),
+            IrDType::I4 { .. } | IrDType::F4 { .. } | IrDType::U4Scaled { .. } => packed_words(8),
+            IrDType::I8Scaled { .. }
+            | IrDType::F8 { .. }
+            | IrDType::F8R { .. }
+            | IrDType::U8Scaled { .. } => packed_words(4),
         }
     }
 }

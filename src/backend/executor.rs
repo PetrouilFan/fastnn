@@ -67,12 +67,42 @@ fn read_execution_outputs<B: Backend>(
                 resolve_shape(&node.output_type.shape, shape_env).map_err(|e| {
                     BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
                 })?;
-            let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-            let computed = execution_storage_size(&node.output_type.dtype, actual_numel);
+            let actual_numel = resolved_shape
+                .iter()
+                .try_fold(1usize, |count, &dimension| {
+                    let dimension = usize::try_from(dimension).map_err(|_| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} dimension does not fit usize"
+                        ))
+                    })?;
+                    count.checked_mul(dimension).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} element count overflows"
+                        ))
+                    })
+                })?;
+            let computed = checked_execution_storage_size(&node.output_type.dtype, actual_numel)?;
             (computed, resolved_shape)
         } else {
             (slot.size, vec![])
         };
+        if actual_size > slot.size {
+            return Err(BackendError::Dispatch(format!(
+                "output node {output_node_id} requires {actual_size} bytes but its slot holds {}",
+                slot.size
+            )));
+        }
+        let output_end = slot.offset.checked_add(actual_size).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "output node {output_node_id} arena range overflows"
+            ))
+        })?;
+        if output_end > tightened_memory_plan.total_size {
+            return Err(BackendError::Dispatch(format!(
+                "output node {output_node_id} range {}..{output_end} exceeds arena size {}",
+                slot.offset, tightened_memory_plan.total_size
+            )));
+        }
         let data = backend.read_arena(arena, slot.offset, actual_size);
         outputs.push(data);
     }
@@ -91,6 +121,17 @@ fn execution_storage_size(dtype: &IrDType, numel: usize) -> usize {
         IrDType::I8 => numel + 8,
         _ => numel * dtype.byte_size(),
     }
+}
+
+fn checked_execution_storage_size(dtype: &IrDType, numel: usize) -> Result<usize, BackendError> {
+    if matches!(dtype, IrDType::I8) {
+        return numel.checked_add(8).ok_or_else(|| {
+            BackendError::Dispatch("I8 execution storage size overflows usize".into())
+        });
+    }
+    dtype
+        .try_packed_byte_size(numel)
+        .ok_or_else(|| BackendError::Dispatch("execution storage size overflows usize".into()))
 }
 
 impl<B: Backend> GraphExecutor<B> {
@@ -2173,6 +2214,12 @@ mod execution_storage_size_tests {
                 u8.packed_byte_size(numel)
             );
         }
+    }
+
+    #[test]
+    fn checked_storage_sizes_reject_overflow() {
+        assert!(IrDType::F32.try_packed_byte_size(usize::MAX).is_none());
+        assert!(checked_execution_storage_size(&IrDType::I8, usize::MAX).is_err());
     }
 
     #[test]
