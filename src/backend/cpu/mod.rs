@@ -3947,36 +3947,75 @@ impl Backend for CpuBackend {
                                 let input_w = params[6];
                                 let kernel_h = params[7];
                                 let kernel_w = params[8];
+                                if stride == 0
+                                    || dilation == 0
+                                    || groups == 0
+                                    || kernel_h == 0
+                                    || kernel_w == 0
+                                    || input_c % groups != 0
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: invalid stride, dilation, groups, channels, or kernel dimensions".into(),
+                                    ));
+                                }
                                 let meta = weight_meta.clone().ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "conv2d_i4_i8/u8_i8: missing weight_meta".into(),
                                     )
                                 })?;
+                                if output_slice.offset % std::mem::align_of::<f32>() != 0
+                                    || output_slice.size % std::mem::size_of::<f32>() != 0
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: output slice is not f32-aligned"
+                                            .into(),
+                                    ));
+                                }
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
 
-                                // Parse i8 activation header
-                                let affine = {
-                                    let scale = if activation_payload.len() >= 4 {
-                                        f32::from_le_bytes(
-                                            activation_payload[0..4].try_into().unwrap(),
-                                        )
-                                    } else {
-                                        1.0
-                                    };
-                                    let zp = if activation_payload.len() >= 8 {
-                                        f32::from_le_bytes(
-                                            activation_payload[4..8].try_into().unwrap(),
-                                        )
-                                    } else {
-                                        0.0
-                                    };
-                                    microkernels::I8ActivationAffine { scale, zero: zp }
-                                };
+                                if activation_payload.len() < 8 {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "conv2d_i4_i8/u8_i8: activation payload has {} bytes, expected an 8-byte affine header",
+                                        activation_payload.len()
+                                    )));
+                                }
+                                let scale = f32::from_le_bytes([
+                                    activation_payload[0],
+                                    activation_payload[1],
+                                    activation_payload[2],
+                                    activation_payload[3],
+                                ]);
+                                let zp = f32::from_le_bytes([
+                                    activation_payload[4],
+                                    activation_payload[5],
+                                    activation_payload[6],
+                                    activation_payload[7],
+                                ]);
+                                if !scale.is_finite() || scale <= 0.0 || !zp.is_finite() {
+                                    return Err(BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: activation affine metadata must be finite with a positive scale".into(),
+                                    ));
+                                }
+                                let affine = microkernels::I8ActivationAffine { scale, zero: zp };
                                 // Zero-copy view of i8 activation data (payload starts at byte 8)
-                                let payload = activation_payload.get(8..).unwrap_or(&[]);
+                                let payload = &activation_payload[8..];
+                                let image_size = input_c
+                                    .checked_mul(input_h)
+                                    .and_then(|value| value.checked_mul(input_w))
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "conv2d_i4_i8/u8_i8: activation shape overflows".into(),
+                                        )
+                                    })?;
+                                if image_size == 0 || payload.len() % image_size != 0 {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "conv2d_i4_i8/u8_i8: activation data length {} is not a whole number of {image_size}-element images",
+                                        payload.len()
+                                    )));
+                                }
                                 let act_i8: &[i8] = bytemuck::cast_slice(payload);
 
                                 let oc = meta.shape[0];
