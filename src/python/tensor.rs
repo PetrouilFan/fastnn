@@ -336,36 +336,70 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.where_tensor(&condition.inner, &other.inner))
     }
 
-    fn __add__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.add(&other.inner))
+    fn __add__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_add(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __sub__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.sub(&other.inner))
+    fn __sub__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_sub(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __mul__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&other.inner))
+    fn __mul__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_mul(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __rmul__(&self, other: f32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
+    fn __rmul__(&self, other: f32) -> PyResult<PyTensor> {
+        self.mul_scalar(other)
     }
 
-    fn mul_scalar(&self, other: f32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
+    fn mul_scalar(&self, other: f32) -> PyResult<PyTensor> {
+        let scalar = Tensor::try_full(
+            vec![],
+            other,
+            self.inner.dtype(),
+            self.inner.device(),
+        )?;
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_mul(&scalar)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __truediv__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.div(&other.inner))
+    fn __truediv__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_div(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __matmul__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.matmul(&other.inner))
+    fn __matmul__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_matmul(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __neg__(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.neg())
+    fn __neg__(&self) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_neg()
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?,
+        ))
     }
 
     fn __repr__(&self) -> String {
