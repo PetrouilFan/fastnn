@@ -104,7 +104,7 @@ impl PyTensor {
     fn item(&self) -> PyResult<f32> {
         #[cfg(feature = "gpu")]
         if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return self.inner.to_cpu().item().map_err(Into::into);
+            return self.inner.try_to_cpu()?.item().map_err(Into::into);
         }
         self.inner.item().map_err(Into::into)
     }
@@ -478,28 +478,25 @@ impl PyTensor {
             let sliced = self
                 .inner
                 .try_slice(0, idx_val as i64, (idx_val + 1) as i64, 1)?;
-            Ok(PyTensor::from_tensor(sliced.squeeze(Some(0))))
+            Ok(PyTensor::from_tensor(sliced.try_squeeze(Some(0))?))
         }
     }
 
     /// Basic index assignment: supports t[idx] = value for integer indices
     /// along dimension 0. The value can be a scalar (f32) or a tensor.
     /// GPU tensors are automatically copied to CPU before modification.
-    fn __setitem__(&self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn __setitem__(&mut self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         use pyo3::types::PySlice;
 
         // Ensure the tensor is on CPU
-        let mut inner = {
-            #[cfg(feature = "gpu")]
-            if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "__setitem__ does not support GPU tensors; call .cpu() first",
-                ));
-            }
-            self.inner.clone()
-        };
+        #[cfg(feature = "gpu")]
+        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "__setitem__ does not support GPU tensors; call .cpu() first",
+            ));
+        }
 
-        let shape = inner.shape();
+        let shape = self.inner.shape();
         if shape.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot index into a scalar tensor",
@@ -507,12 +504,14 @@ impl PyTensor {
         }
 
         // Compute row size (number of elements per index)
-        let row_size: usize = shape
-            .iter()
-            .skip(1)
-            .map(|&d| d as usize)
-            .product::<usize>()
-            .max(1);
+        let row_size = shape.iter().skip(1).try_fold(1usize, |count, &dim| {
+            let dim = usize::try_from(dim).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("tensor shape contains a negative dimension")
+            })?;
+            count.checked_mul(dim).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("indexed row size overflow")
+            })
+        })?;
         let dim0 = shape[0] as isize;
 
         let (start, stop, step) = if let Ok(slice) = idx.cast::<PySlice>() {
@@ -537,7 +536,7 @@ impl PyTensor {
         let val_data: Vec<f32> = if let Ok(scalar) = value.extract::<f32>() {
             vec![scalar]
         } else if let Ok(t) = value.extract::<PyTensor>() {
-            let tv = t.inner.to_cpu();
+            let tv = t.inner.try_to_cpu()?;
             tv.to_numpy().map_err(PyErr::from)?
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
@@ -546,11 +545,7 @@ impl PyTensor {
         };
 
         // Get mutable access to the tensor's data
-        let total_elems: usize = shape.iter().map(|&d| d as usize).product();
-        let data_slice = unsafe {
-            let ptr = inner.data_ptr_f32_mut();
-            std::slice::from_raw_parts_mut(ptr, total_elems)
-        };
+        let data_slice = self.inner.try_as_f32_slice_mut()?;
 
         let mut i = start;
         while (step > 0 && i < stop) || (step < 0 && i > stop) {
@@ -579,16 +574,16 @@ impl PyTensor {
         Ok(())
     }
 
-    fn cpu(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.to_cpu())
+    fn cpu(&self) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_to_cpu()?))
     }
 
     #[cfg(feature = "gpu")]
-    fn to_gpu(&self, device_id: usize) -> PyTensor {
-        PyTensor::from_tensor(self.inner.to_gpu(device_id))
+    fn to_gpu(&self, device_id: usize) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_to_gpu(device_id)?))
     }
 
-    fn contiguous(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.contiguous())
+    fn contiguous(&self) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_contiguous()?))
     }
 }
