@@ -34,10 +34,11 @@ fn build_training_graph_sgd() -> ComputeGraph {
     let gb = GraphBuilder::new();
     let x = gb.input(&[1, 4], IrDType::F32);
     let w = gb.input(&[4, 4], IrDType::F32);
+    let grad = gb.input(&[4, 4], IrDType::F32);
     let mm = gb.matmul(&x, &w);
-    let loss = gb.reduce_mean(&mm, 0, false);
+    let _loss = gb.reduce_mean(&mm, 0, false);
     // SGD update: w -= lr * grad
-    let _updated = gb.apply_sgd(&w, &loss, 0.01, 0.0);
+    let _updated = gb.apply_sgd(&w, &grad, 0.01, 0.0);
     gb.to_graph()
 }
 
@@ -49,10 +50,11 @@ fn build_training_graph_adam() -> ComputeGraph {
     let w = gb.input(&[4, 4], IrDType::F32);
     let m = gb.input(&[4, 4], IrDType::F32);
     let v = gb.input(&[4, 4], IrDType::F32);
+    let grad = gb.input(&[4, 4], IrDType::F32);
     let mm = gb.matmul(&x, &w);
-    let loss = gb.reduce_mean(&mm, 0, false);
+    let _loss = gb.reduce_mean(&mm, 0, false);
     // Adam update
-    let _updated = gb.apply_adam(&w, &loss, &m, &v, 0.001, 0.9, 0.999, 1e-8, 1);
+    let _updated = gb.apply_adam(&w, &grad, &m, &v, 0.001, 0.9, 0.999, 1e-8, 1);
     gb.to_graph()
 }
 

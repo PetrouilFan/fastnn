@@ -24,6 +24,15 @@ use crate::ir::*;
 use crate::storage::DType;
 use crate::tensor::Tensor;
 
+fn try_zeroed_bytes(size: usize, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|error| format!("{label}: failed to allocate {size} bytes: {error}"))?;
+    bytes.resize(size, 0);
+    Ok(bytes)
+}
+
 /// Parsed ONNX node.
 #[derive(Debug, Clone)]
 pub struct OnnxNode {
@@ -1232,10 +1241,12 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_c_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
 
-                // Create zero initial states if not provided.
-                // Use byte_size() which handles symbolic dims via SYMBOL_DIM_MAX fallback.
+                // Create zero initial states if not provided using checked sizing and allocation.
                 let zero_tt = TensorType::new(h_c_shape.clone(), IrDType::F32);
-                let zero_bytes = vec![0u8; zero_tt.byte_size()];
+                let zero_size = zero_tt
+                    .try_byte_size_with_env(None)
+                    .ok_or_else(|| "LSTM initial-state storage size overflows".to_string())?;
+                let zero_bytes = try_zeroed_bytes(zero_size, "LSTM initial state")?;
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
                 } else {
@@ -1380,7 +1391,10 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
                 let zero_tt = TensorType::new(h_shape.clone(), IrDType::F32);
-                let zero_bytes = vec![0u8; zero_tt.byte_size()];
+                let zero_size = zero_tt
+                    .try_byte_size_with_env(None)
+                    .ok_or_else(|| "GRU initial-state storage size overflows".to_string())?;
+                let zero_bytes = try_zeroed_bytes(zero_size, "GRU initial state")?;
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
                 } else {
