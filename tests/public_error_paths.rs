@@ -451,6 +451,22 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn contiguous_conversion_returns_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let transposed = values.try_transpose(0, 1).unwrap();
+    let contiguous = transposed.try_contiguous().unwrap();
+    assert!(contiguous.is_contiguous());
+    assert_eq!(
+        contiguous.try_as_f32_slice().unwrap(),
+        &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+    );
+
+    let packed = Tensor::try_zeros(vec![2, 8], DType::I4, Device::Cpu).unwrap();
+    let packed_view = packed.try_transpose(0, 1).unwrap();
+    assert!(packed_view.try_contiguous().is_err());
+}
+
+#[test]
 fn invalid_dtype_conversions_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     assert_eq!(values.try_to_dtype(DType::I32).unwrap().dtype(), DType::I32);

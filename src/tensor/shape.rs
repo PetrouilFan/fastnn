@@ -104,20 +104,34 @@ impl TensorImpl {
     }
 
     pub fn contiguous(&self) -> Tensor {
+        self.try_contiguous().expect("Tensor::contiguous failed")
+    }
+
+    pub fn try_contiguous(&self) -> FastnnResult<Tensor> {
         if self.is_contiguous() {
-            return Tensor::new(self.clone());
+            return Ok(Tensor::new(self.clone()));
         }
-        let numel = self.numel() as usize;
+        let numel = usize::try_from(self.numel())
+            .map_err(|_| FastnnError::Overflow("contiguous element count overflow".into()))?;
         let ndim = self.ndim();
-        let elem_size = self
-            .dtype
-            .scalar_byte_width()
-            .expect("contiguous conversion requires plain scalar storage");
-        let mut data = vec![0u8; numel * elem_size];
-        let src_ptr = match self.storage.as_ref() {
-            Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
+        let elem_size = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("contiguous conversion requires plain scalar storage")
+        })?;
+        let nbytes = numel
+            .checked_mul(elem_size)
+            .ok_or_else(|| FastnnError::Overflow("contiguous byte size overflow".into()))?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(nbytes)
+            .map_err(|error| FastnnError::Allocation(error.to_string()))?;
+        data.resize(nbytes, 0u8);
+        let (src_ptr, source_len) = match self.storage.as_ref() {
+            Storage::Cpu(cpu) => (cpu.data.as_ref().as_ptr(), cpu.data.len()),
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => panic!("contiguous(): only supported for CPU tensors"),
+            Storage::Wgpu(_) => {
+                return Err(FastnnError::device(
+                    "contiguous conversion requires CPU storage",
+                ));
+            }
         };
         let strides = &self.strides;
         let sizes = &self.sizes;
@@ -127,11 +141,31 @@ impl TensorImpl {
         for i in 0..numel {
             let mut src_idx = offset;
             for d in 0..ndim {
-                src_idx += indices[d] * strides[d];
+                let contribution = indices[d].checked_mul(strides[d]).ok_or_else(|| {
+                    FastnnError::Overflow("contiguous source index overflow".into())
+                })?;
+                src_idx = src_idx.checked_add(contribution).ok_or_else(|| {
+                    FastnnError::Overflow("contiguous source index overflow".into())
+                })?;
             }
+            let src_idx = usize::try_from(src_idx)
+                .map_err(|_| FastnnError::shape("contiguous source index is negative"))?;
+            let src_byte = src_idx
+                .checked_mul(elem_size)
+                .ok_or_else(|| FastnnError::Overflow("contiguous source byte overflow".into()))?;
+            let src_end = src_byte
+                .checked_add(elem_size)
+                .ok_or_else(|| FastnnError::Overflow("contiguous source range overflow".into()))?;
+            if src_end > source_len {
+                return Err(FastnnError::shape(format!(
+                    "contiguous source range {src_byte}..{src_end} exceeds storage length {source_len}"
+                )));
+            }
+            // SAFETY: source and destination ranges were checked above, each range is
+            // exactly one scalar wide, and the newly allocated destination is disjoint.
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    src_ptr.add((src_idx as usize) * elem_size),
+                    src_ptr.add(src_byte),
                     dst.add(i * elem_size),
                     elem_size,
                 );
@@ -145,9 +179,8 @@ impl TensorImpl {
             }
         }
         let sizes = self.sizes.clone();
-        let nbytes = data.len();
         let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(data, nbytes)));
-        let mut new_tensor = Tensor::new(TensorImpl::new(storage, sizes, self.dtype));
+        let mut new_tensor = Tensor::new(TensorImpl::try_new(storage, sizes, self.dtype)?);
         if let Some(meta) = &self.autograd_meta {
             let meta_lock = meta.lock();
             if meta_lock.requires_grad {
@@ -155,7 +188,7 @@ impl TensorImpl {
                 Arc::make_mut(&mut new_tensor.inner).set_autograd_meta(new_meta);
             }
         }
-        new_tensor
+        Ok(new_tensor)
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
@@ -389,7 +422,11 @@ impl Tensor {
     }
 
     pub fn contiguous(&self) -> Tensor {
-        self.inner.contiguous()
+        self.try_contiguous().expect("Tensor::contiguous failed")
+    }
+
+    pub fn try_contiguous(&self) -> FastnnResult<Tensor> {
+        self.inner.try_contiguous()
     }
 
     pub fn view(&self, shape: Vec<i64>) -> Tensor {
