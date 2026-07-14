@@ -451,6 +451,18 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_comparison_operands_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    assert!(values.try_ge_tensor(&incompatible).is_err());
+    assert!(values.try_le_tensor(&incompatible).is_err());
+
+    let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
+    assert!(packed.try_sign().is_err());
+    assert!(packed.try_logical_not().is_err());
+}
+
+#[test]
 fn invalid_gradient_clipping_parameters_return_structured_errors() {
     let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
     assert!(fastnn::tensor::try_clip_grad_norm_(&[tensor.clone()], -1.0, 2.0).is_err());

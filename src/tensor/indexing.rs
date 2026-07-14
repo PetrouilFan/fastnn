@@ -152,11 +152,15 @@ impl Tensor {
     impl_scalar_op!(gt_scalar, _CMP_GT_OQ, >);
 
     pub fn sign(&self) -> Tensor {
+        self.try_sign().expect("Tensor::sign failed")
+    }
+
+    pub fn try_sign(&self) -> FastnnResult<Tensor> {
         Tensor::exec_aot(&[self], |g, ins| vec![g.sign(&ins[0])])
-            .expect("Tensor::sign: AOT execution failed")
+            .map_err(|error| FastnnError::Computation(error.to_string()))?
             .into_iter()
             .next()
-            .unwrap()
+            .ok_or_else(|| FastnnError::Internal("sign execution returned no output".into()))
     }
 
     pub fn minimum(&self, other: &Tensor) -> Tensor {
@@ -182,6 +186,11 @@ impl Tensor {
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
+        self.try_ge_tensor(other).expect("Tensor::ge_tensor failed")
+    }
+
+    pub fn try_ge_tensor(&self, other: &Tensor) -> FastnnResult<Tensor> {
+        validate_selection_values(self, other, "ge_tensor")?;
         // ge(a,b) = not(b > a) = not(gt_scalar(b - a, 0))
         Tensor::exec_aot(&[self, other], |g, ins| {
             let diff = g.sub(&ins[1], &ins[0]); // b - a
@@ -189,13 +198,18 @@ impl Tensor {
             let gt = g.gt_scalar(&diff, &zero); // b - a > 0  (i.e. b > a)
             vec![g.logical_not(&gt)] // not(b > a) = a >= b
         })
-        .expect("Tensor::ge_tensor: AOT execution failed")
+        .map_err(|error| FastnnError::Computation(error.to_string()))?
         .into_iter()
         .next()
-        .unwrap()
+        .ok_or_else(|| FastnnError::Internal("ge_tensor execution returned no output".into()))
     }
 
     pub fn le_tensor(&self, other: &Tensor) -> Tensor {
+        self.try_le_tensor(other).expect("Tensor::le_tensor failed")
+    }
+
+    pub fn try_le_tensor(&self, other: &Tensor) -> FastnnResult<Tensor> {
+        validate_selection_values(self, other, "le_tensor")?;
         // le(a,b) = not(a > b) = not(gt_scalar(a - b, 0))
         Tensor::exec_aot(&[self, other], |g, ins| {
             let diff = g.sub(&ins[0], &ins[1]); // a - b
@@ -203,10 +217,10 @@ impl Tensor {
             let gt = g.gt_scalar(&diff, &zero); // a - b > 0 (i.e. a > b)
             vec![g.logical_not(&gt)] // not(a > b) = a <= b
         })
-        .expect("Tensor::le_tensor: AOT execution failed")
+        .map_err(|error| FastnnError::Computation(error.to_string()))?
         .into_iter()
         .next()
-        .unwrap()
+        .ok_or_else(|| FastnnError::Internal("le_tensor execution returned no output".into()))
     }
 
     impl_scalar_op!(lt_scalar, _CMP_LT_OQ, <);
@@ -218,11 +232,15 @@ impl Tensor {
     impl_cpu_fast_path!(div_scalar, _mm256_div_ps, /, DivScalarBackward);
 
     pub fn logical_not(&self) -> Tensor {
+        self.try_logical_not().expect("Tensor::logical_not failed")
+    }
+
+    pub fn try_logical_not(&self) -> FastnnResult<Tensor> {
         Tensor::exec_aot(&[self], |g, ins| vec![g.logical_not(&ins[0])])
-            .expect("Tensor::logical_not: AOT execution failed")
+            .map_err(|error| FastnnError::Computation(error.to_string()))?
             .into_iter()
             .next()
-            .unwrap()
+            .ok_or_else(|| FastnnError::Internal("logical_not execution returned no output".into()))
     }
 
     pub fn argmax(&self, dim: Option<usize>) -> Tensor {
