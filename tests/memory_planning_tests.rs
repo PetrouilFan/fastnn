@@ -666,3 +666,31 @@ fn test_memory_plan_tighten_rejects_malformed_conv_parameters() {
     };
     assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
 }
+
+#[test]
+fn test_memory_plan_tighten_rejects_malformed_shape_parameters() {
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32),
+    );
+    let softmax = graph.add_node(
+        Opcode::Softmax,
+        vec![input],
+        TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32),
+    );
+    graph
+        .get_node_mut(softmax)
+        .unwrap()
+        .attrs
+        .insert("axis".into(), "9".into());
+    let plan = MemoryPlan {
+        total_size: 0,
+        slots: HashMap::new(),
+        secondary_slots: HashMap::new(),
+        outputs: vec![],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
+}

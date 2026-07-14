@@ -85,58 +85,90 @@ impl MemoryPlan {
         // Iterate over every node in topological order and re-derive
         // shape-dependent kernel parameters using the concrete ShapeEnv.
         crate::utils::traverse_graph(graph, |node_id, node| {
-            let resolved_input_shapes: Vec<Vec<u64>> = node
-                .inputs
-                .iter()
-                .filter_map(|&id| graph.get_node(id))
-                .map(|n| {
-                    n.output_type
-                        .shape
-                        .iter()
-                        .map(|d| d.evaluate_with_env(shape_env).unwrap_or(0))
-                        .collect()
-                })
-                .collect();
+            let mut resolved_input_shapes = Vec::with_capacity(node.inputs.len());
+            for &input_id in &node.inputs {
+                let input = graph.get_node(input_id).ok_or_else(|| {
+                    format!("node {node_id} references missing input node {input_id}")
+                })?;
+                let mut shape = Vec::with_capacity(input.output_type.shape.len());
+                for dimension in &input.output_type.shape {
+                    shape.push(dimension.evaluate_with_env(shape_env).map_err(|error| {
+                        format!("node {node_id} input {input_id} shape: {error}")
+                    })?);
+                }
+                resolved_input_shapes.push(shape);
+            }
+            let to_usize = |value: u64, label: &str| {
+                usize::try_from(value)
+                    .map_err(|_| format!("node {node_id} {label} does not fit usize"))
+            };
 
             let tightened = match node.opcode {
                 Opcode::MatMul => {
-                    if resolved_input_shapes.len() < 2 {
-                        return Ok(());
+                    let lhs = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("matmul node {node_id} is missing its lhs input"))?;
+                    let rhs = resolved_input_shapes
+                        .get(1)
+                        .ok_or_else(|| format!("matmul node {node_id} is missing its rhs input"))?;
+                    if lhs.len() < 2 || rhs.len() < 2 {
+                        return Err(format!("matmul node {node_id} requires rank-two inputs"));
                     }
-                    let m = resolved_input_shapes[0]
-                        .get(resolved_input_shapes[0].len().saturating_sub(2))
-                        .copied()
-                        .unwrap_or(1) as usize;
-                    let k = resolved_input_shapes[0].last().copied().unwrap_or(1) as usize;
-                    let n = resolved_input_shapes[1].last().copied().unwrap_or(1) as usize;
+                    let m = to_usize(lhs[lhs.len() - 2], "matmul M")?;
+                    let k = to_usize(lhs[lhs.len() - 1], "matmul K")?;
+                    let rhs_k = to_usize(rhs[rhs.len() - 2], "matmul rhs K")?;
+                    let n = to_usize(rhs[rhs.len() - 1], "matmul N")?;
+                    if k != rhs_k {
+                        return Err(format!(
+                            "matmul node {node_id} contraction mismatch: {k} versus {rhs_k}"
+                        ));
+                    }
                     vec![m, k, n]
                 }
                 Opcode::Transpose => {
-                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
+                    let input_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("transpose node {node_id} is missing its input"))?;
                     let rank = input_shape.len();
                     if rank == 2 {
-                        // 2D transpose: params = [M, N]
-                        let m = input_shape[0] as usize;
-                        let n = input_shape[1] as usize;
+                        let m = to_usize(input_shape[0], "transpose rows")?;
+                        let n = to_usize(input_shape[1], "transpose columns")?;
                         vec![m, n]
                     } else {
                         // N-D permute transpose: params = [rank, d0..dN, p0..pN]
                         // The perm comes from node attrs (e.g. "0,3,1,2")
                         let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
-                        let mut params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
+                        let capacity = rank
+                            .checked_mul(2)
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or_else(|| {
+                            format!("transpose node {node_id} rank overflows")
+                        })?;
+                        let mut params: Vec<usize> = Vec::with_capacity(capacity);
                         params.push(rank);
-                        params.extend(input_shape.iter().map(|&d| d as usize));
+                        for &dimension in input_shape {
+                            params.push(to_usize(dimension, "transpose dimension")?);
+                        }
                         if perm_str.is_empty() {
                             // Default: reverse
                             for i in (0..rank).rev() {
                                 params.push(i);
                             }
                         } else {
-                            let perm: Vec<usize> =
-                                perm_str.split(',').filter_map(|s| s.parse().ok()).collect();
-                            for i in 0..rank {
-                                params.push(perm.get(i).copied().unwrap_or(i));
+                            let perm: Result<Vec<usize>, _> =
+                                perm_str.split(',').map(str::parse).collect();
+                            let perm = perm.map_err(|_| {
+                                format!("transpose node {node_id} has invalid permutation")
+                            })?;
+                            if perm.len() != rank
+                                || perm.iter().any(|&axis| axis >= rank)
+                                || (0..rank).any(|axis| !perm.contains(&axis))
+                            {
+                                return Err(format!(
+                                    "transpose node {node_id} permutation is not a rank-{rank} bijection"
+                                ));
                             }
+                            params.extend(perm);
                         }
                         params
                     }
@@ -145,41 +177,47 @@ impl MemoryPlan {
                     let axis: i64 = node
                         .attrs
                         .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
-                    let rank = resolved_input_shapes.first().map(|s| s.len()).unwrap_or(1);
-                    let normalized_axis = if axis < 0 {
-                        (rank as i64 + axis) as usize
-                    } else {
-                        axis as usize
-                    };
-                    let axis_dim = resolved_input_shapes
+                        .ok_or_else(|| format!("softmax node {node_id} is missing its axis"))?
+                        .parse()
+                        .map_err(|_| format!("softmax node {node_id} has invalid axis"))?;
+                    let input_shape = resolved_input_shapes
                         .first()
-                        .and_then(|s| s.get(normalized_axis).copied())
-                        .unwrap_or(1) as usize;
-                    let stride = resolved_input_shapes
-                        .first()
-                        .map(|s| {
-                            s[normalized_axis + 1..]
-                                .iter()
-                                .copied()
-                                .map(|x| x as usize)
-                                .product::<usize>()
-                                .max(1)
-                        })
-                        .unwrap_or(1);
+                        .ok_or_else(|| format!("softmax node {node_id} is missing its input"))?;
+                    let rank = i64::try_from(input_shape.len())
+                        .map_err(|_| format!("softmax node {node_id} rank does not fit i64"))?;
+                    let normalized_axis = if axis < 0 { rank + axis } else { axis };
+                    if normalized_axis < 0 || normalized_axis >= rank {
+                        return Err(format!(
+                            "softmax node {node_id} axis {axis} is out of range"
+                        ));
+                    }
+                    let normalized_axis = usize::try_from(normalized_axis)
+                        .map_err(|_| format!("softmax node {node_id} axis conversion failed"))?;
+                    let axis_dim = to_usize(input_shape[normalized_axis], "softmax axis size")?;
+                    let stride = input_shape[normalized_axis + 1..].iter().try_fold(
+                        1usize,
+                        |product, &dimension| {
+                            product
+                                .checked_mul(to_usize(dimension, "softmax stride dimension")?)
+                                .ok_or_else(|| format!("softmax node {node_id} stride overflows"))
+                        },
+                    )?;
                     vec![axis_dim, stride]
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
                     let axis: usize = node
                         .attrs
                         .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
-                    let group_size = resolved_input_shapes
+                        .ok_or_else(|| format!("reduction node {node_id} is missing its axis"))?
+                        .parse()
+                        .map_err(|_| format!("reduction node {node_id} has invalid axis"))?;
+                    let input_shape = resolved_input_shapes
                         .first()
-                        .and_then(|s| s.get(axis).copied())
-                        .unwrap_or(1) as usize;
+                        .ok_or_else(|| format!("reduction node {node_id} is missing its input"))?;
+                    let group_size = input_shape.get(axis).copied().ok_or_else(|| {
+                        format!("reduction node {node_id} axis {axis} is out of range")
+                    })?;
+                    let group_size = to_usize(group_size, "reduction group size")?;
                     let (is_mean, is_max) = match node.opcode {
                         Opcode::ReduceMean => (1, 0),
                         Opcode::ReduceMax => (0, 1),
