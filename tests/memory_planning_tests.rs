@@ -677,6 +677,25 @@ fn test_memory_planning_rejects_arena_alignment_overflow() {
     );
     graph.set_outputs(vec![input]);
     assert!(memory_planning::plan_memory(&graph).is_err());
+
+    let mut slots = HashMap::new();
+    slots.insert(
+        input,
+        AllocSlot {
+            offset: 0,
+            size: usize::MAX,
+            node_id: input,
+            output_index: 0,
+        },
+    );
+    let plan = MemoryPlan {
+        total_size: usize::MAX,
+        slots,
+        secondary_slots: HashMap::new(),
+        outputs: vec![input],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
 }
 
 #[test]

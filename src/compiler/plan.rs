@@ -48,10 +48,18 @@ impl MemoryPlan {
         let mut mp = self.clone();
         let mut max_end = 0usize;
         for (_, slot) in mp.slots.iter_mut() {
-            let tight_size = graph
-                .get_node(slot.node_id)
-                .map(|n| n.output_type.byte_size_with_env(Some(shape_env)))
-                .unwrap_or(slot.size);
+            let tight_size = match graph.get_node(slot.node_id) {
+                Some(node) => node
+                    .output_type
+                    .try_byte_size_with_env(Some(shape_env))
+                    .ok_or_else(|| {
+                        format!(
+                            "memory slot for node {} storage size overflows",
+                            slot.node_id
+                        )
+                    })?,
+                None => slot.size,
+            };
             slot.size = tight_size.min(slot.size);
             let slot_end = slot
                 .offset
@@ -60,11 +68,20 @@ impl MemoryPlan {
             max_end = max_end.max(slot_end);
         }
         for (_, slot) in mp.secondary_slots.iter_mut() {
-            let tight_size = graph
+            let tight_size = match graph
                 .get_node(slot.node_id)
-                .and_then(|n| n.secondary_output_type.as_ref())
-                .map(|t| t.byte_size_with_env(Some(shape_env)))
-                .unwrap_or(slot.size);
+                .and_then(|node| node.secondary_output_type.as_ref())
+            {
+                Some(output_type) => output_type
+                    .try_byte_size_with_env(Some(shape_env))
+                    .ok_or_else(|| {
+                        format!(
+                            "secondary memory slot for node {} storage size overflows",
+                            slot.node_id
+                        )
+                    })?,
+                None => slot.size,
+            };
             slot.size = tight_size.min(slot.size);
             let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
                 format!(
