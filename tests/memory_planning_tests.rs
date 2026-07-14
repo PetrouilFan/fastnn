@@ -1,6 +1,8 @@
 use fastnn::compiler::passes::memory_planning;
 use fastnn::compiler::passes::shape_inference;
-use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+use fastnn::compiler::{AllocSlot, MemoryPlan};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorType};
+use std::collections::HashMap;
 
 #[test]
 fn test_memory_plan_basic_reuse() {
@@ -588,4 +590,27 @@ fn test_memory_plan_single_node() {
     // Single node should have exactly one slot
     assert_eq!(plan.slots.len(), 1);
     assert!(plan.slots.contains_key(&input_id));
+}
+#[test]
+fn test_memory_plan_tighten_rejects_slot_range_overflow() {
+    let mut slots = HashMap::new();
+    slots.insert(
+        0,
+        AllocSlot {
+            offset: usize::MAX,
+            size: 2,
+            node_id: 0,
+            output_index: 0,
+        },
+    );
+    let plan = MemoryPlan {
+        total_size: usize::MAX,
+        slots,
+        secondary_slots: HashMap::new(),
+        outputs: vec![],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan
+        .try_tighten(&ComputeGraph::new(), &ShapeEnv::new())
+        .is_err());
 }

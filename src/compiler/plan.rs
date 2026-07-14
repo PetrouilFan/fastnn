@@ -41,6 +41,15 @@ impl MemoryPlan {
     /// [`tighten_slices`](crate::backend::executor::tighten_slices) can
     /// update [`Instruction::CallKernel`] params without a full recompile.
     pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> MemoryPlan {
+        self.try_tighten(graph, shape_env)
+            .expect("MemoryPlan::tighten failed")
+    }
+
+    pub fn try_tighten(
+        &self,
+        graph: &ComputeGraph,
+        shape_env: &ShapeEnv,
+    ) -> Result<MemoryPlan, String> {
         let mut mp = self.clone();
         let mut max_end = 0usize;
         for (_, slot) in mp.slots.iter_mut() {
@@ -49,7 +58,11 @@ impl MemoryPlan {
                 .map(|n| n.output_type.byte_size_with_env(Some(shape_env)))
                 .unwrap_or(slot.size);
             slot.size = tight_size.min(slot.size);
-            max_end = max_end.max(slot.offset + slot.size);
+            let slot_end = slot
+                .offset
+                .checked_add(slot.size)
+                .ok_or_else(|| format!("memory slot for node {} range overflows", slot.node_id))?;
+            max_end = max_end.max(slot_end);
         }
         for (_, slot) in mp.secondary_slots.iter_mut() {
             let tight_size = graph
@@ -58,7 +71,13 @@ impl MemoryPlan {
                 .map(|t| t.byte_size_with_env(Some(shape_env)))
                 .unwrap_or(slot.size);
             slot.size = tight_size.min(slot.size);
-            max_end = max_end.max(slot.offset + slot.size);
+            let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+                format!(
+                    "secondary memory slot for node {} range overflows",
+                    slot.node_id
+                )
+            })?;
+            max_end = max_end.max(slot_end);
         }
         mp.total_size = max_end;
 
@@ -228,9 +247,8 @@ impl MemoryPlan {
             };
             mp.tightened_params.insert(node_id, tightened);
             Ok(())
-        })
-        .unwrap_or(());
+        })?;
 
-        mp
+        Ok(mp)
     }
 }

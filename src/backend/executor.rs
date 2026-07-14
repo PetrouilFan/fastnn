@@ -109,20 +109,6 @@ fn read_execution_outputs<B: Backend>(
     Ok(outputs)
 }
 
-fn execution_storage_size(dtype: &IrDType, numel: usize) -> usize {
-    match dtype {
-        IrDType::I4 { .. }
-        | IrDType::I8Scaled { .. }
-        | IrDType::F8 { .. }
-        | IrDType::F8R { .. }
-        | IrDType::F4 { .. }
-        | IrDType::U4Scaled { .. }
-        | IrDType::U8Scaled { .. } => dtype.packed_byte_size(numel),
-        IrDType::I8 => numel + 8,
-        _ => numel * dtype.byte_size(),
-    }
-}
-
 fn checked_execution_storage_size(dtype: &IrDType, numel: usize) -> Result<usize, BackendError> {
     if matches!(dtype, IrDType::I8) {
         return numel.checked_add(8).ok_or_else(|| {
@@ -472,7 +458,9 @@ impl<B: Backend> GraphExecutor<B> {
                 validate_shapes(graph, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-                let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
+                let tightened_memory_plan = memory_plan
+                    .try_tighten(graph, &shape_env)
+                    .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
                 tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
                 // Cache for static-shape models so subsequent calls
@@ -514,14 +502,37 @@ impl<B: Backend> GraphExecutor<B> {
         // already validated.
         if cached_filtered_plan.is_none() {
             for (&node_id, slot) in &tightened_memory_plan.slots {
+                let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "node {node_id}: tightened memory slot range overflows"
+                    ))
+                })?;
+                if slot_end > tightened_memory_plan.total_size {
+                    return Err(BackendError::Dispatch(format!(
+                        "node {node_id}: tightened memory slot range {}..{slot_end} exceeds arena size {}",
+                        slot.offset, tightened_memory_plan.total_size
+                    )));
+                }
                 if let Some(node) = graph.get_node(node_id) {
-                    let needed =
-                        if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
-                            let numel: u64 = shape.iter().product();
-                            execution_storage_size(&node.output_type.dtype, numel as usize)
-                        } else {
-                            continue;
-                        };
+                    let shape =
+                        resolve_shape(&node.output_type.shape, &shape_env).map_err(|error| {
+                            BackendError::Dispatch(format!(
+                                "node {node_id}: failed to resolve output shape: {error}"
+                            ))
+                        })?;
+                    let numel = shape.iter().try_fold(1usize, |count, &dimension| {
+                        let dimension = usize::try_from(dimension).map_err(|_| {
+                            BackendError::Dispatch(format!(
+                                "node {node_id}: resolved dimension does not fit usize"
+                            ))
+                        })?;
+                        count.checked_mul(dimension).ok_or_else(|| {
+                            BackendError::Dispatch(format!(
+                                "node {node_id}: resolved element count overflows"
+                            ))
+                        })
+                    })?;
+                    let needed = checked_execution_storage_size(&node.output_type.dtype, numel)?;
                     if needed > slot.size {
                         return Err(BackendError::Dispatch(format!(
                             "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
@@ -835,7 +846,9 @@ impl<B: Backend> GraphExecutor<B> {
         // 6b. Optionally tighten memory plan using concrete batch shapes.
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
-            let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
+            let tightened_mp = memory_plan
+                .try_tighten(&final_graph, shape_env)
+                .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
             let mut plan = plan;
             tighten_slices(&mut plan, &memory_plan, &tightened_mp, &final_graph)
                 .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
@@ -2206,11 +2219,11 @@ mod execution_storage_size_tests {
 
         for numel in [1, 7, 8, 9, 17, 64] {
             assert_eq!(
-                execution_storage_size(&u4, numel),
+                checked_execution_storage_size(&u4, numel).unwrap(),
                 u4.packed_byte_size(numel)
             );
             assert_eq!(
-                execution_storage_size(&u8, numel),
+                checked_execution_storage_size(&u8, numel).unwrap(),
                 u8.packed_byte_size(numel)
             );
         }
@@ -2224,8 +2237,14 @@ mod execution_storage_size_tests {
 
     #[test]
     fn native_types_use_logical_element_size() {
-        assert_eq!(execution_storage_size(&IrDType::F32, 17), 68);
-        assert_eq!(execution_storage_size(&IrDType::I64, 17), 136);
+        assert_eq!(
+            checked_execution_storage_size(&IrDType::F32, 17).unwrap(),
+            68
+        );
+        assert_eq!(
+            checked_execution_storage_size(&IrDType::I64, 17).unwrap(),
+            136
+        );
     }
 
     #[test]
