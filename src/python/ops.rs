@@ -100,12 +100,16 @@ macro_rules! unary_op {
     };
 }
 
-/// Macro for binary operations: fn op(a, b) -> PyTensor
+/// Macro for recoverable binary operations.
 macro_rules! binary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
-        fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
-            PyTensor::from_tensor(a.inner.$method(&b.inner))
+        fn $name(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+            Ok(PyTensor::from_tensor(
+                a.inner
+                    .$method(&b.inner)
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+            ))
         }
     };
 }
@@ -138,20 +142,20 @@ macro_rules! arg_op {
 }
 
 #[pyfunction]
-fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
-    PyTensor::from_tensor(Tensor::full(
+fn full_like(tensor: &PyTensor, value: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(Tensor::try_full(
         tensor.inner.shape(),
         value,
         tensor.inner.dtype(),
         tensor.inner.device(),
-    ))
+    )?))
 }
 
 // Binary operations using macro
-binary_op!(add, add);
-binary_op!(sub, sub);
-binary_op!(mul, mul);
-binary_op!(div, div);
+binary_op!(add, try_add);
+binary_op!(sub, try_sub);
+binary_op!(mul, try_mul);
+binary_op!(div, try_div);
 
 #[pyfunction]
 fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
