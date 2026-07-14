@@ -2067,6 +2067,39 @@ impl GraphBuilder {
         lr: f32,
         weight_decay: f32,
     ) -> GraphTensor {
+        self.try_apply_sgd(weight, grad, lr, weight_decay)
+            .expect("GraphBuilder::apply_sgd received invalid inputs")
+    }
+
+    pub fn try_apply_sgd(
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        lr: f32,
+        weight_decay: f32,
+    ) -> FastnnResult<GraphTensor> {
+        if !lr.is_finite() || lr < 0.0 {
+            return Err(FastnnError::shape(
+                "SGD learning rate must be finite and non-negative",
+            ));
+        }
+        if !weight_decay.is_finite() || weight_decay < 0.0 {
+            return Err(FastnnError::shape(
+                "SGD weight decay must be finite and non-negative",
+            ));
+        }
+        if weight.tensor_type().shape != grad.tensor_type().shape {
+            return Err(FastnnError::shape(format!(
+                "SGD weight shape {:?} does not match gradient shape {:?}",
+                weight.tensor_type().shape,
+                grad.tensor_type().shape
+            )));
+        }
+        if weight.tensor_type().dtype != grad.tensor_type().dtype {
+            return Err(FastnnError::dtype(
+                "SGD weight and gradient dtypes must match",
+            ));
+        }
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
@@ -2084,9 +2117,8 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
-                .expect("packed dtype bit width must be valid")
         } else {
-            result
+            Ok(result)
         }
     }
 

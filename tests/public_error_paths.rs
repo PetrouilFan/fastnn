@@ -370,6 +370,23 @@ fn invalid_binary_shapes_return_dispatch_errors() {
 }
 
 #[test]
+fn invalid_sgd_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+    let shape = graph
+        .try_apply_sgd(&weight, &wrong_shape, 0.1, 0.0)
+        .expect_err("SGD must reject mismatched gradient shapes");
+    assert!(shape.to_string().contains("gradient shape"));
+
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    assert!(graph
+        .try_apply_sgd(&weight, &gradient, f32::NAN, 0.0)
+        .is_err());
+    assert!(graph.try_apply_sgd(&weight, &gradient, 0.1, -1.0).is_err());
+}
+
+#[test]
 fn invalid_selection_operands_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
     let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
