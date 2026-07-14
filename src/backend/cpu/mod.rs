@@ -7118,82 +7118,165 @@ impl Backend for CpuBackend {
                             }
                         }
                         "dequantize_activations" => {
-                            let numel = params.first().copied().unwrap_or(0);
-                            let is_per_channel = params.get(1).copied().unwrap_or(0) == 1;
+                            if params.len() < 2 {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_activations: expected numel and mode parameters"
+                                        .into(),
+                                ));
+                            }
+                            let numel = params[0];
+                            let is_per_channel = params[1] == 1;
                             let num_channels = if is_per_channel {
-                                params.get(2).copied().unwrap_or(0)
+                                params.get(2).copied().ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "dequantize_activations: missing channel count".into(),
+                                    )
+                                })?
                             } else {
                                 0
                             };
-                            if let Some(input_slice) = input_slices.first() {
-                                let in_data = bytemuck::cast_slice(unsafe {
-                                    arena.view_f32(input_slice.offset, input_slice.size)
-                                });
+                            let input_slice = input_slices.first().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "dequantize_activations: missing input slice".into(),
+                                )
+                            })?;
+                            if output_slice.offset % std::mem::align_of::<f32>() != 0
+                                || output_slice.size % std::mem::size_of::<f32>() != 0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_activations: output slice is not f32-aligned"
+                                        .into(),
+                                ));
+                            }
+                            let input_end = input_slice
+                                .offset
+                                .checked_add(input_slice.size)
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "dequantize_activations: input range overflows".into(),
+                                    )
+                                })?;
+                            if input_slice.offset < out_end && out_start < input_end {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_activations: input and output slices overlap"
+                                        .into(),
+                                ));
+                            }
+                            let expected_output = numel.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "dequantize_activations: output size overflows".into(),
+                                )
+                            })?;
+                            if output_slice.size != expected_output {
+                                return Err(BackendError::Dispatch(format!(
+                                    "dequantize_activations: output has {} bytes, expected {expected_output}",
+                                    output_slice.size
+                                )));
+                            }
+                            let in_data: &[u8] =
+                                unsafe { arena.view_u8(input_slice.offset, input_slice.size) };
+                            let read_f32 = |offset: usize| -> Result<f32, BackendError> {
+                                let bytes = in_data.get(offset..offset + 4).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "dequantize_activations: truncated affine metadata".into(),
+                                    )
+                                })?;
+                                Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                            };
 
+                            if is_per_channel {
+                                if num_channels == 0 || in_data.len() < 8 {
+                                    return Err(BackendError::Dispatch(
+                                        "dequantize_activations: invalid per-channel header".into(),
+                                    ));
+                                }
+                                let nc = u32::from_le_bytes([
+                                    in_data[0], in_data[1], in_data[2], in_data[3],
+                                ]) as usize;
+                                let chunk_size = u32::from_le_bytes([
+                                    in_data[4], in_data[5], in_data[6], in_data[7],
+                                ]) as usize;
+                                if nc != num_channels || chunk_size == 0 {
+                                    return Err(BackendError::Dispatch(
+                                        "dequantize_activations: per-channel header disagrees with parameters".into(),
+                                    ));
+                                }
+                                let pair_bytes = nc.checked_mul(8).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "dequantize_activations: channel metadata size overflows"
+                                            .into(),
+                                    )
+                                })?;
+                                let data_start =
+                                    8usize.checked_add(pair_bytes).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_activations: channel data offset overflows"
+                                                .into(),
+                                        )
+                                    })?;
+                                let encoded_values = nc.checked_mul(chunk_size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "dequantize_activations: channel payload size overflows".into(),
+                                    )
+                                })?;
+                                let expected_input =
+                                    data_start.checked_add(encoded_values).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_activations: total input size overflows"
+                                                .into(),
+                                        )
+                                    })?;
+                                if encoded_values != numel || in_data.len() != expected_input {
+                                    return Err(BackendError::Dispatch(
+                                        "dequantize_activations: per-channel payload length mismatch".into(),
+                                    ));
+                                }
+                                let mut scales = Vec::with_capacity(nc);
+                                let mut offsets = Vec::with_capacity(nc);
+                                for channel in 0..nc {
+                                    let scale = read_f32(8 + channel * 4)?;
+                                    let offset = read_f32(8 + nc * 4 + channel * 4)?;
+                                    if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+                                        return Err(BackendError::Dispatch(
+                                            "dequantize_activations: affine metadata must be finite with positive scales".into(),
+                                        ));
+                                    }
+                                    scales.push(scale);
+                                    offsets.push(offset);
+                                }
                                 let out_f32 =
                                     unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-
-                                if is_per_channel && num_channels > 0 {
-                                    // Per-channel format:
-                                    // header: [num_channels(u32)][chunk_size(u32)]
-                                    // then num_channels scale(zp) pairs
-                                    // then channel data blocks
-                                    let nc = u32::from_le_bytes(
-                                        in_data[0..4].try_into().unwrap_or([0; 4]),
-                                    ) as usize;
-                                    let chunk_size = u32::from_le_bytes(
-                                        in_data[4..8].try_into().unwrap_or([0; 4]),
-                                    ) as usize;
-                                    let pair_bytes = nc * 8; // scale + zp per channel
-                                    let data_start = 8 + pair_bytes;
-                                    for ch in 0..nc {
-                                        let scale = f32::from_le_bytes(
-                                            in_data[8 + ch * 4..8 + (ch + 1) * 4]
-                                                .try_into()
-                                                .unwrap_or([0; 4]),
-                                        );
-                                        let zp = f32::from_le_bytes(
-                                            in_data[8 + nc * 4 + ch * 4..8 + nc * 4 + (ch + 1) * 4]
-                                                .try_into()
-                                                .unwrap_or([0; 4]),
-                                        );
-                                        let ch_start = ch * chunk_size;
-                                        let ch_end = (ch_start + chunk_size).min(out_f32.len());
-                                        for i in ch_start..ch_end {
-                                            let local = i - ch_start;
-                                            let di = data_start + local;
-                                            let q = if di < in_data.len() {
-                                                in_data[di] as i8
-                                            } else {
-                                                0i8
-                                            };
-                                            out_f32[i] = (q as f32) * scale + zp;
-                                        }
+                                for channel in 0..nc {
+                                    let start = channel * chunk_size;
+                                    for local in 0..chunk_size {
+                                        let q = in_data[data_start + start + local] as i8;
+                                        out_f32[start + local] =
+                                            (q as f32) * scales[channel] + offsets[channel];
                                     }
-                                } else {
-                                    // Per-tensor symmetric (legacy path)
-                                    let header_size = 8;
-                                    let scale = if in_data.len() >= 4 {
-                                        f32::from_le_bytes(in_data[0..4].try_into().unwrap())
-                                    } else {
-                                        1.0
-                                    };
-                                    let zp = if in_data.len() >= 8 {
-                                        f32::from_le_bytes(in_data[4..8].try_into().unwrap())
-                                    } else {
-                                        0.0
-                                    };
-
-                                    let max_out = out_f32.len().min(numel);
-                                    for i in 0..max_out {
-                                        let idx = header_size + i;
-                                        let q = if idx < in_data.len() {
-                                            in_data[idx] as i8
-                                        } else {
-                                            0i8
-                                        };
-                                        out_f32[i] = (q as f32) * scale + zp;
-                                    }
+                                }
+                            } else {
+                                let expected_input = numel.checked_add(8).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "dequantize_activations: input size overflows".into(),
+                                    )
+                                })?;
+                                if in_data.len() != expected_input {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "dequantize_activations: input has {} bytes, expected {expected_input}",
+                                        in_data.len()
+                                    )));
+                                }
+                                let scale = read_f32(0)?;
+                                let offset = read_f32(4)?;
+                                if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+                                    return Err(BackendError::Dispatch(
+                                        "dequantize_activations: affine metadata must be finite with a positive scale".into(),
+                                    ));
+                                }
+                                let out_f32 =
+                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                                for (index, output) in out_f32.iter_mut().enumerate() {
+                                    *output = (in_data[8 + index] as i8 as f32) * scale + offset;
                                 }
                             }
                         }
