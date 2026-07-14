@@ -292,20 +292,32 @@ unary_op!(silu, silu);
 // Activation ops
 #[pyfunction]
 #[pyo3(signature = (a, negative_slope = 0.01))]
-fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.leaky_relu(negative_slope))
+fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        a.inner
+            .try_leaky_relu(negative_slope)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+    ))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, alpha = 1.0))]
-fn elu(a: &PyTensor, alpha: f32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.elu(alpha))
+fn elu(a: &PyTensor, alpha: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        a.inner
+            .try_elu(alpha)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+    ))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
-fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.softplus(beta, threshold))
+fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        a.inner
+            .try_softplus(beta, threshold)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+    ))
 }
 
 #[pyfunction]

@@ -68,6 +68,36 @@ macro_rules! impl_unary_op_extra {
     };
 }
 
+macro_rules! impl_validated_unary_op_extra {
+    ($try_name:ident, $name:ident, $backward:literal,
+     ($($param:ident: $ptype:ty),*), $validation:expr, $message:literal,
+     $ir_method:ident $(, $extra_arg:expr)*) => {
+        pub fn $try_name(&self, $($param: $ptype),*) -> Result<Tensor, BackendError> {
+            if !($validation) {
+                return Err(BackendError::Dispatch(
+                    concat!(stringify!($name), ": ", $message).into(),
+                ));
+            }
+            let output = exec_single(&[self], |g, ins| {
+                vec![g.$ir_method(&ins[0] $(, $extra_arg)*)]
+            })?;
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                Ok(Self::attach_grad_fn(
+                    output,
+                    autograd::make_node_info($backward, vec![self.clone()]),
+                ))
+            } else {
+                Ok(output)
+            }
+        }
+
+        pub fn $name(&self, $($param: $ptype),*) -> Tensor {
+            self.$try_name($($param),*)
+                .expect(concat!("Tensor::", stringify!($name), ": AOT execution failed"))
+        }
+    };
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::{
     _mm256_add_ps, _mm256_div_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
@@ -649,11 +679,37 @@ impl Tensor {
     impl_unary_op!(try_tanh, tanh, tanh, "TanhBackward");
     impl_unary_op!(try_silu, silu, silu, "SiLUBackward");
     impl_unary_op!(try_gelu, gelu, gelu, "GeluBackward");
-    impl_unary_op_extra!(try_leaky_relu, leaky_relu, "LeakyReLUBackward", (negative_slope: f32), leaky_relu, negative_slope);
-    impl_unary_op_extra!(try_softplus, softplus, "SoftplusBackward", (beta: f32, threshold: f32), softplus);
+    impl_validated_unary_op_extra!(
+        try_leaky_relu,
+        leaky_relu,
+        "LeakyReLUBackward",
+        (negative_slope: f32),
+        negative_slope.is_finite(),
+        "negative_slope must be finite",
+        leaky_relu,
+        negative_slope
+    );
+    impl_validated_unary_op_extra!(
+        try_softplus,
+        softplus,
+        "SoftplusBackward",
+        (beta: f32, threshold: f32),
+        beta.is_finite() && beta > 0.0 && threshold.is_finite(),
+        "beta must be finite and positive and threshold must be finite",
+        softplus
+    );
     impl_unary_op!(try_hardswish, hardswish, hardswish, "HardswishBackward");
     impl_unary_op!(try_mish, mish, mish, "MishBackward");
-    impl_unary_op_extra!(try_elu, elu, "EluBackward", (alpha: f32), elu, alpha);
+    impl_validated_unary_op_extra!(
+        try_elu,
+        elu,
+        "EluBackward",
+        (alpha: f32),
+        alpha.is_finite(),
+        "alpha must be finite",
+        elu,
+        alpha
+    );
     pub fn try_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
         let dim = self.normalize_axis(dim, "softmax")?;
         let output = exec_single(&[self], |graph, inputs| {

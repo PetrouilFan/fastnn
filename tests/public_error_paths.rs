@@ -370,6 +370,16 @@ fn invalid_binary_shapes_return_dispatch_errors() {
 }
 
 #[test]
+fn invalid_activation_parameters_return_dispatch_errors() {
+    let tensor = Tensor::from_vec(vec![-1.0, 0.0, 1.0], vec![3]);
+    assert!(tensor.try_leaky_relu(f32::NAN).is_err());
+    assert!(tensor.try_elu(f32::INFINITY).is_err());
+    assert!(tensor.try_softplus(0.0, 20.0).is_err());
+    assert!(tensor.try_softplus(1.0, f32::NAN).is_err());
+    assert_eq!(tensor.try_softplus(1.0, 20.0).unwrap().shape(), vec![3]);
+}
+
+#[test]
 fn invalid_softmax_dimensions_return_dispatch_errors() {
     let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     let softmax = tensor
