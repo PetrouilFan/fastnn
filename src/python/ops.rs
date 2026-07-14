@@ -397,14 +397,14 @@ fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
-fn maximum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.maximum(&other.inner))
+fn maximum(a: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_maximum(&other.inner)?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
-fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.minimum(&other.inner))
+fn minimum(a: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_minimum(&other.inner)?))
 }
 
 #[pyfunction]
@@ -716,8 +716,14 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
 
 // Tensor manipulation ops
 #[pyfunction]
-fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(x.inner.where_tensor(&condition.inner, &y.inner))
+fn where_(
+    condition: &PyTensor,
+    x: &PyTensor,
+    y: &PyTensor,
+) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        x.inner.try_where_tensor(&condition.inner, &y.inner)?,
+    ))
 }
 
 #[pyfunction]

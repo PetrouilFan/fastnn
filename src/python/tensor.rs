@@ -316,12 +316,16 @@ impl PyTensor {
         PyTensor::from_tensor(self.inner.flip(&[dim as usize]))
     }
 
-    fn maximum(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.maximum(&other.inner))
+    fn maximum(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.try_maximum(&other.inner)?,
+        ))
     }
 
-    fn minimum(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.minimum(&other.inner))
+    fn minimum(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.try_minimum(&other.inner)?,
+        ))
     }
 
     fn log_softmax(&self, dim: i32) -> PyResult<PyTensor> {
@@ -332,8 +336,10 @@ impl PyTensor {
         Ok(PyTensor::from_tensor(self.inner.try_repeat(&repeats)?))
     }
 
-    fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.where_tensor(&condition.inner, &other.inner))
+    fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.try_where_tensor(&condition.inner, &other.inner)?,
+        ))
     }
 
     fn __add__(&self, other: &PyTensor) -> PyResult<PyTensor> {

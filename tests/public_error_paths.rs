@@ -370,6 +370,20 @@ fn invalid_binary_shapes_return_dispatch_errors() {
 }
 
 #[test]
+fn invalid_selection_operands_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    assert!(values.try_maximum(&incompatible).is_err());
+    assert!(values.try_minimum(&incompatible).is_err());
+
+    let condition = Tensor::from_vec(vec![1.0; 5], vec![5]);
+    assert!(values.try_where_tensor(&condition, &values).is_err());
+    assert!(values
+        .try_where_tensor(&Tensor::from_vec(vec![1.0; 6], vec![2, 3]), &values)
+        .is_ok());
+}
+
+#[test]
 fn invalid_activation_parameters_return_dispatch_errors() {
     let tensor = Tensor::from_vec(vec![-1.0, 0.0, 1.0], vec![3]);
     assert!(tensor.try_leaky_relu(f32::NAN).is_err());

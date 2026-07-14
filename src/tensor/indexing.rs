@@ -31,6 +31,21 @@ fn cpu_f32_fast_path_setup(t: &Tensor) -> Option<(usize, *const f32, *mut f32, T
     }
 }
 
+fn validate_selection_values(left: &Tensor, right: &Tensor, operation: &str) -> FastnnResult<()> {
+    if left.device() != right.device() {
+        return Err(FastnnError::device(format!(
+            "{operation} operands must be on the same device"
+        )));
+    }
+    if left.dtype() != right.dtype() {
+        return Err(FastnnError::dtype(format!(
+            "{operation} operand dtypes must match"
+        )));
+    }
+    Tensor::broadcast_shapes(&left.shape(), &right.shape())?;
+    Ok(())
+}
+
 impl TensorImpl {
     pub fn slice(&self, dim: usize, start: i64, end: i64, step: i64) -> Tensor {
         self.try_slice(dim, start, end, step)
@@ -113,18 +128,25 @@ impl Tensor {
     }
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {
+        self.try_maximum(other)
+            .expect("Tensor::maximum execution failed")
+    }
+
+    pub fn try_maximum(&self, other: &Tensor) -> FastnnResult<Tensor> {
+        validate_selection_values(self, other, "maximum")?;
         let output = Tensor::exec_aot(&[self, other], |g, ins| vec![g.maximum(&ins[0], &ins[1])])
-            .expect("Tensor::maximum: AOT execution failed")
+            .map_err(|error| FastnnError::Internal(error.to_string()))?
             .into_iter()
             .next()
-            .unwrap();
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let _edges = autograd::make_edges(self, other);
-            let inputs = vec![self.clone(), other.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("MaximumBackward", inputs))
-        } else {
-            output
-        }
+            .ok_or_else(|| FastnnError::Internal("maximum execution returned no output".into()))?;
+        Ok(
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let inputs = vec![self.clone(), other.clone()];
+                Self::attach_grad_fn(output, autograd::make_node_info("MaximumBackward", inputs))
+            } else {
+                output
+            },
+        )
     }
 
     impl_scalar_op!(gt_scalar, _CMP_GT_OQ, >);
@@ -138,18 +160,25 @@ impl Tensor {
     }
 
     pub fn minimum(&self, other: &Tensor) -> Tensor {
+        self.try_minimum(other)
+            .expect("Tensor::minimum execution failed")
+    }
+
+    pub fn try_minimum(&self, other: &Tensor) -> FastnnResult<Tensor> {
+        validate_selection_values(self, other, "minimum")?;
         let output = Tensor::exec_aot(&[self, other], |g, ins| vec![g.minimum(&ins[0], &ins[1])])
-            .expect("Tensor::minimum: AOT execution failed")
+            .map_err(|error| FastnnError::Internal(error.to_string()))?
             .into_iter()
             .next()
-            .unwrap();
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let _edges = autograd::make_edges(self, other);
-            let inputs = vec![self.clone(), other.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("MinimumBackward", inputs))
-        } else {
-            output
-        }
+            .ok_or_else(|| FastnnError::Internal("minimum execution returned no output".into()))?;
+        Ok(
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let inputs = vec![self.clone(), other.clone()];
+                Self::attach_grad_fn(output, autograd::make_node_info("MinimumBackward", inputs))
+            } else {
+                output
+            },
+        )
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
@@ -369,21 +398,35 @@ impl Tensor {
     }
 
     pub fn where_tensor(&self, condition: &Tensor, other: &Tensor) -> Tensor {
+        self.try_where_tensor(condition, other)
+            .expect("Tensor::where_tensor execution failed")
+    }
+
+    pub fn try_where_tensor(&self, condition: &Tensor, other: &Tensor) -> FastnnResult<Tensor> {
+        validate_selection_values(self, other, "where")?;
+        if condition.device() != self.device() {
+            return Err(FastnnError::device(
+                "where condition and values must be on the same device",
+            ));
+        }
+        Tensor::broadcast_shapes(&condition.shape(), &self.shape())?;
+        Tensor::broadcast_shapes(&condition.shape(), &other.shape())?;
         let output = Tensor::exec_aot(&[condition, self, other], |g, ins| {
             vec![g.where_tensor(&ins[0], &ins[1], &ins[2])]
         })
-        .expect("Tensor::where_tensor: AOT failed")
+        .map_err(|error| FastnnError::Internal(error.to_string()))?
         .into_iter()
         .next()
-        .unwrap();
+        .ok_or_else(|| FastnnError::Internal("where execution returned no output".into()))?;
 
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let _edges = autograd::make_edges(self, other);
-            let inputs = vec![self.clone(), other.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("WhereBackward", inputs))
-        } else {
-            output
-        }
+        Ok(
+            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
+                let inputs = vec![self.clone(), other.clone()];
+                Self::attach_grad_fn(output, autograd::make_node_info("WhereBackward", inputs))
+            } else {
+                output
+            },
+        )
     }
 
     pub fn gather(&self, axis: i64, indices: &Tensor) -> Tensor {
