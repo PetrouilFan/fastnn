@@ -451,6 +451,25 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_rmsprop_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let second_moment = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_rmsprop(&weight, &wrong_shape, &second_moment, 0.01, 0.99, 1e-8)
+        .is_err());
+    assert!(graph
+        .try_apply_rmsprop(&weight, &gradient, &second_moment, 0.01, 1.0, 1e-8)
+        .is_err());
+    assert!(graph
+        .try_apply_rmsprop(&weight, &gradient, &second_moment, 0.01, 0.99, 0.0)
+        .is_err());
+}
+
+#[test]
 fn invalid_lion_inputs_return_structured_errors() {
     let graph = GraphBuilder::new();
     let weight = graph.input(&[2, 2], IrDType::F32);

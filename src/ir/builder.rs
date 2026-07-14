@@ -2488,6 +2488,46 @@ impl GraphBuilder {
         beta: f32,
         eps: f32,
     ) -> GraphTensor {
+        self.try_apply_rmsprop(weight, grad, v, lr, beta, eps)
+            .expect("GraphBuilder::apply_rmsprop received invalid inputs")
+    }
+
+    pub fn try_apply_rmsprop(
+        &self,
+        weight: &GraphTensor,
+        grad: &GraphTensor,
+        v: &GraphTensor,
+        lr: f32,
+        beta: f32,
+        eps: f32,
+    ) -> FastnnResult<GraphTensor> {
+        if !lr.is_finite() || lr < 0.0 {
+            return Err(FastnnError::shape(
+                "RMSprop learning rate must be finite and non-negative",
+            ));
+        }
+        if !beta.is_finite() || !(0.0..1.0).contains(&beta) {
+            return Err(FastnnError::shape("RMSprop beta must be in [0, 1)"));
+        }
+        if !eps.is_finite() || eps <= 0.0 {
+            return Err(FastnnError::shape(
+                "RMSprop epsilon must be finite and positive",
+            ));
+        }
+        for (name, tensor) in [("gradient", grad), ("second moment", v)] {
+            if tensor.tensor_type().shape != weight.tensor_type().shape {
+                return Err(FastnnError::shape(format!(
+                    "RMSprop {name} shape {:?} does not match weight shape {:?}",
+                    tensor.tensor_type().shape,
+                    weight.tensor_type().shape
+                )));
+            }
+            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
+                return Err(FastnnError::dtype(format!(
+                    "RMSprop {name} dtype does not match weight dtype"
+                )));
+            }
+        }
         let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
@@ -2506,9 +2546,8 @@ impl GraphBuilder {
         let result = GraphTensor::new(self.clone(), node_id, tt);
         if let Some(bit_width) = bw {
             self.quantize(&result, bit_width)
-                .expect("packed dtype bit width must be valid")
         } else {
-            result
+            Ok(result)
         }
     }
 
