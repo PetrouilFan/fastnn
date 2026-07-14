@@ -387,6 +387,56 @@ fn invalid_sgd_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_adam_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let first_moment = graph.input(&[2, 2], IrDType::F32);
+    let second_moment = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &wrong_shape,
+            &first_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            1e-8,
+            1,
+        )
+        .is_err());
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &gradient,
+            &first_moment,
+            &second_moment,
+            0.001,
+            1.0,
+            0.999,
+            1e-8,
+            1,
+        )
+        .is_err());
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &gradient,
+            &first_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            0.0,
+            0,
+        )
+        .is_err());
+}
+
+#[test]
 fn invalid_selection_operands_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
     let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
