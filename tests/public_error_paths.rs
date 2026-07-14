@@ -451,6 +451,13 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_squeeze_dimensions_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+    assert_eq!(values.try_squeeze(Some(0)).unwrap().shape(), &[2]);
+    assert!(values.try_squeeze(Some(2)).is_err());
+}
+
+#[test]
 fn invalid_flip_dimensions_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
     assert!(values.try_flip(&[2]).is_err());

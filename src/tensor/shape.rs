@@ -316,10 +316,22 @@ impl TensorImpl {
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
-        match dim {
+        self.try_squeeze(dim).expect("Tensor::squeeze failed")
+    }
+
+    pub fn try_squeeze(&self, dim: Option<usize>) -> FastnnResult<Tensor> {
+        if let Some(dim) = dim {
+            if dim >= self.ndim() {
+                return Err(FastnnError::shape(format!(
+                    "squeeze dimension {dim} is out of range for rank {}",
+                    self.ndim()
+                )));
+            }
+        }
+        Ok(match dim {
             Some(d) => {
-                if d >= self.ndim() || self.sizes[d] != 1 {
-                    return self.clone().into();
+                if self.sizes[d] != 1 {
+                    return Ok(self.clone().into());
                 }
                 let mut sizes = self.sizes.clone();
                 let mut strides = self.strides.clone();
@@ -347,7 +359,7 @@ impl TensorImpl {
                 self.new_view_from(sizes, strides, self.storage_offset)
                     .into()
             }
-        }
+        })
     }
 
     pub fn expand(&self, sizes: SmallVec<[i64; 8]>) -> Tensor {
@@ -509,14 +521,18 @@ impl Tensor {
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
-        let output = self.inner.squeeze(dim);
+        self.try_squeeze(dim).expect("Tensor::squeeze failed")
+    }
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
+    pub fn try_squeeze(&self, dim: Option<usize>) -> FastnnResult<Tensor> {
+        let output = self.inner.try_squeeze(dim)?;
+
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
         } else {
             output
-        }
+        })
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {

@@ -308,8 +308,20 @@ impl PyTensor {
         ))
     }
 
-    fn squeeze(&self, dim: Option<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.squeeze(dim.map(|d| d as usize)))
+    fn squeeze(&self, dim: Option<i64>) -> PyResult<PyTensor> {
+        let normalized = if let Some(dim) = dim {
+            let rank = self.inner.ndim() as i64;
+            let normalized = if dim < 0 { dim + rank } else { dim };
+            if normalized < 0 || normalized >= rank {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "squeeze dimension {dim} is out of range for rank {rank}"
+                )));
+            }
+            Some(normalized as usize)
+        } else {
+            None
+        };
+        Ok(PyTensor::from_tensor(self.inner.try_squeeze(normalized)?))
     }
 
     fn flip(&self, dim: i32) -> PyResult<PyTensor> {
