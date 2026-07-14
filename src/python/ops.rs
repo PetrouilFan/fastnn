@@ -892,13 +892,16 @@ fn erf(tensor: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn clip_grad_norm_(tensors: Vec<PyTensor>, max_norm: f32, norm_type: f32) -> f32 {
+fn clip_grad_norm_(tensors: Vec<PyTensor>, max_norm: f32, norm_type: f32) -> PyResult<f32> {
     let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    core_tensor::clip_grad_norm_(&tensors, max_norm, norm_type)
+    Ok(core_tensor::try_clip_grad_norm_(
+        &tensors, max_norm, norm_type,
+    )?)
 }
 
 #[pyfunction]
-fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) {
+fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) -> PyResult<()> {
     let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    core_tensor::clip_grad_value_(&tensors, clip_value);
+    core_tensor::try_clip_grad_value_(&tensors, clip_value)?;
+    Ok(())
 }

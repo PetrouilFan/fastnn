@@ -1175,10 +1175,24 @@ fn einsum_validated(equation: &str, tensors: &[Tensor]) -> Tensor {
 }
 
 pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32 {
+    try_clip_grad_norm_(tensors, max_norm, norm_type).expect("clip_grad_norm_ failed")
+}
+
+pub fn try_clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> FastnnResult<f32> {
+    if !max_norm.is_finite() || max_norm < 0.0 {
+        return Err(FastnnError::shape(
+            "gradient maximum norm must be finite and non-negative",
+        ));
+    }
+    if !norm_type.is_finite() || norm_type <= 0.0 {
+        return Err(FastnnError::shape(
+            "gradient norm type must be finite and positive",
+        ));
+    }
     let mut total_norm = 0.0f32;
     for t in tensors {
         if let Some(g) = t.grad() {
-            let g_data = g.as_f32_slice();
+            let g_data = g.try_as_f32_slice()?;
             if norm_type == 2.0 {
                 let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
                 total_norm += param_norm * param_norm;
@@ -1192,29 +1206,44 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
     } else {
         total_norm = total_norm.powf(1.0 / norm_type);
     }
-    let clip_coef = max_norm / (total_norm.max(1e-6));
+    if !total_norm.is_finite() {
+        return Err(FastnnError::Computation(
+            "gradient norm is not finite".into(),
+        ));
+    }
+    let clip_coef = max_norm / total_norm.max(1e-6);
     if clip_coef < 1.0 {
         for t in tensors {
             if let Some(mut g) = t.grad() {
-                for x in g.as_f32_slice_mut().iter_mut() {
+                for x in g.try_as_f32_slice_mut()?.iter_mut() {
                     *x *= clip_coef;
                 }
                 t.set_grad(Some(g));
             }
         }
     }
-    total_norm
+    Ok(total_norm)
 }
 
 pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
+    try_clip_grad_value_(tensors, clip_value).expect("clip_grad_value_ failed")
+}
+
+pub fn try_clip_grad_value_(tensors: &[Tensor], clip_value: f32) -> FastnnResult<()> {
+    if !clip_value.is_finite() || clip_value < 0.0 {
+        return Err(FastnnError::shape(
+            "gradient clip value must be finite and non-negative",
+        ));
+    }
     for t in tensors {
         if let Some(mut g) = t.grad() {
-            for x in g.as_f32_slice_mut().iter_mut() {
+            for x in g.try_as_f32_slice_mut()?.iter_mut() {
                 *x = x.max(-clip_value).min(clip_value);
             }
             t.set_grad(Some(g));
         }
     }
+    Ok(())
 }
 
 // =============================================================================

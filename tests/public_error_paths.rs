@@ -451,6 +451,14 @@ fn invalid_adam_inputs_return_structured_errors() {
 }
 
 #[test]
+fn invalid_gradient_clipping_parameters_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    assert!(fastnn::tensor::try_clip_grad_norm_(&[tensor.clone()], -1.0, 2.0).is_err());
+    assert!(fastnn::tensor::try_clip_grad_norm_(&[tensor.clone()], 1.0, 0.0).is_err());
+    assert!(fastnn::tensor::try_clip_grad_value_(&[tensor], f32::NAN).is_err());
+}
+
+#[test]
 fn invalid_einsum_inputs_return_structured_errors() {
     let left = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
     let right = Tensor::from_vec(vec![1.0; 8], vec![4, 2]);
