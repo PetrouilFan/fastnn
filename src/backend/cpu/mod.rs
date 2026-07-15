@@ -3975,51 +3975,74 @@ impl Backend for CpuBackend {
                             );
                         }
                         "transpose_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let transpose_params =
-                                    resolve_params(params, param_dims, shape_env, 2)?;
-                                let &[m, n] = &transpose_params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "transpose_f32: expected params [M,N]".into(),
-                                    ));
-                                };
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                        if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
-                                            unsafe {
-                                                microkernels::transpose_f32_avx2(
-                                                    input, out_f32, m, n,
-                                                );
-                                            }
-                                            return;
-                                        }
-                                        #[cfg(not(feature = "parallel"))]
-                                        {
-                                            for i in 0..m {
-                                                for j in 0..n {
-                                                    out_f32[j * m + i] = input[i * n + j];
-                                                }
-                                            }
-                                        }
-                                        #[cfg(feature = "parallel")]
-                                        {
-                                            use rayon::prelude::*;
-                                            out_f32.par_chunks_mut(m).enumerate().for_each(
-                                                |(j, col)| {
-                                                    for i in 0..m {
-                                                        col[i] = input[i * n + j];
-                                                    }
-                                                },
-                                            );
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "transpose_f32: expected exactly one input".into(),
+                                ));
                             }
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let transpose_params =
+                                resolve_params(params, param_dims, shape_env, 2)?;
+                            let &[m, n] = &transpose_params[..] else {
+                                return Err(BackendError::Dispatch(
+                                    "transpose_f32: expected params [M,N]".into(),
+                                ));
+                            };
+                            let expected_bytes = m
+                                .checked_mul(n)
+                                .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "transpose_f32: matrix storage size overflows".into(),
+                                    )
+                                })?;
+                            let input_slice = input_slices[0];
+                            if input_slice.size != expected_bytes
+                                || output_slice.size != expected_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "transpose_f32: geometry and f32 storage disagree".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
+                                        unsafe {
+                                            microkernels::transpose_f32_avx2(input, out_f32, m, n);
+                                        }
+                                        return;
+                                    }
+                                    #[cfg(not(feature = "parallel"))]
+                                    {
+                                        for i in 0..m {
+                                            for j in 0..n {
+                                                out_f32[j * m + i] = input[i * n + j];
+                                            }
+                                        }
+                                    }
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        out_f32.par_chunks_mut(m).enumerate().for_each(
+                                            |(j, col)| {
+                                                for i in 0..m {
+                                                    col[i] = input[i * n + j];
+                                                }
+                                            },
+                                        );
+                                    }
+                                },
+                            );
                         }
                         "transpose_perm_f32" => {
                             if let Some(input_slice) = input_slices.first() {

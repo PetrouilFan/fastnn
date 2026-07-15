@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn transpose_rejects_truncated_matrix_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "transpose_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 12)],
+                output_slice: crate::backend::BufferSlice::new(12, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 28,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(28).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn reduction_respects_nontrailing_axis() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
