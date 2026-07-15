@@ -20,7 +20,7 @@ use crate::packed_tensor::PackedTensor;
 use bytemuck;
 use smallvec::{smallvec, SmallVec};
 use std::any::TypeId;
-use std::borrow::Cow;
+
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -3150,7 +3150,7 @@ impl Backend for CpuBackend {
                         if input_slices.len() != 2
                             || !params.is_empty()
                             || input_slices[0].size != output_slice.size
-                            || input_slices[1].size != scalar_bytes
+                            || input_slices[1].size < scalar_bytes
                             || input_slices.iter().any(|slice| {
                                 !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
                                     || !slice.size.is_multiple_of(scalar_bytes)
@@ -3965,6 +3965,38 @@ impl Backend for CpuBackend {
                             );
                         }
                         "softmax" => {
+                            if input_slices.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "softmax: expected exactly one input".into(),
+                                ));
+                            }
+                            let softmax_params = resolve_params(params, param_dims, shape_env, 2)?;
+                            let [axis_dim_size, stride] = softmax_params.as_ref() else {
+                                unreachable!();
+                            };
+                            let input_slice = input_slices[0];
+                            let output_size = out_end - out_start;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_elements = input_slice.size / scalar_bytes;
+                            let row_span = axis_dim_size.checked_mul(*stride).ok_or_else(|| {
+                                BackendError::Dispatch("softmax: row span overflows".into())
+                            })?;
+                            if *axis_dim_size == 0
+                                || *stride == 0
+                                || input_slice.size == 0
+                                || input_slice.size != output_size
+                                || !input_elements.is_multiple_of(row_span)
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(scalar_bytes)
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "softmax: invalid geometry or f32 storage contract".into(),
+                                ));
+                            }
+                            let num_rows = input_elements / axis_dim_size;
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 arena::with_unary_f32_slices(
@@ -3972,20 +4004,11 @@ impl Backend for CpuBackend {
                                     *input_slice,
                                     output_slice,
                                     |input, out_f32| {
-                                        let softmax_params =
-                                            resolve_params(params, param_dims, shape_env, 2)
-                                                .unwrap_or_else(|_| {
-                                                    Cow::Owned(vec![input.len(), 1])
-                                                });
-                                        let axis_dim_size = softmax_params[0].max(1);
-                                        let stride =
-                                            softmax_params.get(1).copied().unwrap_or(1).max(1);
-                                        let num_rows = input.len() / axis_dim_size.max(1);
                                         softmax_f32(
                                             input,
                                             out_f32,
-                                            axis_dim_size,
-                                            stride,
+                                            *axis_dim_size,
+                                            *stride,
                                             num_rows,
                                         );
                                     },
