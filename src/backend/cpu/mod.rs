@@ -9326,42 +9326,80 @@ impl Backend for CpuBackend {
                             }
                         }
                         "range_f32" => {
-                            // Range(start, limit, step): produce 1D F32 tensor.
-                            let d = arena.data_mut();
-                            let start_val = if let Some(s) = input_slices.first() {
-                                f32::from_le_bytes(
-                                    d[s.offset..s.offset + 4].try_into().unwrap_or([0u8; 4]),
+                            if input_slices.len() != 3 || !params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "range_f32: expected start, limit, step and no parameters"
+                                        .into(),
+                                ));
+                            }
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if input_slices.iter().any(|slice| {
+                                slice.size < scalar_bytes
+                                    || !slice.size.is_multiple_of(scalar_bytes)
+                                    || !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                            }) || !output_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice.size.is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "range_f32: invalid f32 scalar or output storage".into(),
+                                ));
+                            }
+                            let read_scalar = |slice: BufferSlice| {
+                                let data = arena.data_mut();
+                                bytemuck::try_cast_slice::<_, f32>(
+                                    &data[slice.offset..slice.offset + scalar_bytes],
                                 )
-                            } else {
-                                0.0
+                                .ok()
+                                .and_then(|values| values.first().copied())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "range_f32: scalar storage cannot be read as f32".into(),
+                                    )
+                                })
                             };
-                            let limit_val = if let Some(s) = input_slices.get(1) {
-                                f32::from_le_bytes(
-                                    d[s.offset..s.offset + 4].try_into().unwrap_or([0u8; 4]),
-                                )
+                            let start_value = read_scalar(input_slices[0])?;
+                            let limit_value = read_scalar(input_slices[1])?;
+                            let step_value = read_scalar(input_slices[2])?;
+                            if !start_value.is_finite()
+                                || !limit_value.is_finite()
+                                || !step_value.is_finite()
+                                || step_value == 0.0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "range_f32: start, limit, and nonzero step must be finite"
+                                        .into(),
+                                ));
+                            }
+                            let span = if step_value > 0.0 {
+                                (limit_value - start_value) / step_value
                             } else {
-                                0.0
+                                (start_value - limit_value) / -step_value
                             };
-                            let step_val = if let Some(s) = input_slices.get(2) {
-                                f32::from_le_bytes(
-                                    d[s.offset..s.offset + 4].try_into().unwrap_or([1u8; 4]),
-                                )
-                            } else {
-                                1.0
-                            };
-                            let n = if step_val > 0.0 {
-                                ((limit_val - start_val) / step_val).ceil().max(0.0) as usize
-                            } else if step_val < 0.0 {
-                                ((start_val - limit_val) / (-step_val)).ceil().max(0.0) as usize
-                            } else {
-                                0
-                            };
-                            let out_f32 = bytemuck::cast_slice_mut::<_, f32>(
-                                &mut d[out_start..out_start + output_slice.size],
-                            );
-                            let actual_len = out_f32.len().min(n);
-                            for i in 0..actual_len {
-                                out_f32[i] = start_val + i as f32 * step_val;
+                            if !span.is_finite() {
+                                return Err(BackendError::Dispatch(
+                                    "range_f32: element count is not finite".into(),
+                                ));
+                            }
+                            let element_count = span.ceil().max(0.0) as usize;
+                            let expected_bytes =
+                                element_count.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "range_f32: output size overflows".into(),
+                                    )
+                                })?;
+                            if output_slice.size != expected_bytes {
+                                return Err(BackendError::Dispatch(
+                                    "range_f32: output storage does not match range geometry"
+                                        .into(),
+                                ));
+                            }
+                            let data = arena.data_mut();
+                            let output =
+                                bytemuck::cast_slice_mut::<_, f32>(&mut data[out_start..out_end]);
+                            for (index, value) in output.iter_mut().enumerate() {
+                                *value = start_value + index as f32 * step_value;
                             }
                         }
                         "quantize_f32_u4" | "quantize_f32_u8" => {
