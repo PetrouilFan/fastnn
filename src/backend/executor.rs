@@ -2272,6 +2272,39 @@ mod execution_storage_size_tests {
         };
         let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
         assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+
+        let runtime_step_plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adamw_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                    crate::backend::BufferSlice::new(8, 4),
+                    crate::backend::BufferSlice::new(12, 4),
+                    crate::backend::BufferSlice::new(16, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(24, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    0.001f32.to_bits() as usize,
+                    0.9f32.to_bits() as usize,
+                    0.999f32.to_bits() as usize,
+                    1e-8f32.to_bits() as usize,
+                    0.01f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 28,
+            levels: vec![0],
+        };
+        let arena = backend
+            .try_allocate_arena(runtime_step_plan.arena_size)
+            .unwrap();
+        assert!(backend
+            .dispatch(&runtime_step_plan, &arena, &ShapeEnv::new())
+            .is_err());
     }
 
     #[test]

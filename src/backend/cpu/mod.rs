@@ -300,6 +300,26 @@ mod cpu_buffer_tests {
 #[derive(Clone)]
 pub struct CpuBackend;
 
+fn read_adam_runtime_step(
+    data: &[u8],
+    slice: BufferSlice,
+    kernel_name: &str,
+) -> Result<f32, BackendError> {
+    let bytes = data.get(slice.offset..slice.offset + 8).ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: runtime step range is invalid"))
+    })?;
+    let step = u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    if step == 0 || step > i32::MAX as u64 {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: optimizer step must be in 1..={}",
+            i32::MAX
+        )));
+    }
+    Ok(step as f32)
+}
+
 fn validate_adam_dispatch(
     kernel_name: &str,
     input_slices: &[BufferSlice],
@@ -362,9 +382,10 @@ fn validate_adam_dispatch(
             "{kernel_name}: runtime step tensor must contain exactly 8 bytes"
         )));
     }
-    if input_slices.len() == 4 && params[4] == 0 {
+    if input_slices.len() == 4 && (params[4] == 0 || params[4] > i32::MAX as usize) {
         return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: optimizer step must be positive"
+            "{kernel_name}: optimizer step must be in 1..={}",
+            i32::MAX
         )));
     }
     if decoupled_weight_decay {
@@ -6278,11 +6299,11 @@ impl Backend for CpuBackend {
                                 let eps = f32::from_bits(params[3] as u32);
                                 let (t, wd) = if input_slices.len() >= 5 {
                                     let d_ref: &[u8] = &*d;
-                                    let t = u64::from_le_bytes(
-                                        d_ref[input_slices[4].offset..input_slices[4].offset + 8]
-                                            .try_into()
-                                            .unwrap(),
-                                    ) as f32;
+                                    let t = read_adam_runtime_step(
+                                        d_ref,
+                                        input_slices[4],
+                                        "adamw_update_f32",
+                                    )?;
                                     let wd = f32::from_bits(params[4] as u32);
                                     (t, wd)
                                 } else {
@@ -6581,11 +6602,11 @@ impl Backend for CpuBackend {
                                 let eps = f32::from_bits(params[3] as u32);
                                 let (t, wd) = if input_slices.len() >= 5 {
                                     // New path: t is a runtime tensor (5th input slice)
-                                    let t = u64::from_le_bytes(
-                                        d_ref[input_slices[4].offset..input_slices[4].offset + 8]
-                                            .try_into()
-                                            .unwrap(),
-                                    ) as f32;
+                                    let t = read_adam_runtime_step(
+                                        d_ref,
+                                        input_slices[4],
+                                        "adamw_update_f16_state",
+                                    )?;
                                     let wd = f32::from_bits(params[4] as u32);
                                     (t, wd)
                                 } else {
