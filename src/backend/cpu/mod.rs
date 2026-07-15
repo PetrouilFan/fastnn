@@ -300,6 +300,102 @@ mod cpu_buffer_tests {
 #[derive(Clone)]
 pub struct CpuBackend;
 
+fn validate_adam_dispatch(
+    kernel_name: &str,
+    input_slices: &[BufferSlice],
+    output_slice: BufferSlice,
+    params: &[usize],
+    uses_f16_state: bool,
+    decoupled_weight_decay: bool,
+) -> Result<(), BackendError> {
+    let valid_input_count = if decoupled_weight_decay {
+        matches!(input_slices.len(), 4 | 5)
+    } else {
+        input_slices.len() == 4
+    };
+    if !valid_input_count {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: invalid input count {}",
+            input_slices.len()
+        )));
+    }
+    let required_params = if decoupled_weight_decay && input_slices.len() == 4 {
+        6
+    } else {
+        5
+    };
+    if params.len() < required_params {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: expected at least {required_params} parameters"
+        )));
+    }
+    let weight_size = input_slices[0].size;
+    if weight_size == 0
+        || weight_size % 4 != 0
+        || input_slices[0].offset % 4 != 0
+        || input_slices[1].size != weight_size
+        || input_slices[1].offset % 4 != 0
+        || output_slice.size != weight_size
+        || output_slice.offset % 4 != 0
+    {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: weight, gradient, and output slices must be matching f32 tensors"
+        )));
+    }
+    let state_size = if uses_f16_state {
+        weight_size / 2
+    } else {
+        weight_size
+    };
+    let state_alignment = if uses_f16_state { 2 } else { 4 };
+    if input_slices[2].size != state_size
+        || input_slices[3].size != state_size
+        || input_slices[2].offset % state_alignment != 0
+        || input_slices[3].offset % state_alignment != 0
+    {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: optimizer state slices do not match the weight tensor"
+        )));
+    }
+    if input_slices.len() == 5 && input_slices[4].size != 8 {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: runtime step tensor must contain exactly 8 bytes"
+        )));
+    }
+    if input_slices.len() == 4 && params[4] == 0 {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: optimizer step must be positive"
+        )));
+    }
+    if decoupled_weight_decay {
+        let weight_decay_index = if input_slices.len() == 5 { 4 } else { 5 };
+        let weight_decay = f32::from_bits(params[weight_decay_index] as u32);
+        if !weight_decay.is_finite() || weight_decay < 0.0 {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: weight decay must be finite and non-negative"
+            )));
+        }
+    }
+    let lr = f32::from_bits(params[0] as u32);
+    let beta1 = f32::from_bits(params[1] as u32);
+    let beta2 = f32::from_bits(params[2] as u32);
+    let eps = f32::from_bits(params[3] as u32);
+    if !lr.is_finite()
+        || lr < 0.0
+        || !beta1.is_finite()
+        || !(0.0..1.0).contains(&beta1)
+        || !beta2.is_finite()
+        || !(0.0..1.0).contains(&beta2)
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: invalid optimizer hyperparameters"
+        )));
+    }
+    Ok(())
+}
+
 impl Backend for CpuBackend {
     type Buffer = CpuBuffer;
 
@@ -6074,6 +6170,14 @@ impl Backend for CpuBackend {
                             }
                         }
                         "adam_update_f32" => {
+                            validate_adam_dispatch(
+                                "adam_update_f32",
+                                input_slices,
+                                *output_slice,
+                                params,
+                                false,
+                                false,
+                            )?;
                             let d = arena.data_mut();
                             let d_ptr = d.as_mut_ptr();
                             // SAFETY: Slices are non-overlapping (except w which is
@@ -6127,6 +6231,14 @@ impl Backend for CpuBackend {
                             }
                         }
                         "adamw_update_f32" => {
+                            validate_adam_dispatch(
+                                "adamw_update_f32",
+                                input_slices,
+                                *output_slice,
+                                params,
+                                false,
+                                true,
+                            )?;
                             let d = arena.data_mut();
                             let d_ptr = d.as_mut_ptr();
                             // SAFETY: Slices are non-overlapping (except w which is
@@ -6306,6 +6418,14 @@ impl Backend for CpuBackend {
                         // m and v are stored as F16 (2 bytes/elem), w and grad are F32 (4 bytes/elem).
                         // Read F16 state, convert to f32 internally, apply update, write back as F16.
                         "adam_update_f16_state" => {
+                            validate_adam_dispatch(
+                                "adam_update_f16_state",
+                                input_slices,
+                                *output_slice,
+                                params,
+                                true,
+                                false,
+                            )?;
                             let n = input_slices[0].size / 4;
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
                                 let d = arena.data_mut();
@@ -6415,6 +6535,14 @@ impl Backend for CpuBackend {
                                 .copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
                         }
                         "adamw_update_f16_state" => {
+                            validate_adam_dispatch(
+                                "adamw_update_f16_state",
+                                input_slices,
+                                *output_slice,
+                                params,
+                                true,
+                                true,
+                            )?;
                             let n = input_slices[0].size / 4;
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
                                 let d = arena.data_mut();

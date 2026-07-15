@@ -2248,6 +2248,33 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn adam_dispatch_rejects_malformed_storage_contracts() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adam_update_f32".into(),
+                input_slices: vec![],
+                output_slice: crate::backend::BufferSlice::new(0, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    0.001f32.to_bits() as usize,
+                    0.9f32.to_bits() as usize,
+                    0.999f32.to_bits() as usize,
+                    1e-8f32.to_bits() as usize,
+                    1,
+                ],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn packed_dequantization_rejects_implicit_storage_width() {
         let backend = crate::backend::cpu::CpuBackend;
         let plan = ExecutablePlan {
