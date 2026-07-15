@@ -1,6 +1,8 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::{Backend, BufferSlice, ExecutablePlan, Instruction};
+use fastnn::compiler::{AllocSlot, MemoryPlan};
 use fastnn::ir::ShapeEnv;
+use std::collections::HashMap;
 use std::process::Command;
 
 const HELPER_ENV: &str = "FASTNN_RELEASE_ERROR_HELPER";
@@ -25,6 +27,26 @@ fn run_malformed_dispatch() {
         .try_allocate_arena(plan.arena_size)
         .expect("small helper arena should allocate");
     assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+
+    let mut slots = HashMap::new();
+    slots.insert(
+        0,
+        AllocSlot {
+            offset: usize::MAX,
+            size: 2,
+            node_id: 0,
+            output_index: 0,
+        },
+    );
+    let memory = MemoryPlan {
+        total_size: usize::MAX,
+        slots,
+        inputs: vec![0],
+        secondary_slots: HashMap::new(),
+        outputs: vec![0],
+        tightened_params: HashMap::new(),
+    };
+    assert!(memory.validate().is_err());
 }
 
 #[test]
