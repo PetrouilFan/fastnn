@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn argmax_rejects_zero_reduction_dimension() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "argmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(8, 8),
+                secondary_output_slice: None,
+                params: vec![0, 0, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn scalar_f32_dispatch_rejects_empty_scalar_storage() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

@@ -6130,10 +6130,49 @@ impl Backend for CpuBackend {
                             );
                         }
                         "argmax" => {
+                            if input_slices.len() != 1 || params.len() != 3 {
+                                return Err(BackendError::Dispatch(
+                                    "argmax: expected one input and axis/dimension/inner parameters"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let axis = params[0];
+                            let dim_size = params[1];
+                            let inner = params[2];
+                            let input_elements = input_slice.size / std::mem::size_of::<f32>();
+                            let reduction_span = dim_size.checked_mul(inner).ok_or_else(|| {
+                                BackendError::Dispatch("argmax: reduction span overflows".into())
+                            })?;
+                            if dim_size == 0
+                                || inner == 0
+                                || input_slice.size == 0
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<u64>())
+                                || !(out_end - out_start).is_multiple_of(std::mem::size_of::<u64>())
+                                || !input_elements.is_multiple_of(reduction_span)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "argmax: invalid reduction geometry or scalar storage".into(),
+                                ));
+                            }
+                            let outer = input_elements / reduction_span;
+                            let expected_output = outer
+                                .checked_mul(inner)
+                                .and_then(|values| values.checked_mul(std::mem::size_of::<u64>()))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch("argmax: output size overflows".into())
+                                })?;
+                            if out_end - out_start != expected_output {
+                                return Err(BackendError::Dispatch(
+                                    "argmax: output storage does not match reduction geometry"
+                                        .into(),
+                                ));
+                            }
                             if let Some(input_slice) = input_slices.first() {
-                                let axis = params.first().copied().unwrap_or(usize::MAX);
-                                let dim_size = params.get(1).copied().unwrap_or(0);
-                                let inner = params.get(2).copied().unwrap_or(1);
                                 let input_end = input_slice.offset + input_slice.size;
                                 let output_bytes = BufferSlice::new(out_start, out_end - out_start);
 
