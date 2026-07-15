@@ -1895,13 +1895,21 @@ impl Backend for CpuBackend {
                         .get("output_w")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(1);
+                    let h_in = input_shapes
+                        .first()
+                        .and_then(|shape| shape.get(2).copied())
+                        .unwrap_or(1) as usize;
+                    let w_in = input_shapes
+                        .first()
+                        .and_then(|shape| shape.get(3).copied())
+                        .unwrap_or(1) as usize;
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "adaptive_avg_pool2d".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![out_h, out_w],
+                        params: vec![out_h, out_w, h_in, w_in],
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -6829,40 +6837,73 @@ impl Backend for CpuBackend {
                             );
                         }
                         "adaptive_avg_pool2d" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let out_h = params.first().copied().unwrap_or(1);
-                                let out_w = params.get(1).copied().unwrap_or(1);
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let out_len = out_f32.len();
-                                        if out_len > 0 {
-                                            let in_len = input.len();
-                                            let nc = if out_h > 0 && out_w > 0 {
-                                                out_len / (out_h * out_w)
-                                            } else {
-                                                0
-                                            };
-                                            if nc > 0 && in_len > 0 && in_len % nc == 0 {
-                                                let hw = in_len / nc;
-                                                let mut h = (hw as f64).sqrt() as usize;
-                                                while h > 0 && hw % h != 0 {
-                                                    h -= 1;
-                                                }
-                                                let w = hw / h;
-                                                if h >= out_h && w >= out_w && h > 0 && w > 0 {
-                                                    microkernels::adaptive_avg_pool2d_f32_scalar(
-                                                        input, out_f32, nc, h, w, out_h, out_w,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 1 || params.len() != 4 {
+                                return Err(BackendError::Dispatch(
+                                    "adaptive_avg_pool2d: expected one input and output/input geometry"
+                                        .into(),
+                                ));
                             }
+                            let [out_h, out_w, h_in, w_in] = params[..] else {
+                                unreachable!();
+                            };
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_elements = input_slice.size / scalar_bytes;
+                            let input_hw = h_in.checked_mul(w_in).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "adaptive_avg_pool2d: input geometry overflows".into(),
+                                )
+                            })?;
+                            let output_hw = out_h.checked_mul(out_w).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "adaptive_avg_pool2d: output geometry overflows".into(),
+                                )
+                            })?;
+                            if out_h == 0 || out_w == 0 || h_in == 0 || w_in == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "adaptive_avg_pool2d: dimensions must be positive".into(),
+                                ));
+                            }
+                            let nc = input_elements / input_hw;
+                            let expected_output = nc
+                                .checked_mul(output_hw)
+                                .and_then(|elements| elements.checked_mul(scalar_bytes))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "adaptive_avg_pool2d: output size overflows".into(),
+                                    )
+                                })?;
+                            if out_h == 0
+                                || out_w == 0
+                                || h_in == 0
+                                || w_in == 0
+                                || out_h > h_in
+                                || out_w > w_in
+                                || !input_elements.is_multiple_of(input_hw)
+                                || output_slice.size != expected_output
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "adaptive_avg_pool2d: invalid geometry or f32 storage".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    microkernels::adaptive_avg_pool2d_f32_scalar(
+                                        input, out_f32, nc, h_in, w_in, out_h, out_w,
+                                    );
+                                },
+                            );
                         }
                         "repeat" => {
                             if let Some(input_slice) = input_slices.first() {
