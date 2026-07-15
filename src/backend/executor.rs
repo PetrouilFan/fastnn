@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn batch_norm_rejects_nonpositive_epsilon() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "norm_f32".into(),
+                input_slices: vec![],
+                output_slice: crate::backend::BufferSlice::new(0, 0),
+                secondary_output_slice: None,
+                params: vec![0.0f32.to_bits() as usize, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 0,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(0).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn biasadd_rejects_zero_channel_stride() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

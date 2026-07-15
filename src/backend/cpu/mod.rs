@@ -4087,7 +4087,75 @@ impl Backend for CpuBackend {
                                 ));
                             };
                             let eps = f32::from_bits(eps_bits as u32);
+                            if !eps.is_finite() || eps <= 0.0 || is_batch_norm > 1 {
+                                return Err(BackendError::Dispatch(
+                                    "norm_f32: epsilon must be finite and positive and mode must be 0 or 1"
+                                        .into(),
+                                ));
+                            }
                             if is_batch_norm == 1 {
+                                if input_slices.len() != 5 {
+                                    return Err(BackendError::Dispatch(
+                                        "norm_f32 batch mode expects data, weight, bias, mean, and variance"
+                                            .into(),
+                                    ));
+                                }
+                                let data_slice = input_slices[0];
+                                let channel_slices = &input_slices[1..];
+                                let output_size = out_end - out_start;
+                                let scalar_bytes = std::mem::size_of::<f32>();
+                                let channel_bytes = channel_slices[0].size;
+                                let channel_count = channel_bytes / scalar_bytes;
+                                if channel_count == 0
+                                    || data_slice.size != output_size
+                                    || channel_slices
+                                        .iter()
+                                        .any(|slice| slice.size != channel_bytes)
+                                    || input_slices.iter().any(|slice| {
+                                        !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                            || !slice.size.is_multiple_of(scalar_bytes)
+                                    })
+                                    || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                    || !output_size.is_multiple_of(scalar_bytes)
+                                    || !(data_slice.size / scalar_bytes)
+                                        .is_multiple_of(channel_count)
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "norm_f32 batch mode has invalid channel or f32 storage"
+                                            .into(),
+                                    ));
+                                }
+                                let output_overlaps = input_slices.iter().any(|slice| {
+                                    let end = slice.offset + slice.size;
+                                    slice.offset < out_end && out_start < end
+                                });
+                                if output_overlaps {
+                                    return Err(BackendError::Dispatch(
+                                        "norm_f32 batch inputs and output overlap".into(),
+                                    ));
+                                }
+                                {
+                                    let data = arena.data_mut();
+                                    let metadata_is_invalid = channel_slices.iter().any(|slice| {
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &data[slice.offset..slice.offset + slice.size],
+                                        )
+                                        .iter()
+                                        .any(|value| !value.is_finite())
+                                    });
+                                    let variance = bytemuck::cast_slice::<_, f32>(
+                                        &data[channel_slices[3].offset
+                                            ..channel_slices[3].offset + channel_slices[3].size],
+                                    );
+                                    if metadata_is_invalid
+                                        || variance.iter().any(|value| *value < 0.0)
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "norm_f32 batch metadata must be finite with nonnegative variance"
+                                                .into(),
+                                        ));
+                                    }
+                                }
                                 // Batch norm (evaluation mode): use running_mean and running_var
                                 if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] =
                                     &input_slices[..]
