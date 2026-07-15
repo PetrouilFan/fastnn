@@ -2320,6 +2320,35 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn pad_places_input_at_low_padding_offset() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pad_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 8)],
+                output_slice: crate::backend::BufferSlice::new(8, 20),
+                secondary_output_slice: None,
+                params: vec![1, 2, 1, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 28,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(28).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[3.0f32, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 8, 20).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[0.0, 3.0, 4.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
     fn cast_dispatch_rejects_missing_width_metadata() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

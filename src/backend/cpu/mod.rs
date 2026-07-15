@@ -1381,17 +1381,26 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Pad => {
                     let pads_str = node.attrs.get("pads").cloned().unwrap_or_default();
-                    let pads: Vec<usize> = pads_str
+                    let parsed_pads: Vec<usize> = pads_str
                         .split(',')
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
+                    let input_shape = input_shapes.first().cloned().unwrap_or_default();
+                    let rank = input_shape.len();
+                    let mut pad_params = Vec::with_capacity(1 + rank * 3);
+                    pad_params.push(rank);
+                    pad_params.extend(input_shape.into_iter().map(|size| size as usize));
+                    for dimension in 0..rank {
+                        pad_params.push(parsed_pads.get(dimension * 2).copied().unwrap_or(0));
+                        pad_params.push(parsed_pads.get(dimension * 2 + 1).copied().unwrap_or(0));
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "pad_f32".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: pads,
+                        params: pad_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -5395,17 +5404,115 @@ impl Backend for CpuBackend {
                             }
                         }
                         "pad_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                // Zero-copy view of input
-                                let input: &[f32] =
-                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let out_f32 =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                // Simple flat copy: the caller right-sizes the output buffer.
-                                // Output includes padding zeros already allocated.
-                                let end = input.len().min(out_f32.len());
-                                out_f32[..end].copy_from_slice(&input[..end]);
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "pad_f32: expected one input and encoded shape/padding".into(),
+                                ));
                             }
+                            let rank = params[0];
+                            let expected_params = rank
+                                .checked_mul(3)
+                                .and_then(|count| count.checked_add(1))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pad_f32: parameter count overflows".into(),
+                                    )
+                                })?;
+                            if params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "pad_f32: malformed shape/padding metadata".into(),
+                                ));
+                            }
+                            let input_shape = &params[1..1 + rank];
+                            let pads = &params[1 + rank..];
+                            let input_elements =
+                                input_shape.iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "pad_f32: input shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let output_elements = input_shape.iter().enumerate().try_fold(
+                                1usize,
+                                |count, (dimension, size)| {
+                                    let output_size = size
+                                        .checked_add(pads[dimension * 2])
+                                        .and_then(|value| {
+                                            value.checked_add(pads[dimension * 2 + 1])
+                                        })
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "pad_f32: padded dimension overflows".into(),
+                                            )
+                                        })?;
+                                    count.checked_mul(output_size).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "pad_f32: output shape product overflows".into(),
+                                        )
+                                    })
+                                },
+                            )?;
+                            let input_bytes = input_elements
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pad_f32: input storage size overflows".into(),
+                                    )
+                                })?;
+                            let output_bytes = output_elements
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pad_f32: output storage size overflows".into(),
+                                    )
+                                })?;
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slice.size != input_bytes
+                                || output_slice.size != output_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "pad_f32: shape and f32 storage disagree".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, output| {
+                                    for (output_index, value) in output.iter_mut().enumerate() {
+                                        let mut remaining = output_index;
+                                        let mut source_index = 0usize;
+                                        let mut source_stride = 1usize;
+                                        let mut inside = true;
+                                        for dimension in (0..rank).rev() {
+                                            let output_dimension = input_shape[dimension]
+                                                + pads[dimension * 2]
+                                                + pads[dimension * 2 + 1];
+                                            let coordinate = remaining % output_dimension;
+                                            remaining /= output_dimension;
+                                            let low_pad = pads[dimension * 2];
+                                            if coordinate < low_pad
+                                                || coordinate >= low_pad + input_shape[dimension]
+                                            {
+                                                inside = false;
+                                            } else {
+                                                source_index +=
+                                                    (coordinate - low_pad) * source_stride;
+                                            }
+                                            source_stride *= input_shape[dimension];
+                                        }
+                                        *value = if inside { input[source_index] } else { 0.0 };
+                                    }
+                                },
+                            );
                         }
                         "gather" => {
                             if let [data_slice, indices_slice] = &input_slices[..] {
