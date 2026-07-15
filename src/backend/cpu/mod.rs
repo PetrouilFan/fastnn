@@ -7679,6 +7679,54 @@ impl Backend for CpuBackend {
                             }
                         }
                         "muon_update_f32" => {
+                            if input_slices.len() != 3 || params.len() != 3 {
+                                return Err(BackendError::Dispatch(
+                                    "muon_update_f32: expected weights, gradients, momentum, and three parameters"
+                                        .into(),
+                                ));
+                            }
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let lr = f32::from_bits(params[0] as u32);
+                            let beta = f32::from_bits(params[1] as u32);
+                            let wd = f32::from_bits(params[2] as u32);
+                            let reference_size = input_slices[0].size;
+                            let input_overlap =
+                                input_slices.iter().enumerate().any(|(index, left)| {
+                                    input_slices[index + 1..].iter().any(|right| {
+                                        left.offset < right.offset + right.size
+                                            && right.offset < left.offset + left.size
+                                    })
+                                });
+                            let output_is_weight = output_slice == input_slices[0];
+                            let output_overlap = !output_is_weight
+                                && input_slices.iter().any(|input| {
+                                    input.offset < output_slice.offset + output_slice.size
+                                        && output_slice.offset < input.offset + input.size
+                                });
+                            if !lr.is_finite()
+                                || lr < 0.0
+                                || !beta.is_finite()
+                                || !(0.0..1.0).contains(&beta)
+                                || !wd.is_finite()
+                                || wd < 0.0
+                                || input_slices.iter().any(|slice| {
+                                    slice.size != reference_size
+                                        || !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(scalar_bytes)
+                                })
+                                || output_slice.size != reference_size
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || input_overlap
+                                || output_overlap
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "muon_update_f32: invalid numerical, storage, or overlap contract"
+                                        .into(),
+                                ));
+                            }
                             let (w_new, m_new) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
@@ -7694,9 +7742,6 @@ impl Backend for CpuBackend {
                                     &d_ref[input_slices[2].offset
                                         ..input_slices[2].offset + input_slices[2].size],
                                 );
-                                let lr = f32::from_bits(params[0] as u32);
-                                let beta = f32::from_bits(params[1] as u32);
-                                let wd = f32::from_bits(params[2] as u32);
                                 muon_update_f32(w_init, g_slice, m_init, lr, beta, wd)
                             };
                             let d = arena.data_mut();
