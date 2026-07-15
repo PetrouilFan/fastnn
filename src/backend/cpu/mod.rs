@@ -6861,15 +6861,6 @@ impl Backend for CpuBackend {
                                     "rms_norm: invalid numerical or f32 storage contract".into(),
                                 ));
                             }
-                            let output_overlaps = input_slices.iter().any(|slice| {
-                                let end = slice.offset + slice.size;
-                                slice.offset < out_end && out_start < end
-                            });
-                            if output_overlaps {
-                                return Err(BackendError::Dispatch(
-                                    "rms_norm: input and output slices overlap".into(),
-                                ));
-                            }
                             if let [data_slice, weight_slice] = &input_slices[..] {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let row_size = weight_slice.size / scalar_bytes;
@@ -6923,34 +6914,12 @@ impl Backend for CpuBackend {
                                 ));
                             }
                             if let [residual_slice, main_slice, rest @ ..] = &input_slices[..] {
-                                let eps =
-                                    f32::from_bits(params.first().copied().unwrap_or(0) as u32);
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let weight_slice = rest.first().copied();
                                 let bias_slice = rest.get(1).copied();
-                                let fallback_row_size = weight_slice
-                                    .or(bias_slice)
-                                    .map(|slice| slice.size / std::mem::size_of::<f32>())
-                                    .unwrap_or(output_slice.size / std::mem::size_of::<f32>());
-                                let row_size = params
-                                    .get(1)
-                                    .copied()
-                                    .filter(|&value| value > 0)
-                                    .unwrap_or(fallback_row_size);
-
-                                if residual_slice.size == main_slice.size
-                                    && main_slice.size == output_slice.size
-                                    && row_size > 0
-                                    && (output_slice.size / std::mem::size_of::<f32>())
-                                        .is_multiple_of(row_size)
-                                    && weight_slice.is_none_or(|w| {
-                                        w.size / std::mem::size_of::<f32>() == row_size
-                                    })
-                                    && bias_slice.is_none_or(|b| {
-                                        b.size / std::mem::size_of::<f32>() == row_size
-                                    })
                                 {
-                                    let mut inputs = vec![*residual_slice, *main_slice];
+                                    let mut inputs: SmallVec<[BufferSlice; 4]> =
+                                        smallvec![*residual_slice, *main_slice];
                                     if let Some(w) = weight_slice {
                                         inputs.push(w);
                                     }
@@ -7039,29 +7008,11 @@ impl Backend for CpuBackend {
                                 ));
                             }
                             if let [residual_slice, main_slice, rest @ ..] = &input_slices[..] {
-                                let eps =
-                                    f32::from_bits(params.first().copied().unwrap_or(0) as u32);
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 let weight_slice = rest.first().copied();
-                                let fallback_row_size = weight_slice
-                                    .map(|slice| slice.size / std::mem::size_of::<f32>())
-                                    .unwrap_or(output_slice.size / std::mem::size_of::<f32>());
-                                let row_size = params
-                                    .get(1)
-                                    .copied()
-                                    .filter(|&value| value > 0)
-                                    .unwrap_or(fallback_row_size);
-
-                                if residual_slice.size == main_slice.size
-                                    && main_slice.size == output_slice.size
-                                    && row_size > 0
-                                    && (output_slice.size / std::mem::size_of::<f32>())
-                                        .is_multiple_of(row_size)
-                                    && weight_slice.is_none_or(|w| {
-                                        w.size / std::mem::size_of::<f32>() == row_size
-                                    })
                                 {
-                                    let mut inputs = vec![*residual_slice, *main_slice];
+                                    let mut inputs: SmallVec<[BufferSlice; 4]> =
+                                        smallvec![*residual_slice, *main_slice];
                                     if let Some(w) = weight_slice {
                                         inputs.push(w);
                                     }

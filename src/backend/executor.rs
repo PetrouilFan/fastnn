@@ -3422,6 +3422,39 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn rms_norm_supports_valid_in_place_output() {
+        let eps = 1e-5f32;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "rms_norm".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![eps.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[3.0f32, 4.0, 1.0, 1.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        let values = bytemuck::cast_slice::<_, f32>(&output);
+        let denominator = (12.5f32 + eps).sqrt();
+        assert!((values[0] - 3.0 / denominator).abs() < 1e-6);
+        assert!((values[1] - 4.0 / denominator).abs() < 1e-6);
+    }
+
+    #[test]
     fn rms_norm_rejects_empty_weight_storage() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
