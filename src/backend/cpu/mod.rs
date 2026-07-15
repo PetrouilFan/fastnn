@@ -7228,32 +7228,50 @@ impl Backend for CpuBackend {
                             );
                         }
                         "where_f32" => {
-                            if input_slices.len() >= 3 {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let cond_slice = input_slices[0];
-                                let x_slice = input_slices[1];
-                                let y_slice = input_slices[2];
-                                arena::with_nary_f32_slices(
-                                    arena,
-                                    &[cond_slice, x_slice, y_slice],
-                                    output_slice,
-                                    |inputs, out_f32| {
-                                        let cond = inputs[0];
-                                        let x = inputs[1];
-                                        let y = inputs[2];
-                                        let len = out_f32.len();
-                                        for i in 0..len {
-                                            let c =
-                                                cond.get(i % cond.len()).copied().unwrap_or(0.0);
-                                            out_f32[i] = if c != 0.0 {
-                                                x.get(i % x.len()).copied().unwrap_or(0.0)
-                                            } else {
-                                                y.get(i % y.len()).copied().unwrap_or(0.0)
-                                            };
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 3 || !params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "where_f32: expected condition, x, and y without parameters"
+                                        .into(),
+                                ));
                             }
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let output_elements = output_slice.size / scalar_bytes;
+                            let malformed_input = input_slices.iter().any(|slice| {
+                                !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                    || !slice.size.is_multiple_of(scalar_bytes)
+                                    || (output_elements > 0 && slice.size == 0)
+                                    || (output_elements == 0 && slice.size != 0)
+                                    || (slice.size > 0
+                                        && !output_slice.size.is_multiple_of(slice.size))
+                            });
+                            if malformed_input
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice.size.is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "where_f32: invalid broadcasting or f32 storage".into(),
+                                ));
+                            }
+                            arena::with_nary_f32_slices(
+                                arena,
+                                input_slices,
+                                output_slice,
+                                |inputs, out_f32| {
+                                    let cond = inputs[0];
+                                    let x = inputs[1];
+                                    let y = inputs[2];
+                                    for (index, output) in out_f32.iter_mut().enumerate() {
+                                        *output = if cond[index % cond.len()] != 0.0 {
+                                            x[index % x.len()]
+                                        } else {
+                                            y[index % y.len()]
+                                        };
+                                    }
+                                },
+                            );
                         }
                         // â”€â”€ Optimizer kernels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         "sgd_update_f32" => {
