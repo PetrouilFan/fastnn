@@ -3136,6 +3136,36 @@ impl Backend for CpuBackend {
                         }
                     }
 
+                    let is_scalar_f32 = matches!(
+                        kernel_name.as_str(),
+                        "gt_scalar_f32"
+                            | "lt_scalar_f32"
+                            | "eq_scalar_f32"
+                            | "add_scalar_f32"
+                            | "mul_scalar_f32"
+                            | "div_scalar_f32"
+                    );
+                    if is_scalar_f32 {
+                        let scalar_bytes = std::mem::size_of::<f32>();
+                        if input_slices.len() != 2
+                            || !params.is_empty()
+                            || input_slices[0].size != output_slice.size
+                            || input_slices[1].size != scalar_bytes
+                            || input_slices.iter().any(|slice| {
+                                !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                    || !slice.size.is_multiple_of(scalar_bytes)
+                            })
+                            || !output_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                            || !output_slice.size.is_multiple_of(scalar_bytes)
+                        {
+                            return Err(BackendError::Dispatch(format!(
+                                "{kernel_name}: scalar f32 storage or parameter contract is invalid"
+                            )));
+                        }
+                    }
+
                     match kernel_name.as_str() {
                         "add_f32" => {
                             fused_binary_activation_dispatch(
