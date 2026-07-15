@@ -8228,21 +8228,20 @@ fn dispatch_conv2d_fp32_with_view(
         _ => None,
     };
 
-    if input_slices.len() < 2 {
+    if !matches!(input_slices.len(), 2 | 3) {
         return Err(BackendError::Dispatch(format!(
-            "conv2d_persistent: expected â‰¥ 2 input slices, got {}",
+            "conv2d_persistent: expected 2 or 3 input slices, got {}",
             input_slices.len()
         )));
+    }
+    if params.len() != 15 {
+        return Err(BackendError::Dispatch(
+            "conv2d_persistent: expected the resolved 15-parameter contract".into(),
+        ));
     }
     let input_slice = input_slices[0];
     let weight_slice = input_slices[1];
     let bias_slice = input_slices.get(2).copied();
-
-    if params.len() < 9 {
-        return Err(BackendError::Dispatch(
-            "conv2d_persistent: expected at least 9 params".into(),
-        ));
-    }
     let stride = params[0];
     let padding = params[1];
     let dilation = params[2];
@@ -8252,18 +8251,82 @@ fn dispatch_conv2d_fp32_with_view(
     let w = params[6];
     let kh = params[7];
     let kw = params[8];
-    let c_per_group = c / groups.max(1);
-    let (n_in, f_out) = if params.len() >= 15 {
-        (params[9], params[10])
-    } else {
-        let f32_size = std::mem::size_of::<f32>();
-        let n_in = (input_slice.size / f32_size) / (c * h * w).max(1);
-        let f_out = (weight_slice.size / f32_size) / (c_per_group * kh * kw).max(1);
-        (n_in, f_out)
+    let n_in = params[9];
+    let f_out = params[10];
+    if stride == 0
+        || dilation == 0
+        || groups == 0
+        || c == 0
+        || h == 0
+        || w == 0
+        || kh == 0
+        || kw == 0
+        || n_in == 0
+        || f_out == 0
+        || c % groups != 0
+    {
+        return Err(BackendError::Dispatch(
+            "conv2d_persistent: invalid convolution geometry".into(),
+        ));
+    }
+    let checked_product = |values: &[usize], label: &str| -> Result<usize, BackendError> {
+        values
+            .iter()
+            .try_fold(1usize, |acc, value| acc.checked_mul(*value))
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!("conv2d_persistent: {label} size overflows"))
+            })
     };
-    let _h_out = (h + 2 * padding).saturating_sub(dilation * (kh - 1) + 1) / stride + 1;
-    let _w_out = (w + 2 * padding).saturating_sub(dilation * (kw - 1) + 1) / stride + 1;
-
+    let padded_h = h
+        .checked_add(padding.checked_mul(2).ok_or_else(|| {
+            BackendError::Dispatch("conv2d_persistent: vertical padding overflows".into())
+        })?)
+        .ok_or_else(|| {
+            BackendError::Dispatch("conv2d_persistent: padded height overflows".into())
+        })?;
+    let padded_w = w
+        .checked_add(padding.checked_mul(2).ok_or_else(|| {
+            BackendError::Dispatch("conv2d_persistent: horizontal padding overflows".into())
+        })?)
+        .ok_or_else(|| {
+            BackendError::Dispatch("conv2d_persistent: padded width overflows".into())
+        })?;
+    let kernel_h = dilation
+        .checked_mul(kh - 1)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            BackendError::Dispatch("conv2d_persistent: kernel height overflows".into())
+        })?;
+    let kernel_w = dilation
+        .checked_mul(kw - 1)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            BackendError::Dispatch("conv2d_persistent: kernel width overflows".into())
+        })?;
+    if padded_h < kernel_h || padded_w < kernel_w {
+        return Err(BackendError::Dispatch(
+            "conv2d_persistent: kernel exceeds padded input".into(),
+        ));
+    }
+    let h_out = (padded_h - kernel_h) / stride + 1;
+    let w_out = (padded_w - kernel_w) / stride + 1;
+    let expected_input = checked_product(&[n_in, c, h, w], "input")?;
+    let expected_weight = checked_product(&[f_out, c / groups, kh, kw], "weight")?;
+    let expected_output = checked_product(&[n_in, f_out, h_out, w_out], "output")?;
+    let expected_bias = checked_product(&[f_out], "bias")?;
+    if input_slice.offset % 4 != 0
+        || weight_slice.offset % 4 != 0
+        || output_slice.offset % 4 != 0
+        || input_slice.size != expected_input
+        || weight_slice.size != expected_weight
+        || output_slice.size != expected_output
+        || bias_slice.is_some_and(|bias| bias.offset % 4 != 0 || bias.size != expected_bias)
+    {
+        return Err(BackendError::Dispatch(
+            "conv2d_persistent: storage does not match convolution geometry".into(),
+        ));
+    }
     // Resolve the weight / bias f32 slices.  Persistent-view entries
     // are borrowed directly (no copy); non-overridden slots fall
     // back to a Vec copy of the arena bytes (these are rare in

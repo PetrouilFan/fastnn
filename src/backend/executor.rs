@@ -2265,6 +2265,30 @@ mod execution_storage_size_tests {
         assert!(backend
             .dispatch_with_persistent_view(&plan, &arena, &ShapeEnv::new(), Some(&view))
             .is_err());
+
+        let malformed_conv = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv2d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![0; 15],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(12).unwrap();
+        let mut view = PersistentPreparedWeights::new();
+        assert!(view.insert((4, 4), Arc::new(vec![1.0])));
+        assert!(backend
+            .dispatch_with_persistent_view(&malformed_conv, &arena, &ShapeEnv::new(), Some(&view),)
+            .is_err());
     }
 
     #[test]
