@@ -2320,6 +2320,30 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn rms_norm_rejects_empty_weight_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "rms_norm".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1e-5f32.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn prelu_rejects_empty_weight_storage() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

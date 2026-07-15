@@ -5600,23 +5600,55 @@ impl Backend for CpuBackend {
                             }
                         }
                         "rms_norm" => {
+                            if input_slices.len() != 2 || params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "rms_norm: expected data, weight, and epsilon".into(),
+                                ));
+                            }
+                            let eps = f32::from_bits(params[0] as u32);
+                            let data_slice = input_slices[0];
+                            let weight_slice = input_slices[1];
+                            let output_size = out_end - out_start;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if !eps.is_finite()
+                                || eps <= 0.0
+                                || data_slice.size == 0
+                                || weight_slice.size == 0
+                                || data_slice.size != output_size
+                                || !data_slice.size.is_multiple_of(weight_slice.size)
+                                || !data_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !weight_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !data_slice.size.is_multiple_of(scalar_bytes)
+                                || !weight_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_size.is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "rms_norm: invalid numerical or f32 storage contract".into(),
+                                ));
+                            }
+                            let output_overlaps = input_slices.iter().any(|slice| {
+                                let end = slice.offset + slice.size;
+                                slice.offset < out_end && out_start < end
+                            });
+                            if output_overlaps {
+                                return Err(BackendError::Dispatch(
+                                    "rms_norm: input and output slices overlap".into(),
+                                ));
+                            }
                             if let [data_slice, weight_slice] = &input_slices[..] {
-                                let eps =
-                                    f32::from_bits(params.first().copied().unwrap_or(0) as u32);
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                                let row_size = weight_slice.size / scalar_bytes;
                                 arena::with_nary_f32_slices(
                                     arena,
                                     &[*data_slice, *weight_slice],
                                     output_slice,
                                     |inputs, out_f32| {
-                                        let input = inputs[0];
-                                        let weight = inputs[1];
-                                        let row_size = if !weight.is_empty() {
-                                            input.len() / weight.len()
-                                        } else {
-                                            input.len()
-                                        };
-                                        rms_norm_f32(input, weight, out_f32, row_size, eps);
+                                        rms_norm_f32(inputs[0], inputs[1], out_f32, row_size, eps);
                                     },
                                 );
                             }
