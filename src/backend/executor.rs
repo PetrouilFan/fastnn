@@ -2248,6 +2248,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn f16_to_f32_rejects_partial_scalars() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "to_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 3)],
+                output_slice: crate::backend::BufferSlice::new(4, 8),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn adam_dispatch_rejects_malformed_storage_contracts() {
         let backend = crate::backend::cpu::CpuBackend;
         let plan = ExecutablePlan {

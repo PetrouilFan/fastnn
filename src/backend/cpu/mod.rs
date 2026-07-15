@@ -7358,21 +7358,46 @@ impl Backend for CpuBackend {
                             }
                         }
                         "to_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let in_data =
-                                    unsafe { arena.view_u8(input_slice.offset, input_slice.size) };
-                                let out_f32 =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let max_out = out_f32.len().min(in_data.len() / 2);
-                                for i in 0..max_out {
-                                    let start = i * 2;
-                                    if start + 2 <= in_data.len() {
-                                        let f16_val = half::f16::from_le_bytes(
-                                            in_data[start..start + 2].try_into().unwrap(),
-                                        );
-                                        out_f32[i] = f16_val.to_f32();
-                                    }
-                                }
+                            if input_slices.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "to_f32: expected exactly one f16 input".into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            if input_slice.size % 2 != 0
+                                || input_slice.offset % 2 != 0
+                                || output_slice.offset % 4 != 0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "to_f32: input or output slice has invalid scalar alignment"
+                                        .into(),
+                                ));
+                            }
+                            let numel = input_slice.size / 2;
+                            let expected_output = numel.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch("to_f32: output size overflows".into())
+                            })?;
+                            if output_slice.size != expected_output {
+                                return Err(BackendError::Dispatch(format!(
+                                    "to_f32: output has {} bytes, expected {expected_output}",
+                                    output_slice.size
+                                )));
+                            }
+                            let input_end = input_slice.offset + input_slice.size;
+                            if input_slice.offset < out_end && out_start < input_end {
+                                return Err(BackendError::Dispatch(
+                                    "to_f32: input and output slices overlap".into(),
+                                ));
+                            }
+                            let in_data =
+                                unsafe { arena.view_u8(input_slice.offset, input_slice.size) };
+                            let out_f32 =
+                                unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                            for (index, output) in out_f32.iter_mut().enumerate() {
+                                let start = index * 2;
+                                *output =
+                                    half::f16::from_le_bytes([in_data[start], in_data[start + 1]])
+                                        .to_f32();
                             }
                         }
                         "quantize_activations" => {
