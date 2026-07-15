@@ -417,36 +417,75 @@ fn try_gpu_dispatch(
     let out_start = output_slice.offset;
 
     // Resolve symbolic params if present.
-    let resolved_params = if let Some(dims) = param_dims {
-        let n = params.len().min(dims.len());
-        let mut p = params.to_vec();
-        for i in 0..n {
-            if let Ok(v) = dims[i].evaluate_with_env(shape_env) {
-                p[i] = v as usize;
-            }
+    let mut resolved_params = Vec::new();
+    resolved_params
+        .try_reserve_exact(params.len())
+        .map_err(|error| {
+            BackendError::Dispatch(format!(
+                "WGPU parameter allocation failed for {kernel_name}: {error}"
+            ))
+        })?;
+    resolved_params.extend_from_slice(params);
+    if let Some(dims) = param_dims {
+        if dims.len() > resolved_params.len() {
+            return Err(BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} has {} dynamic parameters but only {} parameter slots",
+                dims.len(),
+                resolved_params.len()
+            )));
         }
-        p
-    } else {
-        params.to_vec()
-    };
-
-    // Read input data from arena.
-    let read_input = |idx: usize| -> Vec<f32> {
-        if idx < input_slices.len() {
-            let s = &input_slices[idx];
-            let d = arena.data_mut();
-            bytemuck::cast_slice::<_, f32>(&d[s.offset..s.offset + s.size]).to_vec()
-        } else {
-            Vec::new()
+        for (index, dim) in dims.iter().enumerate() {
+            let value = dim.evaluate_with_env(shape_env).map_err(|error| {
+                BackendError::Dispatch(format!(
+                    "WGPU kernel {kernel_name} dynamic parameter {index} failed: {error}"
+                ))
+            })?;
+            resolved_params[index] = usize::try_from(value).map_err(|_| {
+                BackendError::Dispatch(format!(
+                    "WGPU kernel {kernel_name} dynamic parameter {index} does not fit usize"
+                ))
+            })?;
         }
-    };
+    }
 
-    let input0 = read_input(0);
-    let input1 = read_input(1);
-    let _input2 = read_input(2);
-    let numel = input0.len();
+    let read_f32_input = |index: usize| -> Result<Vec<f32>, BackendError> {
+        let slice = input_slices.get(index).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} is missing input {index}"
+            ))
+        })?;
+        if !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+            || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+        {
+            return Err(BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} input {index} is not complete aligned f32 storage"
+            )));
+        }
+        let end = slice.offset.checked_add(slice.size).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} input {index} range overflows"
+            ))
+        })?;
+        let data = arena.data_mut();
+        let source = bytemuck::cast_slice::<_, f32>(&data[slice.offset..end]);
+        let mut values = Vec::new();
+        values.try_reserve_exact(source.len()).map_err(|error| {
+            BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} input {index} allocation failed: {error}"
+            ))
+        })?;
+        values.extend_from_slice(source);
+        Ok(values)
+    };
 
     if let Some(opcode) = elementwise::elementwise_opcode(kernel_name) {
+        let input0 = read_f32_input(0)?;
+        let input1 = if input_slices.len() > 1 {
+            read_f32_input(1)?
+        } else {
+            Vec::new()
+        };
+        let numel = input0.len();
         let extra0 = if kernel_name == "leaky_relu_f32" {
             params
                 .first()
@@ -481,6 +520,8 @@ fn try_gpu_dispatch(
 
     match kernel_name {
         "softmax" => {
+            let input0 = read_f32_input(0)?;
+            let numel = input0.len();
             let axis_dim = params.first().copied().unwrap_or(1);
             softmax::dispatch_softmax_gpu(
                 ctx,
@@ -493,6 +534,7 @@ fn try_gpu_dispatch(
             )
         }
         "reduce_f32" => {
+            let input0 = read_f32_input(0)?;
             let group_size = resolved_params.first().copied().unwrap_or(1);
             let is_mean = params.get(1).copied().unwrap_or(0);
             reduce::dispatch_reduce_gpu(
@@ -588,6 +630,7 @@ fn try_gpu_dispatch(
             true,
         ),
         "transpose_f32" => {
+            let input0 = read_f32_input(0)?;
             let m = resolved_params.first().copied().unwrap_or(1);
             let n = resolved_params.get(1).copied().unwrap_or(1);
             transpose::dispatch_transpose_gpu(ctx, encoder, pending_reads, &input0, m, n, out_start)
