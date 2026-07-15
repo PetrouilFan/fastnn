@@ -8903,14 +8903,14 @@ impl Backend for CpuBackend {
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
                             let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                            let len = n.min(w_init.len()).min(m_init.len()).min(v_init.len());
+                            let len = n;
                             let mut w_new = w_init.clone();
                             let mut m_new_f32 = vec![0.0f32; len];
                             let mut v_new_f32 = vec![0.0f32; len];
                             #[cfg(not(feature = "parallel"))]
                             {
                                 for i in 0..len {
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                    let g = grad[i];
                                     m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                     v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                     let m_hat = m_new_f32[i] / bias_corr1;
@@ -8928,8 +8928,7 @@ impl Backend for CpuBackend {
                                         .zip(v_new_f32.par_iter_mut())
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
-                                            let g =
-                                                grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                            let g = grad[i];
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                             let m_hat = *m / bias_corr1;
@@ -8938,7 +8937,7 @@ impl Backend for CpuBackend {
                                         });
                                 } else {
                                     for i in 0..len {
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                        let g = grad[i];
                                         m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                         v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                         let m_hat = m_new_f32[i] / bias_corr1;
@@ -8955,20 +8954,20 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
-                            let m_bytes: Vec<u8> = m_new_f32
-                                .iter()
-                                .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
-                                .collect();
-                            let v_bytes: Vec<u8> = v_new_f32
-                                .iter()
-                                .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
-                                .collect();
-                            let m_end = (input_slices[2].offset + m_bytes.len()).min(d.len());
-                            let v_end = (input_slices[3].offset + v_bytes.len()).min(d.len());
-                            d[input_slices[2].offset..m_end]
-                                .copy_from_slice(&m_bytes[..m_end - input_slices[2].offset]);
-                            d[input_slices[3].offset..v_end]
-                                .copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
+                            for (chunk, value) in d[input_slices[2].offset
+                                ..input_slices[2].offset + input_slices[2].size]
+                                .chunks_exact_mut(2)
+                                .zip(m_new_f32.iter())
+                            {
+                                chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
+                            }
+                            for (chunk, value) in d[input_slices[3].offset
+                                ..input_slices[3].offset + input_slices[3].size]
+                                .chunks_exact_mut(2)
+                                .zip(v_new_f32.iter())
+                            {
+                                chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
+                            }
                         }
                         "adamw_update_f16_state" => {
                             validate_adam_dispatch(
@@ -9034,7 +9033,7 @@ impl Backend for CpuBackend {
                             };
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
                             let bias_corr2 = 1.0 - beta2.powi(t as i32);
-                            let len = n.min(w_init.len()).min(m_init.len()).min(v_init.len());
+                            let len = n;
                             let mut w_new = w_init.clone();
                             let mut m_new_f32 = vec![0.0f32; len];
                             let mut v_new_f32 = vec![0.0f32; len];
@@ -9042,7 +9041,7 @@ impl Backend for CpuBackend {
                             {
                                 for i in 0..len {
                                     w_new[i] -= lr * wd * w_init[i];
-                                    let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                    let g = grad[i];
                                     m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                     v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                     let m_hat = m_new_f32[i] / bias_corr1;
@@ -9061,8 +9060,7 @@ impl Backend for CpuBackend {
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
                                             *w -= lr * wd * w_init[i];
-                                            let g =
-                                                grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                            let g = grad[i];
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                             let m_hat = *m / bias_corr1;
@@ -9072,7 +9070,7 @@ impl Backend for CpuBackend {
                                 } else {
                                     for i in 0..len {
                                         w_new[i] -= lr * wd * w_init[i];
-                                        let g = grad.get(i % grad.len()).copied().unwrap_or(0.0);
+                                        let g = grad[i];
                                         m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                         v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
                                         let m_hat = m_new_f32[i] / bias_corr1;
@@ -9089,20 +9087,20 @@ impl Backend for CpuBackend {
                             .copy_from_slice(&w_new);
                             bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 .copy_from_slice(&w_new);
-                            let m_bytes: Vec<u8> = m_new_f32
-                                .iter()
-                                .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
-                                .collect();
-                            let v_bytes: Vec<u8> = v_new_f32
-                                .iter()
-                                .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
-                                .collect();
-                            let m_end = (input_slices[2].offset + m_bytes.len()).min(d.len());
-                            let v_end = (input_slices[3].offset + v_bytes.len()).min(d.len());
-                            d[input_slices[2].offset..m_end]
-                                .copy_from_slice(&m_bytes[..m_end - input_slices[2].offset]);
-                            d[input_slices[3].offset..v_end]
-                                .copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
+                            for (chunk, value) in d[input_slices[2].offset
+                                ..input_slices[2].offset + input_slices[2].size]
+                                .chunks_exact_mut(2)
+                                .zip(m_new_f32.iter())
+                            {
+                                chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
+                            }
+                            for (chunk, value) in d[input_slices[3].offset
+                                ..input_slices[3].offset + input_slices[3].size]
+                                .chunks_exact_mut(2)
+                                .zip(v_new_f32.iter())
+                            {
+                                chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
+                            }
                         }
                         "cast" => {
                             if input_slices.len() != 1 || params.len() != 2 {
