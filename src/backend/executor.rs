@@ -2320,6 +2320,33 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn embedding_rejects_out_of_range_indices() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "embedding".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(12, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        backend
+            .try_write_arena(&arena, 8, &2.0f32.to_le_bytes())
+            .unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn split_topk_rejects_k_larger_than_input() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

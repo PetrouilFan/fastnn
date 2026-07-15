@@ -5997,6 +5997,74 @@ impl Backend for CpuBackend {
                             }
                         }
                         "embedding" => {
+                            if input_slices.len() != 2 || !params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "embedding: expected weight and indices inputs without parameters"
+                                        .into(),
+                                ));
+                            }
+                            let weight_slice = input_slices[0];
+                            let indices_slice = input_slices[1];
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let output_size = out_end - out_start;
+                            if weight_slice.size == 0
+                                || indices_slice.size == 0
+                                || output_size == 0
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(scalar_bytes)
+                                })
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_size.is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "embedding: slices must contain nonempty aligned f32 storage"
+                                        .into(),
+                                ));
+                            }
+                            let index_count = indices_slice.size / scalar_bytes;
+                            let output_elements = output_size / scalar_bytes;
+                            if !output_elements.is_multiple_of(index_count) {
+                                return Err(BackendError::Dispatch(
+                                    "embedding: output does not contain complete embedding rows"
+                                        .into(),
+                                ));
+                            }
+                            let dim = output_elements / index_count;
+                            let weight_elements = weight_slice.size / scalar_bytes;
+                            if dim == 0 || !weight_elements.is_multiple_of(dim) {
+                                return Err(BackendError::Dispatch(
+                                    "embedding: weight storage does not contain complete rows"
+                                        .into(),
+                                ));
+                            }
+                            let vocabulary_size = weight_elements / dim;
+                            let output_overlaps = input_slices.iter().any(|slice| {
+                                let end = slice.offset + slice.size;
+                                slice.offset < out_end && out_start < end
+                            });
+                            if output_overlaps {
+                                return Err(BackendError::Dispatch(
+                                    "embedding: input and output slices overlap".into(),
+                                ));
+                            }
+                            {
+                                let data = arena.data_mut();
+                                let indices = bytemuck::cast_slice::<_, f32>(
+                                    &data[indices_slice.offset
+                                        ..indices_slice.offset + indices_slice.size],
+                                );
+                                if indices.iter().any(|index| {
+                                    !index.is_finite()
+                                        || *index < 0.0
+                                        || index.fract() != 0.0
+                                        || *index >= vocabulary_size as f32
+                                }) {
+                                    return Err(BackendError::Dispatch(
+                                        "embedding: index is non-integral or out of range".into(),
+                                    ));
+                                }
+                            }
                             if let [weight_slice, indices_slice] = &input_slices[..] {
                                 let (weight, indices) = unsafe {
                                     (
@@ -6006,22 +6074,12 @@ impl Backend for CpuBackend {
                                 };
                                 let out_f32 =
                                     unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let dim = if !weight.is_empty() && !indices.is_empty() {
-                                    out_f32.len() / indices.len()
-                                } else {
-                                    1
-                                };
-                                for i in 0..indices.len() {
-                                    let idx = indices[i] as usize;
+                                for (i, index) in indices.iter().enumerate() {
+                                    let idx = *index as usize;
                                     let src_start = idx * dim;
                                     let dst_start = i * dim;
-                                    let len = dim
-                                        .min(weight.len().saturating_sub(src_start))
-                                        .min(out_f32.len().saturating_sub(dst_start));
-                                    if len > 0 {
-                                        out_f32[dst_start..dst_start + len]
-                                            .copy_from_slice(&weight[src_start..src_start + len]);
-                                    }
+                                    out_f32[dst_start..dst_start + dim]
+                                        .copy_from_slice(&weight[src_start..src_start + dim]);
                                 }
                             }
                         }
