@@ -1920,13 +1920,19 @@ impl Backend for CpuBackend {
                         .split(',')
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
+                    let input_shape = input_shapes.first().cloned().unwrap_or_default();
+                    let mut repeat_params =
+                        Vec::with_capacity(1 + input_shape.len() + repeats.len());
+                    repeat_params.push(input_shape.len());
+                    repeat_params.extend(input_shape.into_iter().map(|dim| dim as usize));
+                    repeat_params.extend(repeats);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "repeat".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: repeats,
+                        params: repeat_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -6906,32 +6912,99 @@ impl Backend for CpuBackend {
                             );
                         }
                         "repeat" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let in_len = input.len();
-                                        let out_len = out_f32.len();
-                                        if in_len > 0 && out_len >= in_len && out_len % in_len == 0
-                                        {
-                                            let factor = out_len / in_len;
-                                            for i in 0..in_len {
-                                                let val = input[i];
-                                                for f in 0..factor {
-                                                    out_f32[i * factor + f] = val;
-                                                }
-                                            }
-                                        } else if in_len > 0 {
-                                            for i in 0..out_len {
-                                                out_f32[i] = input[i % in_len];
-                                            }
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "repeat: expected one input and encoded shape/repeats".into(),
+                                ));
                             }
+                            let rank = params[0];
+                            let expected_params = rank
+                                .checked_mul(2)
+                                .and_then(|count| count.checked_add(1))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "repeat: parameter count overflows".into(),
+                                    )
+                                })?;
+                            if params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "repeat: shape and repeat ranks must match".into(),
+                                ));
+                            }
+                            let input_shape = &params[1..1 + rank];
+                            let repeats = &params[1 + rank..];
+                            let input_elements =
+                                input_shape.iter().try_fold(1usize, |count, dim| {
+                                    count.checked_mul(*dim).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "repeat: input shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let output_elements = input_shape.iter().zip(repeats).try_fold(
+                                1usize,
+                                |count, (dim, repeat)| {
+                                    if *repeat == 0 {
+                                        return Err(BackendError::Dispatch(
+                                            "repeat: repeat factors must be positive".into(),
+                                        ));
+                                    }
+                                    dim.checked_mul(*repeat)
+                                        .and_then(|output_dim| count.checked_mul(output_dim))
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "repeat: output shape product overflows".into(),
+                                            )
+                                        })
+                                },
+                            )?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let expected_input =
+                                input_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("repeat: input size overflows".into())
+                                })?;
+                            let expected_output =
+                                output_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("repeat: output size overflows".into())
+                                })?;
+                            if input_slice.size != expected_input
+                                || output_slice.size != expected_output
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "repeat: invalid shape or f32 storage".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    for (output_index, output) in out_f32.iter_mut().enumerate() {
+                                        let mut remaining = output_index;
+                                        let mut input_index = 0usize;
+                                        let mut input_stride = 1usize;
+                                        for dimension in (0..rank).rev() {
+                                            let output_dim =
+                                                input_shape[dimension] * repeats[dimension];
+                                            let output_coordinate = remaining % output_dim;
+                                            remaining /= output_dim;
+                                            input_index += (output_coordinate
+                                                % input_shape[dimension])
+                                                * input_stride;
+                                            input_stride *= input_shape[dimension];
+                                        }
+                                        *output = input[input_index];
+                                    }
+                                },
+                            );
                         }
                         "cumsum" => {
                             if let Some(input_slice) = input_slices.first() {

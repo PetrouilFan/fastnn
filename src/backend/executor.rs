@@ -2320,6 +2320,35 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn repeat_uses_dimension_aware_tiling() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "repeat".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 32),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 48,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(48).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 16, 32).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+        );
+    }
+
+    #[test]
     fn adaptive_pool_rejects_zero_input_height() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
