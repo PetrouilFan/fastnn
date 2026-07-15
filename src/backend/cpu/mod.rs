@@ -7328,15 +7328,62 @@ impl Backend for CpuBackend {
                                 .copy_from_slice(&w_new);
                         }
                         "quantize_gradient_f32_to_f8x4r" => {
+                            if input_slices.len() != 1 || params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "gradient f8 quantization expects one f32 input and element count"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let numel = params[0];
+                            let expected_input = numel
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "gradient f8 quantization input size overflows".into(),
+                                    )
+                                })?;
+
+                            let output_size = out_end - out_start;
+                            let effective_numel = input_slice.size / std::mem::size_of::<f32>();
+                            let required_packed_bytes = effective_numel
+                                .div_ceil(4)
+                                .checked_mul(std::mem::size_of::<u32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "gradient f8 packed size overflows".into(),
+                                    )
+                                })?;
+                            if !input_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                                || input_slice.size > expected_input
+                                || !input_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<u32>())
+                                || output_size < required_packed_bytes
+                                || !output_size.is_multiple_of(std::mem::size_of::<u32>())
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "gradient f8 quantization has invalid storage: input={}, output={}, declared={expected_input}",
+                                    input_slice.size, output_size
+                                )));
+                            }
                             if let Some(input_slice) = input_slices.first() {
-                                let in_f32 =
+                                let source =
                                     unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                                let mut in_f32 = Vec::new();
+                                in_f32.try_reserve_exact(source.len()).map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "gradient f8 quantization input materialization failed: {error}"
+                                    ))
+                                })?;
+                                in_f32.extend_from_slice(source);
                                 let out = unsafe {
                                     bytemuck::cast_slice_mut(
                                         arena.view_f32_mut(out_start, out_end - out_start),
                                     )
                                 };
-                                let num_words = out.len() / 4;
+                                let num_words = effective_numel.div_ceil(4);
                                 for w in 0..num_words {
                                     let base = w * 4;
                                     let mut vals = [0.0f32; 4];
@@ -7350,9 +7397,47 @@ impl Backend for CpuBackend {
                             }
                         }
                         "dequantize_gradient_f8x4r_to_f32" => {
+                            if input_slices.len() != 1 || params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "gradient f8 dequantization expects one input and element count"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let numel = params[0];
+                            // Quantized-gradient slots currently retain logical F32 byte sizing;
+                            // packed words occupy the leading ceil(numel / 4) u32 values.
+                            let _declared_bytes = numel
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "gradient f8 declared size overflows".into(),
+                                    )
+                                })?;
+                            let output_size = out_end - out_start;
+                            let effective_numel = output_size / std::mem::size_of::<f32>();
+                            let required_packed_bytes = effective_numel
+                                .div_ceil(4)
+                                .checked_mul(std::mem::size_of::<u32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "gradient f8 packed input size overflows".into(),
+                                    )
+                                })?;
+                            if !input_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<u32>())
+                                || input_slice.size < required_packed_bytes
+                                || !input_slice.size.is_multiple_of(std::mem::size_of::<u32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_size.is_multiple_of(std::mem::size_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "gradient f8 dequantization has invalid storage".into(),
+                                ));
+                            }
                             if let Some(input_slice) = input_slices.first() {
-                                let numel = *params.first().unwrap_or(&0);
-                                let in_u32 = unsafe {
+                                let source = unsafe {
                                     std::slice::from_raw_parts(
                                         arena
                                             .view_f32(input_slice.offset, input_slice.size)
@@ -7361,6 +7446,13 @@ impl Backend for CpuBackend {
                                         input_slice.size / 4,
                                     )
                                 };
+                                let mut in_u32 = Vec::new();
+                                in_u32.try_reserve_exact(source.len()).map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "gradient f8 dequantization input materialization failed: {error}"
+                                    ))
+                                })?;
+                                in_u32.extend_from_slice(source);
                                 let out_bytes = unsafe {
                                     std::slice::from_raw_parts_mut(
                                         arena
@@ -7370,15 +7462,14 @@ impl Backend for CpuBackend {
                                         out_end - out_start,
                                     )
                                 };
-                                let num_words = numel.div_ceil(4);
+                                let num_words = effective_numel.div_ceil(4);
                                 for w in 0..num_words {
-                                    let word = in_u32.get(w).copied().unwrap_or(0);
-                                    let word = F8x4R(word);
+                                    let word = F8x4R(in_u32[w]);
                                     let vals = word.unpack_to_f32();
                                     let base = w * 4;
                                     for j in 0..4 {
                                         let idx = base + j;
-                                        if idx < numel {
+                                        if idx < effective_numel {
                                             let bytes = vals[j].to_le_bytes();
                                             let off = idx * 4;
                                             if off + 4 <= out_bytes.len() {
