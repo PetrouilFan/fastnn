@@ -9492,9 +9492,23 @@ impl Backend for CpuBackend {
 
                             // Check for cached scales from wrap_quantized_optimizer
                             let has_cached = has_cached == 1;
-                            let mut cached_scales = vec![];
-                            let mut cached_zeros = vec![];
+                            let mut cached_scales = Vec::new();
+                            let mut cached_zeros = Vec::new();
                             if has_cached {
+                                cached_scales
+                                    .try_reserve_exact(num_channels)
+                                    .map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                        "{kernel_name}: cached scale allocation failed: {error}"
+                                    ))
+                                    })?;
+                                cached_zeros
+                                    .try_reserve_exact(num_channels)
+                                    .map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                        "{kernel_name}: cached offset allocation failed: {error}"
+                                    ))
+                                    })?;
                                 let sc_start = 4;
                                 let sc_end = sc_start + num_channels;
                                 let zp_start = sc_end;
@@ -9528,12 +9542,25 @@ impl Backend for CpuBackend {
                                         "{kernel_name}: input values must be finite"
                                     )));
                                 }
-                                let mut f32_data = tls_alloc_f32(input_f32.len());
-                                f32_data.copy_from_slice(input_f32);
+                                let mut f32_data = Vec::new();
+                                f32_data
+                                    .try_reserve_exact(input_f32.len())
+                                    .map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "{kernel_name}: input materialization failed: {error}"
+                                        ))
+                                    })?;
+                                f32_data.extend_from_slice(input_f32);
 
-                                let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
-                                let mut zero_points: Vec<f32> = vec![0.0; num_channels];
-                                let mut packed: Vec<u32> = vec![0u32; packed_words];
+                                let mut scales = Vec::new();
+                                scales.try_reserve_exact(num_channels).map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "{kernel_name}: scale allocation failed: {error}"
+                                    ))
+                                })?;
+                                let mut zero_points =
+                                    try_filled_vec(num_channels, 0.0f32, kernel_name)?;
+                                let mut packed = try_filled_vec(packed_words, 0u32, kernel_name)?;
 
                                 if has_cached
                                     && cached_scales.len() == num_channels
