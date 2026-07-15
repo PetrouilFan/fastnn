@@ -4998,98 +4998,106 @@ impl Backend for CpuBackend {
                             }
                         }
                         "concat" => {
-                            if !input_slices.is_empty() && params.len() >= 3 {
-                                let _axis = params[0];
-                                let _inner_stride = params[1];
-                                let outer_count = params[2];
-                                // For each input, compute block_size = elements per outer position.
-                                let num_inputs = input_slices.len();
-                                let mut block_sizes: Vec<usize> = Vec::with_capacity(num_inputs);
-                                for slice in input_slices {
-                                    let elems = slice.size / std::mem::size_of::<f32>();
-                                    block_sizes.push(elems / outer_count.max(1));
-                                }
-                                let out_f32 = {
-                                    let d = arena.data_mut();
-                                    bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let mut output_offset = 0;
-                                let d = arena.data_mut();
-                                for outer_pos in 0..outer_count {
-                                    for (si, slice) in input_slices.iter().enumerate() {
-                                        let input_data = bytemuck::cast_slice::<_, f32>(
-                                            &d[slice.offset..slice.offset + slice.size],
-                                        );
-                                        let bs = block_sizes[si];
-                                        let src_start = outer_pos * bs;
-                                        let src_end = (src_start + bs).min(input_data.len());
-                                        let copy_len = src_end - src_start;
-                                        let dst_end = (output_offset + copy_len).min(out_f32.len());
-                                        let actual_copy = dst_end - output_offset;
-                                        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                        if microkernels::simd_avx2_available() {
-                                            unsafe {
-                                                microkernels::concat_f32_avx2(
-                                                    &input_data[src_start..src_start + actual_copy],
-                                                    out_f32,
-                                                    output_offset,
-                                                );
-                                            }
-                                        } else {
-                                            out_f32[output_offset..dst_end].copy_from_slice(
-                                                &input_data[src_start..src_start + actual_copy],
-                                            );
-                                        }
-                                        #[cfg(not(all(
-                                            feature = "simd",
-                                            target_arch = "x86_64"
-                                        )))]
-                                        out_f32[output_offset..dst_end].copy_from_slice(
-                                            &input_data[src_start..src_start + actual_copy],
-                                        );
-                                        #[cfg(feature = "debug_canary")]
-                                        eprintln!(
-                                            "[FNN_DBG_CONCAT] out=[{},{}) outer={} input[{}]: off={} sz={} block={} copy={}",
-                                            out_start, out_end, outer_pos, si, slice.offset, slice.size, bs, copy_len
-                                        );
-                                        output_offset += copy_len;
-                                    }
-                                }
-                            } else if !input_slices.is_empty() {
-                                // Fallback: flat concat (legacy, no axis info)
-                                let mut output_offset = 0;
-                                for slice in input_slices {
-                                    let input_data =
-                                        unsafe { arena.view_f32(slice.offset, slice.size) };
-                                    let out_f32 = unsafe {
-                                        arena.view_f32_mut(out_start, out_end - out_start)
-                                    };
-                                    let end = (output_offset + input_data.len()).min(out_f32.len());
-                                    let actual_copy = end - output_offset;
-                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                    if microkernels::simd_avx2_available() {
-                                        unsafe {
-                                            microkernels::concat_f32_avx2(
-                                                &input_data[..actual_copy],
-                                                out_f32,
-                                                output_offset,
-                                            );
-                                        }
-                                    } else {
-                                        out_f32[output_offset..end]
-                                            .copy_from_slice(&input_data[..actual_copy]);
-                                    }
-                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                                    out_f32[output_offset..end]
-                                        .copy_from_slice(&input_data[..actual_copy]);
-                                    #[cfg(feature = "debug_canary")]
-                                    eprintln!(
-                                        "[FNN_DBG_CONCAT] out=[{},{}) input: off={} sz={} numel={} (flat fallback)",
-                                        out_start, out_end, slice.offset, slice.size, input_data.len()
-                                    );
-                                    output_offset += input_data.len();
-                                }
+                            if input_slices.is_empty() || params.len() != 3 {
+                                return Err(BackendError::Dispatch(
+                                    "concat: expected inputs and [axis, inner_stride, outer_count]"
+                                        .into(),
+                                ));
                             }
+                            let inner_stride = params[1];
+                            let outer_count = params[2];
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if inner_stride == 0
+                                || input_slices.iter().any(|slice| {
+                                    !slice.size.is_multiple_of(scalar_bytes)
+                                        || !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                })
+                                || !output_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "concat: invalid stride or incomplete f32 storage".into(),
+                                ));
+                            }
+                            if outer_count == 0 {
+                                if output_slice.size != 0
+                                    || input_slices.iter().any(|slice| slice.size != 0)
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "concat: zero outer count requires zero-sized tensors"
+                                            .into(),
+                                    ));
+                                }
+                                continue;
+                            }
+                            let mut block_sizes = Vec::new();
+                            block_sizes
+                                .try_reserve_exact(input_slices.len())
+                                .map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "concat: block metadata allocation failed: {error}"
+                                    ))
+                                })?;
+                            let mut expected_output_elements = 0usize;
+                            for slice in input_slices {
+                                let elements = slice.size / scalar_bytes;
+                                if !elements.is_multiple_of(outer_count) {
+                                    return Err(BackendError::Dispatch(
+                                        "concat: input does not contain complete outer blocks"
+                                            .into(),
+                                    ));
+                                }
+                                let block_size = elements / outer_count;
+                                if !block_size.is_multiple_of(inner_stride) {
+                                    return Err(BackendError::Dispatch(
+                                        "concat: input block disagrees with inner stride".into(),
+                                    ));
+                                }
+                                expected_output_elements = expected_output_elements
+                                    .checked_add(elements)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "concat: output element count overflows".into(),
+                                        )
+                                    })?;
+                                block_sizes.push(block_size);
+                            }
+                            let expected_output_bytes = expected_output_elements
+                                .checked_mul(scalar_bytes)
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "concat: output storage size overflows".into(),
+                                    )
+                                })?;
+                            if output_slice.size != expected_output_bytes {
+                                return Err(BackendError::Dispatch(
+                                    "concat: output storage does not equal all input elements"
+                                        .into(),
+                                ));
+                            }
+                            arena::with_nary_f32_slices(
+                                arena,
+                                input_slices,
+                                output_slice,
+                                |inputs, output| {
+                                    let mut output_offset = 0usize;
+                                    for outer_position in 0..outer_count {
+                                        for (input, block_size) in
+                                            inputs.iter().zip(block_sizes.iter().copied())
+                                        {
+                                            let source = outer_position * block_size;
+                                            output[output_offset..output_offset + block_size]
+                                                .copy_from_slice(
+                                                    &input[source..source + block_size],
+                                                );
+                                            output_offset += block_size;
+                                        }
+                                    }
+                                },
+                            );
                         }
 
                         "pool_f32" => {
