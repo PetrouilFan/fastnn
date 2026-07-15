@@ -1,5 +1,5 @@
 use crate::error::FastnnError;
-use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
+use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType, TensorValue};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::compiler::plan::{AllocSlot, MemoryPlan};
@@ -179,7 +179,14 @@ pub fn plan_memory_with_env(
 
     crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
-        let size = tensor_byte_size(&node.output_type, shape_env).map_err(|e| e.to_string())?;
+        let logical_size =
+            tensor_byte_size(&node.output_type, shape_env).map_err(|e| e.to_string())?;
+        let size = match &node.opcode {
+            Opcode::Constant(TensorValue::Data { bytes, .. }) => logical_size.max(bytes.len()),
+            Opcode::Constant(TensorValue::Float(_)) => logical_size.max(std::mem::size_of::<f32>()),
+            Opcode::Constant(TensorValue::Int(_)) => logical_size.max(std::mem::size_of::<i64>()),
+            _ => logical_size,
+        };
         if size > 0 {
             // Input nodes have their data written by the executor before any
             // instruction runs, so their lifetime starts at position 0 — not

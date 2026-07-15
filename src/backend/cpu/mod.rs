@@ -6707,49 +6707,42 @@ impl Backend for CpuBackend {
                                         .into(),
                                 ));
                             }
-                            let output_overlaps = input_slices.iter().any(|slice| {
-                                let end = slice.offset + slice.size;
-                                slice.offset < out_end && out_start < end
-                            });
-                            if output_overlaps {
-                                return Err(BackendError::Dispatch(
-                                    "conv_transpose2d: input and output slices overlap".into(),
-                                ));
-                            }
                             if let [input_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = unsafe {
-                                    (
-                                        arena.view_f32(input_slice.offset, input_slice.size),
-                                        arena.view_f32(weight_slice.offset, weight_slice.size),
-                                    )
+                                let (input, weight) = {
+                                    let arena_data = arena.data_mut();
+                                    let input = try_copy_slice(
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &arena_data[input_slice.offset
+                                                ..input_slice.offset + input_slice.size],
+                                        ),
+                                        "conv_transpose2d input materialization",
+                                    )?;
+                                    let weight = try_copy_slice(
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &arena_data[weight_slice.offset
+                                                ..weight_slice.offset + weight_slice.size],
+                                        ),
+                                        "conv_transpose2d weight materialization",
+                                    )?;
+                                    (input, weight)
                                 };
-                                let &[stride, padding, c, hin, win, kh, kw] = &params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "conv_transpose2d: expected params [stride, padding, input_c, input_h, input_w, kernel_h, kernel_w]"
-                                            .into(),
-                                    ));
-                                };
-                                let n = input.len() / (c * hin * win).max(1);
-                                let f = weight.len() / (c * kh * kw).max(1);
-                                let h_out = ((hin - 1) * stride + kh).saturating_sub(2 * padding);
-                                let w_out = ((win - 1) * stride + kw).saturating_sub(2 * padding);
                                 let out_f32 =
                                     unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
                                 out_f32.fill(0.0f32);
                                 for nn in 0..n {
-                                    for cc in 0..c {
-                                        for hh in 0..hin {
-                                            for ww in 0..win {
+                                    for cc in 0..*c {
+                                        for hh in 0..*hin {
+                                            for ww in 0..*win {
                                                 for ff in 0..f {
-                                                    for kkh in 0..kh {
-                                                        for kkw in 0..kw {
-                                                            let h_out_idx = hh * stride + kkh;
-                                                            let w_out_idx = ww * stride + kkw;
-                                                            if h_out_idx >= padding
-                                                                && w_out_idx >= padding
+                                                    for kkh in 0..*kh {
+                                                        for kkw in 0..*kw {
+                                                            let h_out_idx = hh * *stride + kkh;
+                                                            let w_out_idx = ww * *stride + kkw;
+                                                            if h_out_idx >= *padding
+                                                                && w_out_idx >= *padding
                                                             {
-                                                                let h_out_s = h_out_idx - padding;
-                                                                let w_out_s = w_out_idx - padding;
+                                                                let h_out_s = h_out_idx - *padding;
+                                                                let w_out_s = w_out_idx - *padding;
                                                                 if h_out_s < h_out
                                                                     && w_out_s < w_out
                                                                 {
@@ -6759,23 +6752,18 @@ impl Backend for CpuBackend {
                                                                         + h_out_s * w_out
                                                                         + w_out_s;
                                                                     let input_idx = nn
-                                                                        * (c * hin * win)
-                                                                        + cc * (hin * win)
-                                                                        + hh * win
+                                                                        * (*c * *hin * *win)
+                                                                        + cc * (*hin * *win)
+                                                                        + hh * *win
                                                                         + ww;
                                                                     let weight_idx = cc
-                                                                        * (f * kh * kw)
-                                                                        + ff * (kh * kw)
-                                                                        + kkh * kw
+                                                                        * (f * *kh * *kw)
+                                                                        + ff * (*kh * *kw)
+                                                                        + kkh * *kw
                                                                         + kkw;
-                                                                    if out_idx < out_f32.len()
-                                                                        && input_idx < input.len()
-                                                                        && weight_idx < weight.len()
-                                                                    {
-                                                                        out_f32[out_idx] += input
-                                                                            [input_idx]
-                                                                            * weight[weight_idx];
-                                                                    }
+                                                                    out_f32[out_idx] += input
+                                                                        [input_idx]
+                                                                        * weight[weight_idx];
                                                                 }
                                                             }
                                                         }

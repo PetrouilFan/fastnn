@@ -1,4 +1,4 @@
-use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv};
+use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -100,15 +100,23 @@ impl MemoryPlan {
         let mut max_end = 0usize;
         for (_, slot) in mp.slots.iter_mut() {
             let tight_size = match graph.get_node(slot.node_id) {
-                Some(node) => node
-                    .output_type
-                    .try_byte_size_with_env(Some(shape_env))
-                    .ok_or_else(|| {
-                        format!(
-                            "memory slot for node {} storage size overflows",
-                            slot.node_id
-                        )
-                    })?,
+                Some(node) => {
+                    let logical_size = node
+                        .output_type
+                        .try_byte_size_with_env(Some(shape_env))
+                        .ok_or_else(|| {
+                            format!(
+                                "memory slot for node {} storage size overflows",
+                                slot.node_id
+                            )
+                        })?;
+                    match &node.opcode {
+                        Opcode::Constant(TensorValue::Data { bytes, .. }) => {
+                            logical_size.max(bytes.len())
+                        }
+                        _ => logical_size,
+                    }
+                }
                 None => slot.size,
             };
             slot.size = tight_size.min(slot.size);
