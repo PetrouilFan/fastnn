@@ -277,16 +277,23 @@ impl MemoryPlan {
                     let input_shape = resolved_input_shapes
                         .first()
                         .ok_or_else(|| format!("reduction node {node_id} is missing its input"))?;
-                    let group_size = input_shape.get(axis).copied().ok_or_else(|| {
-                        format!("reduction node {node_id} axis {axis} is out of range")
-                    })?;
-                    let group_size = to_usize(group_size, "reduction group size")?;
+                    if axis >= input_shape.len() {
+                        return Err(format!(
+                            "reduction node {node_id} axis {axis} is out of range"
+                        ));
+                    }
                     let (is_mean, is_max) = match node.opcode {
                         Opcode::ReduceMean => (1, 0),
                         Opcode::ReduceMax => (0, 1),
                         _ => (0, 0), // ReduceSum
                     };
-                    vec![group_size, is_mean, is_max]
+                    let mut params = Vec::with_capacity(input_shape.len() + 4);
+                    params.push(input_shape.len());
+                    for dimension in input_shape {
+                        params.push(to_usize(*dimension, "reduction dimension")?);
+                    }
+                    params.extend([axis, is_mean, is_max]);
+                    params
                 }
                 Opcode::Conv2d => {
                     let get_attr = |name: &str| -> Result<usize, String> {

@@ -2320,6 +2320,32 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn reduction_respects_nontrailing_axis() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "reduce_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 8),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 0, 0, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 16, 8).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&bytes), &[4.0, 6.0]);
+    }
+
+    #[test]
     fn concat_rejects_truncated_output_storage() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

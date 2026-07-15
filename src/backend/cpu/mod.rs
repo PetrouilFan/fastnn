@@ -1488,10 +1488,6 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
-                    // Group size = product of dims being reduced over.
-                    // For a single-axis reduce this is just input_shape[axis],
-                    // which is typically Known (e.g. reduce over dim 1 of [N,4]
-                    // has group_size=Known(4)).
                     let axis_i64: i64 = node
                         .attrs
                         .get("axis")
@@ -1503,20 +1499,36 @@ impl Backend for CpuBackend {
                     } else {
                         axis_i64.min((rank - 1).max(0))
                     } as usize;
-                    let group_size_dim = input_shape_dims
-                        .first()
-                        .and_then(|s| s.get(axis).cloned())
-                        .unwrap_or(DimExpr::Known(1));
                     let (is_mean, is_max) = match node.opcode {
                         Opcode::ReduceMean => (1, 0),
                         Opcode::ReduceMax => (0, 1),
                         _ => (0, 0), // ReduceSum
                     };
-                    let group_size = group_size_dim.evaluate().unwrap_or_else(|| {
-                        // Symbolic dim â€” use SYMBOL_DIM_MAX as compile-time
-                        // estimate; runtime resolves via param_dims.
-                        crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed)
-                    }) as usize;
+                    let shape_dims = input_shape_dims
+                        .first()
+                        .filter(|shape| !shape.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            input_shapes
+                                .first()
+                                .map(|shape| {
+                                    shape
+                                        .iter()
+                                        .copied()
+                                        .map(DimExpr::Known)
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default()
+                        });
+                    let mut reduce_params = Vec::with_capacity(shape_dims.len() + 4);
+                    reduce_params.push(shape_dims.len());
+                    reduce_params.extend(shape_dims.iter().map(|dimension| {
+                        dimension
+                            .evaluate()
+                            .unwrap_or_else(|| crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed))
+                            as usize
+                    }));
+                    reduce_params.extend([axis, is_mean, is_max]);
 
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -1524,11 +1536,8 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![group_size, is_mean, is_max],
-                        // Pass the group_size as a symbolic DimExpr so dispatch
-                        // can re-evaluate it when shape_env is available (e.g.
-                        // reduce over symbolic batch dim N).
-                        param_dims: Some(vec![group_size_dim]),
+                        params: reduce_params,
+                        param_dims: (!shape_dims.is_empty()).then_some(shape_dims),
                         weight_meta: None,
                     });
                 }
@@ -3833,37 +3842,137 @@ impl Backend for CpuBackend {
                             )?;
                         }
                         "reduce_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let &[group_size, is_mean, is_max] = &params[..3] else {
-                                    return Err(BackendError::Dispatch(
-                                        "reduce_f32: expected params [group_size, is_mean, is_max]"
-                                            .into(),
-                                    ));
-                                };
-                                let effective_group_size = match param_dims {
-                                    Some(dims) if !dims.is_empty() => {
-                                        dims[0].evaluate_with_env(shape_env).map_err(|e| {
-                                            BackendError::Dispatch(format!("reduce_f32: {e}"))
-                                        })? as usize
-                                    }
-                                    _ => group_size,
-                                };
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        reduce_f32(
-                                            input,
-                                            out_f32,
-                                            effective_group_size,
-                                            is_mean == 1,
-                                            is_max == 1,
-                                        );
-                                    },
-                                );
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "reduce_f32: expected one input and encoded geometry".into(),
+                                ));
                             }
+                            let rank = params[0];
+                            let expected_params = rank.checked_add(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "reduce_f32: parameter count overflows".into(),
+                                )
+                            })?;
+                            if rank == 0 || params.len() != expected_params {
+                                return Err(BackendError::Dispatch(format!(
+                                    "reduce_f32: malformed shape metadata (rank {rank}, {} parameters)",
+                                    params.len()
+                                )));
+                            }
+                            let mut shape = params[1..1 + rank].to_vec();
+                            if let Some(dimensions) = param_dims {
+                                if dimensions.len() != rank {
+                                    return Err(BackendError::Dispatch(
+                                        "reduce_f32: symbolic shape rank mismatch".into(),
+                                    ));
+                                }
+                                for (size, dimension) in shape.iter_mut().zip(dimensions) {
+                                    *size =
+                                        dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                            BackendError::Dispatch(format!("reduce_f32: {error}"))
+                                        })? as usize;
+                                }
+                            }
+                            let axis = params[1 + rank];
+                            let is_mean = params[2 + rank];
+                            let is_max = params[3 + rank];
+                            if axis >= rank || is_mean > 1 || is_max > 1 || is_mean + is_max > 1 {
+                                return Err(BackendError::Dispatch(
+                                    "reduce_f32: invalid axis or reduction mode".into(),
+                                ));
+                            }
+                            let axis_size = shape[axis];
+                            if axis_size == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "reduce_f32: cannot reduce an empty axis".into(),
+                                ));
+                            }
+                            let input_elements =
+                                shape.iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "reduce_f32: input shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let outer =
+                                shape[..axis].iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "reduce_f32: outer geometry overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let inner =
+                                shape[axis + 1..]
+                                    .iter()
+                                    .try_fold(1usize, |count, dimension| {
+                                        count.checked_mul(*dimension).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "reduce_f32: inner geometry overflows".into(),
+                                            )
+                                        })
+                                    })?;
+                            let output_elements = outer.checked_mul(inner).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "reduce_f32: output geometry overflows".into(),
+                                )
+                            })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_bytes =
+                                input_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "reduce_f32: input size overflows".into(),
+                                    )
+                                })?;
+                            let output_bytes =
+                                output_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "reduce_f32: output size overflows".into(),
+                                    )
+                                })?;
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slice.size != input_bytes
+                                || output_slice.size != output_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "reduce_f32: geometry and f32 storage disagree".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, output| {
+                                    for outer_index in 0..outer {
+                                        for inner_index in 0..inner {
+                                            let mut value =
+                                                if is_max == 1 { f32::NEG_INFINITY } else { 0.0 };
+                                            for axis_index in 0..axis_size {
+                                                let input_index =
+                                                    (outer_index * axis_size + axis_index) * inner
+                                                        + inner_index;
+                                                if is_max == 1 {
+                                                    value = value.max(input[input_index]);
+                                                } else {
+                                                    value += input[input_index];
+                                                }
+                                            }
+                                            if is_mean == 1 {
+                                                value /= axis_size as f32;
+                                            }
+                                            output[outer_index * inner + inner_index] = value;
+                                        }
+                                    }
+                                },
+                            );
                         }
                         "transpose_f32" => {
                             if let Some(input_slice) = input_slices.first() {
