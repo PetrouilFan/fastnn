@@ -6224,9 +6224,57 @@ impl Backend for CpuBackend {
                             }
                         }
                         "topk_fused" => {
+                            if input_slices.len() != 1 || params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "topk_fused: expected one input and k parameter".into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let secondary = secondary_output_slice.ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "topk_fused: missing secondary indices output".into(),
+                                )
+                            })?;
+                            let k = params[0];
+                            let input_len = input_slice.size / std::mem::size_of::<f32>();
+                            let expected_values =
+                                k.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "topk_fused: values output size overflows".into(),
+                                    )
+                                })?;
+                            let expected_indices =
+                                k.checked_mul(std::mem::size_of::<u64>()).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "topk_fused: indices output size overflows".into(),
+                                    )
+                                })?;
+                            let ranges_overlap = |a: BufferSlice, b: BufferSlice| {
+                                a.offset < b.offset + b.size && b.offset < a.offset + a.size
+                            };
+                            if k == 0
+                                || input_len < k
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || output_slice.size != expected_values
+                                || !secondary.offset.is_multiple_of(std::mem::align_of::<u64>())
+                                || secondary.size != expected_indices
+                                || ranges_overlap(input_slice, *output_slice)
+                                || ranges_overlap(input_slice, secondary)
+                                || ranges_overlap(*output_slice, secondary)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "topk_fused: invalid k, scalar storage, or overlapping outputs"
+                                        .into(),
+                                ));
+                            }
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let k = params.first().copied().unwrap_or(1);
                                 arena::with_unary_f32_slices(
                                     arena,
                                     *input_slice,
