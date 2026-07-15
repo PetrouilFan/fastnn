@@ -4016,6 +4016,49 @@ impl Backend for CpuBackend {
                             }
                         }
                         "biasadd" => {
+                            if input_slices.len() != 2 || params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "biasadd: expected data/bias inputs and channel stride".into(),
+                                ));
+                            }
+                            let data_slice = input_slices[0];
+                            let bias_slice = input_slices[1];
+                            let channel_stride = params[0];
+                            let output_size = out_end - out_start;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let data_elements = data_slice.size / scalar_bytes;
+                            let bias_elements = bias_slice.size / scalar_bytes;
+                            let channel_block =
+                                bias_elements.checked_mul(channel_stride).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "biasadd: channel geometry overflows".into(),
+                                    )
+                                })?;
+                            if channel_stride == 0
+                                || data_slice.size != output_size
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(scalar_bytes)
+                                })
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_size.is_multiple_of(scalar_bytes)
+                                || (data_elements > 0
+                                    && (bias_elements == 0
+                                        || !data_elements.is_multiple_of(channel_block)))
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "biasadd: invalid geometry or f32 storage contract".into(),
+                                ));
+                            }
+                            let output_overlaps = input_slices.iter().any(|slice| {
+                                let end = slice.offset + slice.size;
+                                slice.offset < out_end && out_start < end
+                            });
+                            if output_overlaps {
+                                return Err(BackendError::Dispatch(
+                                    "biasadd: input and output slices overlap".into(),
+                                ));
+                            }
                             if let [data_slice, bias_slice] = &input_slices[..] {
                                 let (data, bias): (&[f32], &[f32]) = {
                                     let d = arena.data_mut();
@@ -4033,11 +4076,6 @@ impl Backend for CpuBackend {
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
-                                };
-                                let &[channel_stride] = &params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "biasadd: expected params [channel_stride]".into(),
-                                    ));
                                 };
                                 biasadd_f32(data, bias, out_f32, channel_stride);
                             }
