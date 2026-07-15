@@ -7494,42 +7494,41 @@ impl Backend for CpuBackend {
                                     "top-k output has invalid k or scalar storage".into(),
                                 ));
                             }
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_slice| {
-                                        let mut indexed: Vec<(usize, f32)> =
-                                            input.iter().copied().enumerate().collect();
-                                        if input.len() > k {
-                                            indexed.select_nth_unstable_by(
-                                                input.len().saturating_sub(k),
-                                                |a, b| {
-                                                    a.1.partial_cmp(&b.1)
-                                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                                },
-                                            );
-                                        }
-                                        if is_values {
-                                            let out_f32 =
-                                                bytemuck::cast_slice_mut::<_, f32>(out_slice);
-                                            for i in 0..k.min(out_f32.len()) {
-                                                out_f32[i] =
-                                                    indexed[input.len().saturating_sub(k) + i].1;
-                                            }
-                                        } else {
-                                            let out_u64 =
-                                                bytemuck::cast_slice_mut::<_, u64>(out_slice);
-                                            for i in 0..k.min(out_u64.len()) {
-                                                out_u64[i] =
-                                                    indexed[input.len().saturating_sub(k) + i].0
-                                                        as u64;
-                                            }
-                                        }
-                                    },
+                            let mut indexed = Vec::new();
+                            indexed.try_reserve_exact(input_len).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "{kernel_name}: candidate allocation failed: {error}"
+                                ))
+                            })?;
+                            {
+                                let data = arena.data_mut();
+                                let input = bytemuck::cast_slice::<_, f32>(
+                                    &data
+                                        [input_slice.offset..input_slice.offset + input_slice.size],
                                 );
+                                indexed.extend(input.iter().copied().enumerate());
+                            }
+                            if input_len > k {
+                                indexed.select_nth_unstable_by(input_len - k, |a, b| {
+                                    a.1.total_cmp(&b.1)
+                                });
+                            }
+                            let selected = &indexed[input_len - k..];
+                            let data = arena.data_mut();
+                            if is_values {
+                                let output = bytemuck::cast_slice_mut::<_, f32>(
+                                    &mut data[out_start..out_end],
+                                );
+                                for (value, candidate) in output.iter_mut().zip(selected.iter()) {
+                                    *value = candidate.1;
+                                }
+                            } else {
+                                let output = bytemuck::cast_slice_mut::<_, u64>(
+                                    &mut data[out_start..out_end],
+                                );
+                                for (index, candidate) in output.iter_mut().zip(selected.iter()) {
+                                    *index = candidate.0 as u64;
+                                }
                             }
                         }
                         "upsample_nearest2d" => {
