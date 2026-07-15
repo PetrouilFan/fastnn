@@ -4045,63 +4045,108 @@ impl Backend for CpuBackend {
                             );
                         }
                         "transpose_perm_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let rank = params.first().copied().unwrap_or(2);
-                                let nd_params =
-                                    resolve_params(params, param_dims, shape_env, 1 + 2 * rank)?;
-                                let dims: Vec<usize> = nd_params[1..1 + rank].to_vec();
-                                let perm: Vec<usize> = nd_params[1 + rank..1 + 2 * rank].to_vec();
-                                let mut in_strides = vec![1usize; rank];
-                                let mut out_strides = vec![1usize; rank];
-                                for i in (0..rank - 1).rev() {
-                                    in_strides[i] = in_strides[i + 1] * dims[i + 1];
-                                }
-                                for i in (0..rank - 1).rev() {
-                                    out_strides[perm[i]] =
-                                        out_strides[perm[i + 1]] * dims[perm[i + 1]];
-                                }
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let total = out_f32.len();
-                                        let mut lookup = Vec::with_capacity(total);
-                                        for out_idx in 0..total {
-                                            let mut in_idx = 0usize;
-                                            let mut remaining = out_idx;
-                                            for k in 0..rank {
-                                                let coord = remaining / out_strides[perm[k]];
-                                                remaining %= out_strides[perm[k]];
-                                                in_idx += coord * in_strides[perm[k]];
-                                            }
-                                            lookup.push(in_idx);
-                                        }
-                                        #[cfg(not(feature = "parallel"))]
-                                        {
-                                            for (i, &in_idx) in lookup.iter().enumerate() {
-                                                out_f32[i] = input[in_idx];
-                                            }
-                                        }
-                                        #[cfg(feature = "parallel")]
-                                        {
-                                            use rayon::prelude::*;
-                                            if total >= 4096 {
-                                                out_f32.par_iter_mut().enumerate().for_each(
-                                                    |(i, v)| {
-                                                        *v = input[lookup[i]];
-                                                    },
-                                                );
-                                            } else {
-                                                for (i, &in_idx) in lookup.iter().enumerate() {
-                                                    out_f32[i] = input[in_idx];
-                                                }
-                                            }
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "transpose_perm_f32: expected one input and encoded permutation"
+                                        .into(),
+                                ));
                             }
+                            let rank = params[0];
+                            if rank == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "transpose_perm_f32: rank must be positive".into(),
+                                ));
+                            }
+                            let expected_params = rank
+                                .checked_mul(2)
+                                .and_then(|count| count.checked_add(1))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "transpose_perm_f32: parameter count overflows".into(),
+                                    )
+                                })?;
+                            let nd_params =
+                                resolve_params(params, param_dims, shape_env, expected_params)?;
+                            let dims = &nd_params[1..1 + rank];
+                            let perm = &nd_params[1 + rank..];
+                            let mut seen = vec![false; rank];
+                            for axis in perm {
+                                if *axis >= rank || seen[*axis] {
+                                    return Err(BackendError::Dispatch(
+                                        "transpose_perm_f32: permutation must contain each axis once"
+                                            .into(),
+                                    ));
+                                }
+                                seen[*axis] = true;
+                            }
+                            let total = dims.iter().try_fold(1usize, |count, dimension| {
+                                count.checked_mul(*dimension).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "transpose_perm_f32: shape product overflows".into(),
+                                    )
+                                })
+                            })?;
+                            let expected_bytes = total
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "transpose_perm_f32: storage size overflows".into(),
+                                    )
+                                })?;
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slice.size != expected_bytes
+                                || output_slice.size != expected_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "transpose_perm_f32: shape and f32 storage disagree".into(),
+                                ));
+                            }
+                            let mut input_strides = vec![1usize; rank];
+                            for axis in (0..rank - 1).rev() {
+                                input_strides[axis] = input_strides[axis + 1]
+                                    .checked_mul(dims[axis + 1])
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "transpose_perm_f32: input stride overflows".into(),
+                                        )
+                                    })?;
+                            }
+                            let mut output_strides = vec![1usize; rank];
+                            for axis in (0..rank - 1).rev() {
+                                output_strides[axis] = output_strides[axis + 1]
+                                    .checked_mul(dims[perm[axis + 1]])
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "transpose_perm_f32: output stride overflows".into(),
+                                        )
+                                    })?;
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, output| {
+                                    for (output_index, value) in output.iter_mut().enumerate() {
+                                        let mut remaining = output_index;
+                                        let mut input_index = 0usize;
+                                        for output_axis in 0..rank {
+                                            let coordinate =
+                                                remaining / output_strides[output_axis];
+                                            remaining %= output_strides[output_axis];
+                                            input_index +=
+                                                coordinate * input_strides[perm[output_axis]];
+                                        }
+                                        *value = input[input_index];
+                                    }
+                                },
+                            );
                         }
                         "add_relu_f32" => {
                             fused_binary_activation_dispatch(
