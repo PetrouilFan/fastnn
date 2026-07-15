@@ -7481,35 +7481,67 @@ impl Backend for CpuBackend {
                             }
                         }
                         "gradient_scale" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let numel = *params.first().unwrap_or(&0);
-                                let scale = f32::from_bits(*params.get(1).unwrap_or(&0) as u32);
-                                let in_f32 =
-                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let out_f32 =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let len = out_f32.len().min(in_f32.len()).min(numel);
-                                #[cfg(not(feature = "parallel"))]
-                                {
-                                    for i in 0..len {
-                                        out_f32[i] = in_f32[i] * scale;
-                                    }
-                                }
-                                #[cfg(feature = "parallel")]
-                                {
-                                    use rayon::prelude::*;
-                                    if len >= 4096 {
-                                        out_f32[..len]
-                                            .par_iter_mut()
-                                            .enumerate()
-                                            .for_each(|(i, o)| *o = in_f32[i] * scale);
-                                    } else {
-                                        for i in 0..len {
-                                            out_f32[i] = in_f32[i] * scale;
+                            if input_slices.len() != 1 || params.len() != 2 {
+                                return Err(BackendError::Dispatch(
+                                    "gradient_scale: expected one input, element count, and scale"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let declared_numel = params[0];
+                            let scale = f32::from_bits(params[1] as u32);
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if !scale.is_finite()
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice.size.is_multiple_of(scalar_bytes)
+                                || (declared_numel == 0
+                                    && (input_slice.size != 0 || output_slice.size != 0))
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "gradient_scale: invalid numerical or f32 storage contract"
+                                        .into(),
+                                ));
+                            }
+                            let effective_numel = declared_numel
+                                .min(input_slice.size / scalar_bytes)
+                                .min(output_slice.size / scalar_bytes);
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |in_f32, out_f32| {
+                                    let input = &in_f32[..effective_numel];
+                                    let output = &mut out_f32[..effective_numel];
+                                    #[cfg(not(feature = "parallel"))]
+                                    {
+                                        for (output, input) in output.iter_mut().zip(input) {
+                                            *output = *input * scale;
                                         }
                                     }
-                                }
-                            }
+                                    #[cfg(feature = "parallel")]
+                                    {
+                                        use rayon::prelude::*;
+                                        if effective_numel >= 4096 {
+                                            output.par_iter_mut().zip(input.par_iter()).for_each(
+                                                |(output, input)| {
+                                                    *output = *input * scale;
+                                                },
+                                            );
+                                        } else {
+                                            for (output, input) in output.iter_mut().zip(input) {
+                                                *output = *input * scale;
+                                            }
+                                        }
+                                    }
+                                },
+                            );
                         }
                         "adam_update_f32" => {
                             validate_adam_dispatch(

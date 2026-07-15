@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn gradient_scale_rejects_nonfinite_scale() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "gradient_scale".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, f32::NAN.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn gradient_f8_dequantization_rejects_truncated_words() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
