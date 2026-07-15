@@ -3050,6 +3050,48 @@ impl Backend for CpuBackend {
                     let out_start = output_slice.offset;
                     let out_end = output_slice.offset + output_slice.size;
 
+                    let is_unary_f32 = matches!(
+                        kernel_name.as_str(),
+                        "relu_f32"
+                            | "gelu_f32"
+                            | "silu_f32"
+                            | "exp_f32"
+                            | "log_f32"
+                            | "sqrt_f32"
+                            | "neg_f32"
+                            | "abs_f32"
+                            | "sigmoid_f32"
+                            | "tanh_f32"
+                            | "leaky_relu_f32"
+                            | "elu_f32"
+                            | "softplus_f32"
+                            | "hardswish_f32"
+                            | "clamp_f32"
+                            | "sign_f32"
+                            | "round_f32"
+                            | "logical_not_f32"
+                            | "log_softmax_f32"
+                            | "mish_f32"
+                    );
+                    if is_unary_f32 {
+                        let input = input_slices.first().copied();
+                        if input_slices.len() != 1
+                            || input.is_none_or(|slice| {
+                                slice.size != output_slice.size
+                                    || !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                    || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                            })
+                            || !output_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                            || !output_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                        {
+                            return Err(BackendError::Dispatch(format!(
+                                "{kernel_name}: unary f32 input and output storage must match"
+                            )));
+                        }
+                    }
+
                     match kernel_name.as_str() {
                         "add_f32" => {
                             fused_binary_activation_dispatch(
@@ -3126,11 +3168,17 @@ impl Backend for CpuBackend {
                             unary_op_dispatch(input_slices, arena, out_start, out_end, tanh_f32);
                         }
                         "leaky_relu_f32" => {
-                            let slope = if !params.is_empty() {
-                                f32::from_bits(params[0] as u32)
-                            } else {
-                                0.01
-                            };
+                            if params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "leaky_relu_f32: expected one slope parameter".into(),
+                                ));
+                            }
+                            let slope = f32::from_bits(params[0] as u32);
+                            if !slope.is_finite() {
+                                return Err(BackendError::Dispatch(
+                                    "leaky_relu_f32: slope must be finite".into(),
+                                ));
+                            }
                             unary_op_dispatch(
                                 input_slices,
                                 arena,
@@ -3163,16 +3211,18 @@ impl Backend for CpuBackend {
                             );
                         }
                         "clamp_f32" => {
-                            let min_val = if !params.is_empty() {
-                                f32::from_bits(params[0] as u32)
-                            } else {
-                                0.0
-                            };
-                            let max_val = if params.len() > 1 {
-                                f32::from_bits(params[1] as u32)
-                            } else {
-                                1.0
-                            };
+                            if params.len() != 2 {
+                                return Err(BackendError::Dispatch(
+                                    "clamp_f32: expected minimum and maximum parameters".into(),
+                                ));
+                            }
+                            let min_val = f32::from_bits(params[0] as u32);
+                            let max_val = f32::from_bits(params[1] as u32);
+                            if !min_val.is_finite() || !max_val.is_finite() || min_val > max_val {
+                                return Err(BackendError::Dispatch(
+                                    "clamp_f32: bounds must be finite and ordered".into(),
+                                ));
+                            }
                             unary_op_dispatch(
                                 input_slices,
                                 arena,
