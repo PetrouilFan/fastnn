@@ -5093,6 +5093,124 @@ impl Backend for CpuBackend {
                         }
 
                         "pool_f32" => {
+                            if input_slices.len() != 1 || params.len() != 8 {
+                                return Err(BackendError::Dispatch(
+                                    "pool_f32: expected one input and eight geometry parameters"
+                                        .into(),
+                                ));
+                            }
+                            let [kernel, stride, padding, is_max, n, c, h, w] = [
+                                params[0], params[1], params[2], params[3], params[4], params[5],
+                                params[6], params[7],
+                            ];
+                            if kernel == 0
+                                || stride == 0
+                                || n == 0
+                                || c == 0
+                                || h == 0
+                                || w == 0
+                                || is_max > 1
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "pool_f32: invalid mode, stride, or dimensions".into(),
+                                ));
+                            }
+                            let padded_height = padding
+                                .checked_mul(2)
+                                .and_then(|value| h.checked_add(value))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pool_f32: padded height overflows".into(),
+                                    )
+                                })?;
+                            let padded_width = padding
+                                .checked_mul(2)
+                                .and_then(|value| w.checked_add(value))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pool_f32: padded width overflows".into(),
+                                    )
+                                })?;
+                            if kernel > padded_height || kernel > padded_width {
+                                return Err(BackendError::Dispatch(
+                                    "pool_f32: kernel exceeds padded input".into(),
+                                ));
+                            }
+                            let h_out = (padded_height - kernel) / stride + 1;
+                            let w_out = (padded_width - kernel) / stride + 1;
+                            let input_elements = n
+                                .checked_mul(c)
+                                .and_then(|value| value.checked_mul(h))
+                                .and_then(|value| value.checked_mul(w))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pool_f32: input geometry overflows".into(),
+                                    )
+                                })?;
+                            let output_elements = n
+                                .checked_mul(c)
+                                .and_then(|value| value.checked_mul(h_out))
+                                .and_then(|value| value.checked_mul(w_out))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pool_f32: output geometry overflows".into(),
+                                    )
+                                })?;
+                            let input_bytes = input_elements
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pool_f32: input storage size overflows".into(),
+                                    )
+                                })?;
+                            let output_bytes = output_elements
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "pool_f32: output storage size overflows".into(),
+                                    )
+                                })?;
+                            let input_slice = input_slices[0];
+                            if input_slice.size != input_bytes
+                                || out_end - out_start != output_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "pool_f32: geometry and f32 storage disagree".into(),
+                                ));
+                            }
+                            if let Some(indices) = secondary_output_slice {
+                                let indices_bytes = output_elements
+                                    .checked_mul(std::mem::size_of::<i64>())
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "pool_f32: index storage size overflows".into(),
+                                        )
+                                    })?;
+                                if is_max == 0
+                                    || indices.size != indices_bytes
+                                    || !indices.offset.is_multiple_of(std::mem::align_of::<i64>())
+                                    || arena::ranges_overlap(
+                                        indices.offset,
+                                        indices.offset + indices.size,
+                                        input_slice.offset,
+                                        input_slice.offset + input_slice.size,
+                                    )
+                                    || arena::ranges_overlap(
+                                        indices.offset,
+                                        indices.offset + indices.size,
+                                        out_start,
+                                        out_end,
+                                    )
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "pool_f32: invalid or overlapping indices output".into(),
+                                    ));
+                                }
+                            }
                             if let Some(input_slice) = input_slices.first() {
                                 let input_end = input_slice.offset + input_slice.size;
                                 let overlaps = arena::ranges_overlap(
