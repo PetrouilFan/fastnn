@@ -2320,6 +2320,44 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn layer_norm_applies_affine_parameters() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "norm_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 8),
+                    crate::backend::BufferSlice::new(16, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(24, 8),
+                secondary_output_slice: None,
+                params: vec![1e-5f32.to_bits() as usize, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 32,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(32).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 3.0]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 8, bytemuck::cast_slice(&[2.0f32, 3.0]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 16, bytemuck::cast_slice(&[1.0f32, -1.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 24, 8).unwrap();
+        let output = bytemuck::cast_slice::<_, f32>(&bytes);
+        assert!((output[0] + 1.0).abs() < 1e-4, "output={output:?}");
+        assert!((output[1] - 2.0).abs() < 1e-4, "output={output:?}");
+    }
+
+    #[test]
     fn batch_norm_rejects_nonpositive_epsilon() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

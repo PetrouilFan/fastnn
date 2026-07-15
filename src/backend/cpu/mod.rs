@@ -4226,15 +4226,61 @@ impl Backend for CpuBackend {
                                         );
                                     }
                                 }
-                            } else if let Some(input_slice) = input_slices.first() {
+                            } else {
+                                if input_slices.len() != 3 {
+                                    return Err(BackendError::Dispatch(
+                                        "norm_f32 layer mode expects data, weight, and bias".into(),
+                                    ));
+                                }
+                                let data_slice = input_slices[0];
+                                let weight_slice = input_slices[1];
+                                let bias_slice = input_slices[2];
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(
+                                let scalar_bytes = std::mem::size_of::<f32>();
+                                let row_size = weight_slice.size / scalar_bytes;
+                                let data_elements = data_slice.size / scalar_bytes;
+                                if row_size == 0
+                                    || data_slice.size != output_slice.size
+                                    || bias_slice.size != weight_slice.size
+                                    || !data_elements.is_multiple_of(row_size)
+                                    || input_slices.iter().any(|slice| {
+                                        !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                            || !slice.size.is_multiple_of(scalar_bytes)
+                                    })
+                                    || !output_slice
+                                        .offset
+                                        .is_multiple_of(std::mem::align_of::<f32>())
+                                    || !output_slice.size.is_multiple_of(scalar_bytes)
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "norm_f32 layer mode has invalid row or f32 storage".into(),
+                                    ));
+                                }
+                                {
+                                    let data = arena.data_mut();
+                                    if [weight_slice, bias_slice].iter().any(|slice| {
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &data[slice.offset..slice.offset + slice.size],
+                                        )
+                                        .iter()
+                                        .any(|value| !value.is_finite())
+                                    }) {
+                                        return Err(BackendError::Dispatch(
+                                            "norm_f32 layer affine metadata must be finite".into(),
+                                        ));
+                                    }
+                                }
+                                arena::with_nary_f32_slices(
                                     arena,
-                                    *input_slice,
+                                    input_slices,
                                     output_slice,
-                                    |input, out_f32| {
-                                        let row_size = input.len() / out_f32.len().max(1);
-                                        norm_layernorm_f32(input, out_f32, row_size, eps);
+                                    |inputs, out_f32| {
+                                        norm_layernorm_f32(inputs[0], out_f32, row_size, eps);
+                                        for (index, output) in out_f32.iter_mut().enumerate() {
+                                            let column = index % row_size;
+                                            *output =
+                                                *output * inputs[1][column] + inputs[2][column];
+                                        }
                                     },
                                 );
                             }
