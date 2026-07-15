@@ -2320,6 +2320,34 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn packed_dequantization_rejects_trailing_payload() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "dequantize_kernel".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 5)],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    1,
+                    1,
+                    4,
+                    1,
+                    1.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn packed_quantization_rejects_incomplete_metadata() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

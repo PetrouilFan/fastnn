@@ -9644,11 +9644,12 @@ impl Backend for CpuBackend {
                             }
                         }
                         "dequantize_kernel" => {
-                            let input_slice = input_slices.first().ok_or_else(|| {
-                                BackendError::Dispatch(
-                                    "dequantize_kernel: missing input slice".into(),
-                                )
-                            })?;
+                            if input_slices.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_kernel: expected exactly one input slice".into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
                             if params.len() < 4 {
                                 return Err(BackendError::Dispatch(
                                     "dequantize_kernel: expected numel, format, bit width, and channel count".into(),
@@ -9724,11 +9725,13 @@ impl Backend for CpuBackend {
                                     // The packed data starts at offset 0 (no header)
                                     let data_offset = 0;
                                     // Infer num_elems_per_channel from numel
-                                    let num_elems_per_channel = if num_channels > 0 {
-                                        numel / num_channels
-                                    } else {
-                                        numel
-                                    };
+                                    if !numel.is_multiple_of(num_channels) {
+                                        return Err(BackendError::Dispatch(
+                                            "dequantize_kernel: numel is not divisible by channel count"
+                                                .into(),
+                                        ));
+                                    }
+                                    let num_elems_per_channel = numel / num_channels;
 
                                     (
                                         num_channels,
@@ -9845,52 +9848,37 @@ impl Backend for CpuBackend {
                                                 .into(),
                                         )
                                     })?;
-                                if packed_end > in_data.len() {
+                                if packed_end != in_data.len() {
                                     return Err(BackendError::Dispatch(
-                                        "dequantize_kernel: truncated packed payload".into(),
+                                        "dequantize_kernel: packed payload size is not exact"
+                                            .into(),
                                     ));
                                 }
-
-                                let total_packed_bytes = in_data.len() - data_offset;
-                                let packed_words = total_packed_bytes / 4;
 
                                 // Write output
                                 let out_f32 = {
                                     let d = arena.data_mut();
                                     bytemuck::cast_slice_mut::<_, f32>(&mut d[out_start..out_end])
                                 };
-                                let max_out = out_f32.len().min(numel);
-                                for i in 0..max_out {
-                                    let ch = if num_channels > 0 {
-                                        i / num_elems_per_channel % num_channels
-                                    } else {
-                                        0
-                                    };
+                                for i in 0..numel {
+                                    let ch = i / num_elems_per_channel;
                                     let word_idx = i / items_per_word;
                                     let shift = (i % items_per_word) * bit_width;
-                                    if word_idx < packed_words {
-                                        let word_start = data_offset + word_idx * 4;
-                                        let word = if word_start + 4 <= in_data.len() {
-                                            u32::from_le_bytes(
-                                                in_data[word_start..word_start + 4]
-                                                    .try_into()
-                                                    .unwrap(),
-                                            )
-                                        } else {
-                                            0
-                                        };
-                                        let q = ((word >> shift) & ((1 << bit_width) - 1)) as i32;
-                                        // Sign-extend for signed types
-                                        let sign_bit = 1 << (bit_width - 1);
-                                        let q_signed = if (q & sign_bit) != 0 {
-                                            q | (!((1 << bit_width) - 1))
-                                        } else {
-                                            q
-                                        };
-                                        let scale = scales.get(ch).copied().unwrap_or(1.0);
-                                        let zp = zero_points.get(ch).copied().unwrap_or(0.0);
-                                        out_f32[i] = q_signed as f32 * scale + zp;
-                                    }
+                                    let word_start = data_offset + word_idx * 4;
+                                    let word = u32::from_le_bytes([
+                                        in_data[word_start],
+                                        in_data[word_start + 1],
+                                        in_data[word_start + 2],
+                                        in_data[word_start + 3],
+                                    ]);
+                                    let q = ((word >> shift) & ((1 << bit_width) - 1)) as i32;
+                                    let sign_bit = 1 << (bit_width - 1);
+                                    let q_signed = if (q & sign_bit) != 0 {
+                                        q | (!((1 << bit_width) - 1))
+                                    } else {
+                                        q
+                                    };
+                                    out_f32[i] = q_signed as f32 * scales[ch] + zero_points[ch];
                                 }
                             }
                         }
