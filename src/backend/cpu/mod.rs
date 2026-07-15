@@ -7150,61 +7150,82 @@ impl Backend for CpuBackend {
                             }
                         }
                         "flip" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let num_dims = params.first().copied().unwrap_or(0);
-                                let flip_dims: Vec<usize> = if num_dims > 0 {
-                                    params[1..1 + num_dims].to_vec()
-                                } else {
-                                    vec![]
-                                };
-                                let shape: Vec<usize> = if num_dims > 0 {
-                                    params[1 + num_dims..].to_vec()
-                                } else {
-                                    vec![]
-                                };
-                                let ndim = shape.len();
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let len = out_f32.len().min(input.len());
-                                        if params.is_empty() {
-                                            for i in 0..len {
-                                                out_f32[i] = input[len - 1 - i];
-                                            }
-                                        } else {
-                                            let mut indices = vec![0i64; ndim];
-                                            let mut strides = vec![0i64; ndim];
-                                            let mut stride = 1i64;
-                                            for d in (0..ndim).rev() {
-                                                strides[d] = stride;
-                                                stride *= shape[d] as i64;
-                                            }
-                                            for out_idx in 0..len {
-                                                let mut src_idx = 0i64;
-                                                for d in 0..ndim {
-                                                    let idx = if flip_dims.contains(&d) {
-                                                        shape[d] as i64 - 1 - indices[d]
-                                                    } else {
-                                                        indices[d]
-                                                    };
-                                                    src_idx += idx * strides[d];
-                                                }
-                                                out_f32[out_idx] = input[src_idx as usize];
-                                                for d in (0..ndim).rev() {
-                                                    indices[d] += 1;
-                                                    if indices[d] < shape[d] as i64 {
-                                                        break;
-                                                    }
-                                                    indices[d] = 0;
-                                                }
-                                            }
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "flip: expected one input and encoded dimensions/shape".into(),
+                                ));
                             }
+                            let num_dims = params[0];
+                            let shape_start = num_dims.checked_add(1).ok_or_else(|| {
+                                BackendError::Dispatch("flip: dimension count overflows".into())
+                            })?;
+                            if shape_start > params.len() {
+                                return Err(BackendError::Dispatch(
+                                    "flip: truncated dimension metadata".into(),
+                                ));
+                            }
+                            let flip_dims = &params[1..shape_start];
+                            let shape = &params[shape_start..];
+                            if flip_dims.iter().any(|dim| *dim >= shape.len())
+                                || flip_dims
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(index, dim)| flip_dims[..index].contains(dim))
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "flip: dimensions must be unique and within rank".into(),
+                                ));
+                            }
+                            let elements = shape.iter().try_fold(1usize, |count, size| {
+                                count.checked_mul(*size).ok_or_else(|| {
+                                    BackendError::Dispatch("flip: shape product overflows".into())
+                                })
+                            })?;
+                            let expected_bytes = elements
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                BackendError::Dispatch("flip: storage size overflows".into())
+                            })?;
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slice.size != expected_bytes
+                                || output_slice.size != expected_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "flip: shape and f32 storage disagree".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    for (output_index, output) in out_f32.iter_mut().enumerate() {
+                                        let mut remaining = output_index;
+                                        let mut source_index = 0usize;
+                                        let mut source_stride = 1usize;
+                                        for dimension in (0..shape.len()).rev() {
+                                            let coordinate = remaining % shape[dimension];
+                                            remaining /= shape[dimension];
+                                            let source_coordinate =
+                                                if flip_dims.contains(&dimension) {
+                                                    shape[dimension] - 1 - coordinate
+                                                } else {
+                                                    coordinate
+                                                };
+                                            source_index += source_coordinate * source_stride;
+                                            source_stride *= shape[dimension];
+                                        }
+                                        *output = input[source_index];
+                                    }
+                                },
+                            );
                         }
                         "where_f32" => {
                             if input_slices.len() >= 3 {

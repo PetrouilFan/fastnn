@@ -2320,6 +2320,35 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn flip_respects_selected_dimensions() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "flip".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 16),
+                secondary_output_slice: None,
+                params: vec![1, 0, 2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 32,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(32).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 16, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[3.0, 4.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
     fn cumsum_respects_selected_dimension() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
