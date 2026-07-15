@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn to_f16_rejects_partial_output_scalar() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "to_f16".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 1),
+                secondary_output_slice: None,
+                params: vec![1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 5,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(5).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn erf_dispatch_rejects_partial_output_contract() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

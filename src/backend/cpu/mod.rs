@@ -8835,21 +8835,48 @@ impl Backend for CpuBackend {
                             }
                         }
                         "to_f16" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let f32_data =
-                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let out_bytes =
-                                    unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
-                                for (i, &v) in f32_data.iter().enumerate() {
-                                    let f16_val = half::f16::from_f32(v);
-                                    let bytes = f16_val.to_le_bytes();
-                                    let start = i * 2;
-                                    let end = (start + 2).min(out_bytes.len());
-                                    if start < out_bytes.len() {
-                                        out_bytes[start..end]
-                                            .copy_from_slice(&bytes[..end - start]);
-                                    }
-                                }
+                            if input_slices.len() != 1 || params.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "to_f16: expected one f32 input and declared element count"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let declared_numel = params[0];
+                            let output_size = out_end - out_start;
+                            if !input_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<u16>())
+                                || !output_size.is_multiple_of(std::mem::size_of::<u16>())
+                                || (declared_numel == 0
+                                    && (input_slice.size != 0 || output_size != 0))
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "to_f16: invalid scalar alignment or storage contract".into(),
+                                ));
+                            }
+                            let effective_numel = declared_numel
+                                .min(input_slice.size / std::mem::size_of::<f32>())
+                                .min(output_size / std::mem::size_of::<u16>());
+                            let source =
+                                unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                            let mut f32_data = Vec::new();
+                            f32_data
+                                .try_reserve_exact(effective_numel)
+                                .map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "to_f16: input materialization failed: {error}"
+                                    ))
+                                })?;
+                            f32_data.extend_from_slice(&source[..effective_numel]);
+                            let out_bytes =
+                                unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
+                            for (index, value) in f32_data.iter().enumerate() {
+                                let start = index * std::mem::size_of::<u16>();
+                                out_bytes[start..start + 2]
+                                    .copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
                             }
                         }
                         "to_f32" => {
