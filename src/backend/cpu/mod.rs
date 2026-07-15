@@ -6084,6 +6084,41 @@ impl Backend for CpuBackend {
                             }
                         }
                         "pow_f32" => {
+                            if input_slices.len() != 2 || !params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "pow_f32: expected data and exponent inputs without parameters"
+                                        .into(),
+                                ));
+                            }
+                            let data_slice = input_slices[0];
+                            let exponent_slice = input_slices[1];
+                            let output_size = out_end - out_start;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if data_slice.size == 0
+                                || exponent_slice.size == 0
+                                || data_slice.size != output_size
+                                || !matches!(exponent_slice.size, 4)
+                                    && exponent_slice.size != data_slice.size
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(scalar_bytes)
+                                })
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_size.is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "pow_f32: invalid f32 storage or exponent broadcasting".into(),
+                                ));
+                            }
+                            let output_overlaps = input_slices.iter().any(|slice| {
+                                let end = slice.offset + slice.size;
+                                slice.offset < out_end && out_start < end
+                            });
+                            if output_overlaps {
+                                return Err(BackendError::Dispatch(
+                                    "pow_f32: input and output slices overlap".into(),
+                                ));
+                            }
                             if let [data_slice, exp_slice] = &input_slices[..] {
                                 let (data, exponent) = unsafe {
                                     (
@@ -6097,10 +6132,10 @@ impl Backend for CpuBackend {
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0..len {
-                                        let e = if i < exponent.len() {
-                                            exponent[i]
+                                        let e = if exponent.len() == 1 {
+                                            exponent[0]
                                         } else {
-                                            exponent[exponent.len().saturating_sub(1)]
+                                            exponent[i]
                                         };
                                         out_f32[i] = data[i].powf(e);
                                     }
@@ -6112,20 +6147,20 @@ impl Backend for CpuBackend {
                                     if len >= 4096 {
                                         out_f32[..len].par_iter_mut().enumerate().for_each(
                                             |(i, o)| {
-                                                let e = if i < exponent.len() {
-                                                    exponent[i]
+                                                let e = if exponent.len() == 1 {
+                                                    exponent[0]
                                                 } else {
-                                                    exponent[exponent.len().saturating_sub(1)]
+                                                    exponent[i]
                                                 };
                                                 *o = data[i].powf(e);
                                             },
                                         );
                                     } else {
                                         for i in 0..len {
-                                            let e = if i < exponent.len() {
-                                                exponent[i]
+                                            let e = if exponent.len() == 1 {
+                                                exponent[0]
                                             } else {
-                                                exponent[exponent.len().saturating_sub(1)]
+                                                exponent[i]
                                             };
                                             out_f32[i] = data[i].powf(e);
                                         }
