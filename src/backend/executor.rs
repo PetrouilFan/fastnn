@@ -2320,6 +2320,45 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn gather_respects_nonzero_axis_geometry() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "gather".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 24),
+                    crate::backend::BufferSlice::new(24, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(32, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 3, 2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 48,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(48).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 24, bytemuck::cast_slice(&[2.0f32, 0.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 32, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[3.0, 1.0, 6.0, 4.0]
+        );
+    }
+
+    #[test]
     fn pad_places_input_at_low_padding_offset() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

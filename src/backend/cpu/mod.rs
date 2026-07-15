@@ -1411,13 +1411,26 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|a| a.parse().ok())
                         .unwrap_or(0);
+                    let data_shape = input_shapes.first().cloned().unwrap_or_default();
+                    let indices_numel = input_shapes
+                        .get(1)
+                        .and_then(|shape| {
+                            shape
+                                .iter()
+                                .try_fold(1u64, |count, size| count.checked_mul(*size))
+                        })
+                        .unwrap_or(0) as usize;
+                    let mut gather_params = Vec::with_capacity(data_shape.len() + 3);
+                    gather_params.push(data_shape.len());
+                    gather_params.extend(data_shape.into_iter().map(|size| size as usize));
+                    gather_params.extend([indices_numel, axis]);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "gather".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![axis],
+                        params: gather_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -5515,29 +5528,126 @@ impl Backend for CpuBackend {
                             );
                         }
                         "gather" => {
-                            if let [data_slice, indices_slice] = &input_slices[..] {
-                                // Zero-copy views of input and indices
-                                let input: &[f32] =
-                                    unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
-                                let indices: &[f32] = unsafe {
-                                    arena.view_f32(indices_slice.offset, indices_slice.size)
-                                };
-                                let out_f32 =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let axis = if !params.is_empty() { params[0] } else { 0 };
-                                let inner = if axis == 0 {
-                                    input.len() / out_f32.len().max(1)
-                                } else {
-                                    1
-                                };
-                                for i in 0..out_f32.len() {
-                                    let idx_idx = i.checked_div(inner).unwrap_or(i);
-                                    let idx = indices[idx_idx.min(indices.len().saturating_sub(1))]
-                                        as usize;
-                                    let src = idx * inner + (i % inner);
-                                    out_f32[i] = if src < input.len() { input[src] } else { 0.0 };
-                                }
+                            if input_slices.len() != 2 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "gather: expected data, indices, and encoded geometry".into(),
+                                ));
                             }
+                            let rank = params[0];
+                            let expected_params = rank.checked_add(3).ok_or_else(|| {
+                                BackendError::Dispatch("gather: parameter count overflows".into())
+                            })?;
+                            if rank == 0 || params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "gather: malformed data shape metadata".into(),
+                                ));
+                            }
+                            let data_shape = &params[1..1 + rank];
+                            let indices_numel = params[1 + rank];
+                            let axis = params[2 + rank];
+                            if axis >= rank {
+                                return Err(BackendError::Dispatch(
+                                    "gather: axis is outside data rank".into(),
+                                ));
+                            }
+                            let data_elements =
+                                data_shape.iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "gather: data shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let outer = data_shape[..axis].iter().try_fold(
+                                1usize,
+                                |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "gather: outer geometry overflows".into(),
+                                        )
+                                    })
+                                },
+                            )?;
+                            let inner = data_shape[axis + 1..].iter().try_fold(
+                                1usize,
+                                |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "gather: inner geometry overflows".into(),
+                                        )
+                                    })
+                                },
+                            )?;
+                            let axis_size = data_shape[axis];
+                            let output_elements = outer
+                                .checked_mul(indices_numel)
+                                .and_then(|count| count.checked_mul(inner))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "gather: output geometry overflows".into(),
+                                    )
+                                })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let expected_data =
+                                data_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("gather: data size overflows".into())
+                                })?;
+                            let expected_indices =
+                                indices_numel.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("gather: index size overflows".into())
+                                })?;
+                            let expected_output =
+                                output_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("gather: output size overflows".into())
+                                })?;
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slices[0].size != expected_data
+                                || input_slices[1].size != expected_indices
+                                || output_slice.size != expected_output
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                })
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "gather: geometry and f32 storage disagree".into(),
+                                ));
+                            }
+                            let indices = unsafe {
+                                arena.view_f32(input_slices[1].offset, input_slices[1].size)
+                            };
+                            if indices.iter().any(|index| {
+                                !index.is_finite()
+                                    || *index < 0.0
+                                    || index.fract() != 0.0
+                                    || *index >= axis_size as f32
+                            }) {
+                                return Err(BackendError::Dispatch(
+                                    "gather: indices must be integral and within the axis".into(),
+                                ));
+                            }
+                            arena::with_nary_f32_slices(
+                                arena,
+                                input_slices,
+                                output_slice,
+                                |inputs, output| {
+                                    let data = inputs[0];
+                                    let indices = inputs[1];
+                                    for outer_index in 0..outer {
+                                        for (index_position, index) in indices.iter().enumerate() {
+                                            let source =
+                                                (outer_index * axis_size + *index as usize) * inner;
+                                            let destination = (outer_index * indices_numel
+                                                + index_position)
+                                                * inner;
+                                            output[destination..destination + inner]
+                                                .copy_from_slice(&data[source..source + inner]);
+                                        }
+                                    }
+                                },
+                            );
                         }
                         "slice_f32" => {
                             if let Some(input_slice) = input_slices.first() {
