@@ -1,3 +1,5 @@
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::Backend;
 use fastnn::compiler::passes::{memory_planning, shape_inference};
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
@@ -16,6 +18,20 @@ fn test_single_node_graph() {
 
     assert_eq!(plan.slots.len(), 1, "single-node graph should have 1 slot");
     assert!(plan.slots.contains_key(&a.node_id()));
+}
+
+#[test]
+fn shape_lowering_rejects_dimensions_that_f32_cannot_represent() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[16_777_217], IrDType::F32);
+    let shape = builder.shape_op(&input);
+    let mut graph = builder.to_graph();
+    graph.set_inputs(vec![input.node_id()]);
+    graph.set_outputs(vec![shape.node_id()]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let memory = memory_planning::plan_memory(&graph).unwrap();
+    assert!(CpuBackend.compile(&graph, &memory).is_err());
 }
 
 #[test]

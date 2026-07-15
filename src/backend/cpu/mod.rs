@@ -2282,11 +2282,38 @@ impl Backend for CpuBackend {
                     // Resolve input shape at compile time (known dims directly,
                     // symbolic dims use SYMBOL_DIM_MAX â€” they'll be resolved
                     // at dispatch by param_dims).
-                    use std::io::Write;
-                    let in_shape = input_shapes.first().cloned().unwrap_or_default();
-                    let mut shape_bytes = Vec::with_capacity(in_shape.len() * 4);
-                    for &d in &in_shape {
-                        shape_bytes.write_all(&(d as f32).to_le_bytes()).unwrap();
+                    let in_shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "shape node {node_id} has no resolved input shape"
+                        ))
+                    })?;
+                    let byte_len = in_shape.len().checked_mul(4).ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "shape node {node_id} output size overflows"
+                        ))
+                    })?;
+                    if output_slice.size != byte_len {
+                        return Err(BackendError::Compilation(format!(
+                            "shape node {node_id} output slot has {} bytes, expected {byte_len}",
+                            output_slice.size
+                        )));
+                    }
+                    let mut shape_bytes = Vec::new();
+                    shape_bytes.try_reserve_exact(byte_len).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "shape node {node_id} output allocation failed"
+                        ))
+                    })?;
+                    for &dimension in in_shape {
+                        // Shape values currently use the legacy f32 tensor contract. Reject
+                        // dimensions that cannot round-trip instead of silently changing them.
+                        let encoded = dimension as f32;
+                        if encoded as u64 != dimension {
+                            return Err(BackendError::Compilation(format!(
+                                "shape node {node_id} dimension {dimension} is not exactly representable as f32"
+                            )));
+                        }
+                        shape_bytes.extend_from_slice(&encoded.to_le_bytes());
                     }
                     instructions.push(Instruction::WriteConst {
                         dst: output_slice,
