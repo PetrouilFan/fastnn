@@ -8184,40 +8184,93 @@ impl Backend for CpuBackend {
                                 .copy_from_slice(&v_bytes[..v_end - input_slices[3].offset]);
                         }
                         "cast" => {
-                            let in_byte_size = *params.first().unwrap_or(&4);
-                            let out_byte_size = *params.get(1).unwrap_or(&4);
-                            if let Some(input_slice) = input_slices.first() {
-                                if in_byte_size == 4 && out_byte_size == 8 {
-                                    let in_f32 = unsafe {
-                                        arena.view_f32(input_slice.offset, input_slice.size)
-                                    };
-                                    let out = unsafe {
-                                        bytemuck::cast_slice_mut(
-                                            arena.view_f32_mut(out_start, out_end - out_start),
-                                        )
-                                    };
-                                    let num = in_f32.len();
-                                    for i in 0..num {
-                                        let byte_off = i * 8;
-                                        if byte_off + 8 <= out.len() {
-                                            out[byte_off..byte_off + 8]
-                                                .copy_from_slice(&(in_f32[i] as i64).to_le_bytes());
-                                        }
+                            if input_slices.len() != 1 || params.len() != 2 {
+                                return Err(BackendError::Dispatch(
+                                    "cast: expected one input and input/output byte widths".into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let output_size = out_end - out_start;
+                            let in_byte_size = params[0];
+                            let out_byte_size = params[1];
+                            match (in_byte_size, out_byte_size) {
+                                (4, 8) => {
+                                    let numel = input_slice.size / 4;
+                                    let expected_output =
+                                        numel.checked_mul(8).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "cast: f32-to-i64 output size overflows".into(),
+                                            )
+                                        })?;
+                                    if !input_slice.offset.is_multiple_of(4)
+                                        || !input_slice.size.is_multiple_of(4)
+                                        || !out_start.is_multiple_of(8)
+                                        || output_size != expected_output
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "cast: invalid f32-to-i64 storage contract".into(),
+                                        ));
                                     }
-                                } else if in_byte_size == 8 && out_byte_size == 4 {
-                                    let in_f32_src = unsafe {
+                                    let source = unsafe {
                                         arena.view_f32(input_slice.offset, input_slice.size)
                                     };
-                                    let in_i64: &[i64] = bytemuck::cast_slice(in_f32_src);
-                                    let out_f32 = unsafe {
-                                        arena.view_f32_mut(out_start, out_end - out_start)
+                                    let mut input = Vec::new();
+                                    input.try_reserve_exact(numel).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "cast: input materialization failed: {error}"
+                                        ))
+                                    })?;
+                                    input.extend_from_slice(source);
+                                    let output = unsafe {
+                                        arena.view_u8_mut(out_start, out_end - out_start)
                                     };
-                                    let len = in_i64.len().min(out_f32.len());
-                                    for i in 0..len {
-                                        out_f32[i] = in_i64[i] as f32;
+                                    for (index, value) in input.iter().enumerate() {
+                                        let start = index * 8;
+                                        output[start..start + 8]
+                                            .copy_from_slice(&(*value as i64).to_le_bytes());
                                     }
                                 }
-                                // Same-size casts handled by MemCopy at compile time
+                                (8, 4) => {
+                                    let numel = input_slice.size / 8;
+                                    let expected_output =
+                                        numel.checked_mul(4).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "cast: i64-to-f32 output size overflows".into(),
+                                            )
+                                        })?;
+                                    if !input_slice.offset.is_multiple_of(8)
+                                        || !input_slice.size.is_multiple_of(8)
+                                        || !out_start.is_multiple_of(4)
+                                        || output_size != expected_output
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "cast: invalid i64-to-f32 storage contract".into(),
+                                        ));
+                                    }
+                                    let data = arena.data_mut();
+                                    let source_bytes = &data
+                                        [input_slice.offset..input_slice.offset + input_slice.size];
+                                    let mut input = Vec::new();
+                                    input.try_reserve_exact(numel).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "cast: input materialization failed: {error}"
+                                        ))
+                                    })?;
+                                    input.extend_from_slice(bytemuck::cast_slice::<_, i64>(
+                                        source_bytes,
+                                    ));
+                                    let output = bytemuck::cast_slice_mut::<_, f32>(
+                                        &mut data[out_start..out_end],
+                                    );
+                                    for (output, input) in output.iter_mut().zip(input) {
+                                        *output = input as f32;
+                                    }
+                                }
+                                _ => {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "cast: unsupported byte-width conversion {in_byte_size}->{out_byte_size}"
+                                    )));
+                                }
                             }
                         }
 
