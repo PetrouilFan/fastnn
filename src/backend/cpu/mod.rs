@@ -1953,13 +1953,18 @@ impl Backend for CpuBackend {
                         .get("reverse")
                         .and_then(|r| r.parse().ok())
                         .unwrap_or(0);
+                    let input_shape = input_shapes.first().cloned().unwrap_or_default();
+                    let mut cumsum_params = Vec::with_capacity(input_shape.len() + 4);
+                    cumsum_params.push(input_shape.len());
+                    cumsum_params.extend(input_shape.into_iter().map(|size| size as usize));
+                    cumsum_params.extend([dim, exclusive, rev]);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "cumsum".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![dim, exclusive, rev],
+                        params: cumsum_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -7007,34 +7012,115 @@ impl Backend for CpuBackend {
                             );
                         }
                         "cumsum" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let exclusive = params.get(1).copied().unwrap_or(0);
-                                let rev = params.get(2).copied().unwrap_or(0);
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let len = out_f32.len().min(input.len());
-                                        if rev == 0 {
-                                            let mut s = 0.0f32;
-                                            for i in 0..len {
-                                                s += input[i];
-                                                out_f32[i] =
-                                                    if exclusive != 0 { s - input[i] } else { s };
-                                            }
-                                        } else {
-                                            let mut s = 0.0f32;
-                                            for i in (0..len).rev() {
-                                                s += input[i];
-                                                out_f32[i] =
-                                                    if exclusive != 0 { s - input[i] } else { s };
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "cumsum: expected one input and encoded shape/options".into(),
+                                ));
+                            }
+                            let rank = params[0];
+                            let expected_params = rank.checked_add(4).ok_or_else(|| {
+                                BackendError::Dispatch("cumsum: parameter count overflows".into())
+                            })?;
+                            if rank == 0 || params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "cumsum: malformed shape/options metadata".into(),
+                                ));
+                            }
+                            let input_shape = &params[1..1 + rank];
+                            let dim = params[1 + rank];
+                            let exclusive = params[2 + rank];
+                            let reverse = params[3 + rank];
+                            if dim >= rank || exclusive > 1 || reverse > 1 {
+                                return Err(BackendError::Dispatch(
+                                    "cumsum: invalid dimension or boolean option".into(),
+                                ));
+                            }
+                            let input_elements =
+                                input_shape.iter().try_fold(1usize, |count, size| {
+                                    count.checked_mul(*size).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "cumsum: input shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let inner =
+                                input_shape[dim + 1..]
+                                    .iter()
+                                    .try_fold(1usize, |count, size| {
+                                        count.checked_mul(*size).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "cumsum: inner geometry overflows".into(),
+                                            )
+                                        })
+                                    })?;
+                            let outer =
+                                input_shape[..dim].iter().try_fold(1usize, |count, size| {
+                                    count.checked_mul(*size).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "cumsum: outer geometry overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let axis_size = input_shape[dim];
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let expected_bytes =
+                                input_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("cumsum: storage size overflows".into())
+                                })?;
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slice.size != expected_bytes
+                                || output_slice.size != expected_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "cumsum: shape and f32 storage disagree".into(),
+                                ));
+                            }
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    for outer_index in 0..outer {
+                                        for inner_index in 0..inner {
+                                            let mut sum = 0.0f32;
+                                            if reverse == 0 {
+                                                for axis_index in 0..axis_size {
+                                                    let index = outer_index * axis_size * inner
+                                                        + axis_index * inner
+                                                        + inner_index;
+                                                    if exclusive == 0 {
+                                                        sum += input[index];
+                                                        out_f32[index] = sum;
+                                                    } else {
+                                                        out_f32[index] = sum;
+                                                        sum += input[index];
+                                                    }
+                                                }
+                                            } else {
+                                                for axis_index in (0..axis_size).rev() {
+                                                    let index = outer_index * axis_size * inner
+                                                        + axis_index * inner
+                                                        + inner_index;
+                                                    if exclusive == 0 {
+                                                        sum += input[index];
+                                                        out_f32[index] = sum;
+                                                    } else {
+                                                        out_f32[index] = sum;
+                                                        sum += input[index];
+                                                    }
+                                                }
                                             }
                                         }
-                                    },
-                                );
-                            }
+                                    }
+                                },
+                            );
                         }
                         "erf_f32" => {
                             if let Some(input_slice) = input_slices.first() {
