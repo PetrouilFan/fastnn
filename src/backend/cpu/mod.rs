@@ -5879,45 +5879,113 @@ impl Backend for CpuBackend {
                             );
                         }
                         "conv1d" => {
-                            if let [input_slice, weight_slice] = &input_slices[..] {
-                                let input: &[f32] =
-                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let weight: &[f32] = unsafe {
-                                    arena.view_f32(weight_slice.offset, weight_slice.size)
-                                };
-                                let &[stride, padding, c, w, kw] = &params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "conv1d: expected params [stride, padding, input_c, input_w, kernel_w]".into(),
-                                    ));
-                                };
-                                let n = input.len() / (c * w).max(1);
-                                let f = weight.len() / (c * kw).max(1);
-                                let w_out = (w + 2 * padding).saturating_sub(kw) / stride + 1;
-                                let out_f32: &mut [f32] =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                for nn in 0..n {
-                                    for ff in 0..f {
-                                        for ww in 0..w_out {
-                                            let mut sum = 0.0f32;
-                                            for cc in 0..c {
-                                                for kkw in 0..kw {
-                                                    let w_in = ww * stride + kkw;
-                                                    if w_in >= padding {
-                                                        let w_in_s = w_in - padding;
-                                                        if w_in_s < w {
-                                                            sum += input
-                                                                [nn * (c * w) + cc * w + w_in_s]
-                                                                * weight
-                                                                    [ff * (c * kw) + cc * kw + kkw];
+                            if input_slices.len() != 2 || params.len() != 5 {
+                                return Err(BackendError::Dispatch(
+                                    "conv1d: expected input, weight, and five geometry parameters"
+                                        .into(),
+                                ));
+                            }
+                            let [stride, padding, c, w, kw] =
+                                [params[0], params[1], params[2], params[3], params[4]];
+                            if stride == 0 || c == 0 || w == 0 || kw == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "conv1d: stride and tensor dimensions must be positive".into(),
+                                ));
+                            }
+                            let input_plane = c.checked_mul(w).ok_or_else(|| {
+                                BackendError::Dispatch("conv1d: input geometry overflows".into())
+                            })?;
+                            let kernel_plane = c.checked_mul(kw).ok_or_else(|| {
+                                BackendError::Dispatch("conv1d: kernel geometry overflows".into())
+                            })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if input_slices.iter().any(|slice| {
+                                !slice.size.is_multiple_of(scalar_bytes)
+                                    || !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                            }) || !(out_end - out_start).is_multiple_of(scalar_bytes)
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv1d: storage is not complete aligned f32 data".into(),
+                                ));
+                            }
+                            let input_elements = input_slices[0].size / scalar_bytes;
+                            let weight_elements = input_slices[1].size / scalar_bytes;
+                            if !input_elements.is_multiple_of(input_plane)
+                                || !weight_elements.is_multiple_of(kernel_plane)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv1d: storage does not contain complete tensors".into(),
+                                ));
+                            }
+                            let n = input_elements / input_plane;
+                            let f = weight_elements / kernel_plane;
+                            let padded_width = padding
+                                .checked_mul(2)
+                                .and_then(|value| w.checked_add(value))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch("conv1d: padded width overflows".into())
+                                })?;
+                            if kw > padded_width {
+                                return Err(BackendError::Dispatch(
+                                    "conv1d: kernel exceeds padded input width".into(),
+                                ));
+                            }
+                            let w_out = (padded_width - kw) / stride + 1;
+                            let output_elements = n
+                                .checked_mul(f)
+                                .and_then(|count| count.checked_mul(w_out))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv1d: output geometry overflows".into(),
+                                    )
+                                })?;
+                            let output_bytes =
+                                output_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv1d: output storage size overflows".into(),
+                                    )
+                                })?;
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if output_slice.size != output_bytes {
+                                return Err(BackendError::Dispatch(
+                                    "conv1d: output storage does not match geometry".into(),
+                                ));
+                            }
+                            arena::with_nary_f32_slices(
+                                arena,
+                                input_slices,
+                                output_slice,
+                                |inputs, output| {
+                                    let input = inputs[0];
+                                    let weight = inputs[1];
+                                    for nn in 0..n {
+                                        for ff in 0..f {
+                                            for ww in 0..w_out {
+                                                let mut sum = 0.0f32;
+                                                for cc in 0..c {
+                                                    for kkw in 0..kw {
+                                                        let padded_index = ww * stride + kkw;
+                                                        if padded_index >= padding {
+                                                            let input_index =
+                                                                padded_index - padding;
+                                                            if input_index < w {
+                                                                sum += input[nn * input_plane
+                                                                    + cc * w
+                                                                    + input_index]
+                                                                    * weight[ff * kernel_plane
+                                                                        + cc * kw
+                                                                        + kkw];
+                                                            }
                                                         }
                                                     }
                                                 }
+                                                output[nn * (f * w_out) + ff * w_out + ww] = sum;
                                             }
-                                            out_f32[nn * (f * w_out) + ff * w_out + ww] = sum;
                                         }
                                     }
-                                }
-                            }
+                                },
+                            );
                         }
                         "conv3d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
