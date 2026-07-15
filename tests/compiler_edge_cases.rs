@@ -35,6 +35,24 @@ fn shape_lowering_rejects_dimensions_that_f32_cannot_represent() {
 }
 
 #[test]
+fn activation_dequantization_requires_quantize_predecessor() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let mut graph = builder.to_graph();
+    let dequantized = graph.add_node(
+        Opcode::DequantizeActivations,
+        vec![input.node_id()],
+        TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+    );
+    graph.set_inputs(vec![input.node_id()]);
+    graph.set_outputs(vec![dequantized]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let memory = memory_planning::plan_memory(&graph).unwrap();
+    assert!(CpuBackend.compile(&graph, &memory).is_err());
+}
+
+#[test]
 fn test_disconnected_graph() {
     let g = GraphBuilder::new();
     let a = g.input(&[2, 3], IrDType::F32);

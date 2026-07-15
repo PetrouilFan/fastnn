@@ -2695,43 +2695,69 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::DequantizeActivations => {
-                    let numel = input_shapes
+                    let input_shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "activation dequantization node {node_id} has no input shape"
+                        ))
+                    })?;
+                    let numel_u64 = input_shape.iter().try_fold(1u64, |acc, value| {
+                        acc.checked_mul(*value).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "activation dequantization node {node_id} element count overflows"
+                            ))
+                        })
+                    })?;
+                    let numel = usize::try_from(numel_u64).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "activation dequantization node {node_id} exceeds this platform"
+                        ))
+                    })?;
+                    let predecessor = node
+                        .inputs
                         .first()
-                        .map(|s| s.iter().product::<u64>() as usize)
-                        .unwrap_or(1);
-                    // Read per-channel metadata from the QuantizeActivations
-                    // predecessor (if any) via the node's own dtype/metadata.
-                    let mut params = vec![numel];
-                    // Peek at predecessor node to detect per-channel format
-                    if let Some(&pred_id) = node.inputs.first() {
-                        if let Some(pred) = graph.get_node(pred_id) {
-                            if let Some(mode) = pred.attrs.get("mode") {
-                                if mode == "per_channel" {
-                                    let nc: usize = pred
-                                        .attrs
-                                        .get("num_channels")
-                                        .and_then(|s| s.parse().ok())
-                                        .unwrap_or(0);
-                                    params.push(1); // per_channel flag
-                                    params.push(nc);
-                                    let scales_str =
-                                        pred.attrs.get("scales").cloned().unwrap_or_default();
-                                    let zps_str =
-                                        pred.attrs.get("zero_points").cloned().unwrap_or_default();
-                                    for s in scales_str.split(',') {
-                                        if let Ok(v) = s.parse::<f32>() {
-                                            params.push(v.to_bits() as usize);
-                                        }
-                                    }
-                                    for zp in zps_str.split(',') {
-                                        if let Ok(v) = zp.parse::<f32>() {
-                                            params.push(v.to_bits() as usize);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        .and_then(|predecessor| graph.get_node(*predecessor))
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "activation dequantization node {node_id} has no predecessor"
+                            ))
+                        })?;
+                    if predecessor.opcode != Opcode::QuantizeActivations {
+                        return Err(BackendError::Compilation(format!(
+                            "activation dequantization node {node_id} must consume QuantizeActivations"
+                        )));
                     }
+                    let mode = predecessor.attrs.get("mode").map(String::as_str);
+                    let is_per_channel = mode == Some("per_channel");
+                    if !matches!(mode, None | Some("per_tensor") | Some("per_channel")) {
+                        return Err(BackendError::Compilation(format!(
+                            "activation dequantization node {node_id} has invalid mode"
+                        )));
+                    }
+                    let num_channels = if is_per_channel {
+                        let channels = predecessor
+                            .attrs
+                            .get("num_channels")
+                            .ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "activation dequantization node {node_id} is missing num_channels"
+                                ))
+                            })?
+                            .parse::<usize>()
+                            .map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "activation dequantization node {node_id} has invalid num_channels"
+                                ))
+                            })?;
+                        if channels == 0 || numel % channels != 0 {
+                            return Err(BackendError::Compilation(format!(
+                                "activation dequantization node {node_id} has incompatible channels"
+                            )));
+                        }
+                        channels
+                    } else {
+                        0
+                    };
+                    let params = vec![numel, usize::from(is_per_channel), num_channels];
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "dequantize_activations".to_string(),
@@ -7669,28 +7695,27 @@ impl Backend for CpuBackend {
                             }
                         }
                         "dequantize_activations" => {
-                            if params.len() < 2 {
+                            if params.len() != 3 || input_slices.len() != 1 {
                                 return Err(BackendError::Dispatch(
-                                    "dequantize_activations: expected numel and mode parameters"
+                                    "dequantize_activations: expected numel, mode, channel count, and one input"
                                         .into(),
                                 ));
                             }
                             let numel = params[0];
+                            if params[1] > 1 {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_activations: invalid quantization mode".into(),
+                                ));
+                            }
                             let is_per_channel = params[1] == 1;
-                            let num_channels = if is_per_channel {
-                                params.get(2).copied().ok_or_else(|| {
-                                    BackendError::Dispatch(
-                                        "dequantize_activations: missing channel count".into(),
-                                    )
-                                })?
-                            } else {
-                                0
-                            };
-                            let input_slice = input_slices.first().ok_or_else(|| {
-                                BackendError::Dispatch(
-                                    "dequantize_activations: missing input slice".into(),
-                                )
-                            })?;
+                            let num_channels = params[2];
+                            if !is_per_channel && num_channels != 0 {
+                                return Err(BackendError::Dispatch(
+                                    "dequantize_activations: per-tensor mode cannot declare channels"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
                             if output_slice.offset % std::mem::align_of::<f32>() != 0
                                 || output_slice.size % std::mem::size_of::<f32>() != 0
                             {
