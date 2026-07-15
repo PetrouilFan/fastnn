@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn packed_quantization_rejects_incomplete_metadata() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "quantize_f32_u4".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 20),
+                secondary_output_slice: None,
+                params: vec![1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn range_dispatch_writes_complete_validated_output() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

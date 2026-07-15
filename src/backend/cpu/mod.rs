@@ -9403,9 +9403,54 @@ impl Backend for CpuBackend {
                             }
                         }
                         "quantize_f32_u4" | "quantize_f32_u8" => {
-                            let num_channels = *params.first().unwrap_or(&1);
-                            let num_elems_per_channel = *params.get(1).unwrap_or(&1);
-                            let numel = *params.get(2).unwrap_or(&1);
+                            if input_slices.len() != 1 || params.len() < 4 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel_name}: expected one input and complete quantization metadata"
+                                )));
+                            }
+                            let num_channels = params[0];
+                            let num_elems_per_channel = params[1];
+                            let numel = params[2];
+                            let has_cached = params[3];
+                            if num_channels == 0
+                                || num_elems_per_channel == 0
+                                || has_cached > 1
+                                || num_channels > u32::MAX as usize
+                                || num_elems_per_channel > u32::MAX as usize
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel_name}: invalid channel geometry or cache mode"
+                                )));
+                            }
+                            let expected_numel = num_channels
+                                .checked_mul(num_elems_per_channel)
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(format!(
+                                        "{kernel_name}: channel geometry overflows"
+                                    ))
+                                })?;
+                            if numel != expected_numel {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel_name}: channel geometry does not match numel"
+                                )));
+                            }
+                            let expected_params = if has_cached == 1 {
+                                num_channels
+                                    .checked_mul(2)
+                                    .and_then(|count| count.checked_add(4))
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(format!(
+                                            "{kernel_name}: cached metadata count overflows"
+                                        ))
+                                    })?
+                            } else {
+                                4
+                            };
+                            if params.len() != expected_params {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel_name}: incomplete cached quantization metadata"
+                                )));
+                            }
                             let bit_width = if kernel_name == "quantize_f32_u4" {
                                 4
                             } else {
@@ -9413,9 +9458,40 @@ impl Backend for CpuBackend {
                             };
                             let max_q = (1i32 << (bit_width - 1)) - 1; // 7 for U4, 127 for U8
                             let items_per_word = 32 / bit_width; // 8 for U4, 4 for U8
+                            let input_slice = input_slices[0];
+                            let expected_input = numel.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "{kernel_name}: input size overflows"
+                                ))
+                            })?;
+                            let packed_words = numel.div_ceil(items_per_word);
+                            let header_size = num_channels
+                                .checked_mul(8)
+                                .and_then(|bytes| bytes.checked_add(8))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(format!(
+                                        "{kernel_name}: header size overflows"
+                                    ))
+                                })?;
+                            let expected_output = packed_words
+                                .checked_mul(4)
+                                .and_then(|bytes| bytes.checked_add(header_size))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(format!(
+                                        "{kernel_name}: output size overflows"
+                                    ))
+                                })?;
+                            if input_slice.size != expected_input
+                                || !input_slice.offset.is_multiple_of(4)
+                                || output_slice.size != expected_output
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel_name}: tensor geometry and storage disagree"
+                                )));
+                            }
 
                             // Check for cached scales from wrap_quantized_optimizer
-                            let has_cached = params.get(3).copied().unwrap_or(0) == 1;
+                            let has_cached = has_cached == 1;
                             let mut cached_scales = vec![];
                             let mut cached_zeros = vec![];
                             if has_cached {
@@ -9424,12 +9500,21 @@ impl Backend for CpuBackend {
                                 let zp_start = sc_end;
                                 let zp_end = zp_start + num_channels;
                                 for i in sc_start..sc_end {
-                                    let bits = *params.get(i).unwrap_or(&0);
+                                    let bits = params[i];
                                     cached_scales.push(f32::from_bits(bits as u32));
                                 }
                                 for i in zp_start..zp_end {
-                                    let bits = *params.get(i).unwrap_or(&0);
+                                    let bits = params[i];
                                     cached_zeros.push(f32::from_bits(bits as u32));
+                                }
+                                if cached_scales
+                                    .iter()
+                                    .any(|scale| !scale.is_finite() || *scale <= 0.0)
+                                    || cached_zeros.iter().any(|zero| !zero.is_finite())
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "{kernel_name}: cached affine metadata must be finite with positive scales"
+                                    )));
                                 }
                             }
 
@@ -9438,12 +9523,16 @@ impl Backend for CpuBackend {
                                 let input_f32 = bytemuck::cast_slice::<_, f32>(
                                     &d[input_slice.offset..input_slice.offset + input_slice.size],
                                 );
+                                if input_f32.iter().any(|value| !value.is_finite()) {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "{kernel_name}: input values must be finite"
+                                    )));
+                                }
                                 let mut f32_data = tls_alloc_f32(input_f32.len());
                                 f32_data.copy_from_slice(input_f32);
 
                                 let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
                                 let mut zero_points: Vec<f32> = vec![0.0; num_channels];
-                                let packed_words = numel.div_ceil(items_per_word);
                                 let mut packed: Vec<u32> = vec![0u32; packed_words];
 
                                 if has_cached
@@ -9455,8 +9544,7 @@ impl Backend for CpuBackend {
                                     // Pack using cached scales
                                     for ch in 0..num_channels {
                                         let start = ch * num_elems_per_channel;
-                                        let end =
-                                            (start + num_elems_per_channel).min(f32_data.len());
+                                        let end = start + num_elems_per_channel;
                                         let scale = scales[ch];
                                         let inv_s = if scale != 0.0 { 1.0 / scale } else { 0.0 };
                                         let zp = zero_points[ch];
@@ -9475,8 +9563,7 @@ impl Backend for CpuBackend {
                                     // Original path: recompute per-channel scales
                                     for ch in 0..num_channels {
                                         let start = ch * num_elems_per_channel;
-                                        let end =
-                                            (start + num_elems_per_channel).min(f32_data.len());
+                                        let end = start + num_elems_per_channel;
                                         let max_abs = f32_data[start..end]
                                             .iter()
                                             .map(|v| v.abs())
@@ -9504,9 +9591,8 @@ impl Backend for CpuBackend {
 
                                 // Write output: [num_channels(u32)][num_elems_per_channel(u32)]
                                 //             [scales(f32 x N)][zero_points(f32 x N)][packed_data]
-                                let header_size = 8 + 8 * num_channels; // 2 u32 + N f32 + N f32
                                 let total_size = header_size + packed.len() * 4;
-                                let out_end = (out_start + total_size).min(d.len());
+                                let out_end = out_start + total_size;
                                 let out = &mut d[out_start..out_end];
 
                                 let mut offset = 0;
