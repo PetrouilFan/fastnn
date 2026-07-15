@@ -7216,25 +7216,28 @@ impl Backend for CpuBackend {
                                     "pow_f32: invalid f32 storage or exponent broadcasting".into(),
                                 ));
                             }
-                            let output_overlaps = input_slices.iter().any(|slice| {
-                                let end = slice.offset + slice.size;
-                                slice.offset < out_end && out_start < end
-                            });
-                            if output_overlaps {
-                                return Err(BackendError::Dispatch(
-                                    "pow_f32: input and output slices overlap".into(),
-                                ));
-                            }
                             if let [data_slice, exp_slice] = &input_slices[..] {
-                                let (data, exponent) = unsafe {
-                                    (
-                                        arena.view_f32(data_slice.offset, data_slice.size),
-                                        arena.view_f32(exp_slice.offset, exp_slice.size),
-                                    )
+                                let (data, exponent) = {
+                                    let arena_data = arena.data_mut();
+                                    let data = try_copy_slice(
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &arena_data[data_slice.offset
+                                                ..data_slice.offset + data_slice.size],
+                                        ),
+                                        "pow_f32 data materialization",
+                                    )?;
+                                    let exponent = try_copy_slice(
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &arena_data[exp_slice.offset
+                                                ..exp_slice.offset + exp_slice.size],
+                                        ),
+                                        "pow_f32 exponent materialization",
+                                    )?;
+                                    (data, exponent)
                                 };
                                 let out_f32 =
                                     unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let len = out_f32.len().min(data.len());
+                                let len = data.len();
                                 #[cfg(not(feature = "parallel"))]
                                 {
                                     for i in 0..len {

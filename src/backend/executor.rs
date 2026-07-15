@@ -3231,6 +3231,35 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn pow_supports_valid_in_place_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pow_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[2.0f32, 3.0, 2.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&output), &[4.0, 9.0]);
+    }
+
+    #[test]
     fn pow_rejects_empty_exponent_storage() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
