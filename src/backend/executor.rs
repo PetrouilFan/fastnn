@@ -2248,6 +2248,50 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn activation_quantization_validates_and_populates_each_channel() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "quantize_activations".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 28),
+                secondary_output_slice: None,
+                params: vec![
+                    4,
+                    1,
+                    2,
+                    1.0f32.to_bits() as usize,
+                    1.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 44,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        assert_eq!(
+            backend.try_read_arena(&arena, 40, 4).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+
+        let mut malformed = plan;
+        if let Instruction::CallKernel { output_slice, .. } = &mut malformed.instructions[0] {
+            output_slice.size = 27;
+        }
+        assert!(backend
+            .dispatch(&malformed, &arena, &ShapeEnv::new())
+            .is_err());
+    }
+
+    #[test]
     fn f16_to_f32_rejects_partial_scalars() {
         let backend = crate::backend::cpu::CpuBackend;
         let plan = ExecutablePlan {

@@ -2536,45 +2536,120 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::QuantizeActivations => {
-                    let numel = input_shapes
-                        .first()
-                        .map(|s| s.iter().product::<u64>() as usize)
-                        .unwrap_or(1);
-                    // Detect per-channel quantization from node attrs
-                    let mode = node.attrs.get("mode").map(|s| s.as_str());
+                    let input_shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "activation quantization node {node_id} has no input shape"
+                        ))
+                    })?;
+                    let numel_u64 = input_shape.iter().try_fold(1u64, |acc, value| {
+                        acc.checked_mul(*value).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "activation quantization node {node_id} element count overflows"
+                            ))
+                        })
+                    })?;
+                    let numel = usize::try_from(numel_u64).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "activation quantization node {node_id} exceeds this platform"
+                        ))
+                    })?;
+                    let mode = node.attrs.get("mode").map(String::as_str);
                     let is_per_channel = mode == Some("per_channel");
-                    let num_channels: usize = if is_per_channel {
-                        node.attrs
+                    if !matches!(mode, None | Some("per_tensor") | Some("per_channel")) {
+                        return Err(BackendError::Compilation(format!(
+                            "activation quantization node {node_id} has invalid mode"
+                        )));
+                    }
+                    let num_channels = if is_per_channel {
+                        let value = node
+                            .attrs
                             .get("num_channels")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(1)
+                            .ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "activation quantization node {node_id} is missing num_channels"
+                                ))
+                            })?
+                            .parse::<usize>()
+                            .map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "activation quantization node {node_id} has invalid num_channels"
+                                ))
+                            })?;
+                        if value == 0
+                            || value > u32::MAX as usize
+                            || numel % value != 0
+                            || numel / value > u32::MAX as usize
+                        {
+                            return Err(BackendError::Compilation(format!(
+                                "activation quantization node {node_id} has incompatible channels"
+                            )));
+                        }
+                        value
                     } else {
                         0
                     };
-                    let mut params = vec![numel, if is_per_channel { 1 } else { 0 }, num_channels];
+                    let parse_affine = |name: &str| -> Result<Vec<f32>, BackendError> {
+                        node.attrs
+                            .get(name)
+                            .ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "activation quantization node {node_id} is missing {name}"
+                                ))
+                            })?
+                            .split(',')
+                            .map(|value| {
+                                value.parse::<f32>().map_err(|_| {
+                                    BackendError::Compilation(format!(
+                                        "activation quantization node {node_id} has invalid {name}"
+                                    ))
+                                })
+                            })
+                            .collect()
+                    };
+                    let mut params = vec![numel, usize::from(is_per_channel), num_channels];
                     if is_per_channel {
-                        let scales_str = node.attrs.get("scales").cloned().unwrap_or_default();
-                        let zps_str = node.attrs.get("zero_points").cloned().unwrap_or_default();
-                        for s in scales_str.split(',') {
-                            if let Ok(v) = s.parse::<f32>() {
-                                params.push(v.to_bits() as usize);
-                            }
-                        }
-                        for zp in zps_str.split(',') {
-                            if let Ok(v) = zp.parse::<f32>() {
-                                params.push(v.to_bits() as usize);
-                            }
-                        }
-                    } else {
-                        // Per-tensor: include calibration scale/zp from attrs if available
-                        if let (Some(scale_str), Some(zp_str)) =
-                            (node.attrs.get("scale"), node.attrs.get("zero_point"))
+                        let scales = parse_affine("scales")?;
+                        let offsets = parse_affine("zero_points")?;
+                        if scales.len() != num_channels
+                            || offsets.len() != num_channels
+                            || scales
+                                .iter()
+                                .any(|scale| !scale.is_finite() || *scale <= 0.0)
+                            || offsets.iter().any(|offset| !offset.is_finite())
                         {
-                            if let (Ok(scale), Ok(zp)) =
-                                (scale_str.parse::<f32>(), zp_str.parse::<f32>())
-                            {
-                                params.push(scale.to_bits() as usize); // params[3] = scale_bits
-                                params.push(zp.to_bits() as usize); // params[4] = zero_point_bits
+                            return Err(BackendError::Compilation(format!(
+                                "activation quantization node {node_id} has invalid affine metadata"
+                            )));
+                        }
+                        params.extend(scales.into_iter().map(|value| value.to_bits() as usize));
+                        params.extend(offsets.into_iter().map(|value| value.to_bits() as usize));
+                    } else {
+                        match (node.attrs.get("scale"), node.attrs.get("zero_point")) {
+                            (None, None) => params.push(0),
+                            (Some(scale), Some(offset)) => {
+                                let scale = scale.parse::<f32>().map_err(|_| {
+                                    BackendError::Compilation(format!(
+                                        "activation quantization node {node_id} has invalid scale"
+                                    ))
+                                })?;
+                                let offset = offset.parse::<f32>().map_err(|_| {
+                                    BackendError::Compilation(format!(
+                                        "activation quantization node {node_id} has invalid zero_point"
+                                    ))
+                                })?;
+                                if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+                                    return Err(BackendError::Compilation(format!(
+                                        "activation quantization node {node_id} has invalid affine metadata"
+                                    )));
+                                }
+                                params.push(1);
+                                params.push(scale.to_bits() as usize);
+                                params.push(offset.to_bits() as usize);
+                            }
+                            _ => {
+                                return Err(BackendError::Compilation(format!(
+                                    "activation quantization node {node_id} has incomplete affine metadata"
+                                )))
                             }
                         }
                     }
@@ -7401,81 +7476,167 @@ impl Backend for CpuBackend {
                             }
                         }
                         "quantize_activations" => {
-                            let numel = params.first().copied().unwrap_or(0);
-                            let is_per_channel = params.get(1).copied().unwrap_or(0) == 1;
-                            let num_channels = params.get(2).copied().unwrap_or(0);
-                            if let Some(input_slice) = input_slices.first() {
-                                let f32_data =
-                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let out_bytes =
-                                    unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
-
-                                if is_per_channel && num_channels > 0 {
-                                    // Per-channel asymmetric quantization
-                                    let sc_idx = 3; // scales start at param index 3
-                                    let zp_idx = 3 + num_channels; // zero_points start after scales
-                                    let chunk_size = numel / num_channels;
-                                    // Write header: num_channels (u32), then chunk_size (u32), then per-channel scales/zps
-                                    let header_offset: usize = 4 + 4 + num_channels * 8;
-                                    let h32 =
-                                        bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[..4]);
-                                    h32[0] = num_channels as u32;
-                                    let chunk32 =
-                                        bytemuck::cast_slice_mut::<_, u32>(&mut out_bytes[4..8]);
-                                    chunk32[0] = chunk_size as u32;
-                                    let scale_start = 8;
-                                    let zp_start = 8 + num_channels * 4;
-                                    for ch in 0..num_channels {
-                                        let scale = f32::from_bits(params[sc_idx + ch] as u32);
-                                        let zp = f32::from_bits(params[zp_idx + ch] as u32);
-                                        out_bytes[scale_start + ch * 4..scale_start + (ch + 1) * 4]
-                                            .copy_from_slice(&scale.to_le_bytes());
-                                        out_bytes[zp_start + ch * 4..zp_start + (ch + 1) * 4]
-                                            .copy_from_slice(&zp.to_le_bytes());
-                                        // Quantize this channel's data
-                                        let ch_start = ch * chunk_size;
-                                        let ch_end = (ch_start + chunk_size).min(f32_data.len());
-                                        for i in ch_start..ch_end {
-                                            let local = i - ch_start;
-                                            if header_offset + local < out_bytes.len() {
-                                                let q = if scale == 0.0 {
-                                                    0i8
-                                                } else {
-                                                    ((f32_data[i] - zp) / scale)
-                                                        .round()
-                                                        .clamp(-128.0, 127.0)
-                                                        as i8
-                                                };
-                                                out_bytes[header_offset + local] = q as u8;
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // Per-tensor quantization with optional calibration
-                                    // If params[3] and params[4] are present, use them as calibrated scale/zp
-                                    let (scale, zp) = if params.len() >= 5 {
-                                        (
-                                            f32::from_bits(params[3] as u32),
-                                            f32::from_bits(params[4] as u32),
+                            if params.len() < 3 || input_slices.len() != 1 {
+                                return Err(BackendError::Dispatch(
+                                    "quantize_activations: incomplete parameters or inputs".into(),
+                                ));
+                            }
+                            let numel = params[0];
+                            let mode = params[1];
+                            let num_channels = params[2];
+                            if mode > 1 {
+                                return Err(BackendError::Dispatch(
+                                    "quantize_activations: invalid quantization mode".into(),
+                                ));
+                            }
+                            let is_per_channel = mode == 1;
+                            let expected_params = if is_per_channel {
+                                if num_channels == 0
+                                    || num_channels > u32::MAX as usize
+                                    || numel % num_channels != 0
+                                    || numel / num_channels > u32::MAX as usize
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "quantize_activations: incompatible channel metadata"
+                                            .into(),
+                                    ));
+                                }
+                                num_channels
+                                    .checked_mul(2)
+                                    .and_then(|value| value.checked_add(3))
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "quantize_activations: parameter count overflows"
+                                                .into(),
                                         )
-                                    } else {
-                                        // Legacy: compute scale dynamically from max_abs (symmetric)
-                                        let max_abs =
-                                            f32_data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-                                        (if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 }, 0.0f32)
-                                    };
+                                    })?
+                            } else {
+                                match params.get(3) {
+                                    Some(0) => 4,
+                                    Some(1) => 6,
+                                    _ => {
+                                        return Err(BackendError::Dispatch(
+                                            "quantize_activations: invalid calibration mode".into(),
+                                        ))
+                                    }
+                                }
+                            };
+                            if params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "quantize_activations: affine parameter count mismatch".into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let input_bytes = numel.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "quantize_activations: input size overflows".into(),
+                                )
+                            })?;
+                            let metadata_bytes = if is_per_channel {
+                                num_channels
+                                    .checked_mul(8)
+                                    .and_then(|value| value.checked_add(8))
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "quantize_activations: metadata size overflows".into(),
+                                        )
+                                    })?
+                            } else {
+                                8
+                            };
+                            let output_bytes =
+                                metadata_bytes.checked_add(numel).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "quantize_activations: output size overflows".into(),
+                                    )
+                                })?;
+                            if input_slice.offset % 4 != 0
+                                || input_slice.size != input_bytes
+                                || output_slice.size != output_bytes
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "quantize_activations: storage does not match metadata".into(),
+                                ));
+                            }
+                            let input_end = input_slice.offset + input_slice.size;
+                            if input_slice.offset < out_end && out_start < input_end {
+                                return Err(BackendError::Dispatch(
+                                    "quantize_activations: input and output slices overlap".into(),
+                                ));
+                            }
+                            let f32_data =
+                                unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
+                            let out_bytes =
+                                unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
 
-                                    let header_size = 8; // scale + zp
-                                    out_bytes[0..4].copy_from_slice(&scale.to_le_bytes());
-                                    out_bytes[4..8].copy_from_slice(&zp.to_le_bytes());
-                                    let max_out = (out_bytes.len() - header_size).min(numel);
-                                    for i in 0..max_out {
-                                        let q = ((f32_data[i] - zp) / scale)
+                            if is_per_channel {
+                                let scale_index = 3;
+                                let offset_index = 3 + num_channels;
+                                let chunk_size = numel / num_channels;
+                                out_bytes[0..4]
+                                    .copy_from_slice(&(num_channels as u32).to_le_bytes());
+                                out_bytes[4..8].copy_from_slice(&(chunk_size as u32).to_le_bytes());
+                                let scale_start = 8;
+                                let offset_start = 8 + num_channels * 4;
+                                let data_start = metadata_bytes;
+                                for channel in 0..num_channels {
+                                    let scale =
+                                        f32::from_bits(params[scale_index + channel] as u32);
+                                    let offset =
+                                        f32::from_bits(params[offset_index + channel] as u32);
+                                    if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+                                        return Err(BackendError::Dispatch(
+                                            "quantize_activations: invalid affine metadata".into(),
+                                        ));
+                                    }
+                                    out_bytes[scale_start + channel * 4
+                                        ..scale_start + (channel + 1) * 4]
+                                        .copy_from_slice(&scale.to_le_bytes());
+                                    out_bytes[offset_start + channel * 4
+                                        ..offset_start + (channel + 1) * 4]
+                                        .copy_from_slice(&offset.to_le_bytes());
+                                    let channel_start = channel * chunk_size;
+                                    let channel_end = channel_start + chunk_size;
+                                    for index in channel_start..channel_end {
+                                        let quantized = ((f32_data[index] - offset) / scale)
                                             .round()
                                             .clamp(-128.0, 127.0)
                                             as i8;
-                                        out_bytes[header_size + i] = q as u8;
+                                        out_bytes[data_start + index] = quantized as u8;
                                     }
+                                }
+                            } else {
+                                let (scale, offset) = if params[3] == 0 {
+                                    if f32_data.iter().any(|value| !value.is_finite()) {
+                                        return Err(BackendError::Dispatch(
+                                            "quantize_activations: dynamic calibration requires finite input"
+                                                .into(),
+                                        ));
+                                    }
+                                    let max_abs = f32_data
+                                        .iter()
+                                        .map(|value| value.abs())
+                                        .fold(0.0f32, f32::max);
+                                    (if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 }, 0.0)
+                                } else {
+                                    (
+                                        f32::from_bits(params[4] as u32),
+                                        f32::from_bits(params[5] as u32),
+                                    )
+                                };
+                                if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+                                    return Err(BackendError::Dispatch(
+                                        "quantize_activations: invalid affine metadata".into(),
+                                    ));
+                                }
+                                out_bytes[0..4].copy_from_slice(&scale.to_le_bytes());
+                                out_bytes[4..8].copy_from_slice(&offset.to_le_bytes());
+                                for index in 0..numel {
+                                    let quantized = ((f32_data[index] - offset) / scale)
+                                        .round()
+                                        .clamp(-128.0, 127.0)
+                                        as i8;
+                                    out_bytes[8 + index] = quantized as u8;
                                 }
                             }
                         }
