@@ -9678,8 +9678,13 @@ impl Backend for CpuBackend {
                             {
                                 let in_data = {
                                     let d = arena.data_mut();
-                                    let mut buf = tls_alloc_u8(input_slice.size);
-                                    buf.copy_from_slice(
+                                    let mut buf = Vec::new();
+                                    buf.try_reserve_exact(input_slice.size).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "dequantize_kernel: input materialization failed: {error}"
+                                        ))
+                                    })?;
+                                    buf.extend_from_slice(
                                         &d[input_slice.offset
                                             ..input_slice.offset + input_slice.size],
                                     );
@@ -9711,13 +9716,22 @@ impl Backend for CpuBackend {
                                                 .into(),
                                         ));
                                     }
-                                    let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
+                                    let mut scales = Vec::new();
+                                    scales.try_reserve_exact(num_channels).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "dequantize_kernel: scale metadata allocation failed: {error}"
+                                        ))
+                                    })?;
                                     for j in 0..num_channels {
                                         let bits = params[4 + j];
                                         scales.push(f32::from_bits(bits as u32));
                                     }
-                                    let mut zero_points: Vec<f32> =
-                                        Vec::with_capacity(num_channels);
+                                    let mut zero_points = Vec::new();
+                                    zero_points.try_reserve_exact(num_channels).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "dequantize_kernel: offset metadata allocation failed: {error}"
+                                        ))
+                                    })?;
                                     for j in 0..num_channels {
                                         let bits = params[4 + num_channels + j];
                                         zero_points.push(f32::from_bits(bits as u32));
@@ -9773,7 +9787,12 @@ impl Backend for CpuBackend {
                                         ));
                                     }
                                     let mut hdr_offset = 8usize;
-                                    let mut scales: Vec<f32> = Vec::with_capacity(num_channels);
+                                    let mut scales = Vec::new();
+                                    scales.try_reserve_exact(num_channels).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "dequantize_kernel: scale metadata allocation failed: {error}"
+                                        ))
+                                    })?;
                                     for _ in 0..num_channels {
                                         let bytes = &in_data[hdr_offset..hdr_offset + 4];
                                         scales.push(f32::from_le_bytes([
@@ -9781,8 +9800,12 @@ impl Backend for CpuBackend {
                                         ]));
                                         hdr_offset += 4;
                                     }
-                                    let mut zero_points: Vec<f32> =
-                                        Vec::with_capacity(num_channels);
+                                    let mut zero_points = Vec::new();
+                                    zero_points.try_reserve_exact(num_channels).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "dequantize_kernel: offset metadata allocation failed: {error}"
+                                        ))
+                                    })?;
                                     for _ in 0..num_channels {
                                         let bytes = &in_data[hdr_offset..hdr_offset + 4];
                                         zero_points.push(f32::from_le_bytes([
