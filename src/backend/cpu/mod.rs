@@ -6661,45 +6661,78 @@ impl Backend for CpuBackend {
                             }
                         }
                         "upsample_nearest2d" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let scale_h = params.first().copied().unwrap_or(2);
-                                let scale_w = params.get(1).copied().unwrap_or(2);
-                                let h_in = params.get(2).copied().unwrap_or(1);
-                                let w_in = params.get(3).copied().unwrap_or(1);
-                                let hw = h_in * w_in;
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let in_len = input.len();
-                                        if scale_h > 0
-                                            && scale_w > 0
-                                            && hw > 0
-                                            && in_len > 0
-                                            && in_len % hw == 0
-                                        {
-                                            let nc = in_len / hw;
-                                            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                            {
-                                                use crate::backend::cpu::microkernels::has_avx2;
-                                                if has_avx2() {
-                                                    unsafe {
-                                                        crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
-                                                        input, out_f32, nc, h_in, w_in, scale_h, scale_w,
-                                                    );
-                                                    }
-                                                    return;
-                                                }
-                                            }
-                                            crate::backend::cpu::microkernels::upsample_nearest2d_f32(
-                                            input, out_f32, nc, h_in, w_in, scale_h, scale_w,
-                                        );
-                                        }
-                                    },
-                                );
+                            if input_slices.len() != 1 || params.len() != 4 {
+                                return Err(BackendError::Dispatch(
+                                    "upsample_nearest2d: expected one input and scale/input geometry"
+                                        .into(),
+                                ));
                             }
+                            let [scale_h, scale_w, h_in, w_in] = params[..] else {
+                                unreachable!();
+                            };
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_elements = input_slice.size / scalar_bytes;
+                            let hw = h_in.checked_mul(w_in).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "upsample_nearest2d: input geometry overflows".into(),
+                                )
+                            })?;
+                            let scale = scale_h.checked_mul(scale_w).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "upsample_nearest2d: scale geometry overflows".into(),
+                                )
+                            })?;
+                            let expected_output = input_elements
+                                .checked_mul(scale)
+                                .and_then(|elements| elements.checked_mul(scalar_bytes))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "upsample_nearest2d: output size overflows".into(),
+                                    )
+                                })?;
+                            if scale_h == 0
+                                || scale_w == 0
+                                || h_in == 0
+                                || w_in == 0
+                                || !input_elements.is_multiple_of(hw)
+                                || output_slice.size != expected_output
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "upsample_nearest2d: invalid geometry or f32 storage".into(),
+                                ));
+                            }
+                            let nc = input_elements / hw;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+                                    {
+                                        use crate::backend::cpu::microkernels::has_avx2;
+                                        if has_avx2() {
+                                            unsafe {
+                                                crate::backend::cpu::microkernels::upsample_nearest2d_f32_avx2(
+                                                    input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                                );
+                                            }
+                                            return;
+                                        }
+                                    }
+                                    crate::backend::cpu::microkernels::upsample_nearest2d_f32(
+                                        input, out_f32, nc, h_in, w_in, scale_h, scale_w,
+                                    );
+                                },
+                            );
                         }
                         "upsample_bilinear2d" => {
                             if let Some(input_slice) = input_slices.first() {

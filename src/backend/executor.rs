@@ -2320,6 +2320,27 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn nearest_upsample_rejects_zero_scale() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "upsample_nearest2d".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 0),
+                secondary_output_slice: None,
+                params: vec![0, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(4).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn layer_norm_applies_affine_parameters() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
