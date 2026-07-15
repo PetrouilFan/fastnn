@@ -6735,65 +6735,98 @@ impl Backend for CpuBackend {
                             );
                         }
                         "upsample_bilinear2d" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let scale_h = params.first().copied().unwrap_or(2);
-                                let scale_w = params.get(1).copied().unwrap_or(2);
-                                let h_in = params.get(2).copied().unwrap_or(1);
-                                let w_in = params.get(3).copied().unwrap_or(1);
-                                let hw = h_in * w_in;
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_f32| {
-                                        let out_len = out_f32.len();
-                                        let in_len = input.len();
-                                        if scale_h > 0
-                                            && scale_w > 0
-                                            && hw > 0
-                                            && out_len == in_len * scale_h * scale_w
-                                            && in_len > 0
-                                            && in_len % hw == 0
-                                        {
-                                            let nc = in_len / hw;
-                                            for nci in 0..nc {
-                                                for hi in 0..h_in * scale_h {
-                                                    for wi in 0..w_in * scale_w {
-                                                        let src_h = (hi as f64 / scale_h as f64)
-                                                            .min((h_in - 1) as f64);
-                                                        let src_w = (wi as f64 / scale_w as f64)
-                                                            .min((w_in - 1) as f64);
-                                                        let h0 = src_h.floor() as usize;
-                                                        let w0 = src_w.floor() as usize;
-                                                        let h1 = (h0 + 1).min(h_in - 1);
-                                                        let w1 = (w0 + 1).min(w_in - 1);
-                                                        let dh = src_h - h0 as f64;
-                                                        let dw = src_w - w0 as f64;
-                                                        let v00 = input[nci * hw + h0 * w_in + w0];
-                                                        let v01 = input[nci * hw + h0 * w_in + w1];
-                                                        let v10 = input[nci * hw + h1 * w_in + w0];
-                                                        let v11 = input[nci * hw + h1 * w_in + w1];
-                                                        let v0 = v00 * (1.0 - dw as f32)
-                                                            + v01 * dw as f32;
-                                                        let v1 = v10 * (1.0 - dw as f32)
-                                                            + v11 * dw as f32;
-                                                        let val =
-                                                            v0 * (1.0 - dh as f32) + v1 * dh as f32;
-                                                        let out_idx =
-                                                            nci * h_in * scale_h * w_in * scale_w
-                                                                + hi * w_in * scale_w
-                                                                + wi;
-                                                        if out_idx < out_len {
-                                                            out_f32[out_idx] = val;
-                                                        }
-                                                    }
-                                                }
+                            if input_slices.len() != 1 || params.len() != 4 {
+                                return Err(BackendError::Dispatch(
+                                    "upsample_bilinear2d: expected one input and scale/input geometry"
+                                        .into(),
+                                ));
+                            }
+                            let [scale_h, scale_w, h_in, w_in] = params[..] else {
+                                unreachable!();
+                            };
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_elements = input_slice.size / scalar_bytes;
+                            let hw = h_in.checked_mul(w_in).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "upsample_bilinear2d: input geometry overflows".into(),
+                                )
+                            })?;
+                            let scale = scale_h.checked_mul(scale_w).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "upsample_bilinear2d: scale geometry overflows".into(),
+                                )
+                            })?;
+                            let expected_output = input_elements
+                                .checked_mul(scale)
+                                .and_then(|elements| elements.checked_mul(scalar_bytes))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "upsample_bilinear2d: output size overflows".into(),
+                                    )
+                                })?;
+                            if scale_h == 0
+                                || scale_w == 0
+                                || h_in == 0
+                                || w_in == 0
+                                || !input_elements.is_multiple_of(hw)
+                                || output_slice.size != expected_output
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "upsample_bilinear2d: invalid geometry or f32 storage".into(),
+                                ));
+                            }
+                            let nc = input_elements / hw;
+                            let h_out = h_in.checked_mul(scale_h).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "upsample_bilinear2d: output height overflows".into(),
+                                )
+                            })?;
+                            let w_out = w_in.checked_mul(scale_w).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "upsample_bilinear2d: output width overflows".into(),
+                                )
+                            })?;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_f32| {
+                                    for nci in 0..nc {
+                                        for hi in 0..h_out {
+                                            for wi in 0..w_out {
+                                                let src_h = (hi as f64 / scale_h as f64)
+                                                    .min((h_in - 1) as f64);
+                                                let src_w = (wi as f64 / scale_w as f64)
+                                                    .min((w_in - 1) as f64);
+                                                let h0 = src_h.floor() as usize;
+                                                let w0 = src_w.floor() as usize;
+                                                let h1 = (h0 + 1).min(h_in - 1);
+                                                let w1 = (w0 + 1).min(w_in - 1);
+                                                let dh = src_h - h0 as f64;
+                                                let dw = src_w - w0 as f64;
+                                                let v00 = input[nci * hw + h0 * w_in + w0];
+                                                let v01 = input[nci * hw + h0 * w_in + w1];
+                                                let v10 = input[nci * hw + h1 * w_in + w0];
+                                                let v11 = input[nci * hw + h1 * w_in + w1];
+                                                let v0 = v00 * (1.0 - dw as f32) + v01 * dw as f32;
+                                                let v1 = v10 * (1.0 - dw as f32) + v11 * dw as f32;
+                                                let val = v0 * (1.0 - dh as f32) + v1 * dh as f32;
+                                                let out_idx = nci * h_out * w_out + hi * w_out + wi;
+                                                out_f32[out_idx] = val;
                                             }
                                         }
-                                    },
-                                );
-                            }
+                                    }
+                                },
+                            );
                         }
                         "adaptive_avg_pool2d" => {
                             if let Some(input_slice) = input_slices.first() {
