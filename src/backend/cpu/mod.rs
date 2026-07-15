@@ -3091,6 +3091,7 @@ impl Backend for CpuBackend {
                             | "logical_not_f32"
                             | "log_softmax_f32"
                             | "mish_f32"
+                            | "erf_f32"
                     );
                     if is_unary_f32 {
                         let input = input_slices.first().copied();
@@ -7123,6 +7124,11 @@ impl Backend for CpuBackend {
                             );
                         }
                         "erf_f32" => {
+                            if !params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "erf_f32: expected no parameters".into(),
+                                ));
+                            }
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
                                 arena::with_unary_f32_slices(
@@ -7130,7 +7136,7 @@ impl Backend for CpuBackend {
                                     *input_slice,
                                     output_slice,
                                     |input, out_f32| {
-                                        for i in 0..out_f32.len().min(input.len()) {
+                                        for i in 0..out_f32.len() {
                                             let x = input[i];
                                             let t = 1.0 / (1.0 + 0.3275911 * x.abs());
                                             #[allow(clippy::excessive_precision)]
