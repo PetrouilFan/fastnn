@@ -426,6 +426,28 @@ fn try_filled_vec<T: Clone>(len: usize, value: T, context: &str) -> Result<Vec<T
     Ok(vector)
 }
 
+fn try_copy_slice<T: Copy>(source: &[T], context: &str) -> Result<Vec<T>, BackendError> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(source.len()).map_err(|error| {
+        BackendError::Dispatch(format!("{context}: allocation failed: {error}"))
+    })?;
+    values.extend_from_slice(source);
+    Ok(values)
+}
+
+fn try_decode_f16(source: &[u8], context: &str) -> Result<Vec<f32>, BackendError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(source.len() / 2)
+        .map_err(|error| {
+            BackendError::Dispatch(format!("{context}: allocation failed: {error}"))
+        })?;
+    for chunk in source.chunks_exact(2) {
+        values.push(half::f16::from_le_bytes([chunk[0], chunk[1]]).to_f32());
+    }
+    Ok(values)
+}
+
 impl Backend for CpuBackend {
     type Buffer = CpuBuffer;
 
@@ -8866,34 +8888,30 @@ impl Backend for CpuBackend {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[0].offset
-                                        ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
-                                let m_raw: Vec<u16> = d_ref[input_slices[2].offset
-                                    ..input_slices[2].offset + input_slices[2].size]
-                                    .chunks_exact(2)
-                                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                                    .collect();
-                                let v_raw: Vec<u16> = d_ref[input_slices[3].offset
-                                    ..input_slices[3].offset + input_slices[3].size]
-                                    .chunks_exact(2)
-                                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                                    .collect();
-                                let m_init: Vec<f32> = m_raw
-                                    .iter()
-                                    .map(|&bits| half::f16::from_bits(bits).to_f32())
-                                    .collect();
-                                let v_init: Vec<f32> = v_raw
-                                    .iter()
-                                    .map(|&bits| half::f16::from_bits(bits).to_f32())
-                                    .collect();
-                                let grad = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                let w_init = try_copy_slice(
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slices[0].offset
+                                            ..input_slices[0].offset + input_slices[0].size],
+                                    ),
+                                    "f16 Adam weight snapshot",
+                                )?;
+                                let m_init = try_decode_f16(
+                                    &d_ref[input_slices[2].offset
+                                        ..input_slices[2].offset + input_slices[2].size],
+                                    "f16 Adam first-moment snapshot",
+                                )?;
+                                let v_init = try_decode_f16(
+                                    &d_ref[input_slices[3].offset
+                                        ..input_slices[3].offset + input_slices[3].size],
+                                    "f16 Adam second-moment snapshot",
+                                )?;
+                                let grad = try_copy_slice(
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slices[1].offset
+                                            ..input_slices[1].offset + input_slices[1].size],
+                                    ),
+                                    "f16 Adam gradient snapshot",
+                                )?;
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
@@ -8904,9 +8922,11 @@ impl Backend for CpuBackend {
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
                             let bias_corr2 = 1.0 - beta2.powi(t as i32);
                             let len = n;
-                            let mut w_new = w_init.clone();
-                            let mut m_new_f32 = vec![0.0f32; len];
-                            let mut v_new_f32 = vec![0.0f32; len];
+                            let mut w_new = w_init;
+                            let mut m_new_f32 =
+                                try_filled_vec(len, 0.0f32, "f16 Adam first moment")?;
+                            let mut v_new_f32 =
+                                try_filled_vec(len, 0.0f32, "f16 Adam second moment")?;
                             #[cfg(not(feature = "parallel"))]
                             {
                                 for i in 0..len {
@@ -8982,34 +9002,30 @@ impl Backend for CpuBackend {
                             let (w_init, m_init, v_init, grad, lr, beta1, beta2, eps, t, wd) = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
-                                let w_init = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[0].offset
-                                        ..input_slices[0].offset + input_slices[0].size],
-                                )
-                                .to_vec();
-                                let m_raw: Vec<u16> = d_ref[input_slices[2].offset
-                                    ..input_slices[2].offset + input_slices[2].size]
-                                    .chunks_exact(2)
-                                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                                    .collect();
-                                let v_raw: Vec<u16> = d_ref[input_slices[3].offset
-                                    ..input_slices[3].offset + input_slices[3].size]
-                                    .chunks_exact(2)
-                                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                                    .collect();
-                                let m_init: Vec<f32> = m_raw
-                                    .iter()
-                                    .map(|&bits| half::f16::from_bits(bits).to_f32())
-                                    .collect();
-                                let v_init: Vec<f32> = v_raw
-                                    .iter()
-                                    .map(|&bits| half::f16::from_bits(bits).to_f32())
-                                    .collect();
-                                let grad = bytemuck::cast_slice::<_, f32>(
-                                    &d_ref[input_slices[1].offset
-                                        ..input_slices[1].offset + input_slices[1].size],
-                                )
-                                .to_vec();
+                                let w_init = try_copy_slice(
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slices[0].offset
+                                            ..input_slices[0].offset + input_slices[0].size],
+                                    ),
+                                    "f16 Adam weight snapshot",
+                                )?;
+                                let m_init = try_decode_f16(
+                                    &d_ref[input_slices[2].offset
+                                        ..input_slices[2].offset + input_slices[2].size],
+                                    "f16 Adam first-moment snapshot",
+                                )?;
+                                let v_init = try_decode_f16(
+                                    &d_ref[input_slices[3].offset
+                                        ..input_slices[3].offset + input_slices[3].size],
+                                    "f16 Adam second-moment snapshot",
+                                )?;
+                                let grad = try_copy_slice(
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &d_ref[input_slices[1].offset
+                                            ..input_slices[1].offset + input_slices[1].size],
+                                    ),
+                                    "f16 Adam gradient snapshot",
+                                )?;
                                 let lr = f32::from_bits(params[0] as u32);
                                 let beta1 = f32::from_bits(params[1] as u32);
                                 let beta2 = f32::from_bits(params[2] as u32);
@@ -9034,13 +9050,15 @@ impl Backend for CpuBackend {
                             let bias_corr1 = 1.0 - beta1.powi(t as i32);
                             let bias_corr2 = 1.0 - beta2.powi(t as i32);
                             let len = n;
-                            let mut w_new = w_init.clone();
-                            let mut m_new_f32 = vec![0.0f32; len];
-                            let mut v_new_f32 = vec![0.0f32; len];
+                            let mut w_new = w_init;
+                            let mut m_new_f32 =
+                                try_filled_vec(len, 0.0f32, "f16 Adam first moment")?;
+                            let mut v_new_f32 =
+                                try_filled_vec(len, 0.0f32, "f16 Adam second moment")?;
                             #[cfg(not(feature = "parallel"))]
                             {
                                 for i in 0..len {
-                                    w_new[i] -= lr * wd * w_init[i];
+                                    w_new[i] -= lr * wd * w_new[i];
                                     let g = grad[i];
                                     m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                     v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
@@ -9059,7 +9077,7 @@ impl Backend for CpuBackend {
                                         .zip(v_new_f32.par_iter_mut())
                                         .enumerate()
                                         .for_each(|(i, ((w, m), v))| {
-                                            *w -= lr * wd * w_init[i];
+                                            *w -= lr * wd * *w;
                                             let g = grad[i];
                                             *m = beta1 * m_init[i] + (1.0 - beta1) * g;
                                             *v = beta2 * v_init[i] + (1.0 - beta2) * g * g;
@@ -9069,7 +9087,7 @@ impl Backend for CpuBackend {
                                         });
                                 } else {
                                     for i in 0..len {
-                                        w_new[i] -= lr * wd * w_init[i];
+                                        w_new[i] -= lr * wd * w_new[i];
                                         let g = grad[i];
                                         m_new_f32[i] = beta1 * m_init[i] + (1.0 - beta1) * g;
                                         v_new_f32[i] = beta2 * v_init[i] + (1.0 - beta2) * g * g;
