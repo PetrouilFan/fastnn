@@ -3092,6 +3092,50 @@ impl Backend for CpuBackend {
                         }
                     }
 
+                    let is_binary_f32 = matches!(
+                        kernel_name.as_str(),
+                        "add_f32"
+                            | "sub_f32"
+                            | "mul_f32"
+                            | "div_f32"
+                            | "max_f32"
+                            | "min_f32"
+                            | "add_relu_f32"
+                            | "sub_relu_f32"
+                            | "mul_relu_f32"
+                            | "div_relu_f32"
+                            | "add_gelu_f32"
+                            | "sub_gelu_f32"
+                            | "mul_gelu_f32"
+                            | "div_gelu_f32"
+                            | "add_silu_f32"
+                            | "sub_silu_f32"
+                            | "mul_silu_f32"
+                            | "div_silu_f32"
+                    );
+                    if is_binary_f32 {
+                        let output_size = output_slice.size;
+                        let invalid_input = |slice: &BufferSlice| {
+                            !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || (output_size > 0
+                                    && (slice.size == 0 || !output_size.is_multiple_of(slice.size)))
+                                || (output_size == 0 && slice.size != 0)
+                        };
+                        if input_slices.len() != 2
+                            || !params.is_empty()
+                            || input_slices.iter().any(invalid_input)
+                            || !output_slice
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                            || !output_size.is_multiple_of(std::mem::size_of::<f32>())
+                        {
+                            return Err(BackendError::Dispatch(format!(
+                                "{kernel_name}: binary f32 storage or parameter contract is invalid"
+                            )));
+                        }
+                    }
+
                     match kernel_name.as_str() {
                         "add_f32" => {
                             fused_binary_activation_dispatch(
