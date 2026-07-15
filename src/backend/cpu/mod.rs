@@ -417,6 +417,15 @@ fn validate_adam_dispatch(
     Ok(())
 }
 
+fn try_filled_vec<T: Clone>(len: usize, value: T, context: &str) -> Result<Vec<T>, BackendError> {
+    let mut vector = Vec::new();
+    vector.try_reserve_exact(len).map_err(|error| {
+        BackendError::Dispatch(format!("{context}: metadata allocation failed: {error}"))
+    })?;
+    vector.resize(len, value);
+    Ok(vector)
+}
+
 impl Backend for CpuBackend {
     type Buffer = CpuBuffer;
 
@@ -4069,7 +4078,8 @@ impl Backend for CpuBackend {
                                 resolve_params(params, param_dims, shape_env, expected_params)?;
                             let dims = &nd_params[1..1 + rank];
                             let perm = &nd_params[1 + rank..];
-                            let mut seen = vec![false; rank];
+                            let mut seen =
+                                try_filled_vec(rank, false, "transpose_perm_f32: rank metadata")?;
                             for axis in perm {
                                 if *axis >= rank || seen[*axis] {
                                     return Err(BackendError::Dispatch(
@@ -4108,7 +4118,8 @@ impl Backend for CpuBackend {
                                     "transpose_perm_f32: shape and f32 storage disagree".into(),
                                 ));
                             }
-                            let mut input_strides = vec![1usize; rank];
+                            let mut input_strides =
+                                try_filled_vec(rank, 1usize, "transpose_perm_f32: input strides")?;
                             for axis in (0..rank - 1).rev() {
                                 input_strides[axis] = input_strides[axis + 1]
                                     .checked_mul(dims[axis + 1])
@@ -4118,7 +4129,8 @@ impl Backend for CpuBackend {
                                         )
                                     })?;
                             }
-                            let mut output_strides = vec![1usize; rank];
+                            let mut output_strides =
+                                try_filled_vec(rank, 1usize, "transpose_perm_f32: output strides")?;
                             for axis in (0..rank - 1).rev() {
                                 output_strides[axis] = output_strides[axis + 1]
                                     .checked_mul(dims[perm[axis + 1]])
