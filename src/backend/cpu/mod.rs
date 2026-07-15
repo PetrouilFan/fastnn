@@ -7417,48 +7417,44 @@ impl Backend for CpuBackend {
                                         .into(),
                                 ));
                             }
-                            if let Some(input_slice) = input_slices.first() {
-                                let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(
-                                    arena,
-                                    *input_slice,
-                                    output_slice,
-                                    |input, out_slice| {
-                                        let mut indexed: Vec<(usize, f32)> =
-                                            input.iter().copied().enumerate().collect();
-                                        if input.len() > k {
-                                            indexed.select_nth_unstable_by(
-                                                input.len().saturating_sub(k),
-                                                |a, b| {
-                                                    a.1.partial_cmp(&b.1)
-                                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                                },
-                                            );
-                                        }
-
-                                        // Write values (f32) to primary output
-                                        for i in 0..k.min(out_slice.len()) {
-                                            out_slice[i] =
-                                                indexed[input.len().saturating_sub(k) + i].1;
-                                        }
-
-                                        // Write indices (i64) to secondary output
-                                        if let Some(sec_slice) = secondary_output_slice {
-                                            let d = arena.data_mut();
-                                            let sec_start = sec_slice.offset;
-                                            let sec_end = sec_slice.offset + sec_slice.size;
-                                            let idx_slice = bytemuck::cast_slice_mut::<_, u64>(
-                                                &mut d[sec_start..sec_end],
-                                            );
-                                            for i in 0..k.min(idx_slice.len()) {
-                                                idx_slice[i] =
-                                                    indexed[input.len().saturating_sub(k) + i].0
-                                                        as u64;
-                                            }
-                                        }
-                                    },
-                                );
-                            }
+                            let mut indexed = Vec::new();
+                            indexed.try_reserve_exact(input_len).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "topk_fused: candidate allocation failed: {error}"
+                                ))
+                            })?;
+                            let mut selected_indices = Vec::new();
+                            selected_indices.try_reserve_exact(k).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "topk_fused: index allocation failed: {error}"
+                                ))
+                            })?;
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, out_slice| {
+                                    indexed.extend(input.iter().copied().enumerate());
+                                    if input.len() > k {
+                                        indexed.select_nth_unstable_by(input.len() - k, |a, b| {
+                                            a.1.total_cmp(&b.1)
+                                        });
+                                    }
+                                    let selected = &indexed[input.len() - k..];
+                                    for (output, candidate) in
+                                        out_slice.iter_mut().zip(selected.iter())
+                                    {
+                                        *output = candidate.1;
+                                        selected_indices.push(candidate.0 as u64);
+                                    }
+                                },
+                            );
+                            let data = arena.data_mut();
+                            let indices = bytemuck::cast_slice_mut::<_, u64>(
+                                &mut data[secondary.offset..secondary.offset + secondary.size],
+                            );
+                            indices.copy_from_slice(&selected_indices);
                         }
                         "topk_values" | "topk_indices" => {
                             if input_slices.len() != 1 || params.len() != 2 {
