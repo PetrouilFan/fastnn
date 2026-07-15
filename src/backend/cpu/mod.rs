@@ -6317,11 +6317,45 @@ impl Backend for CpuBackend {
                             }
                         }
                         "topk_values" | "topk_indices" => {
+                            if input_slices.len() != 1 || params.len() != 2 {
+                                return Err(BackendError::Dispatch(
+                                    "top-k output kernel expects one input and k/axis parameters"
+                                        .into(),
+                                ));
+                            }
+                            let input_slice = input_slices[0];
+                            let k = params[0];
+                            let is_values = kernel_name == "topk_values";
+                            let output_scalar_size = if is_values {
+                                std::mem::size_of::<f32>()
+                            } else {
+                                std::mem::size_of::<u64>()
+                            };
+                            let output_alignment = if is_values {
+                                std::mem::align_of::<f32>()
+                            } else {
+                                std::mem::align_of::<u64>()
+                            };
+                            let input_len = input_slice.size / std::mem::size_of::<f32>();
+                            let expected_output =
+                                k.checked_mul(output_scalar_size).ok_or_else(|| {
+                                    BackendError::Dispatch("top-k output size overflows".into())
+                                })?;
+                            if k == 0
+                                || k > input_len
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !input_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || !out_start.is_multiple_of(output_alignment)
+                                || out_end - out_start != expected_output
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "top-k output has invalid k or scalar storage".into(),
+                                ));
+                            }
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                let k = params.first().copied().unwrap_or(1);
-                                let _axis = params.get(1).copied().unwrap_or(usize::MAX);
-                                let is_values = kernel_name == "topk_values";
                                 arena::with_unary_f32_slices(
                                     arena,
                                     *input_slice,
