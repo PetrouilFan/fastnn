@@ -5339,6 +5339,125 @@ impl Backend for CpuBackend {
                             }
                         }
                         "conv_transpose2d" => {
+                            if input_slices.len() != 2 || params.len() != 7 {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: expected two inputs and seven parameters"
+                                        .into(),
+                                ));
+                            }
+                            let [stride, padding, c, hin, win, kh, kw] = params.as_slice() else {
+                                unreachable!();
+                            };
+                            if *stride == 0
+                                || *c == 0
+                                || *hin == 0
+                                || *win == 0
+                                || *kh == 0
+                                || *kw == 0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: stride, channels, and dimensions must be positive".into(),
+                                ));
+                            }
+                            let checked_elements = |dims: &[usize], label: &str| {
+                                dims.iter().try_fold(1usize, |acc, dim| {
+                                    acc.checked_mul(*dim).ok_or_else(|| {
+                                        BackendError::Dispatch(format!(
+                                            "conv_transpose2d: {label} size overflows"
+                                        ))
+                                    })
+                                })
+                            };
+                            let image_elements =
+                                checked_elements(&[*c, *hin, *win], "input image")?;
+                            let kernel_elements = checked_elements(&[*c, *kh, *kw], "kernel")?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if input_slices.iter().any(|slice| {
+                                !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                    || !slice.size.is_multiple_of(scalar_bytes)
+                            }) || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !(out_end - out_start).is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: slices must contain aligned f32 scalars"
+                                        .into(),
+                                ));
+                            }
+                            let input_elements = input_slices[0].size / scalar_bytes;
+                            let weight_elements = input_slices[1].size / scalar_bytes;
+                            if !input_elements.is_multiple_of(image_elements)
+                                || !weight_elements.is_multiple_of(kernel_elements)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: input or weight storage is incomplete"
+                                        .into(),
+                                ));
+                            }
+                            let n = input_elements / image_elements;
+                            let f = weight_elements / kernel_elements;
+                            if n == 0 || f == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: batch and output channels must be positive"
+                                        .into(),
+                                ));
+                            }
+                            let padded_h = (hin - 1)
+                                .checked_mul(*stride)
+                                .and_then(|value| value.checked_add(*kh))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv_transpose2d: output height overflows".into(),
+                                    )
+                                })?;
+                            let padded_w = (win - 1)
+                                .checked_mul(*stride)
+                                .and_then(|value| value.checked_add(*kw))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv_transpose2d: output width overflows".into(),
+                                    )
+                                })?;
+                            let double_padding = padding.checked_mul(2).ok_or_else(|| {
+                                BackendError::Dispatch("conv_transpose2d: padding overflows".into())
+                            })?;
+                            let h_out = padded_h.checked_sub(double_padding).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "conv_transpose2d: padding exceeds output height".into(),
+                                )
+                            })?;
+                            let w_out = padded_w.checked_sub(double_padding).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "conv_transpose2d: padding exceeds output width".into(),
+                                )
+                            })?;
+                            if h_out == 0 || w_out == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: output dimensions must be positive".into(),
+                                ));
+                            }
+                            let expected_output =
+                                checked_elements(&[n, f, h_out, w_out], "output")?
+                                    .checked_mul(scalar_bytes)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "conv_transpose2d: output bytes overflow".into(),
+                                        )
+                                    })?;
+                            if out_end - out_start != expected_output {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: output storage does not match geometry"
+                                        .into(),
+                                ));
+                            }
+                            let output_overlaps = input_slices.iter().any(|slice| {
+                                let end = slice.offset + slice.size;
+                                slice.offset < out_end && out_start < end
+                            });
+                            if output_overlaps {
+                                return Err(BackendError::Dispatch(
+                                    "conv_transpose2d: input and output slices overlap".into(),
+                                ));
+                            }
                             if let [input_slice, weight_slice] = &input_slices[..] {
                                 let (input, weight) = unsafe {
                                     (

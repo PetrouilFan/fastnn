@@ -2320,6 +2320,30 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn transposed_convolution_rejects_invalid_geometry() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv_transpose2d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 1, 0, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn fused_residual_norm_rejects_invalid_metadata() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
