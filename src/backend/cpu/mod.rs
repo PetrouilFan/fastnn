@@ -10408,11 +10408,10 @@ impl Backend for CpuBackend {
                 }
                 Instruction::MemCopy { dst, src } => {
                     let data = arena.data_mut();
-                    let src_start = src.offset;
-                    let dst_start = dst.offset;
-                    let len = dst.size.min(src.size);
-                    let src_range = src_start..src_start + len;
-                    data.copy_within(src_range, dst_start);
+                    let src_end = src.offset.checked_add(src.size).ok_or_else(|| {
+                        BackendError::Dispatch("memcopy source range overflows".into())
+                    })?;
+                    data.copy_within(src.offset..src_end, dst.offset);
                 }
                 Instruction::Fill { dst, value } => {
                     let data = arena.data_mut();
@@ -10424,8 +10423,10 @@ impl Backend for CpuBackend {
                 }
                 Instruction::WriteConst { dst, data } => {
                     let arena_data = arena.data_mut();
-                    let end = (dst.offset + data.len()).min(arena_data.len());
-                    arena_data[dst.offset..end].copy_from_slice(&data[..end - dst.offset]);
+                    let end = dst.offset.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Dispatch("constant destination range overflows".into())
+                    })?;
+                    arena_data[dst.offset..end].copy_from_slice(data);
                 }
             }
 

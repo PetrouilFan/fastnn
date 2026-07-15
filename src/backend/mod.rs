@@ -268,6 +268,12 @@ impl ExecutablePlan {
                 }
                 Instruction::WriteConst { dst, data } => {
                     validate_slice(*dst, instruction_index, "constant destination")?;
+                    if data.len() > dst.size {
+                        return Err(BackendError::Dispatch(format!(
+                            "instruction {instruction_index} constant payload has {} bytes but destination slot has {}",
+                            data.len(), dst.size
+                        )));
+                    }
                     let data_end = dst.offset.checked_add(data.len()).ok_or_else(|| {
                         BackendError::Dispatch(format!(
                             "instruction {instruction_index} constant data range overflows"
@@ -331,6 +337,16 @@ mod executable_plan_validation_tests {
             levels: vec![0],
         };
         assert!(out_of_bounds.validate().is_err());
+
+        let oversized_constant = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(0, 4),
+                data: vec![0; 8],
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        assert!(oversized_constant.validate().is_err());
 
         let mismatched_copy = ExecutablePlan {
             instructions: vec![Instruction::MemCopy {
