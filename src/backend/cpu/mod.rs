@@ -5468,6 +5468,44 @@ impl Backend for CpuBackend {
                             }
                         }
                         "fused_residual_add_layer_norm" => {
+                            if !(2..=4).contains(&input_slices.len()) || params.len() != 2 {
+                                return Err(BackendError::Dispatch(
+                                    "fused residual layer norm requires 2-4 inputs and eps/row-size parameters".into(),
+                                ));
+                            }
+                            let eps = f32::from_bits(params[0] as u32);
+                            let row_size = params[1];
+                            let row_bytes = row_size
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "fused residual layer norm row size overflows".into(),
+                                    )
+                                })?;
+                            let output_size = out_end - out_start;
+                            if !eps.is_finite()
+                                || eps <= 0.0
+                                || row_size == 0
+                                || output_size == 0
+                                || !output_size.is_multiple_of(row_bytes)
+                                || input_slices[0].size != output_size
+                                || input_slices[1].size != output_size
+                                || input_slices
+                                    .get(2)
+                                    .is_some_and(|slice| slice.size != row_bytes)
+                                || input_slices
+                                    .get(3)
+                                    .is_some_and(|slice| slice.size != row_bytes)
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                })
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "fused residual layer norm has invalid storage or numerical metadata".into(),
+                                ));
+                            }
                             if let [residual_slice, main_slice, rest @ ..] = &input_slices[..] {
                                 let eps =
                                     f32::from_bits(params.first().copied().unwrap_or(0) as u32);
@@ -5549,6 +5587,41 @@ impl Backend for CpuBackend {
                             }
                         }
                         "fused_residual_add_rms_norm" => {
+                            if !(2..=3).contains(&input_slices.len()) || params.len() != 2 {
+                                return Err(BackendError::Dispatch(
+                                    "fused residual RMS norm requires 2-3 inputs and eps/row-size parameters".into(),
+                                ));
+                            }
+                            let eps = f32::from_bits(params[0] as u32);
+                            let row_size = params[1];
+                            let row_bytes = row_size
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "fused residual RMS norm row size overflows".into(),
+                                    )
+                                })?;
+                            let output_size = out_end - out_start;
+                            if !eps.is_finite()
+                                || eps <= 0.0
+                                || row_size == 0
+                                || output_size == 0
+                                || !output_size.is_multiple_of(row_bytes)
+                                || input_slices[0].size != output_size
+                                || input_slices[1].size != output_size
+                                || input_slices
+                                    .get(2)
+                                    .is_some_and(|slice| slice.size != row_bytes)
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                })
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "fused residual RMS norm has invalid storage or numerical metadata".into(),
+                                ));
+                            }
                             if let [residual_slice, main_slice, rest @ ..] = &input_slices[..] {
                                 let eps =
                                     f32::from_bits(params.first().copied().unwrap_or(0) as u32);
