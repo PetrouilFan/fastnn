@@ -1375,7 +1375,7 @@ impl Tensor {
             &input_bytes,
         )?;
 
-        Ok(graph_outputs
+        graph_outputs
             .into_iter()
             .zip(result_bytes)
             .map(|(gt, bytes)| -> Result<Tensor, BackendError> {
@@ -1407,7 +1407,7 @@ impl Tensor {
                 let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));
                 Ok(Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt)))
             })
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 

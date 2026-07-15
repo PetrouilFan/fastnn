@@ -681,7 +681,7 @@ impl IrDType {
 
     pub fn try_packed_byte_size(&self, numel: usize) -> Option<usize> {
         let packed_words = |items_per_word: usize| {
-            let words = numel / items_per_word + usize::from(numel % items_per_word != 0);
+            let words = numel / items_per_word + usize::from(!numel.is_multiple_of(items_per_word));
             words.checked_add(16)?.checked_mul(4)
         };
         match self {

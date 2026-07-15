@@ -263,7 +263,9 @@ fn validate_i8_matmul_contract(
     let expected_output = output_values.checked_mul(4).ok_or_else(|| {
         BackendError::Dispatch(format!("{kernel_name}: output byte size overflows"))
     })?;
-    if output_end.checked_sub(output_start) != Some(expected_output) || output_start % 4 != 0 {
+    if output_end.checked_sub(output_start) != Some(expected_output)
+        || !output_start.is_multiple_of(4)
+    {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: output slice does not match the declared dimensions"
         )));

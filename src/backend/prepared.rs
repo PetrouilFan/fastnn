@@ -1470,7 +1470,7 @@ impl PersistentPreparedWeights {
     /// contract used by [`PreparedConstantArena::insert`].
     pub fn insert(&mut self, key: PreparedWeightKey, payload: Arc<Vec<f32>>) -> bool {
         let payload_bytes = payload.len().checked_mul(std::mem::size_of::<f32>());
-        if key.0 % std::mem::align_of::<f32>() != 0
+        if !key.0.is_multiple_of(std::mem::align_of::<f32>())
             || payload_bytes != Some(key.1)
             || self.by_key.contains_key(&key)
         {

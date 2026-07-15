@@ -29,19 +29,22 @@ fn item_on_non_scalar_tensor_returns_shape_error() {
 fn malformed_tensor_construction_returns_structured_errors() {
     let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
 
-    let negative = TensorImpl::try_new(storage.clone(), vec![-1].into(), DType::F32)
-        .err()
-        .expect("negative tensor dimensions must fail");
+    let negative = match TensorImpl::try_new(storage.clone(), vec![-1].into(), DType::F32) {
+        Err(error) => error,
+        Ok(_) => panic!("negative tensor dimensions must fail"),
+    };
     assert!(negative.to_string().contains("negative size"));
 
-    let oversized = TensorImpl::try_new(storage.clone(), vec![2].into(), DType::F32)
-        .err()
-        .expect("undersized storage must fail");
+    let oversized = match TensorImpl::try_new(storage.clone(), vec![2].into(), DType::F32) {
+        Err(error) => error,
+        Ok(_) => panic!("undersized storage must fail"),
+    };
     assert!(oversized.to_string().contains("only 4 bytes"));
 
-    let overflow = TensorImpl::try_new(storage, vec![i64::MAX, i64::MAX].into(), DType::F32)
-        .err()
-        .expect("overflowing tensor shape must fail");
+    let overflow = match TensorImpl::try_new(storage, vec![i64::MAX, i64::MAX].into(), DType::F32) {
+        Err(error) => error,
+        Ok(_) => panic!("overflowing tensor shape must fail"),
+    };
     assert!(overflow.to_string().contains("overflow"));
 
     let byte_overflow = DType::F64
@@ -50,33 +53,27 @@ fn malformed_tensor_construction_returns_structured_errors() {
     assert!(byte_overflow.to_string().contains("overflow"));
 
     let value_count = Tensor::try_from_vec(vec![1.0, 2.0], vec![3])
-        .err()
-        .expect("mismatched value count must fail");
+        .expect_err("mismatched value count must fail");
     assert!(value_count.to_string().contains("2 were provided"));
 
     let device_value_count = Tensor::try_from_vec_with_device(vec![1.0], vec![2], Device::Cpu)
-        .err()
-        .expect("device vector value-count mismatch must fail");
+        .expect_err("device vector value-count mismatch must fail");
     assert!(device_value_count.to_string().contains("1 were provided"));
 
     let negative_factory = Tensor::try_zeros(vec![-1], DType::F32, Device::Cpu)
-        .err()
-        .expect("negative zero shape must fail");
+        .expect_err("negative zero shape must fail");
     assert!(negative_factory.to_string().contains("negative size"));
 
     let overflowing_factory = Tensor::try_empty(vec![i64::MAX, i64::MAX], DType::F32, Device::Cpu)
-        .err()
-        .expect("overflowing empty shape must fail");
+        .expect_err("overflowing empty shape must fail");
     assert!(overflowing_factory.to_string().contains("overflow"));
 
     let negative_ones = Tensor::try_ones(vec![-1], DType::F32, Device::Cpu)
-        .err()
-        .expect("negative ones shape must fail");
+        .expect_err("negative ones shape must fail");
     assert!(negative_ones.to_string().contains("negative size"));
 
     let packed_full = Tensor::try_full(vec![8], 1.0, DType::I4, Device::Cpu)
-        .err()
-        .expect("nonzero packed full must fail");
+        .expect_err("nonzero packed full must fail");
     assert!(packed_full.to_string().contains("packed dtypes"));
 
     let non_f32 = Tensor::try_zeros(vec![1], DType::I32, Device::Cpu).unwrap();
@@ -465,8 +462,8 @@ fn invalid_comparison_operands_return_structured_errors() {
 #[test]
 fn invalid_gradient_clipping_parameters_return_structured_errors() {
     let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
-    assert!(fastnn::tensor::try_clip_grad_norm_(&[tensor.clone()], -1.0, 2.0).is_err());
-    assert!(fastnn::tensor::try_clip_grad_norm_(&[tensor.clone()], 1.0, 0.0).is_err());
+    assert!(fastnn::tensor::try_clip_grad_norm_(std::slice::from_ref(&tensor), -1.0, 2.0).is_err());
+    assert!(fastnn::tensor::try_clip_grad_norm_(std::slice::from_ref(&tensor), 1.0, 0.0).is_err());
     assert!(fastnn::tensor::try_clip_grad_value_(&[tensor], f32::NAN).is_err());
 }
 
@@ -476,7 +473,7 @@ fn invalid_einsum_inputs_return_structured_errors() {
     let right = Tensor::from_vec(vec![1.0; 8], vec![4, 2]);
 
     assert!(fastnn::tensor::try_einsum("ij,jk", &[left.clone(), right.clone()]).is_err());
-    assert!(fastnn::tensor::try_einsum("ij,jk->ik", &[left.clone()]).is_err());
+    assert!(fastnn::tensor::try_einsum("ij,jk->ik", std::slice::from_ref(&left)).is_err());
     assert!(fastnn::tensor::try_einsum("ii,ij->ij", &[left.clone(), left.clone()]).is_err());
     assert!(fastnn::tensor::try_einsum("ij,jk->iz", &[left, right]).is_err());
 }

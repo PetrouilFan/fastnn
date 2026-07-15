@@ -273,7 +273,7 @@ impl PyTensor {
     }
 
     fn view(&self, shape: Vec<i64>) -> PyResult<PyTensor> {
-        let tensor: Tensor = self.inner.try_view(shape)?.into();
+        let tensor: Tensor = self.inner.try_view(shape)?;
         Ok(PyTensor::from_tensor(tensor))
     }
 

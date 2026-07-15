@@ -351,12 +351,12 @@ fn validate_adam_dispatch(
     }
     let weight_size = input_slices[0].size;
     if weight_size == 0
-        || weight_size % 4 != 0
-        || input_slices[0].offset % 4 != 0
+        || !weight_size.is_multiple_of(4)
+        || !input_slices[0].offset.is_multiple_of(4)
         || input_slices[1].size != weight_size
-        || input_slices[1].offset % 4 != 0
+        || !input_slices[1].offset.is_multiple_of(4)
         || output_slice.size != weight_size
-        || output_slice.offset % 4 != 0
+        || !output_slice.offset.is_multiple_of(4)
     {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: weight, gradient, and output slices must be matching f32 tensors"
@@ -370,8 +370,8 @@ fn validate_adam_dispatch(
     let state_alignment = if uses_f16_state { 2 } else { 4 };
     if input_slices[2].size != state_size
         || input_slices[3].size != state_size
-        || input_slices[2].offset % state_alignment != 0
-        || input_slices[3].offset % state_alignment != 0
+        || !input_slices[2].offset.is_multiple_of(state_alignment)
+        || !input_slices[3].offset.is_multiple_of(state_alignment)
     {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: optimizer state slices do not match the weight tensor"
@@ -3009,7 +3009,7 @@ impl Backend for CpuBackend {
         let mut maxpool_seen: Vec<bool> = vec![false; maxpool_ranges.len()];
         // ANCHOR: debug-canary-end
 
-        for (_instr_idx, instr) in plan.instructions.iter().enumerate() {
+        for instr in &plan.instructions {
             match instr {
                 Instruction::CallKernel {
                     kernel_name,
@@ -4207,7 +4207,7 @@ impl Backend for CpuBackend {
                                     || groups == 0
                                     || kernel_h == 0
                                     || kernel_w == 0
-                                    || input_c % groups != 0
+                                    || !input_c.is_multiple_of(groups)
                                 {
                                     return Err(BackendError::Dispatch(
                                         "conv2d_i4_i8/u8_i8: invalid stride, dilation, groups, channels, or kernel dimensions".into(),
@@ -4265,7 +4265,7 @@ impl Backend for CpuBackend {
                                             "conv2d_i4_i8/u8_i8: activation shape overflows".into(),
                                         )
                                     })?;
-                                if image_size == 0 || payload.len() % image_size != 0 {
+                                if image_size == 0 || !payload.len().is_multiple_of(image_size) {
                                     return Err(BackendError::Dispatch(format!(
                                         "conv2d_i4_i8/u8_i8: activation data length {} is not a whole number of {image_size}-element images",
                                         payload.len()
@@ -4693,7 +4693,7 @@ impl Backend for CpuBackend {
                             } else if !input_slices.is_empty() {
                                 // Fallback: flat concat (legacy, no axis info)
                                 let mut output_offset = 0;
-                                for (_si, slice) in input_slices.iter().enumerate() {
+                                for slice in input_slices {
                                     let input_data =
                                         unsafe { arena.view_f32(slice.offset, slice.size) };
                                     let out_f32 = unsafe {
@@ -4719,8 +4719,8 @@ impl Backend for CpuBackend {
                                         .copy_from_slice(&input_data[..actual_copy]);
                                     #[cfg(feature = "debug_canary")]
                                     eprintln!(
-                                        "[FNN_DBG_CONCAT] out=[{},{}) input[{}]: off={} sz={} numel={} (flat fallback)",
-                                        out_start, out_end, _si, slice.offset, slice.size, input_data.len()
+                                        "[FNN_DBG_CONCAT] out=[{},{}) input: off={} sz={} numel={} (flat fallback)",
+                                        out_start, out_end, slice.offset, slice.size, input_data.len()
                                     );
                                     output_offset += input_data.len();
                                 }
@@ -6905,8 +6905,8 @@ impl Backend for CpuBackend {
                                 })?;
                             if data_slice.size != expected_input_size
                                 || output_slice.size != expected_output_size
-                                || data_slice.offset % 4 != 0
-                                || output_slice.offset % 4 != 0
+                                || !data_slice.offset.is_multiple_of(4)
+                                || !output_slice.offset.is_multiple_of(4)
                             {
                                 return Err(BackendError::Dispatch(
                                     "expand_f32: tensor slices do not match declared dimensions"
@@ -7215,7 +7215,8 @@ impl Backend for CpuBackend {
                                     "dequantize_kernel: output size overflows".into(),
                                 )
                             })?;
-                            if output_slice.size != expected_output || output_slice.offset % 4 != 0
+                            if output_slice.size != expected_output
+                                || !output_slice.offset.is_multiple_of(4)
                             {
                                 return Err(BackendError::Dispatch(
                                     "dequantize_kernel: output slice does not match numel".into(),
@@ -7468,7 +7469,7 @@ impl Backend for CpuBackend {
                             let input_slice = input_slices[0];
                             if input_slice.size % 2 != 0
                                 || input_slice.offset % 2 != 0
-                                || output_slice.offset % 4 != 0
+                                || !output_slice.offset.is_multiple_of(4)
                             {
                                 return Err(BackendError::Dispatch(
                                     "to_f32: input or output slice has invalid scalar alignment"
@@ -7577,7 +7578,7 @@ impl Backend for CpuBackend {
                                         "quantize_activations: output size overflows".into(),
                                     )
                                 })?;
-                            if input_slice.offset % 4 != 0
+                            if !input_slice.offset.is_multiple_of(4)
                                 || input_slice.size != input_bytes
                                 || output_slice.size != output_bytes
                             {
@@ -7954,8 +7955,8 @@ impl Backend for CpuBackend {
                                         }
                                     };
                                     eprintln!(
-                                        "[FNN_DBG_CORRUPT] MaxPool mp_off={} expected={} actual={} AFTER instr_idx={} {}",
-                                        mp_off, expected, actual, _instr_idx, desc
+                                        "[FNN_DBG_CORRUPT] MaxPool mp_off={} expected={} actual={} AFTER {}",
+                                        mp_off, expected, actual, desc
                                     );
                                 }
                             }
@@ -8263,7 +8264,7 @@ fn dispatch_conv2d_fp32_with_view(
         || kw == 0
         || n_in == 0
         || f_out == 0
-        || c % groups != 0
+        || !c.is_multiple_of(groups)
     {
         return Err(BackendError::Dispatch(
             "conv2d_persistent: invalid convolution geometry".into(),
@@ -8315,9 +8316,9 @@ fn dispatch_conv2d_fp32_with_view(
     let expected_weight = checked_product(&[f_out, c / groups, kh, kw], "weight")?;
     let expected_output = checked_product(&[n_in, f_out, h_out, w_out], "output")?;
     let expected_bias = checked_product(&[f_out], "bias")?;
-    if input_slice.offset % 4 != 0
-        || weight_slice.offset % 4 != 0
-        || output_slice.offset % 4 != 0
+    if !input_slice.offset.is_multiple_of(4)
+        || !weight_slice.offset.is_multiple_of(4)
+        || !output_slice.offset.is_multiple_of(4)
         || input_slice.size != expected_input
         || weight_slice.size != expected_weight
         || output_slice.size != expected_output
@@ -8456,9 +8457,9 @@ fn dispatch_matmul_fp32_with_view(
     let expected_b = checked_f32_size(&[k, n], "right operand")?;
     let expected_output = checked_f32_size(&[m, n], "output")?;
     let expected_bias = checked_f32_size(&[n], "bias")?;
-    if a_slice.offset % 4 != 0
-        || b_slice.offset % 4 != 0
-        || output_slice.offset % 4 != 0
+    if !a_slice.offset.is_multiple_of(4)
+        || !b_slice.offset.is_multiple_of(4)
+        || !output_slice.offset.is_multiple_of(4)
         || a_slice.size != expected_a
         || b_slice.size != expected_b
         || output_slice.size != expected_output

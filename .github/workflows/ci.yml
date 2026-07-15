@@ -40,6 +40,8 @@ jobs:
         run: cargo test --test optim_test
       - name: Full Rust integration tests
         run: cargo test --tests -- --test-threads=1
+      - name: Release malformed-input subprocess tests
+        run: cargo test --release --test release_error_paths -- --test-threads=1
 
   feature-profiles:
     runs-on: ubuntu-latest
