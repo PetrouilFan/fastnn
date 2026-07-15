@@ -7275,6 +7275,37 @@ impl Backend for CpuBackend {
                         }
                         // â”€â”€ Optimizer kernels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         "sgd_update_f32" => {
+                            if input_slices.len() != 2 || !(1..=2).contains(&params.len()) {
+                                return Err(BackendError::Dispatch(
+                                    "sgd_update_f32: expected weights/gradients and lr[/weight_decay]"
+                                        .into(),
+                                ));
+                            }
+                            let weight_slice = input_slices[0];
+                            let gradient_slice = input_slices[1];
+                            let output_size = out_end - out_start;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let lr = f32::from_bits(params[0] as u32);
+                            let wd = params
+                                .get(1)
+                                .map_or(0.0, |bits| f32::from_bits(*bits as u32));
+                            if !lr.is_finite()
+                                || lr < 0.0
+                                || !wd.is_finite()
+                                || wd < 0.0
+                                || weight_slice.size != gradient_slice.size
+                                || weight_slice.size != output_size
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(scalar_bytes)
+                                })
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "sgd_update_f32: invalid numerical or f32 storage contract"
+                                        .into(),
+                                ));
+                            }
                             let w_new = {
                                 let d = arena.data_mut();
                                 let d_ref: &[u8] = &*d;
@@ -7286,12 +7317,6 @@ impl Backend for CpuBackend {
                                     &d_ref[input_slices[1].offset
                                         ..input_slices[1].offset + input_slices[1].size],
                                 );
-                                let lr = f32::from_bits(params[0] as u32);
-                                let wd = if params.len() > 1 {
-                                    f32::from_bits(params[1] as u32)
-                                } else {
-                                    0.0
-                                };
                                 sgd_update_f32(w_init, g_slice, lr, wd)
                             };
                             let d = arena.data_mut();

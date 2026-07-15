@@ -2320,6 +2320,30 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn sgd_dispatch_rejects_missing_learning_rate() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "sgd_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn where_rejects_empty_condition_for_nonempty_output() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
