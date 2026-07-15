@@ -2063,20 +2063,53 @@ impl Backend for CpuBackend {
                         .get("axis")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(-1);
-                    let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
+                    let shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "TopK node {node_id} is missing input geometry"
+                        ))
+                    })?;
+                    if shape.is_empty() {
+                        return Err(BackendError::Compilation(format!(
+                            "TopK node {node_id} requires positive input rank"
+                        )));
+                    }
+                    let rank = shape.len();
                     let normalized = if axis < 0 {
-                        (rank + axis).max(0)
+                        axis.checked_add(rank as i64).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "TopK node {node_id} axis normalization overflows"
+                            ))
+                        })?
                     } else {
-                        axis.min((rank - 1).max(0))
+                        axis
                     };
+                    if normalized < 0 || normalized as usize >= rank {
+                        return Err(BackendError::Compilation(format!(
+                            "TopK node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
+                    }
+                    let mut params = Vec::with_capacity(rank + 3);
+                    params.extend([k, rank]);
+                    for dimension in shape {
+                        params.push(usize::try_from(*dimension).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "TopK node {node_id} dimension does not fit usize"
+                            ))
+                        })?);
+                    }
+                    params.push(normalized as usize);
+                    let dynamic_shape = input_shape_dims
+                        .first()
+                        .filter(|dims| dims.len() == rank)
+                        .cloned();
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "topk_fused".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice,
-                        params: vec![k, normalized as usize],
-                        param_dims: None,
+                        params,
+                        param_dims: dynamic_shape,
                         weight_meta: None,
                     });
                 }
@@ -7368,27 +7401,116 @@ impl Backend for CpuBackend {
                             }
                         }
                         "topk_fused" => {
-                            if input_slices.len() != 1 || params.len() != 1 {
+                            if input_slices.len() != 1 || params.len() < 4 {
                                 return Err(BackendError::Dispatch(
-                                    "topk_fused: expected one input and k parameter".into(),
+                                    "topk_fused: expected one input and complete shape metadata"
+                                        .into(),
                                 ));
                             }
+                            let k = params[0];
+                            let rank = params[1];
+                            let expected_params = rank.checked_add(3).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "topk_fused: parameter count overflows".into(),
+                                )
+                            })?;
+                            if rank == 0 || params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "topk_fused: malformed shape metadata".into(),
+                                ));
+                            }
+                            let mut dims = Vec::new();
+                            dims.try_reserve_exact(rank).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "topk_fused: shape allocation failed: {error}"
+                                ))
+                            })?;
+                            dims.extend_from_slice(&params[2..2 + rank]);
+                            if let Some(dynamic_dims) = param_dims {
+                                if dynamic_dims.len() != rank {
+                                    return Err(BackendError::Dispatch(
+                                        "topk_fused: dynamic shape rank mismatch".into(),
+                                    ));
+                                }
+                                for (dimension, expression) in
+                                    dims.iter_mut().zip(dynamic_dims.iter())
+                                {
+                                    let resolved = expression
+                                        .evaluate_with_env(shape_env)
+                                        .map_err(|error| {
+                                            BackendError::Dispatch(format!(
+                                                "topk_fused: dynamic dimension failed: {error}"
+                                            ))
+                                        })?;
+                                    *dimension = usize::try_from(resolved).map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "topk_fused: dynamic dimension does not fit usize"
+                                                .into(),
+                                        )
+                                    })?;
+                                }
+                            }
+                            let axis = params[2 + rank];
+                            if axis >= rank {
+                                return Err(BackendError::Dispatch(
+                                    "topk_fused: axis is out of range".into(),
+                                ));
+                            }
+                            let axis_size = dims[axis];
+                            let outer =
+                                dims[..axis].iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "topk_fused: outer geometry overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let inner =
+                                dims[axis + 1..]
+                                    .iter()
+                                    .try_fold(1usize, |count, dimension| {
+                                        count.checked_mul(*dimension).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "topk_fused: inner geometry overflows".into(),
+                                            )
+                                        })
+                                    })?;
+                            let input_elements = outer
+                                .checked_mul(axis_size)
+                                .and_then(|count| count.checked_mul(inner))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "topk_fused: input geometry overflows".into(),
+                                    )
+                                })?;
+                            let output_elements = outer
+                                .checked_mul(k)
+                                .and_then(|count| count.checked_mul(inner))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "topk_fused: output geometry overflows".into(),
+                                    )
+                                })?;
                             let input_slice = input_slices[0];
                             let secondary = secondary_output_slice.ok_or_else(|| {
                                 BackendError::Dispatch(
                                     "topk_fused: missing secondary indices output".into(),
                                 )
                             })?;
-                            let k = params[0];
-                            let input_len = input_slice.size / std::mem::size_of::<f32>();
+                            let expected_input =
+                                input_elements.checked_mul(4).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "topk_fused: input size overflows".into(),
+                                    )
+                                })?;
                             let expected_values =
-                                k.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
+                                output_elements.checked_mul(4).ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "topk_fused: values output size overflows".into(),
                                     )
                                 })?;
                             let expected_indices =
-                                k.checked_mul(std::mem::size_of::<u64>()).ok_or_else(|| {
+                                output_elements.checked_mul(8).ok_or_else(|| {
                                     BackendError::Dispatch(
                                         "topk_fused: indices output size overflows".into(),
                                     )
@@ -7397,56 +7519,67 @@ impl Backend for CpuBackend {
                                 a.offset < b.offset + b.size && b.offset < a.offset + a.size
                             };
                             if k == 0
-                                || input_len < k
-                                || !input_slice
-                                    .offset
-                                    .is_multiple_of(std::mem::align_of::<f32>())
-                                || !input_slice.size.is_multiple_of(std::mem::size_of::<f32>())
-                                || !output_slice
-                                    .offset
-                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || k > axis_size
+                                || input_slice.size != expected_input
+                                || !input_slice.offset.is_multiple_of(4)
+                                || !output_slice.offset.is_multiple_of(4)
                                 || output_slice.size != expected_values
-                                || !secondary.offset.is_multiple_of(std::mem::align_of::<u64>())
+                                || !secondary.offset.is_multiple_of(8)
                                 || secondary.size != expected_indices
                                 || ranges_overlap(input_slice, *output_slice)
                                 || ranges_overlap(input_slice, secondary)
                                 || ranges_overlap(*output_slice, secondary)
                             {
                                 return Err(BackendError::Dispatch(
-                                    "topk_fused: invalid k, scalar storage, or overlapping outputs"
+                                    "topk_fused: invalid geometry, storage, or overlapping outputs"
                                         .into(),
                                 ));
                             }
                             let mut indexed = Vec::new();
-                            indexed.try_reserve_exact(input_len).map_err(|error| {
+                            indexed.try_reserve_exact(axis_size).map_err(|error| {
                                 BackendError::Dispatch(format!(
                                     "topk_fused: candidate allocation failed: {error}"
                                 ))
                             })?;
                             let mut selected_indices = Vec::new();
-                            selected_indices.try_reserve_exact(k).map_err(|error| {
-                                BackendError::Dispatch(format!(
-                                    "topk_fused: index allocation failed: {error}"
-                                ))
-                            })?;
+                            selected_indices
+                                .try_reserve_exact(output_elements)
+                                .map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "topk_fused: index allocation failed: {error}"
+                                    ))
+                                })?;
                             let output_slice = BufferSlice::new(out_start, out_end - out_start);
                             arena::with_unary_f32_slices(
                                 arena,
                                 input_slice,
                                 output_slice,
-                                |input, out_slice| {
-                                    indexed.extend(input.iter().copied().enumerate());
-                                    if input.len() > k {
-                                        indexed.select_nth_unstable_by(input.len() - k, |a, b| {
-                                            a.1.total_cmp(&b.1)
-                                        });
-                                    }
-                                    let selected = &indexed[input.len() - k..];
-                                    for (output, candidate) in
-                                        out_slice.iter_mut().zip(selected.iter())
-                                    {
-                                        *output = candidate.1;
-                                        selected_indices.push(candidate.0 as u64);
+                                |input, output| {
+                                    for outer_index in 0..outer {
+                                        for inner_index in 0..inner {
+                                            indexed.clear();
+                                            for axis_index in 0..axis_size {
+                                                let input_index =
+                                                    (outer_index * axis_size + axis_index) * inner
+                                                        + inner_index;
+                                                indexed.push((axis_index, input[input_index]));
+                                            }
+                                            if axis_size > k {
+                                                indexed.select_nth_unstable_by(
+                                                    axis_size - k,
+                                                    |a, b| a.1.total_cmp(&b.1),
+                                                );
+                                            }
+                                            for (selected_index, candidate) in
+                                                indexed[axis_size - k..].iter().enumerate()
+                                            {
+                                                let output_index =
+                                                    (outer_index * k + selected_index) * inner
+                                                        + inner_index;
+                                                output[output_index] = candidate.1;
+                                                selected_indices.push(candidate.0 as u64);
+                                            }
+                                        }
                                     }
                                 },
                             );
@@ -7454,7 +7587,18 @@ impl Backend for CpuBackend {
                             let indices = bytemuck::cast_slice_mut::<_, u64>(
                                 &mut data[secondary.offset..secondary.offset + secondary.size],
                             );
-                            indices.copy_from_slice(&selected_indices);
+                            for outer_index in 0..outer {
+                                for inner_index in 0..inner {
+                                    for selected_index in 0..k {
+                                        let logical_index = (outer_index * inner + inner_index) * k
+                                            + selected_index;
+                                        let output_index = (outer_index * k + selected_index)
+                                            * inner
+                                            + inner_index;
+                                        indices[output_index] = selected_indices[logical_index];
+                                    }
+                                }
+                            }
                         }
                         "topk_values" | "topk_indices" => {
                             if input_slices.len() != 1 || params.len() != 2 {

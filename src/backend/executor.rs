@@ -2320,6 +2320,38 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn fused_topk_respects_nontrailing_axis() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "topk_fused".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(24, 12),
+                secondary_output_slice: Some(crate::backend::BufferSlice::new(40, 24)),
+                params: vec![1, 2, 2, 3, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 64,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(64).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let values = backend.try_read_arena(&arena, 24, 12).unwrap();
+        let indices = backend.try_read_arena(&arena, 40, 24).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&values), &[4.0, 5.0, 6.0]);
+        assert_eq!(bytemuck::cast_slice::<_, u64>(&indices), &[1, 1, 1]);
+    }
+
+    #[test]
     fn packed_dequantization_rejects_trailing_payload() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
