@@ -1469,7 +1469,11 @@ impl PersistentPreparedWeights {
     /// the first payload — the same dedupe-at-registration
     /// contract used by [`PreparedConstantArena::insert`].
     pub fn insert(&mut self, key: PreparedWeightKey, payload: Arc<Vec<f32>>) -> bool {
-        if self.by_key.contains_key(&key) {
+        let payload_bytes = payload.len().checked_mul(std::mem::size_of::<f32>());
+        if key.0 % std::mem::align_of::<f32>() != 0
+            || payload_bytes != Some(key.1)
+            || self.by_key.contains_key(&key)
+        {
             return false;
         }
         self.by_key.insert(key, payload);
@@ -1489,7 +1493,7 @@ impl PersistentPreparedWeights {
     /// Duplicate inserts for the same key return `false` and keep
     /// the first payload.
     pub fn insert_u8(&mut self, key: PreparedWeightKey, payload: Arc<Vec<u8>>) -> bool {
-        if self.by_key_u8.contains_key(&key) {
+        if payload.len() != key.1 || self.by_key_u8.contains_key(&key) {
             return false;
         }
         self.by_key_u8.insert(key, payload);
@@ -3588,6 +3592,10 @@ mod tests {
         let got = view.get(&(128, 16)).expect("entry must be present");
         assert_eq!(got, &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(view.get(&(0, 0)), None);
+        assert!(!view.insert((1, 4), Arc::new(vec![1.0])));
+        assert!(!view.insert((32, 8), Arc::new(vec![1.0])));
+        assert!(!view.insert_u8((32, 2), Arc::new(vec![1])));
+        assert_eq!(view.len(), 1);
     }
 
     /// `iter` yields all `(key, value)` pairs without consuming the

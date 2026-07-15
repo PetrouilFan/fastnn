@@ -2247,6 +2247,26 @@ mod execution_storage_size_tests {
         }
     }
 
+    #[cfg(feature = "prepared-plan")]
+    #[test]
+    fn persistent_dispatch_validates_arena_before_view_execution() {
+        use crate::backend::prepared::PersistentPreparedWeights;
+        use std::sync::Arc;
+
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 4,
+            levels: vec![],
+        };
+        let arena = backend.try_allocate_arena(0).unwrap();
+        let mut view = PersistentPreparedWeights::new();
+        assert!(view.insert((0, 4), Arc::new(vec![1.0])));
+        assert!(backend
+            .dispatch_with_persistent_view(&plan, &arena, &ShapeEnv::new(), Some(&view))
+            .is_err());
+    }
+
     #[test]
     fn activation_quantization_validates_and_populates_each_channel() {
         let backend = crate::backend::cpu::CpuBackend;

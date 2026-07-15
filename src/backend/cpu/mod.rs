@@ -8025,6 +8025,15 @@ impl Backend for CpuBackend {
     ) -> Result<(), BackendError> {
         use crate::backend::prepared::PersistentPreparedWeights;
 
+        plan.validate()?;
+        let arena_size = arena.data_mut().len();
+        if arena_size < plan.arena_size {
+            return Err(BackendError::Dispatch(format!(
+                "CPU persistent dispatch arena has {arena_size} bytes, plan requires {}",
+                plan.arena_size
+            )));
+        }
+
         // Fast path: empty / missing view degrades to the standard
         // dispatch without any per-instruction overhead.
         let view: &PersistentPreparedWeights = match persistent_view {
