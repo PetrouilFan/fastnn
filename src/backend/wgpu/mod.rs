@@ -166,7 +166,6 @@ impl Backend for WgpuBackend {
                         ..
                     } => {
                         let out_start = output_slice.offset;
-                        let _out_end = output_slice.offset + output_slice.size;
 
                         // Try GPU dispatch first; fall back to CPU if unsupported.
                         if let Err(_err) = try_gpu_dispatch(
@@ -187,31 +186,67 @@ impl Backend for WgpuBackend {
                             // by this instruction to a temporary buffer, run
                             // CPU dispatch, then copy output back.
                             let arena_len = arena.data_mut().len();
-                            let o_end = (out_start + output_slice.size).min(arena_len);
+                            let o_end =
+                                out_start.checked_add(output_slice.size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "WGPU fallback output range overflows".into(),
+                                    )
+                                })?;
 
                             let mut min_offset = out_start;
                             let mut max_end = o_end;
                             for s in input_slices {
-                                let end = (s.offset + s.size).min(arena_len);
+                                let end = s.offset.checked_add(s.size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "WGPU fallback input range overflows".into(),
+                                    )
+                                })?;
                                 min_offset = min_offset.min(s.offset);
                                 max_end = max_end.max(end);
                             }
+                            if let Some(secondary) = secondary_output_slice {
+                                let end = secondary.offset.checked_add(secondary.size).ok_or_else(
+                                    || {
+                                        BackendError::Dispatch(
+                                            "WGPU fallback secondary output range overflows".into(),
+                                        )
+                                    },
+                                )?;
+                                min_offset = min_offset.min(secondary.offset);
+                                max_end = max_end.max(end);
+                            }
+                            if max_end > arena_len {
+                                return Err(BackendError::Dispatch(format!(
+                                    "WGPU fallback range {min_offset}..{max_end} exceeds arena size {arena_len}"
+                                )));
+                            }
 
                             let range_len = max_end - min_offset;
-                            let mut tmp = vec![0u8; range_len];
+                            let mut tmp = Vec::new();
+                            tmp.try_reserve_exact(range_len).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "WGPU fallback arena allocation failed: {error}"
+                                ))
+                            })?;
+                            tmp.resize(range_len, 0);
                             tmp.copy_from_slice(&arena.data_mut()[min_offset..max_end]);
 
                             let cpu_buf = crate::backend::cpu::CpuBuffer::new(tmp);
                             let cpu = CpuBackend;
 
                             // Adjust offsets into the temp buffer range.
-                            let adjusted_inputs: Vec<BufferSlice> = input_slices
-                                .iter()
-                                .map(|s| BufferSlice {
-                                    offset: s.offset - min_offset,
-                                    size: s.size,
-                                })
-                                .collect();
+                            let mut adjusted_inputs = Vec::new();
+                            adjusted_inputs
+                                .try_reserve_exact(input_slices.len())
+                                .map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "WGPU fallback input metadata allocation failed: {error}"
+                                    ))
+                                })?;
+                            adjusted_inputs.extend(input_slices.iter().map(|s| BufferSlice {
+                                offset: s.offset - min_offset,
+                                size: s.size,
+                            }));
                             let adjusted_output = BufferSlice {
                                 offset: output_slice.offset - min_offset,
                                 size: output_slice.size,
@@ -245,6 +280,20 @@ impl Backend for WgpuBackend {
                             let adj_out_end = o_end - min_offset;
                             wgpu_data[out_start..o_end]
                                 .copy_from_slice(&cpu_data[adj_out_start..adj_out_end]);
+                            if let Some(secondary) = secondary_output_slice {
+                                let secondary_end = secondary
+                                    .offset
+                                    .checked_add(secondary.size)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "WGPU fallback secondary output range overflows".into(),
+                                        )
+                                    })?;
+                                let adjusted_start = secondary.offset - min_offset;
+                                let adjusted_end = secondary_end - min_offset;
+                                wgpu_data[secondary.offset..secondary_end]
+                                    .copy_from_slice(&cpu_data[adjusted_start..adjusted_end]);
+                            }
                         }
                     }
                     Instruction::MemCopy { dst, src } => {
