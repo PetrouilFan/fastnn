@@ -1766,14 +1766,42 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Prelu => {
+                    let shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "PReLU node {node_id} is missing input geometry"
+                        ))
+                    })?;
+                    if shape.is_empty() {
+                        return Err(BackendError::Compilation(format!(
+                            "PReLU node {node_id} requires positive input rank"
+                        )));
+                    }
+                    let mut params = Vec::new();
+                    params.try_reserve_exact(shape.len() + 1).map_err(|error| {
+                        BackendError::Compilation(format!(
+                            "PReLU node {node_id} metadata allocation failed: {error}"
+                        ))
+                    })?;
+                    params.push(shape.len());
+                    for dimension in shape {
+                        params.push(usize::try_from(*dimension).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "PReLU node {node_id} dimension does not fit usize"
+                            ))
+                        })?);
+                    }
+                    let dynamic_shape = input_shape_dims
+                        .first()
+                        .filter(|dims| dims.len() == shape.len())
+                        .cloned();
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "prelu".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
+                        params,
+                        param_dims: dynamic_shape,
                         weight_meta: None,
                     });
                 }
@@ -6760,73 +6788,123 @@ impl Backend for CpuBackend {
                             }
                         }
                         "prelu" => {
-                            if input_slices.len() != 2 || !params.is_empty() {
+                            if input_slices.len() != 2 || params.len() < 2 {
                                 return Err(BackendError::Dispatch(
-                                    "prelu: expected data and weight inputs without parameters"
+                                    "prelu: expected data, weight, and complete shape metadata"
                                         .into(),
                                 ));
                             }
+                            let rank = params[0];
+                            if rank == 0 || params.len() != rank + 1 {
+                                return Err(BackendError::Dispatch(
+                                    "prelu: malformed shape metadata".into(),
+                                ));
+                            }
+                            let mut dims = Vec::new();
+                            dims.try_reserve_exact(rank).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "prelu: shape allocation failed: {error}"
+                                ))
+                            })?;
+                            dims.extend_from_slice(&params[1..]);
+                            if let Some(dynamic_dims) = param_dims {
+                                if dynamic_dims.len() != rank {
+                                    return Err(BackendError::Dispatch(
+                                        "prelu: dynamic shape rank mismatch".into(),
+                                    ));
+                                }
+                                for (dimension, expression) in
+                                    dims.iter_mut().zip(dynamic_dims.iter())
+                                {
+                                    let resolved = expression
+                                        .evaluate_with_env(shape_env)
+                                        .map_err(|error| {
+                                            BackendError::Dispatch(format!(
+                                                "prelu: dynamic dimension failed: {error}"
+                                            ))
+                                        })?;
+                                    *dimension = usize::try_from(resolved).map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "prelu: dynamic dimension does not fit usize".into(),
+                                        )
+                                    })?;
+                                }
+                            }
+                            let numel = dims.iter().try_fold(1usize, |count, dimension| {
+                                count.checked_mul(*dimension).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "prelu: tensor geometry overflows".into(),
+                                    )
+                                })
+                            })?;
+                            let channels = if rank == 1 { dims[0] } else { dims[1] };
+                            let spatial = if rank <= 2 {
+                                1
+                            } else {
+                                dims[2..].iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "prelu: spatial geometry overflows".into(),
+                                        )
+                                    })
+                                })?
+                            };
                             let scalar_bytes = std::mem::size_of::<f32>();
-                            let output_size = out_end - out_start;
+                            let expected_data =
+                                numel.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("prelu: data size overflows".into())
+                                })?;
                             let data_slice = input_slices[0];
                             let weight_slice = input_slices[1];
-                            if data_slice.size == 0
-                                || weight_slice.size == 0
-                                || data_slice.size != output_size
-                                || !data_slice.size.is_multiple_of(weight_slice.size)
-                                || !data_slice
-                                    .offset
-                                    .is_multiple_of(std::mem::align_of::<f32>())
-                                || !weight_slice
-                                    .offset
-                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            let output_size = out_end - out_start;
+                            let weight_elements = weight_slice.size / scalar_bytes;
+                            if numel == 0
+                                || channels == 0
+                                || spatial == 0
+                                || data_slice.size != expected_data
+                                || output_size != expected_data
+                                || !matches!(weight_elements, 1) && weight_elements != channels
+                                || input_slices.iter().any(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(scalar_bytes)
+                                })
                                 || !out_start.is_multiple_of(std::mem::align_of::<f32>())
-                                || !data_slice.size.is_multiple_of(scalar_bytes)
-                                || !weight_slice.size.is_multiple_of(scalar_bytes)
-                                || !output_size.is_multiple_of(scalar_bytes)
                             {
                                 return Err(BackendError::Dispatch(
-                                    "prelu: storage must contain compatible nonempty f32 tensors"
-                                        .into(),
+                                    "prelu: invalid geometry or f32 storage".into(),
                                 ));
                             }
-                            let output_overlaps = input_slices.iter().any(|slice| {
-                                let end = slice.offset + slice.size;
-                                slice.offset < out_end && out_start < end
-                            });
-                            if output_overlaps {
-                                return Err(BackendError::Dispatch(
-                                    "prelu: input and output slices overlap".into(),
-                                ));
-                            }
-                            if let [data_slice, weight_slice] = &input_slices[..] {
-                                let (input, weight) = unsafe {
-                                    (
-                                        arena.view_f32(data_slice.offset, data_slice.size),
-                                        arena.view_f32(weight_slice.offset, weight_slice.size),
-                                    )
+                            let (input, weight) = {
+                                let arena_data = arena.data_mut();
+                                let input = try_copy_slice(
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &arena_data[data_slice.offset
+                                            ..data_slice.offset + data_slice.size],
+                                    ),
+                                    "prelu data materialization",
+                                )?;
+                                let weight = try_copy_slice(
+                                    bytemuck::cast_slice::<_, f32>(
+                                        &arena_data[weight_slice.offset
+                                            ..weight_slice.offset + weight_slice.size],
+                                    ),
+                                    "prelu weight materialization",
+                                )?;
+                                (input, weight)
+                            };
+                            let output =
+                                unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
+                            for (index, value) in output.iter_mut().enumerate() {
+                                let channel = if weight_elements == 1 {
+                                    0
+                                } else {
+                                    (index / spatial) % channels
                                 };
-                                let out_f32 =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                let channel_stride =
-                                    if !weight.is_empty() && input.len() > weight.len() {
-                                        input.len() / weight.len()
-                                    } else {
-                                        1
-                                    };
-                                for i in 0..out_f32.len() {
-                                    let w_idx = if weight.len() == 1 {
-                                        0
-                                    } else {
-                                        (i / channel_stride) % weight.len()
-                                    };
-                                    let slope = weight[w_idx];
-                                    out_f32[i] = if input[i] > 0.0 {
-                                        input[i]
-                                    } else {
-                                        input[i] * slope
-                                    };
-                                }
+                                *value = if input[index] > 0.0 {
+                                    input[index]
+                                } else {
+                                    input[index] * weight[channel]
+                                };
                             }
                         }
                         "rms_norm" => {

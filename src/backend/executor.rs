@@ -3479,6 +3479,45 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn prelu_preserves_batched_channel_geometry_in_place() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "prelu".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 32),
+                    crate::backend::BufferSlice::new(32, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 32),
+                secondary_output_slice: None,
+                params: vec![4, 2, 2, 1, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 40,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(40).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[-1.0f32, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0]),
+            )
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 32, bytemuck::cast_slice(&[0.1f32, 0.2]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 32).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&output),
+            &[-0.1, -0.2, -0.6, -0.8, -0.5, -0.6, -1.4, -1.6]
+        );
+    }
+
+    #[test]
     fn prelu_rejects_empty_weight_storage() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
