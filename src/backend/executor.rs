@@ -2289,6 +2289,34 @@ mod execution_storage_size_tests {
         assert!(backend
             .dispatch_with_persistent_view(&malformed_conv, &arena, &ShapeEnv::new(), Some(&view),)
             .is_err());
+
+        let malformed_matmul = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "matmul".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        assert!(
+            backend
+                .dispatch_with_persistent_view(
+                    &malformed_matmul,
+                    &arena,
+                    &ShapeEnv::new(),
+                    Some(&view),
+                )
+                .is_err()
+        );
     }
 
     #[test]

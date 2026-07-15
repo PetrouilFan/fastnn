@@ -8425,15 +8425,64 @@ fn dispatch_matmul_fp32_with_view(
 ) -> Result<(), BackendError> {
     use crate::backend::cpu::blas::matmul_blas_into;
 
-    if input_slices.len() < 2 {
+    if !matches!(input_slices.len(), 2 | 3) {
         return Err(BackendError::Dispatch(format!(
-            "matmul_persistent: expected â‰¥ 2 input slices, got {}",
+            "matmul_persistent: expected 2 or 3 input slices, got {}",
             input_slices.len()
         )));
     }
     let a_slice = input_slices[0];
     let b_slice = input_slices[1];
     let bias_slice = input_slices.get(2).copied();
+    let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
+    let &[m, k, n] = &matmul_params[..] else {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: expected params [M,K,N]"
+        )));
+    };
+    if m == 0 || k == 0 || n == 0 {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: matrix dimensions must be positive"
+        )));
+    }
+    let checked_f32_size = |dimensions: &[usize], label: &str| {
+        dimensions
+            .iter()
+            .try_fold(1usize, |acc, value| acc.checked_mul(*value))
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| BackendError::Dispatch(format!("{kernel_name}: {label} size overflows")))
+    };
+    let expected_a = checked_f32_size(&[m, k], "left operand")?;
+    let expected_b = checked_f32_size(&[k, n], "right operand")?;
+    let expected_output = checked_f32_size(&[m, n], "output")?;
+    let expected_bias = checked_f32_size(&[n], "bias")?;
+    if a_slice.offset % 4 != 0
+        || b_slice.offset % 4 != 0
+        || output_slice.offset % 4 != 0
+        || a_slice.size != expected_a
+        || b_slice.size != expected_b
+        || output_slice.size != expected_output
+        || bias_slice.is_some_and(|bias| bias.offset % 4 != 0 || bias.size != expected_bias)
+    {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: storage does not match matrix dimensions"
+        )));
+    }
+    let output_end = output_slice.offset + output_slice.size;
+    let b_end = b_slice.offset + b_slice.size;
+    if b_slice.offset < output_end && output_slice.offset < b_end {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: right operand and output slices overlap"
+        )));
+    }
+    if let Some(bias) = bias_slice {
+        let bias_end = bias.offset + bias.size;
+        if bias.offset < output_end && output_slice.offset < bias_end {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: bias and output slices overlap"
+            )));
+        }
+    }
 
     // Resolve the B (weight) / bias f32 slices.
     let b_f32: Vec<f32>;
@@ -8461,17 +8510,18 @@ fn dispatch_matmul_fp32_with_view(
         &[]
     };
 
-    // Borrow the activation tensor from the arena (zero-copy).
-    let a_f32: &[f32] = {
-        let d = arena.data_mut();
-        bytemuck::cast_slice::<_, f32>(&d[a_slice.offset..a_slice.offset + a_slice.size])
-    };
-
-    let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
-    let &[m, _k, n] = &matmul_params[..] else {
-        return Err(BackendError::Dispatch(format!(
-            "{kernel_name}: expected params [M,K,N]"
-        )));
+    // Borrow the activation tensor when disjoint. Optimized plans may reuse
+    // its dead slot for output, in which case materialize it before mutation.
+    let a_end = a_slice.offset + a_slice.size;
+    let a_overlaps_output = a_slice.offset < output_end && output_slice.offset < a_end;
+    let a_owned: Vec<f32>;
+    let a_f32: &[f32] = if a_overlaps_output {
+        let data = arena.data_mut();
+        a_owned = bytemuck::cast_slice::<_, f32>(&data[a_slice.offset..a_end]).to_vec();
+        &a_owned
+    } else {
+        let data = arena.data_mut();
+        bytemuck::cast_slice::<_, f32>(&data[a_slice.offset..a_end])
     };
 
     let out_f32: &mut [f32] = {
@@ -8481,7 +8531,7 @@ fn dispatch_matmul_fp32_with_view(
         )
     };
 
-    matmul_blas_into(a_f32, b_slice_ref, out_f32, m, _k, n);
+    matmul_blas_into(a_f32, b_slice_ref, out_f32, m, k, n);
 
     // Apply fused activation / bias on top of the GEMM output, mirroring
     // the `matmul_activation_dispatch` semantics.
