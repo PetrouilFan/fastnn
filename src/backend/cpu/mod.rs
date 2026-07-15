@@ -1451,20 +1451,18 @@ impl Backend for CpuBackend {
                         .get("end")
                         .and_then(|e| e.parse().ok())
                         .unwrap_or(1);
-                    // Compute the stride (product of dim sizes after `dim`)
-                    // so the kernel can correctly compute the offset for non-batch dims.
-                    let stride = input_shapes
-                        .first()
-                        .filter(|s| dim < s.len())
-                        .map(|s| s[dim + 1..].iter().product::<u64>() as usize)
-                        .unwrap_or(1);
+                    let input_shape = input_shapes.first().cloned().unwrap_or_default();
+                    let mut slice_params = Vec::with_capacity(input_shape.len() + 4);
+                    slice_params.push(input_shape.len());
+                    slice_params.extend(input_shape.into_iter().map(|size| size as usize));
+                    slice_params.extend([dim, start, end]);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "slice_f32".to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![dim, start, end, stride],
+                        params: slice_params,
                         param_dims: None,
                         weight_meta: None,
                     });
@@ -5650,45 +5648,111 @@ impl Backend for CpuBackend {
                             );
                         }
                         "slice_f32" => {
-                            if let Some(input_slice) = input_slices.first() {
-                                let input: &[f32] =
-                                    unsafe { arena.view_f32(input_slice.offset, input_slice.size) };
-                                let &[_dim, start, end, stride] = &params[..] else {
-                                    return Err(BackendError::Dispatch(
-                                        "slice_f32: expected params [dim, start, end, stride]"
-                                            .into(),
-                                    ));
-                                };
-                                let out_f32 =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                // General strided slice along dimension `dim`.
-                                // input layout (row-major): outer * dim_size * stride
-                                // output layout:             outer * (end-start) * stride
-                                let in_len = input.len();
-                                let out_len = out_f32.len();
-                                let range_len = (end - start).max(1);
-                                // dim_size = in_len * range_len / out_len
-                                let dim_size = if out_len > 0 {
-                                    (in_len * range_len) / out_len
-                                } else {
-                                    0
-                                };
-                                let outer = if dim_size > 0 && stride > 0 {
-                                    in_len / dim_size / stride
-                                } else {
-                                    1
-                                };
-                                let slice_elems = range_len * stride;
-                                for i in 0..outer {
-                                    let src_off = i * dim_size * stride + start * stride;
-                                    let dst_off = i * slice_elems;
-                                    let copy_len = slice_elems.min(in_len.saturating_sub(src_off));
-                                    if copy_len > 0 {
-                                        out_f32[dst_off..(dst_off + copy_len)]
-                                            .copy_from_slice(&input[src_off..(src_off + copy_len)]);
-                                    }
-                                }
+                            if input_slices.len() != 1 || params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "slice_f32: expected one input and encoded geometry".into(),
+                                ));
                             }
+                            let rank = params[0];
+                            let expected_params = rank.checked_add(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "slice_f32: parameter count overflows".into(),
+                                )
+                            })?;
+                            if rank == 0 || params.len() != expected_params {
+                                return Err(BackendError::Dispatch(
+                                    "slice_f32: malformed input shape metadata".into(),
+                                ));
+                            }
+                            let input_shape = &params[1..1 + rank];
+                            let dim = params[1 + rank];
+                            let start = params[2 + rank];
+                            let end = params[3 + rank];
+                            if dim >= rank || start > end || end > input_shape[dim] {
+                                return Err(BackendError::Dispatch(
+                                    "slice_f32: invalid dimension or range".into(),
+                                ));
+                            }
+                            let input_elements =
+                                input_shape.iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "slice_f32: input shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let inner = input_shape[dim + 1..].iter().try_fold(
+                                1usize,
+                                |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "slice_f32: inner geometry overflows".into(),
+                                        )
+                                    })
+                                },
+                            )?;
+                            let outer = input_shape[..dim].iter().try_fold(
+                                1usize,
+                                |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "slice_f32: outer geometry overflows".into(),
+                                        )
+                                    })
+                                },
+                            )?;
+                            let range = end - start;
+                            let output_elements = outer
+                                .checked_mul(range)
+                                .and_then(|count| count.checked_mul(inner))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "slice_f32: output geometry overflows".into(),
+                                    )
+                                })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let input_bytes =
+                                input_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("slice_f32: input size overflows".into())
+                                })?;
+                            let output_bytes =
+                                output_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "slice_f32: output size overflows".into(),
+                                    )
+                                })?;
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slice.size != input_bytes
+                                || output_slice.size != output_bytes
+                                || !input_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "slice_f32: shape and f32 storage disagree".into(),
+                                ));
+                            }
+                            let axis_size = input_shape[dim];
+                            let copy_elements = range * inner;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, output| {
+                                    for outer_index in 0..outer {
+                                        let source = (outer_index * axis_size + start) * inner;
+                                        let destination = outer_index * copy_elements;
+                                        output[destination..destination + copy_elements]
+                                            .copy_from_slice(
+                                                &input[source..source + copy_elements],
+                                            );
+                                    }
+                                },
+                            );
                         }
                         "scatter_nd" => {
                             if let [data_slice, indices_slice, updates_slice] = &input_slices[..] {

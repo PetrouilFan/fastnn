@@ -2320,6 +2320,39 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn slice_respects_selected_dimension() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "slice_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(24, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 3, 1, 1, 3],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 40,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(40).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 24, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[2.0, 3.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
     fn gather_respects_nonzero_axis_geometry() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
