@@ -390,7 +390,22 @@ fn invalid_adam_inputs_return_structured_errors() {
     let gradient = graph.input(&[2, 2], IrDType::F32);
     let first_moment = graph.input(&[2, 2], IrDType::F32);
     let second_moment = graph.input(&[2, 2], IrDType::F32);
+    let half_moment = graph.input(&[2, 2], IrDType::F16);
     let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &gradient,
+            &half_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            1e-8,
+            1,
+        )
+        .is_err());
 
     assert!(graph
         .try_apply_adam(

@@ -2172,11 +2172,25 @@ impl GraphBuilder {
                     weight.tensor_type().shape
                 )));
             }
-            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
-                return Err(FastnnError::dtype(format!(
-                    "{operation} {name} dtype does not match weight dtype"
-                )));
-            }
+        }
+        if grad.tensor_type().dtype != weight.tensor_type().dtype {
+            return Err(FastnnError::dtype(format!(
+                "{operation} gradient dtype does not match weight dtype"
+            )));
+        }
+        if m.tensor_type().dtype != v.tensor_type().dtype {
+            return Err(FastnnError::dtype(format!(
+                "{operation} moment dtypes do not match"
+            )));
+        }
+        let moment_dtype = &m.tensor_type().dtype;
+        let weight_dtype = &weight.tensor_type().dtype;
+        if moment_dtype != weight_dtype
+            && !(*weight_dtype == IrDType::F32 && *moment_dtype == IrDType::F16)
+        {
+            return Err(FastnnError::dtype(format!(
+                "{operation} moment dtype must match the weight dtype or use F16 state for F32 weights"
+            )));
         }
         Ok(())
     }
