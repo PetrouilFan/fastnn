@@ -2320,6 +2320,45 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn scatter_nd_updates_complete_indexed_slice() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "scatter_nd".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 16),
+                    crate::backend::BufferSlice::new(16, 4),
+                    crate::backend::BufferSlice::new(20, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(28, 16),
+                secondary_output_slice: None,
+                params: vec![1, 2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 44,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(44).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 16, bytemuck::cast_slice(&[1.0f32]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 20, bytemuck::cast_slice(&[9.0f32, 8.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 28, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 2.0, 9.0, 8.0]
+        );
+    }
+
+    #[test]
     fn slice_respects_selected_dimension() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

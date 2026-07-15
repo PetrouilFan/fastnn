@@ -5755,51 +5755,128 @@ impl Backend for CpuBackend {
                             );
                         }
                         "scatter_nd" => {
-                            if let [data_slice, indices_slice, updates_slice] = &input_slices[..] {
-                                let data: &[f32] =
-                                    unsafe { arena.view_f32(data_slice.offset, data_slice.size) };
-                                let indices_f32: &[f32] = unsafe {
-                                    arena.view_f32(indices_slice.offset, indices_slice.size)
-                                };
-                                let updates: &[f32] = unsafe {
-                                    arena.view_f32(updates_slice.offset, updates_slice.size)
-                                };
-                                let out_f32: &mut [f32] =
-                                    unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
-                                out_f32.copy_from_slice(data);
-                                if let Some((&index_depth, data_dims)) = params.split_first() {
-                                    let data_rank = data_dims.len();
-                                    if index_depth > 0
-                                        && index_depth <= data_rank
-                                        && indices_f32.len() >= index_depth
+                            if input_slices.len() != 3 || params.len() < 2 {
+                                return Err(BackendError::Dispatch(
+                                    "scatter_nd: expected data, indices, updates, and geometry"
+                                        .into(),
+                                ));
+                            }
+                            let index_depth = params[0];
+                            let data_dims = &params[1..];
+                            if index_depth == 0 || index_depth > data_dims.len() {
+                                return Err(BackendError::Dispatch(
+                                    "scatter_nd: invalid index depth".into(),
+                                ));
+                            }
+                            let data_elements =
+                                data_dims.iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "scatter_nd: data shape product overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            let inner_size = data_dims[index_depth..].iter().try_fold(
+                                1usize,
+                                |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "scatter_nd: update slice size overflows".into(),
+                                        )
+                                    })
+                                },
+                            )?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let data_bytes =
+                                data_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch("scatter_nd: data size overflows".into())
+                                })?;
+                            let indices_slice = input_slices[1];
+                            if !indices_slice.size.is_multiple_of(scalar_bytes)
+                                || !indices_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "scatter_nd: indices are not complete aligned f32 scalars"
+                                        .into(),
+                                ));
+                            }
+                            let index_elements = indices_slice.size / scalar_bytes;
+                            if !index_elements.is_multiple_of(index_depth) {
+                                return Err(BackendError::Dispatch(
+                                    "scatter_nd: index storage is not a whole number of tuples"
+                                        .into(),
+                                ));
+                            }
+                            let tuple_count = index_elements / index_depth;
+                            let update_elements =
+                                tuple_count.checked_mul(inner_size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "scatter_nd: update element count overflows".into(),
+                                    )
+                                })?;
+                            let update_bytes =
+                                update_elements.checked_mul(scalar_bytes).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "scatter_nd: update size overflows".into(),
+                                    )
+                                })?;
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if input_slices[0].size != data_bytes
+                                || input_slices[2].size != update_bytes
+                                || output_slice.size != data_bytes
+                                || [input_slices[0], input_slices[2], output_slice].iter().any(
+                                    |slice| {
+                                        !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                    },
+                                )
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "scatter_nd: geometry and f32 storage disagree".into(),
+                                ));
+                            }
+                            let indices =
+                                unsafe { arena.view_f32(indices_slice.offset, indices_slice.size) };
+                            for tuple in indices.chunks_exact(index_depth) {
+                                for (dimension, index) in tuple.iter().enumerate() {
+                                    if !index.is_finite()
+                                        || *index < 0.0
+                                        || index.fract() != 0.0
+                                        || *index >= data_dims[dimension] as f32
                                     {
-                                        let num_indices = indices_f32.len() / index_depth;
-                                        let inner_size: usize =
-                                            data_dims[index_depth..].iter().product();
-                                        for i in 0..num_indices {
-                                            let mut linear_offset = 0usize;
-                                            for j in 0..index_depth {
-                                                let idx = indices_f32[i * index_depth + j] as usize;
-                                                let mut stride = 1usize;
-                                                for k in (j + 1)..data_rank {
-                                                    stride *= data_dims[k];
-                                                }
-                                                linear_offset += idx * stride;
-                                            }
-                                            let update_start = i * inner_size;
-                                            let update_end = update_start + inner_size;
-                                            if linear_offset + inner_size <= out_f32.len()
-                                                && update_end <= updates.len()
-                                            {
-                                                out_f32[linear_offset..linear_offset + inner_size]
-                                                    .copy_from_slice(
-                                                        &updates[update_start..update_end],
-                                                    );
-                                            }
-                                        }
+                                        return Err(BackendError::Dispatch(
+                                            "scatter_nd: indices must be integral and in bounds"
+                                                .into(),
+                                        ));
                                     }
                                 }
                             }
+                            arena::with_nary_f32_slices(
+                                arena,
+                                input_slices,
+                                output_slice,
+                                |inputs, output| {
+                                    output.copy_from_slice(inputs[0]);
+                                    let indices = inputs[1];
+                                    let updates = inputs[2];
+                                    for (tuple_index, tuple) in
+                                        indices.chunks_exact(index_depth).enumerate()
+                                    {
+                                        let mut linear_offset = 0usize;
+                                        let mut stride = data_elements;
+                                        for (dimension, index) in tuple.iter().enumerate() {
+                                            stride /= data_dims[dimension];
+                                            linear_offset += *index as usize * stride;
+                                        }
+                                        let update_start = tuple_index * inner_size;
+                                        output[linear_offset..linear_offset + inner_size]
+                                            .copy_from_slice(
+                                                &updates[update_start..update_start + inner_size],
+                                            );
+                                    }
+                                },
+                            );
                         }
                         "conv1d" => {
                             if let [input_slice, weight_slice] = &input_slices[..] {
