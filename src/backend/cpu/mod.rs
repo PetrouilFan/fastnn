@@ -5530,6 +5530,45 @@ impl Backend for CpuBackend {
                             }
                         }
                         "prelu" => {
+                            if input_slices.len() != 2 || !params.is_empty() {
+                                return Err(BackendError::Dispatch(
+                                    "prelu: expected data and weight inputs without parameters"
+                                        .into(),
+                                ));
+                            }
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            let output_size = out_end - out_start;
+                            let data_slice = input_slices[0];
+                            let weight_slice = input_slices[1];
+                            if data_slice.size == 0
+                                || weight_slice.size == 0
+                                || data_slice.size != output_size
+                                || !data_slice.size.is_multiple_of(weight_slice.size)
+                                || !data_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !weight_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                                || !data_slice.size.is_multiple_of(scalar_bytes)
+                                || !weight_slice.size.is_multiple_of(scalar_bytes)
+                                || !output_size.is_multiple_of(scalar_bytes)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "prelu: storage must contain compatible nonempty f32 tensors"
+                                        .into(),
+                                ));
+                            }
+                            let output_overlaps = input_slices.iter().any(|slice| {
+                                let end = slice.offset + slice.size;
+                                slice.offset < out_end && out_start < end
+                            });
+                            if output_overlaps {
+                                return Err(BackendError::Dispatch(
+                                    "prelu: input and output slices overlap".into(),
+                                ));
+                            }
                             if let [data_slice, weight_slice] = &input_slices[..] {
                                 let (input, weight) = unsafe {
                                     (
@@ -5545,17 +5584,13 @@ impl Backend for CpuBackend {
                                     } else {
                                         1
                                     };
-                                for i in 0..out_f32.len().min(input.len()) {
+                                for i in 0..out_f32.len() {
                                     let w_idx = if weight.len() == 1 {
                                         0
                                     } else {
                                         (i / channel_stride) % weight.len()
                                     };
-                                    let slope = if w_idx < weight.len() {
-                                        weight[w_idx]
-                                    } else {
-                                        0.0
-                                    };
+                                    let slope = weight[w_idx];
                                     out_f32[i] = if input[i] > 0.0 {
                                         input[i]
                                     } else {
