@@ -5988,6 +5988,121 @@ impl Backend for CpuBackend {
                             );
                         }
                         "conv3d" => {
+                            if input_slices.len() != 2 || params.len() != 10 {
+                                return Err(BackendError::Dispatch(
+                                    "conv3d: expected input, weight, and ten geometry parameters"
+                                        .into(),
+                                ));
+                            }
+                            let [stride, padding, dilation, c, d, h, w, kd, kh, kw] = [
+                                params[0], params[1], params[2], params[3], params[4], params[5],
+                                params[6], params[7], params[8], params[9],
+                            ];
+                            if stride == 0
+                                || dilation == 0
+                                || c == 0
+                                || d == 0
+                                || h == 0
+                                || w == 0
+                                || kd == 0
+                                || kh == 0
+                                || kw == 0
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv3d: stride, dilation, and dimensions must be positive"
+                                        .into(),
+                                ));
+                            }
+                            let input_volume = c
+                                .checked_mul(d)
+                                .and_then(|value| value.checked_mul(h))
+                                .and_then(|value| value.checked_mul(w))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv3d: input geometry overflows".into(),
+                                    )
+                                })?;
+                            let kernel_volume = c
+                                .checked_mul(kd)
+                                .and_then(|value| value.checked_mul(kh))
+                                .and_then(|value| value.checked_mul(kw))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv3d: kernel geometry overflows".into(),
+                                    )
+                                })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if input_slices.iter().any(|slice| {
+                                !slice.size.is_multiple_of(scalar_bytes)
+                                    || !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                            }) || !(out_end - out_start).is_multiple_of(scalar_bytes)
+                                || !out_start.is_multiple_of(std::mem::align_of::<f32>())
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv3d: storage is not complete aligned f32 data".into(),
+                                ));
+                            }
+                            let input_elements = input_slices[0].size / scalar_bytes;
+                            let weight_elements = input_slices[1].size / scalar_bytes;
+                            if !input_elements.is_multiple_of(input_volume)
+                                || !weight_elements.is_multiple_of(kernel_volume)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv3d: storage does not contain complete tensors".into(),
+                                ));
+                            }
+                            let padded = |size: usize, kernel: usize| {
+                                let padded_size = padding
+                                    .checked_mul(2)
+                                    .and_then(|value| size.checked_add(value))?;
+                                let effective_kernel = dilation
+                                    .checked_mul(kernel.checked_sub(1)?)?
+                                    .checked_add(1)?;
+                                (effective_kernel <= padded_size)
+                                    .then_some((padded_size - effective_kernel) / stride + 1)
+                            };
+                            let d_out = padded(d, kd).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "conv3d: invalid or overflowing depth geometry".into(),
+                                )
+                            })?;
+                            let h_out = padded(h, kh).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "conv3d: invalid or overflowing height geometry".into(),
+                                )
+                            })?;
+                            let w_out = padded(w, kw).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "conv3d: invalid or overflowing width geometry".into(),
+                                )
+                            })?;
+                            let n = input_elements / input_volume;
+                            let f = weight_elements / kernel_volume;
+                            let expected_output = n
+                                .checked_mul(f)
+                                .and_then(|value| value.checked_mul(d_out))
+                                .and_then(|value| value.checked_mul(h_out))
+                                .and_then(|value| value.checked_mul(w_out))
+                                .and_then(|value| value.checked_mul(scalar_bytes))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv3d: output storage size overflows".into(),
+                                    )
+                                })?;
+                            if out_end - out_start != expected_output
+                                || input_slices.iter().any(|slice| {
+                                    arena::ranges_overlap(
+                                        slice.offset,
+                                        slice.offset + slice.size,
+                                        out_start,
+                                        out_end,
+                                    )
+                                })
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv3d: invalid output storage or overlapping tensors".into(),
+                                ));
+                            }
                             if let [input_slice, weight_slice] = &input_slices[..] {
                                 let (input, weight) = unsafe {
                                     (
