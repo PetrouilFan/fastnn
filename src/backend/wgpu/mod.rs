@@ -266,7 +266,7 @@ impl Backend for WgpuBackend {
                                     params: params.clone(),
                                     param_dims: param_dims.clone(),
                                     weight_meta: weight_meta.clone(),
-                                    node_id: node_id.clone(),
+                                    node_id: *node_id,
                                 }],
                                 arena_size: range_len,
                                 levels: vec![0],

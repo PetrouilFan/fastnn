@@ -1205,7 +1205,7 @@ impl_nn_module!(PyTransformerEncoder {
 
 // ---- AotExecutor (ONNX graph execution via AOT compiler pipeline) ----
 
-#[pyclass]
+#[pyclass(unsendable)]
 pub struct AotExecutor {
     plan: crate::backend::ExecutablePlan,
     memory_plan: crate::compiler::plan::MemoryPlan,

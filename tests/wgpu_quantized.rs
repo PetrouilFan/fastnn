@@ -42,6 +42,7 @@ fn run_matmul<B: fastnn::backend::Backend>(
 }
 
 /// Helper: run conv2d through the full pipeline with a given backend and quantization.
+#[allow(clippy::too_many_arguments)]
 fn run_conv2d<B: fastnn::backend::Backend>(
     batch: usize,
     in_channels: usize,

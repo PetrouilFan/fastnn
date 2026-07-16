@@ -187,8 +187,16 @@ fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
 /// processes instructions sequentially, so the `&mut [u8]` slices
 /// returned by [`data_mut`](CpuBuffer::data_mut) are never aliased.
 ///
-/// `Send + Sync` are safe because the inner `Vec<u8>` is itself
-/// `Send + Sync` and the arena is never accessed concurrently.
+/// `CpuBuffer` is `Send` but deliberately not `Sync`: moving an arena between
+/// threads is valid, while sharing one across concurrent dispatches is not.
+/// Mutable byte access is crate-private so safe external code cannot manufacture
+/// aliased mutable slices.
+///
+/// ```compile_fail
+/// use fastnn::backend::cpu::CpuBuffer;
+/// let buffer = CpuBuffer::new(vec![0; 16]);
+/// let _ = buffer.data_mut();
+/// ```
 pub struct CpuBuffer(UnsafeCell<Vec<u8>>);
 
 impl CpuBuffer {
@@ -205,7 +213,7 @@ impl CpuBuffer {
     /// This is satisfied by the sequential dispatch loop â€” each
     /// `data_mut` call's borrow ends before the next one begins.
     #[allow(clippy::mut_from_ref)]
-    pub fn data_mut(&self) -> &mut [u8] {
+    pub(crate) fn data_mut(&self) -> &mut [u8] {
         // SAFETY: The `UnsafeCell` gives `&mut` to the inner `Vec<u8>`. This is safe because
         // `data_mut()` returns a borrow that is never aliased â€” dispatch processes instructions
         // sequentially and each borrow ends before the next begins.
@@ -268,11 +276,9 @@ impl CpuBuffer {
     }
 }
 
-// SAFETY: `Vec<u8>` is `Send + Sync`.  The arena is never accessed
-// concurrently â€” dispatch is single-threaded â€” so interior mutability
-// via `UnsafeCell` does not introduce data races.
+// SAFETY: ownership of the arena may move between threads. `CpuBuffer` is
+// intentionally not `Sync`, so safe code cannot access one arena concurrently.
 unsafe impl Send for CpuBuffer {}
-unsafe impl Sync for CpuBuffer {}
 
 #[cfg(test)]
 mod cpu_buffer_tests {
