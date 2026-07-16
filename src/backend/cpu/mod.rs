@@ -4588,19 +4588,51 @@ impl Backend for CpuBackend {
                                         ));
                                     }
                                 }
-                                arena::with_nary_f32_slices(
-                                    arena,
-                                    input_slices,
-                                    output_slice,
-                                    |inputs, out_f32| {
-                                        norm_layernorm_f32(inputs[0], out_f32, row_size, eps);
-                                        for (index, output) in out_f32.iter_mut().enumerate() {
-                                            let column = index % row_size;
-                                            *output =
-                                                *output * inputs[1][column] + inputs[2][column];
-                                        }
-                                    },
-                                );
+                                let output_overlaps = input_slices.iter().any(|slice| {
+                                    let end = slice.offset + slice.size;
+                                    slice.offset < out_end && out_start < end
+                                });
+                                if output_overlaps {
+                                    let (data, weight, bias) = {
+                                        let arena_data = arena.data_mut();
+                                        let copy = |slice: BufferSlice, label: &str| {
+                                            try_copy_slice(
+                                                bytemuck::cast_slice::<_, f32>(
+                                                    &arena_data
+                                                        [slice.offset..slice.offset + slice.size],
+                                                ),
+                                                label,
+                                            )
+                                        };
+                                        (
+                                            copy(data_slice, "layer norm data")?,
+                                            copy(weight_slice, "layer norm weight")?,
+                                            copy(bias_slice, "layer norm bias")?,
+                                        )
+                                    };
+                                    let output = unsafe {
+                                        arena.view_f32_mut(out_start, out_end - out_start)
+                                    };
+                                    norm_layernorm_f32(&data, output, row_size, eps);
+                                    for (index, value) in output.iter_mut().enumerate() {
+                                        let column = index % row_size;
+                                        *value = *value * weight[column] + bias[column];
+                                    }
+                                } else {
+                                    arena::with_nary_f32_slices(
+                                        arena,
+                                        input_slices,
+                                        output_slice,
+                                        |inputs, out_f32| {
+                                            norm_layernorm_f32(inputs[0], out_f32, row_size, eps);
+                                            for (index, output) in out_f32.iter_mut().enumerate() {
+                                                let column = index % row_size;
+                                                *output =
+                                                    *output * inputs[1][column] + inputs[2][column];
+                                            }
+                                        },
+                                    );
+                                }
                             }
                         }
                         "div_relu_f32" => {
