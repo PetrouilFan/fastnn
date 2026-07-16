@@ -108,6 +108,34 @@ fn run_malformed_dispatch() {
         .dispatch(&quantized_conv_plan, &arena, &ShapeEnv::new())
         .is_err());
 
+    let quantized_i8_conv_plan = ExecutablePlan {
+        instructions: vec![Instruction::CallKernel {
+            kernel_name: "conv2d_i4_i8".into(),
+            input_slices: vec![BufferSlice::new(0, 9), BufferSlice::new(12, 4)],
+            output_slice: BufferSlice::new(16, 4),
+            secondary_output_slice: None,
+            params: vec![1, 0, 1, 2, 2, 1, 1, 1, 1],
+            param_dims: None,
+            node_id: None,
+            weight_meta: Some(Arc::new(fastnn::backend::QuantizedWeightMeta {
+                bit_width: 4,
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+                shape: vec![1, 1],
+                quant_block_size: 0,
+                codebooks: vec![],
+            })),
+        }],
+        arena_size: 20,
+        levels: vec![0],
+    };
+    let arena = backend
+        .try_allocate_arena(quantized_i8_conv_plan.arena_size)
+        .expect("small quantized i8 helper arena should allocate");
+    assert!(backend
+        .dispatch(&quantized_i8_conv_plan, &arena, &ShapeEnv::new())
+        .is_err());
+
     let builder = GraphBuilder::new();
     let input = builder.input(&[2, 2], IrDType::F32);
     let output = builder.softmax(&input, 1);

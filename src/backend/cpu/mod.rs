@@ -5108,6 +5108,201 @@ impl Backend for CpuBackend {
                         "conv2d_i4_i8" | "conv2d_i4_i8_relu" | "conv2d_i4_i8_gelu"
                         | "conv2d_i4_i8_silu" | "conv2d_i8_i8" | "conv2d_i8_i8_relu"
                         | "conv2d_i8_i8_gelu" | "conv2d_i8_i8_silu" => {
+                            if !(2..=3).contains(&input_slices.len()) {
+                                return Err(BackendError::Dispatch(format!(
+                                    "conv2d_i4_i8/u8_i8: expected 2 or 3 inputs, received {}",
+                                    input_slices.len()
+                                )));
+                            }
+                            if params.len() < 9 {
+                                return Err(BackendError::Dispatch("conv2d_i4_i8/u8_i8: expected at least 9 params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                            }
+                            let stride = params[0];
+                            let padding = params[1];
+                            let dilation = params[2];
+                            let groups = params[3];
+                            let input_c = params[4];
+                            let input_h = params[5];
+                            let input_w = params[6];
+                            let kernel_h = params[7];
+                            let kernel_w = params[8];
+                            if stride == 0
+                                || dilation == 0
+                                || groups == 0
+                                || input_c == 0
+                                || input_h == 0
+                                || input_w == 0
+                                || kernel_h == 0
+                                || kernel_w == 0
+                                || !input_c.is_multiple_of(groups)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: invalid stride, dilation, groups, channels, spatial dimensions, or kernel dimensions".into(),
+                                ));
+                            }
+                            let meta = weight_meta.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: missing weight_meta".into(),
+                                )
+                            })?;
+                            if meta.shape.len() < 2 || meta.shape[0] == 0 {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: weight shape must contain output and contraction dimensions".into(),
+                                ));
+                            }
+                            let output_channels = meta.shape[0];
+                            if !output_channels.is_multiple_of(groups) {
+                                return Err(BackendError::Dispatch(format!(
+                                    "conv2d_i4_i8/u8_i8: {output_channels} output channels are not divisible by {groups} groups"
+                                )));
+                            }
+                            let channels_per_group = input_c / groups;
+                            let expected_inner = channels_per_group
+                                .checked_mul(kernel_h)
+                                .and_then(|value| value.checked_mul(kernel_w))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: weight contraction geometry overflows"
+                                            .into(),
+                                    )
+                                })?;
+                            let metadata_inner = meta.shape[1..]
+                                .iter()
+                                .try_fold(1usize, |product, &dimension| {
+                                    product.checked_mul(dimension)
+                                })
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: weight shape product overflows".into(),
+                                    )
+                                })?;
+                            if metadata_inner != expected_inner {
+                                return Err(BackendError::Dispatch(format!(
+                                    "conv2d_i4_i8/u8_i8: weight contraction dimension {metadata_inner} does not match expected {expected_inner}"
+                                )));
+                            }
+                            let packed_items = if meta.bit_width == 4 {
+                                I4x8::ITEMS
+                            } else {
+                                I8x4::ITEMS
+                            };
+                            let expected_weight_bytes = output_channels
+                                .checked_mul(metadata_inner.div_ceil(packed_items))
+                                .and_then(|words| words.checked_mul(std::mem::size_of::<u32>()))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: packed weight size overflows".into(),
+                                    )
+                                })?;
+                            let activation = &input_slices[0];
+                            let weights = &input_slices[1];
+                            let bias = input_slices.get(2);
+                            if activation.size < 8 || weights.size < expected_weight_bytes {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: activation or packed weight storage is truncated"
+                                        .into(),
+                                ));
+                            }
+                            if !weights.offset.is_multiple_of(std::mem::align_of::<u32>())
+                                || !weights.size.is_multiple_of(std::mem::size_of::<u32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || bias.is_some_and(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                })
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: packed weights, bias, or output storage has invalid alignment or scalar extent".into(),
+                                ));
+                            }
+                            let output_end = output_slice.offset + output_slice.size;
+                            if input_slices.iter().any(|slice| {
+                                arena::ranges_overlap(
+                                    output_slice.offset,
+                                    output_end,
+                                    slice.offset,
+                                    slice.offset + slice.size,
+                                )
+                            }) {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: output storage overlaps an input".into(),
+                                ));
+                            }
+                            let image_size = input_c
+                                .checked_mul(input_h)
+                                .and_then(|value| value.checked_mul(input_w))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: activation shape overflows".into(),
+                                    )
+                                })?;
+                            let activation_elements = activation.size - 8;
+                            if !activation_elements.is_multiple_of(image_size) {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4_i8/u8_i8: activation payload does not contain complete images".into(),
+                                ));
+                            }
+                            let batch = activation_elements / image_size;
+                            let checked_output_dimension =
+                                |input: usize, kernel: usize| -> Result<usize, BackendError> {
+                                    let effective_kernel = dilation
+                                        .checked_mul(kernel - 1)
+                                        .and_then(|value| value.checked_add(1))
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "conv2d_i4_i8/u8_i8: effective kernel overflows"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    let padded_input = padding
+                                        .checked_mul(2)
+                                        .and_then(|value| input.checked_add(value))
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "conv2d_i4_i8/u8_i8: padded input overflows".into(),
+                                            )
+                                        })?;
+                                    if padded_input < effective_kernel {
+                                        return Err(BackendError::Dispatch(
+                                            "conv2d_i4_i8/u8_i8: effective kernel exceeds padded input"
+                                                .into(),
+                                        ));
+                                    }
+                                    Ok((padded_input - effective_kernel) / stride + 1)
+                                };
+                            let output_h = checked_output_dimension(input_h, kernel_h)?;
+                            let output_w = checked_output_dimension(input_w, kernel_w)?;
+                            let expected_output_bytes = batch
+                                .checked_mul(output_channels)
+                                .and_then(|value| value.checked_mul(output_h))
+                                .and_then(|value| value.checked_mul(output_w))
+                                .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: output size overflows".into(),
+                                    )
+                                })?;
+                            if output_slice.size != expected_output_bytes {
+                                return Err(BackendError::Dispatch(format!(
+                                    "conv2d_i4_i8/u8_i8: output has {} bytes, expected {expected_output_bytes}",
+                                    output_slice.size
+                                )));
+                            }
+                            let expected_bias_bytes = output_channels
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4_i8/u8_i8: bias size overflows".into(),
+                                    )
+                                })?;
+                            if bias.is_some_and(|slice| slice.size != expected_bias_bytes) {
+                                return Err(BackendError::Dispatch(format!(
+                                    "conv2d_i4_i8/u8_i8: bias must contain {output_channels} f32 values"
+                                )));
+                            }
                             if input_slices.len() >= 2 {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];

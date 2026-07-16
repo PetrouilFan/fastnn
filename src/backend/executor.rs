@@ -4042,6 +4042,38 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn quantized_i8_activation_conv_rejects_invalid_group_geometry() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv2d_i4_i8".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 9),
+                    crate::backend::BufferSlice::new(12, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(16, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 1, 2, 2, 1, 1, 1, 1],
+                param_dims: None,
+                node_id: None,
+                weight_meta: Some(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                    bit_width: 4,
+                    scales: vec![1.0],
+                    dequant_offsets: vec![0.0],
+                    shape: vec![1, 1],
+                    quant_block_size: 0,
+                    codebooks: vec![],
+                })),
+            }],
+            arena_size: 20,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        arena.data_mut()[..4].copy_from_slice(&1.0f32.to_le_bytes());
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
     fn checked_storage_sizes_reject_overflow() {
         assert!(IrDType::F32.try_packed_byte_size(usize::MAX).is_none());
         assert!(checked_execution_storage_size(&IrDType::I8, usize::MAX).is_err());
