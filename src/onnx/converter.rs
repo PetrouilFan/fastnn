@@ -757,15 +757,68 @@ impl<'a> OnnxConverter<'a> {
                 if let Some(shape_tensor) = self.params.get(&node.inputs[0]) {
                     let shape_data: Vec<f32> =
                         shape_tensor.to_numpy().map_err(|error| error.to_string())?;
-                    let output_shape: Vec<u64> = shape_data.iter().map(|&v| v as u64).collect();
+                    let mut output_shape = Vec::with_capacity(shape_data.len());
+                    for &dimension in &shape_data {
+                        if !dimension.is_finite()
+                            || dimension < 0.0
+                            || dimension.fract() != 0.0
+                            || dimension > u64::MAX as f32
+                        {
+                            return Err(format!(
+                                "ConstantOfShape node '{}' has invalid dimension {dimension}",
+                                node.name
+                            ));
+                        }
+                        output_shape.push(dimension as u64);
+                    }
                     let fill_value: f32 = node
                         .attrs
                         .get("value")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0.0);
-                    let data = fill_value.to_le_bytes().to_vec();
-                    let numel: usize = output_shape.iter().map(|&d| d as usize).product();
-                    let mut full_data = Vec::with_capacity(numel * 4);
+                    if !fill_value.is_finite() {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' has non-finite fill value",
+                            node.name
+                        ));
+                    }
+                    let numel = output_shape
+                        .iter()
+                        .try_fold(1usize, |product, &dimension| {
+                            let dimension = usize::try_from(dimension).map_err(|_| {
+                                format!(
+                                    "ConstantOfShape node '{}' dimension does not fit usize",
+                                    node.name
+                                )
+                            })?;
+                            product.checked_mul(dimension).ok_or_else(|| {
+                                format!(
+                                    "ConstantOfShape node '{}' element count overflows",
+                                    node.name
+                                )
+                            })
+                        })?;
+                    let byte_count =
+                        numel
+                            .checked_mul(std::mem::size_of::<f32>())
+                            .ok_or_else(|| {
+                                format!("ConstantOfShape node '{}' byte count overflows", node.name)
+                            })?;
+                    const MAX_CONSTANT_OF_SHAPE_BYTES: usize = 256 * 1024 * 1024;
+                    if byte_count > MAX_CONSTANT_OF_SHAPE_BYTES {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' requests {byte_count} bytes, exceeding the {MAX_CONSTANT_OF_SHAPE_BYTES}-byte import budget",
+                            node.name
+                        ));
+                    }
+                    let data = fill_value.to_le_bytes();
+                    let mut full_data = Vec::new();
+                    full_data.try_reserve_exact(byte_count).map_err(|error| {
+                        format!(
+                            "ConstantOfShape node '{}' cannot allocate {byte_count} bytes: {error}",
+                            node.name
+                        )
+                    })?;
                     for _ in 0..numel {
                         full_data.extend_from_slice(&data);
                     }

@@ -230,3 +230,28 @@ def test_aot_executor_rejects_missing_node_inputs(op_type, inputs, minimum):
             ["y"],
             input_shapes={"x": [1]},
         )
+
+
+@pytest.mark.parametrize(
+    ("dimension", "message"),
+    [
+        (-1.0, "invalid dimension"),
+        (float("nan"), "invalid dimension"),
+        (1.5, "invalid dimension"),
+        (1_000_000_000.0, "import budget"),
+    ],
+)
+def test_constant_of_shape_rejects_hostile_dimensions(dimension, message):
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "constant_shape",
+            "op_type": "ConstantOfShape",
+            "inputs": "shape",
+            "outputs": "y",
+        }
+    ]
+    shape = fnn.tensor(np.asarray([dimension], dtype=np.float32), [1])
+    with pytest.raises(RuntimeError, match=message):
+        fnn.AotExecutor(nodes, {"shape": shape}, [], ["y"])
