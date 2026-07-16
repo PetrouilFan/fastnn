@@ -1910,7 +1910,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&y], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // The prepared plan must validate against the live plan before
         // the executor will accept it.
         validate_prepared_against_plan(&prepared, &plan)
@@ -1961,7 +1962,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&y], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let input = f32_data(&[-2.0, -1.0, 0.5, 1.5]);
         let mut executor = GraphExecutor::new(CpuBackend);
@@ -2032,7 +2034,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&c], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
         let b_data = f32_data(&[10.0, 20.0, 30.0, 40.0]);
@@ -2059,7 +2062,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&y], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // N = 2 → input bytes = 2*4*4 = 32
         let input = f32_data(&[-1.0, -2.0, -3.0, -4.0, 5.0, 6.0, 7.0, 8.0]);

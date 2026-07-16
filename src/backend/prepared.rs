@@ -1,4 +1,4 @@
-use crate::backend::{BufferSlice, ExecutablePlan, Instruction};
+use crate::backend::{BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::ir::NodeId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1087,7 +1087,10 @@ pub fn validate_prepared_against_plan(
 /// arena is created internally and attached via
 /// [`PreparedExecutablePlan::register_constant_arena`]; both the arena
 /// and the bindings are metadata-only.
-pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan {
+pub fn prepare_executable_plan(
+    plan: &ExecutablePlan,
+) -> Result<PreparedExecutablePlan, BackendError> {
+    plan.validate()?;
     let mut arena = PreparedConstantArena::new();
     let bindings = detect_static_weights(plan, &mut arena);
 
@@ -1118,7 +1121,7 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         })
         .collect();
 
-    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions);
+    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions)?;
 
     let mut prepared = PreparedExecutablePlan {
         instructions,
@@ -1127,64 +1130,142 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         constant_arena: None,
     };
     prepared.register_constant_arena(arena);
-    prepared
+    Ok(prepared)
 }
 
-fn should_materialize_transposed_fp32_conv(conv: &PreparedConv2d) -> bool {
+fn prepared_conv_contraction(conv: &PreparedConv2d) -> Result<usize, BackendError> {
+    let groups = conv.groups.max(1);
+    let channels_per_group = conv.c.checked_div(groups).ok_or_else(|| {
+        BackendError::Dispatch(format!(
+            "prepared Conv instruction {} has invalid group geometry",
+            conv.instruction_index
+        ))
+    })?;
+    channels_per_group
+        .checked_mul(conv.kh)
+        .and_then(|value| value.checked_mul(conv.kw))
+        .ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "prepared Conv instruction {} contraction size overflows",
+                conv.instruction_index
+            ))
+        })
+}
+
+fn should_materialize_transposed_fp32_conv(conv: &PreparedConv2d) -> Result<bool, BackendError> {
     let m = conv.f;
-    let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
-    conv.packed_weight.is_some()
+    let k = prepared_conv_contraction(conv)?;
+    Ok(conv.packed_weight.is_some()
         && conv.groups == 1
         && conv.dilation == 1
         && conv.kh == 3
         && conv.kw == 3
         && m == 64
         && k == 576
-        && matches!(conv.activation, PreparedActivation::Silu)
+        && matches!(conv.activation, PreparedActivation::Silu))
 }
 
-fn transpose_row_major_mk_to_km(data: &[f32], m: usize, k: usize) -> Vec<f32> {
-    let mut out = vec![0.0; data.len()];
-    for i in 0..m {
-        for j in 0..k {
-            out[j * m + i] = data[i * k + j];
+fn transpose_row_major_mk_to_km(
+    data: &[f32],
+    m: usize,
+    k: usize,
+) -> Result<Vec<f32>, BackendError> {
+    let expected_len = m.checked_mul(k).ok_or_else(|| {
+        BackendError::Dispatch("prepared Conv transpose element count overflows".into())
+    })?;
+    if data.len() != expected_len {
+        return Err(BackendError::Dispatch(format!(
+            "prepared Conv transpose source has {} values, expected {expected_len}",
+            data.len()
+        )));
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(expected_len).map_err(|error| {
+        BackendError::Dispatch(format!(
+            "prepared Conv transpose allocation of {expected_len} values failed: {error}"
+        ))
+    })?;
+    output.resize(expected_len, 0.0);
+    for row in 0..m {
+        let source_row = row.checked_mul(k).ok_or_else(|| {
+            BackendError::Dispatch("prepared Conv transpose source index overflows".into())
+        })?;
+        for column in 0..k {
+            let source_index = source_row.checked_add(column).ok_or_else(|| {
+                BackendError::Dispatch("prepared Conv transpose source index overflows".into())
+            })?;
+            let destination_index = column
+                .checked_mul(m)
+                .and_then(|value| value.checked_add(row))
+                .ok_or_else(|| {
+                    BackendError::Dispatch(
+                        "prepared Conv transpose destination index overflows".into(),
+                    )
+                })?;
+            output[destination_index] = data[source_index];
         }
     }
-    out
+    Ok(output)
 }
 
 fn materialize_transposed_fp32_conv_weights(
     arena: &mut PreparedConstantArena,
     instructions: &mut [PreparedInstruction],
-) {
-    let candidates: Vec<(usize, PackedWeightId, usize, usize, usize)> = instructions
-        .iter()
-        .enumerate()
-        .filter_map(|(prepared_index, inst)| match inst {
-            PreparedInstruction::Conv2d(conv) if should_materialize_transposed_fp32_conv(conv) => {
-                let id = conv.packed_weight?;
-                let m = conv.f;
-                let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
-                Some((prepared_index, id, m, k, conv.instruction_index))
-            }
-            _ => None,
-        })
-        .collect();
-
-    for (prepared_index, id, m, k, instruction_index) in candidates {
-        let Some(src) = arena.get(id) else {
+) -> Result<(), BackendError> {
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(instructions.len())
+        .map_err(|error| {
+            BackendError::Dispatch(format!(
+                "prepared Conv candidate allocation failed: {error}"
+            ))
+        })?;
+    for (prepared_index, instruction) in instructions.iter().enumerate() {
+        let PreparedInstruction::Conv2d(conv) = instruction else {
             continue;
         };
-        if src.len() != m * k {
+        if !should_materialize_transposed_fp32_conv(conv)? {
             continue;
         }
-        let transposed = transpose_row_major_mk_to_km(src, m, k);
+        let Some(id) = conv.packed_weight else {
+            continue;
+        };
+        candidates.push((
+            prepared_index,
+            id,
+            conv.f,
+            prepared_conv_contraction(conv)?,
+            conv.instruction_index,
+        ));
+    }
+
+    for (prepared_index, id, m, k, instruction_index) in candidates {
+        let Some(source) = arena.get(id) else {
+            continue;
+        };
+        let expected_len = m.checked_mul(k).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "prepared Conv instruction {instruction_index} payload size overflows"
+            ))
+        })?;
+        if source.len() != expected_len {
+            continue;
+        }
+        let transposed = transpose_row_major_mk_to_km(source, m, k)?;
+        let byte_len = transposed
+            .len()
+            .checked_mul(PackedWeightKind::Fp32.element_bytes())
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "prepared Conv instruction {instruction_index} byte size overflows"
+                ))
+            })?;
         let name = format!("conv_transposed_fp32_i{}", instruction_index);
         let transposed_id = arena.insert_store(
             name,
             PackedWeightKind::Fp32,
             transposed.len(),
-            transposed.len() * PackedWeightKind::Fp32.element_bytes(),
+            byte_len,
             PackedWeightStore::TransposedFp32 {
                 data: transposed,
                 m,
@@ -1195,6 +1276,7 @@ fn materialize_transposed_fp32_conv_weights(
             conv.transposed_weight = Some(transposed_id);
         }
     }
+    Ok(())
 }
 
 // ── PreparedInstruction helpers ──────────────────────────────
@@ -1777,9 +1859,38 @@ mod tests {
     // ── prepare_executable_plan ────────────────────────────────
 
     #[test]
+    fn prepared_conv_overflow_is_recoverable() {
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::WriteConst {
+                    dst: BufferSlice::new(0, 4),
+                    data: vec![0; 4],
+                },
+                Instruction::CallKernel {
+                    kernel_name: "conv2d_silu".into(),
+                    input_slices: vec![BufferSlice::new(4, 4), BufferSlice::new(0, 4)],
+                    output_slice: BufferSlice::new(8, 4),
+                    secondary_output_slice: None,
+                    params: vec![1, 0, 1, 1, usize::MAX, 1, 1, 3, 3],
+                    param_dims: None,
+                    node_id: Some(1),
+                    weight_meta: None,
+                },
+            ],
+            arena_size: 12,
+            levels: vec![0, 1],
+        };
+        let error =
+            prepare_executable_plan(&plan).expect_err("prepared Conv overflow must be recoverable");
+        assert!(error.to_string().contains("Conv"));
+        assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
     fn prepare_empty_plan() {
         let plan = empty_plan();
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert!(prepared.instructions.is_empty());
         assert_eq!(prepared.arena_size, 1024);
         assert_eq!(prepared.scratch_size, 0);
@@ -1801,7 +1912,8 @@ mod tests {
             arena_size: 2048,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.instructions.len(), 2);
         match &prepared.instructions[0] {
             PreparedInstruction::Generic { instruction_index } => {
@@ -1830,7 +1942,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.instructions.len(), 2);
         assert!(matches!(
             &prepared.instructions[0],
@@ -2425,9 +2538,10 @@ mod tests {
                 conv,
             ],
             arena_size: output_offset + f * h * w * 4,
-            levels: vec![],
+            levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_binding_count(), 1);
@@ -2495,10 +2609,11 @@ mod tests {
                 },
                 conv,
             ],
-            arena_size: 8192,
-            levels: vec![],
+            arena_size: 1_000_000,
+            levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 0);
         assert_eq!(prepared.transposed_fp32_conv_binding_count(), 0);
@@ -2521,7 +2636,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.len(), 3);
         let order = prepared.original_instruction_order();
         assert_eq!(order, vec![0, 1, 2]);
@@ -2539,7 +2655,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.len(), 2);
         // Conv2d at original index 0
         assert_eq!(prepared.instructions[0].instruction_index(), 0);
@@ -2572,7 +2689,8 @@ mod tests {
             arena_size: 1024,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let order = prepared.original_instruction_order();
         assert_eq!(order, vec![0, 1]);
     }
@@ -2593,7 +2711,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let generic_indices = prepared.generic_instruction_indices();
         // Only fill (index 1) and memcopy (index 2) are generic
         assert_eq!(generic_indices, vec![1, 2]);
@@ -2750,7 +2869,8 @@ mod tests {
 
     #[test]
     fn plan_holds_constant_arena() {
-        let mut prepared = prepare_executable_plan(&empty_plan());
+        let mut prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         // prepare_executable_plan always attaches an (initially empty)
         // arena so callers can introspect the static-weight bindings
         // without a follow-up registration.
@@ -2792,7 +2912,8 @@ mod tests {
 
     #[test]
     fn prepare_executable_plan_attaches_empty_arena_by_default() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         // The static-weight detection pass always populates an arena,
         // even when no Conv2d / MatMul was found. The arena is just
         // empty in that case.
@@ -2830,7 +2951,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // The conv at plan index 1 must carry a packed_weight binding.
         match &prepared.instructions[1] {
@@ -2879,7 +3001,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         match &prepared.instructions[1] {
             PreparedInstruction::MatMul(m) => {
@@ -2924,7 +3047,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         match &prepared.instructions[1] {
             PreparedInstruction::Conv2d(c) => {
@@ -2972,7 +3096,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1, 2],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let arena = prepared
             .constant_arena()
@@ -3023,7 +3148,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let arena = prepared
             .constant_arena()
@@ -3079,7 +3205,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let arena = prepared
             .constant_arena()
@@ -3136,7 +3263,8 @@ mod tests {
 
     #[test]
     fn static_weight_binding_count_empty_plan() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         assert_eq!(prepared.static_weight_binding_count(), 0);
     }
 
@@ -3160,7 +3288,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // The conv was promoted but never bound to a static weight.
         assert_eq!(prepared.static_weight_binding_count(), 0);
     }
@@ -3204,7 +3333,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 0, 1, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // Two weight bindings: the conv and the fused matmul.
         // Bias bindings are still metadata-only and not counted.
@@ -3298,7 +3428,8 @@ mod tests {
 
     #[test]
     fn constant_arena_entry_count_empty_plan_starts_at_zero() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         assert_eq!(prepared.constant_arena_entry_count(), 0);
     }
 
@@ -3321,10 +3452,11 @@ mod tests {
                 dst: BufferSlice::new(0, 4),
                 value: 0.0,
             }],
-            arena_size: 0,
+            arena_size: 4,
             levels: vec![0],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // No static weights were detected, so the auto-attached arena
         // stays empty.
         assert_eq!(prepared.constant_arena_entry_count(), 0);
@@ -3353,7 +3485,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // Two WriteConsts (weight + weight); the bias slot is dynamic
         // so it is NOT registered in the arena.
         assert_eq!(prepared.constant_arena_entry_count(), 2);
@@ -3363,7 +3496,8 @@ mod tests {
 
     #[test]
     fn constant_arena_total_bytes_empty_plan_starts_at_zero() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         assert_eq!(prepared.constant_arena_total_bytes(), 0);
     }
 
@@ -3402,7 +3536,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.constant_arena_total_bytes(), 32 + 24);
     }
 
@@ -3423,7 +3558,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let arena = prepared
             .constant_arena()
             .expect("plan should carry an arena");
@@ -3453,7 +3589,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         validate_prepared_against_plan(&prepared, &plan)
             .expect("consistent plan must validate cleanly");
     }
@@ -3465,11 +3602,13 @@ mod tests {
             arena_size: 4096,
             levels: vec![0],
         };
-        let mut wrong_arena = prepare_executable_plan(&plan);
+        let mut wrong_arena =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         wrong_arena.arena_size = plan.arena_size - 1;
         assert!(validate_prepared_against_plan(&wrong_arena, &plan).is_err());
 
-        let mut wrong_payload = prepare_executable_plan(&plan);
+        let mut wrong_payload =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let PreparedInstruction::Conv2d(conv) = &mut wrong_payload.instructions[0] else {
             panic!("expected prepared conv2d");
         };
@@ -3497,7 +3636,8 @@ mod tests {
             arena_size: 1024,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // Truncate the plan to a single instruction; the prepared plan
         // (still holding the full two-instruction order) must now

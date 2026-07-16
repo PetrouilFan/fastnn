@@ -1374,7 +1374,8 @@ impl AotExecutor {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan);
+        let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
         Ok(AotExecutor {
             plan,
@@ -1474,7 +1475,8 @@ impl AotExecutor {
             .executor
             .compile_with_plan_and_quantize(self.graph.clone(), None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan);
+        let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
         self.executor.invalidate_runtime_cache();
         self.plan = plan;
