@@ -618,21 +618,19 @@ pub unsafe fn pool_avg_f32_avx2(
 
 #[inline]
 pub fn reduce_sum_f32_scalar(input: &[f32], output: &mut [f32], group_size: usize, is_mean: bool) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
-        let cnt = (end - start) as f32;
+        let end = start + group_size;
         let mut sum = 0.0f32;
         for i in start..end {
             sum += input[i];
         }
         output[g] = if is_mean {
-            if cnt > 0.0 {
-                sum / cnt
-            } else {
-                0.0
-            }
+            sum / group_size as f32
         } else {
             sum
         };
@@ -649,11 +647,13 @@ pub unsafe fn reduce_sum_f32_avx2(
     group_size: usize,
     is_mean: bool,
 ) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
-        let cnt = (end - start) as f32;
+        let end = start + group_size;
         let mut i = start;
         let mut acc = _mm256_setzero_ps();
         while i + 8 <= end {
@@ -665,11 +665,7 @@ pub unsafe fn reduce_sum_f32_avx2(
             sum += input[j];
         }
         output[g] = if is_mean {
-            if cnt > 0.0 {
-                sum / cnt
-            } else {
-                0.0
-            }
+            sum / group_size as f32
         } else {
             sum
         };
@@ -680,10 +676,13 @@ pub unsafe fn reduce_sum_f32_avx2(
 
 #[inline]
 pub fn reduce_max_f32_scalar(input: &[f32], output: &mut [f32], group_size: usize) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
+        let end = start + group_size;
         let mut val = f32::NEG_INFINITY;
         for i in start..end {
             if input[i] > val {
@@ -699,10 +698,13 @@ pub fn reduce_max_f32_scalar(input: &[f32], output: &mut [f32], group_size: usiz
 // SAFETY: Same as reduce_sum_f32_avx2 — caller ensures valid, non-overlapping
 // slices with `input` sized at least `num_groups * group_size`.
 pub unsafe fn reduce_max_f32_avx2(input: &[f32], output: &mut [f32], group_size: usize) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
+        let end = start + group_size;
         let mut i = start;
         let mut vmax = _mm256_set1_ps(f32::NEG_INFINITY);
         while i + 8 <= end {
