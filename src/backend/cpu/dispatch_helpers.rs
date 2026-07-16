@@ -18,7 +18,8 @@ macro_rules! impl_simd_unary_wrapper {
             if microkernels::simd_avx2_available() {
                 return unsafe { $avx2(input, output) };
             }
-            let len = output.len().min(input.len());
+            debug_assert_eq!(input.len(), output.len());
+            let len = output.len();
             #[cfg(feature = "parallel")]
             if len >= 4096 {
                 use rayon::prelude::*;
@@ -48,8 +49,11 @@ macro_rules! impl_simd_binary_wrapper {
             {
                 return unsafe { $avx2(a, b, output) };
             }
+            debug_assert!(!a.is_empty() && !b.is_empty());
+            debug_assert!(a.len() == output.len() || output.len().is_multiple_of(a.len()));
+            debug_assert!(b.len() == output.len() || output.len().is_multiple_of(b.len()));
             #[cfg(feature = "parallel")]
-            let len = output.len().min(a.len().max(b.len()));
+            let len = output.len();
             #[cfg(feature = "parallel")]
             if len >= 4096 {
                 use rayon::prelude::*;
@@ -66,7 +70,9 @@ macro_rules! impl_simd_binary_wrapper {
                 }
             }
             #[cfg(not(feature = "parallel"))]
-            $scalar(a, b, output);
+            for i in 0..output.len() {
+                output[i] = $op(a[i % a.len()], b[i % b.len()]);
+            }
         }
     };
 }
@@ -79,8 +85,9 @@ macro_rules! impl_simd_scalar_wrapper {
             if microkernels::simd_avx2_available() {
                 return unsafe { $avx2(data, s, output) };
             }
+            debug_assert_eq!(data.len(), output.len());
             #[cfg(feature = "parallel")]
-            let len = output.len().min(data.len());
+            let len = output.len();
             #[cfg(feature = "parallel")]
             if len >= 4096 {
                 use rayon::prelude::*;
@@ -93,7 +100,9 @@ macro_rules! impl_simd_scalar_wrapper {
                 }
             }
             #[cfg(not(feature = "parallel"))]
-            $scalar(data, s, output);
+            for i in 0..output.len() {
+                output[i] = $op(data[i], s);
+            }
         }
     };
 }
@@ -194,8 +203,8 @@ pub(super) fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) };
     }
-    let len = output.len().min(input.len());
-    for i in 0..len {
+    debug_assert_eq!(input.len(), output.len());
+    for i in 0..output.len() {
         output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope);
     }
 }
@@ -206,8 +215,8 @@ pub(super) fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) };
     }
-    let len = output.len().min(input.len());
-    for i in 0..len {
+    debug_assert_eq!(input.len(), output.len());
+    for i in 0..output.len() {
         output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val);
     }
 }
