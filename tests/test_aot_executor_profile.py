@@ -182,3 +182,26 @@ def test_aot_executor_rejects_minimum_i64_input_dimension():
             ["y"],
             input_shapes={"x": [-(2**63), 4]},
         )
+
+
+def test_aot_executor_rejects_noncontiguous_input_without_panicking():
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "relu1",
+            "op_type": "Relu",
+            "inputs": "x",
+            "outputs": "y",
+        }
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [2, 2]},
+    )
+    noncontiguous = fnn.zeros([2, 2]).transpose(0, 1)
+    with pytest.raises(ValueError, match="cannot be passed to AOT execution"):
+        executor.forward({"x": noncontiguous})

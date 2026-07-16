@@ -1403,7 +1403,13 @@ impl AotExecutor {
                             name
                         ))
                     })
-                    .map(|t| t.inner.as_bytes())
+                    .and_then(|tensor| {
+                        tensor.inner.try_as_bytes().map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} cannot be passed to AOT execution: {error}"
+                            ))
+                        })
+                    })
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
@@ -1508,7 +1514,13 @@ impl AotExecutor {
                             name
                         ))
                     })
-                    .map(|t| t.inner.as_bytes())
+                    .and_then(|tensor| {
+                        tensor.inner.try_as_bytes().map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} cannot be passed to AOT execution: {error}"
+                            ))
+                        })
+                    })
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
@@ -1557,7 +1569,13 @@ impl AotExecutor {
                             name
                         ))
                     })
-                    .map(|t| t.inner.as_bytes())
+                    .and_then(|tensor| {
+                        tensor.inner.try_as_bytes().map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} cannot be passed to AOT execution: {error}"
+                            ))
+                        })
+                    })
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
@@ -1612,7 +1630,13 @@ impl AotExecutor {
                             name
                         ))
                     })
-                    .map(|t| t.inner.as_bytes())
+                    .and_then(|tensor| {
+                        tensor.inner.try_as_bytes().map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} cannot be passed to AOT execution: {error}"
+                            ))
+                        })
+                    })
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
@@ -1657,7 +1681,13 @@ impl AotExecutor {
                             name
                         ))
                     })
-                    .map(|t| t.inner.as_bytes())
+                    .and_then(|tensor| {
+                        tensor.inner.try_as_bytes().map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} cannot be passed to AOT execution: {error}"
+                            ))
+                        })
+                    })
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
@@ -1687,7 +1717,13 @@ impl AotExecutor {
                             name
                         ))
                     })
-                    .map(|t| t.inner.as_bytes())
+                    .and_then(|tensor| {
+                        tensor.inner.try_as_bytes().map_err(|error| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} cannot be passed to AOT execution: {error}"
+                            ))
+                        })
+                    })
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
