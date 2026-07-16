@@ -147,11 +147,7 @@ macro_rules! tls_pool {
             if v.capacity() < min_capacity {
                 v.reserve(min_capacity - v.len());
             }
-            // SAFETY: `v` was just reserved with sufficient capacity; `set_len` is
-            // safe because the elements are uninitialized but immediately overwritten.
-            unsafe {
-                v.set_len(min_capacity);
-            }
+            v.resize(min_capacity, Default::default());
             $scoped { inner: Some(v) }
         }
 
@@ -229,6 +225,26 @@ impl TlsVecPool {
     }
     pub(crate) fn alloc_zeroed(len: usize) -> ScopedVec {
         tls_alloc_zeroed_f32(len)
+    }
+}
+
+#[cfg(test)]
+mod tls_pool_tests {
+    use super::TlsVecPool;
+
+    #[test]
+    fn reused_vectors_resize_without_uninitialized_elements() {
+        {
+            let mut values = TlsVecPool::alloc(4);
+            values.fill(1.0);
+        }
+        {
+            let values = TlsVecPool::alloc(2);
+            assert_eq!(values.len(), 2);
+        }
+        let values = TlsVecPool::alloc(5);
+        assert_eq!(values.len(), 5);
+        assert_eq!(&values[2..], &[0.0, 0.0, 0.0]);
     }
 }
 
