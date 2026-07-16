@@ -388,7 +388,7 @@ mod tests {
             .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];
-        let input_w = vec![
+        let input_w: Vec<f32> = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let input_bytes_a: Vec<u8> = bytemuck::cast_slice(&input_a).to_vec();

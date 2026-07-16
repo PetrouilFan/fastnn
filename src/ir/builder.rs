@@ -2095,12 +2095,12 @@ impl GraphBuilder {
                 grad.tensor_type().shape
             )));
         }
-        if weight.tensor_type().dtype != grad.tensor_type().dtype {
+        let (w, bw) = self.unwrap_quantized_weight(weight);
+        if w.tensor_type().dtype != grad.tensor_type().dtype {
             return Err(FastnnError::dtype(
-                "SGD weight and gradient dtypes must match",
+                "SGD weight and gradient dtypes must match after dequantizing packed weights",
             ));
         }
-        let (w, bw) = self.unwrap_quantized_weight(weight);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("lr".to_string(), lr.to_string());
         attrs.insert("weight_decay".to_string(), weight_decay.to_string());

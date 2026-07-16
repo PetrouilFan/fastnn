@@ -116,6 +116,13 @@ fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> Result<usiz
         .ok_or_else(|| FastnnError::Internal("tensor storage size overflows".into()))
 }
 
+fn node_byte_size(
+    node: &crate::ir::IRNode,
+    shape_env: Option<&ShapeEnv>,
+) -> Result<usize, FastnnError> {
+    crate::compiler::plan::node_output_byte_size(node, shape_env).map_err(FastnnError::Internal)
+}
+
 /// Plan memory using max estimates (no ShapeEnv).  Equivalent to
 /// `plan_memory_with_env(graph, None)`.
 pub fn plan_memory(graph: &ComputeGraph) -> Result<MemoryPlan, FastnnError> {
@@ -179,8 +186,7 @@ pub fn plan_memory_with_env(
 
     crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
-        let logical_size =
-            tensor_byte_size(&node.output_type, shape_env).map_err(|e| e.to_string())?;
+        let logical_size = node_byte_size(node, shape_env).map_err(|e| e.to_string())?;
         let size = match &node.opcode {
             Opcode::Constant(TensorValue::Data { bytes, .. }) => logical_size.max(bytes.len()),
             Opcode::Constant(TensorValue::Float(_)) => logical_size.max(std::mem::size_of::<f32>()),

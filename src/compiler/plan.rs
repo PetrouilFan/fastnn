@@ -1,6 +1,71 @@
-use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::ir::{ComputeGraph, IRNode, NodeId, Opcode, ShapeEnv, TensorValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Exact bytes produced by a node at the executable boundary.
+///
+/// Most nodes use their tensor representation's storage size. Runtime weight
+/// quantization is different: its arena value is a self-describing wire payload
+/// containing geometry, affine metadata, and packed words. It must not inherit
+/// `PackedTensor`'s private SIMD over-allocation margin.
+pub(crate) fn node_output_byte_size(
+    node: &IRNode,
+    shape_env: Option<&ShapeEnv>,
+) -> Result<usize, String> {
+    if node.opcode != Opcode::Quantize {
+        return node
+            .output_type
+            .try_byte_size_with_env(shape_env)
+            .ok_or_else(|| format!("node {} output storage size overflows", node.id));
+    }
+
+    let mut dimensions = Vec::with_capacity(node.output_type.shape.len());
+    for dimension in &node.output_type.shape {
+        let value = match shape_env {
+            Some(env) => dimension
+                .evaluate_with_env(env)
+                .map_err(|error| format!("quantize node {} output shape: {error}", node.id))?,
+            None => dimension
+                .evaluate()
+                .ok_or_else(|| format!("quantize node {} has unresolved output shape", node.id))?,
+        };
+        dimensions.push(
+            usize::try_from(value)
+                .map_err(|_| format!("quantize node {} dimension does not fit usize", node.id))?,
+        );
+    }
+    let num_channels = dimensions.first().copied().unwrap_or(1);
+    if num_channels == 0 {
+        return Err(format!("quantize node {} has zero channels", node.id));
+    }
+    let numel = dimensions.iter().try_fold(1usize, |product, dimension| {
+        product
+            .checked_mul(*dimension)
+            .ok_or_else(|| format!("quantize node {} element count overflows", node.id))
+    })?;
+    let bit_width = node
+        .attrs
+        .get("bit_width")
+        .ok_or_else(|| format!("quantize node {} is missing bit_width", node.id))?
+        .parse::<usize>()
+        .map_err(|_| format!("quantize node {} has invalid bit_width", node.id))?;
+    if !matches!(bit_width, 4 | 8) {
+        return Err(format!(
+            "quantize node {} has unsupported bit_width {bit_width}",
+            node.id
+        ));
+    }
+    let items_per_word = 32 / bit_width;
+    let packed_bytes = numel
+        .div_ceil(items_per_word)
+        .checked_mul(4)
+        .ok_or_else(|| format!("quantize node {} packed size overflows", node.id))?;
+    num_channels
+        .checked_mul(8)
+        .and_then(|metadata| metadata.checked_add(8))
+        .and_then(|header| header.checked_add(packed_bytes))
+        .ok_or_else(|| format!("quantize node {} wire payload size overflows", node.id))
+}
 
 /// A single allocation slot in the arena
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,15 +166,7 @@ impl MemoryPlan {
         for (_, slot) in mp.slots.iter_mut() {
             let tight_size = match graph.get_node(slot.node_id) {
                 Some(node) => {
-                    let logical_size = node
-                        .output_type
-                        .try_byte_size_with_env(Some(shape_env))
-                        .ok_or_else(|| {
-                            format!(
-                                "memory slot for node {} storage size overflows",
-                                slot.node_id
-                            )
-                        })?;
+                    let logical_size = node_output_byte_size(node, Some(shape_env))?;
                     match &node.opcode {
                         Opcode::Constant(TensorValue::Data { bytes, .. }) => {
                             logical_size.max(bytes.len())

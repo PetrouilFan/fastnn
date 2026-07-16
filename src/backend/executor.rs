@@ -19,7 +19,9 @@ use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, Profile
 use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::MemoryPlan;
-use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
+#[cfg(test)]
+use crate::ir::IrDType;
+use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
 
@@ -61,29 +63,11 @@ fn read_execution_outputs<B: Backend>(
             .ok_or_else(|| {
                 BackendError::Dispatch(format!("no memory slot for output node {}", output_node_id))
             })?;
-        let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
-            let resolved_shape =
-                resolve_shape(&node.output_type.shape, shape_env).map_err(|e| {
-                    BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
-                })?;
-            let actual_numel = resolved_shape
-                .iter()
-                .try_fold(1usize, |count, &dimension| {
-                    let dimension = usize::try_from(dimension).map_err(|_| {
-                        BackendError::Dispatch(format!(
-                            "output node {output_node_id} dimension does not fit usize"
-                        ))
-                    })?;
-                    count.checked_mul(dimension).ok_or_else(|| {
-                        BackendError::Dispatch(format!(
-                            "output node {output_node_id} element count overflows"
-                        ))
-                    })
-                })?;
-            let computed = checked_execution_storage_size(&node.output_type.dtype, actual_numel)?;
-            (computed, resolved_shape)
+        let actual_size = if let Some(node) = graph.get_node(output_node_id) {
+            crate::compiler::plan::node_output_byte_size(node, Some(shape_env))
+                .map_err(BackendError::Dispatch)?
         } else {
-            (slot.size, vec![])
+            slot.size
         };
         if actual_size > slot.size {
             return Err(BackendError::Dispatch(format!(
@@ -108,6 +92,7 @@ fn read_execution_outputs<B: Backend>(
     Ok(outputs)
 }
 
+#[cfg(test)]
 fn checked_execution_storage_size(dtype: &IrDType, numel: usize) -> Result<usize, BackendError> {
     if matches!(dtype, IrDType::I8) {
         return numel.checked_add(8).ok_or_else(|| {
@@ -513,25 +498,15 @@ impl<B: Backend> GraphExecutor<B> {
                     )));
                 }
                 if let Some(node) = graph.get_node(node_id) {
-                    let shape =
-                        resolve_shape(&node.output_type.shape, &shape_env).map_err(|error| {
-                            BackendError::Dispatch(format!(
-                                "node {node_id}: failed to resolve output shape: {error}"
-                            ))
-                        })?;
-                    let numel = shape.iter().try_fold(1usize, |count, &dimension| {
-                        let dimension = usize::try_from(dimension).map_err(|_| {
-                            BackendError::Dispatch(format!(
-                                "node {node_id}: resolved dimension does not fit usize"
-                            ))
-                        })?;
-                        count.checked_mul(dimension).ok_or_else(|| {
-                            BackendError::Dispatch(format!(
-                                "node {node_id}: resolved element count overflows"
-                            ))
-                        })
-                    })?;
-                    let needed = checked_execution_storage_size(&node.output_type.dtype, numel)?;
+                    let needed = match &node.opcode {
+                        crate::ir::Opcode::Constant(crate::ir::TensorValue::Data {
+                            bytes, ..
+                        }) => crate::compiler::plan::node_output_byte_size(node, Some(&shape_env))
+                            .map_err(BackendError::Dispatch)?
+                            .max(bytes.len()),
+                        _ => crate::compiler::plan::node_output_byte_size(node, Some(&shape_env))
+                            .map_err(BackendError::Dispatch)?,
+                    };
                     if needed > slot.size {
                         return Err(BackendError::Dispatch(format!(
                             "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
@@ -1153,7 +1128,15 @@ pub fn tighten_slices(
                         if let Some(slot) = tightened_memory_plan.slots.get(&input_nid) {
                             if let Some(slice) = slice_iter.next() {
                                 slice.offset = slot.offset;
-                                slice.size = slot.size;
+                                slice.size = graph
+                                    .get_node(input_nid)
+                                    .and_then(|input| match &input.opcode {
+                                        Opcode::Constant(TensorValue::Data { bytes, .. }) => {
+                                            Some(bytes.len())
+                                        }
+                                        _ => None,
+                                    })
+                                    .unwrap_or(slot.size);
                             }
                         }
                     }
@@ -1187,18 +1170,6 @@ pub fn tighten_slices(
 
     plan.arena_size = tightened_memory_plan.total_size;
     Ok(())
-}
-
-/// Resolve a shape to concrete values using a runtime ShapeEnv.
-/// Returns an error if any symbolic dimension cannot be resolved.
-fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Result<Vec<u64>, String> {
-    shape
-        .iter()
-        .map(|d| {
-            d.evaluate_with_env(env)
-                .map_err(|e| format!("resolve_shape: {e}"))
-        })
-        .collect()
 }
 
 /// Lenient shape resolution: unbound Symbol dims are replaced with

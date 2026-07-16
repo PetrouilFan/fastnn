@@ -567,10 +567,18 @@ impl Backend for CpuBackend {
                 .inputs
                 .iter()
                 .filter_map(|&input_id| {
-                    memory_plan
-                        .slots
-                        .get(&input_id)
-                        .map(|slot| BufferSlice::new(slot.offset, slot.size))
+                    memory_plan.slots.get(&input_id).map(|slot| {
+                        let size = graph
+                            .get_node(input_id)
+                            .and_then(|input| match &input.opcode {
+                                Opcode::Constant(TensorValue::Data { bytes, .. }) => {
+                                    Some(bytes.len())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(slot.size);
+                        BufferSlice::new(slot.offset, size)
+                    })
                 })
                 .collect();
 
@@ -2609,6 +2617,8 @@ impl Backend for CpuBackend {
                         for &zp in &cached_zeros {
                             params.push(zp.to_bits() as usize);
                         }
+                    } else {
+                        params.push(0); // flag: derive affine metadata from the runtime input
                     }
 
                     instructions.push(Instruction::CallKernel {
@@ -2685,17 +2695,24 @@ impl Backend for CpuBackend {
                             "dequantize node {node_id} scale and offset counts differ"
                         )));
                     }
-                    let has_metadata = !scales.is_empty();
-                    let format_flag: usize = usize::from(has_metadata);
+                    // Runtime Quantize produces a self-describing payload with geometry
+                    // and affine metadata in its header. Static packed values carry
+                    // their affine metadata in the IR and contain packed words only.
+                    let has_metadata = input_node.opcode != Opcode::Quantize && !scales.is_empty();
+                    // 0 = self-describing runtime payload, 2 = static
+                    // PackedTensor words followed by its explicit 64-byte SIMD margin.
+                    let format_flag: usize = if has_metadata { 2 } else { 0 };
                     // [numel, format, bit_width, channels, scales..., offsets...]
                     let mut params = vec![numel, format_flag, bit_width];
                     let num_channels = scales.len();
                     params.push(num_channels);
-                    for &scale in &scales {
-                        params.push(scale.to_bits() as usize);
-                    }
-                    for &offset in &dequant_offsets {
-                        params.push(offset.to_bits() as usize);
+                    if has_metadata {
+                        for &scale in &scales {
+                            params.push(scale.to_bits() as usize);
+                        }
+                        for &offset in &dequant_offsets {
+                            params.push(offset.to_bits() as usize);
+                        }
                     }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -9871,7 +9888,7 @@ impl Backend for CpuBackend {
                             let numel = params[0];
                             let format_flag = params[1];
                             let bit_width = params[2];
-                            if format_flag > 1 || !matches!(bit_width, 4 | 8) {
+                            if format_flag > 2 || !matches!(bit_width, 4 | 8) {
                                 return Err(BackendError::Dispatch(
                                     "dequantize_kernel: invalid format or bit width".into(),
                                 ));
@@ -9911,7 +9928,7 @@ impl Backend for CpuBackend {
                                     zero_points,
                                     data_offset,
                                     bit_width,
-                                ) = if format_flag == 1 {
+                                ) = if matches!(format_flag, 1 | 2) {
                                     // Metadata-based: scales/zero_points passed as params
                                     let num_channels = params[3];
                                     let expected_params = num_channels
@@ -10062,14 +10079,27 @@ impl Backend for CpuBackend {
                                     ));
                                 }
                                 let items_per_word = 32 / bit_width;
-                                let packed_words_required = numel
-                                    .checked_add(items_per_word - 1)
-                                    .map(|value| value / items_per_word)
-                                    .ok_or_else(|| {
-                                        BackendError::Dispatch(
-                                            "dequantize_kernel: packed word count overflows".into(),
-                                        )
-                                    })?;
+                                let packed_words_required = if format_flag == 2 {
+                                    num_elems_per_channel
+                                        .div_ceil(items_per_word)
+                                        .checked_mul(num_channels)
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "dequantize_kernel: row-packed word count overflows"
+                                                    .into(),
+                                            )
+                                        })?
+                                } else {
+                                    numel
+                                        .checked_add(items_per_word - 1)
+                                        .map(|value| value / items_per_word)
+                                        .ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "dequantize_kernel: packed word count overflows"
+                                                    .into(),
+                                            )
+                                        })?
+                                };
                                 let packed_bytes_required =
                                     packed_words_required.checked_mul(4).ok_or_else(|| {
                                         BackendError::Dispatch(
@@ -10084,7 +10114,16 @@ impl Backend for CpuBackend {
                                                 .into(),
                                         )
                                     })?;
-                                if packed_end != in_data.len() {
+                                let expected_input_end = if format_flag == 2 {
+                                    packed_end.checked_add(64).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "dequantize_kernel: SIMD margin range overflows".into(),
+                                        )
+                                    })?
+                                } else {
+                                    packed_end
+                                };
+                                if expected_input_end != in_data.len() {
                                     return Err(BackendError::Dispatch(
                                         "dequantize_kernel: packed payload size is not exact"
                                             .into(),
@@ -10098,8 +10137,18 @@ impl Backend for CpuBackend {
                                 };
                                 for i in 0..numel {
                                     let ch = i / num_elems_per_channel;
-                                    let word_idx = i / items_per_word;
-                                    let shift = (i % items_per_word) * bit_width;
+                                    let within_channel = i % num_elems_per_channel;
+                                    let word_idx = if format_flag == 2 {
+                                        ch * num_elems_per_channel.div_ceil(items_per_word)
+                                            + within_channel / items_per_word
+                                    } else {
+                                        i / items_per_word
+                                    };
+                                    let shift = if format_flag == 2 {
+                                        (within_channel % items_per_word) * bit_width
+                                    } else {
+                                        (i % items_per_word) * bit_width
+                                    };
                                     let word_start = data_offset + word_idx * 4;
                                     let word = u32::from_le_bytes([
                                         in_data[word_start],

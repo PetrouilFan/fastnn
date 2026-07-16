@@ -1112,18 +1112,6 @@ mod tests {
         let (mut plan, memory_plan, compiled_graph) = executor
             .compile_with_plan_and_quantize(graph, Some(4), None)
             .expect("compile with quantization should succeed");
-        // Debug: print output slot size for quantized weight
-        let q_node = compiled_graph
-            .nodes
-            .iter()
-            .find(|n| matches!(n.opcode, Opcode::Quantize))
-            .unwrap();
-        let q_slot = memory_plan.slots.get(&q_node.id);
-        eprintln!(
-            "Quantize node {} output type: {:?}, slot: {:?}",
-            q_node.id, q_node.output_type, q_slot
-        );
-
         let results = executor
             .execute(
                 &compiled_graph,
