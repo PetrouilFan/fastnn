@@ -3370,7 +3370,7 @@ impl Backend for CpuBackend {
                     }
                 }
             }
-            instruction_levels.push(level);
+            instruction_levels.resize(instructions.len(), level);
         }
 
         Ok(ExecutablePlan {

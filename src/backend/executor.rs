@@ -458,21 +458,22 @@ impl<B: Backend> GraphExecutor<B> {
                 // Cache for static-shape models so subsequent calls
                 // skip the entire preamble.
                 if graph.has_static_shapes() {
-                    let filtered_instructions: Vec<Instruction> = plan
+                    let (filtered_instructions, filtered_levels): (Vec<_>, Vec<_>) = plan
                         .instructions
                         .iter()
-                        .filter(|instr| {
+                        .zip(&plan.levels)
+                        .filter(|(instruction, _)| {
                             !matches!(
-                                instr,
+                                instruction,
                                 Instruction::WriteConst { .. } | Instruction::Fill { .. }
                             )
                         })
-                        .cloned()
-                        .collect();
+                        .map(|(instruction, level)| (instruction.clone(), *level))
+                        .unzip();
                     let filtered_plan = ExecutablePlan {
                         instructions: filtered_instructions,
                         arena_size: plan.arena_size,
-                        levels: plan.levels.clone(),
+                        levels: filtered_levels,
                     };
                     self.static_shape_cache = Some(StaticShapeCache {
                         tightened_memory_plan: tightened_memory_plan.clone(),

@@ -188,6 +188,30 @@ pub struct ProfileEntry {
     pub elapsed_ns: u128,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PlanResourceLimits {
+    pub max_arena_bytes: usize,
+    pub max_instructions: usize,
+    pub max_inputs_per_instruction: usize,
+    pub max_total_params: usize,
+    pub max_total_constant_bytes: usize,
+    pub max_total_quant_metadata: usize,
+}
+
+impl Default for PlanResourceLimits {
+    fn default() -> Self {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        Self {
+            max_arena_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
+            max_instructions: 1_000_000,
+            max_inputs_per_instruction: 1_024,
+            max_total_params: 16_000_000,
+            max_total_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_total_quant_metadata: 16_000_000,
+        }
+    }
+}
+
 impl ExecutablePlan {
     /// Save the plan to a binary file using bincode serialization.
     pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -205,6 +229,30 @@ impl ExecutablePlan {
     }
 
     pub fn validate(&self) -> Result<(), BackendError> {
+        self.validate_with_limits(&PlanResourceLimits::default())
+    }
+
+    pub fn validate_with_limits(&self, limits: &PlanResourceLimits) -> Result<(), BackendError> {
+        if self.instructions.len() != self.levels.len() {
+            return Err(BackendError::Dispatch(format!(
+                "executable plan has {} instructions but {} scheduling levels",
+                self.instructions.len(),
+                self.levels.len()
+            )));
+        }
+        if self.instructions.len() > limits.max_instructions {
+            return Err(BackendError::Dispatch(format!(
+                "executable plan has {} instructions, exceeding limit {}",
+                self.instructions.len(),
+                limits.max_instructions
+            )));
+        }
+        if self.arena_size > limits.max_arena_bytes {
+            return Err(BackendError::Dispatch(format!(
+                "executable plan arena requests {} bytes, exceeding limit {}",
+                self.arena_size, limits.max_arena_bytes
+            )));
+        }
         if self.levels.windows(2).any(|levels| levels[0] > levels[1]) {
             return Err(BackendError::Dispatch(
                 "executable plan scheduling levels are not monotonic".into(),
@@ -226,15 +274,35 @@ impl ExecutablePlan {
             Ok(())
         };
 
+        let mut total_params = 0usize;
+        let mut total_constant_bytes = 0usize;
+        let mut total_quant_metadata = 0usize;
         for (instruction_index, instruction) in self.instructions.iter().enumerate() {
             match instruction {
                 Instruction::CallKernel {
                     input_slices,
                     output_slice,
                     secondary_output_slice,
+                    params,
                     weight_meta,
                     ..
                 } => {
+                    if input_slices.len() > limits.max_inputs_per_instruction {
+                        return Err(BackendError::Dispatch(format!(
+                            "instruction {instruction_index} has {} inputs, exceeding limit {}",
+                            input_slices.len(),
+                            limits.max_inputs_per_instruction
+                        )));
+                    }
+                    total_params = total_params.checked_add(params.len()).ok_or_else(|| {
+                        BackendError::Dispatch("executable plan parameter count overflows".into())
+                    })?;
+                    if total_params > limits.max_total_params {
+                        return Err(BackendError::Dispatch(format!(
+                            "executable plan has {total_params} kernel parameters, exceeding limit {}",
+                            limits.max_total_params
+                        )));
+                    }
                     for (input_index, &slice) in input_slices.iter().enumerate() {
                         validate_slice(slice, instruction_index, &format!("input {input_index}"))?;
                     }
@@ -243,6 +311,35 @@ impl ExecutablePlan {
                         validate_slice(*slice, instruction_index, "secondary output")?;
                     }
                     if let Some(weight_meta) = weight_meta {
+                        let metadata_count =
+                            weight_meta
+                                .scales
+                                .len()
+                                .checked_add(weight_meta.dequant_offsets.len())
+                                .and_then(|count| count.checked_add(weight_meta.shape.len()))
+                                .and_then(|count| {
+                                    weight_meta.codebooks.len().checked_mul(16).and_then(
+                                        |codebook_values| count.checked_add(codebook_values),
+                                    )
+                                })
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "executable plan quantized metadata count overflows".into(),
+                                    )
+                                })?;
+                        total_quant_metadata = total_quant_metadata
+                            .checked_add(metadata_count)
+                            .ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "executable plan quantized metadata count overflows".into(),
+                                )
+                            })?;
+                        if total_quant_metadata > limits.max_total_quant_metadata {
+                            return Err(BackendError::Dispatch(format!(
+                                "executable plan has {total_quant_metadata} quantized metadata entries, exceeding limit {}",
+                                limits.max_total_quant_metadata
+                            )));
+                        }
                         weight_meta.validate(instruction_index)?;
                     }
                 }
@@ -267,6 +364,19 @@ impl ExecutablePlan {
                     }
                 }
                 Instruction::WriteConst { dst, data } => {
+                    total_constant_bytes = total_constant_bytes
+                        .checked_add(data.len())
+                        .ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "executable plan constant payload size overflows".into(),
+                            )
+                        })?;
+                    if total_constant_bytes > limits.max_total_constant_bytes {
+                        return Err(BackendError::Dispatch(format!(
+                            "executable plan has {total_constant_bytes} constant bytes, exceeding limit {}",
+                            limits.max_total_constant_bytes
+                        )));
+                    }
                     validate_slice(*dst, instruction_index, "constant destination")?;
                     if data.len() > dst.size {
                         return Err(BackendError::Dispatch(format!(
@@ -357,6 +467,33 @@ mod executable_plan_validation_tests {
             levels: vec![0],
         };
         assert!(mismatched_copy.validate().is_err());
+
+        let missing_level = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: BufferSlice::new(0, 4),
+                value: 0.0,
+            }],
+            arena_size: 4,
+            levels: vec![],
+        };
+        assert!(missing_level.validate().is_err());
+    }
+
+    #[test]
+    fn enforces_explicit_plan_resource_limits() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(0, 4),
+                data: vec![0; 4],
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let limits = PlanResourceLimits {
+            max_total_constant_bytes: 3,
+            ..PlanResourceLimits::default()
+        };
+        assert!(plan.validate_with_limits(&limits).is_err());
     }
 }
 
