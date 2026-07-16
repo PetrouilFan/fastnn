@@ -4441,11 +4441,6 @@ impl Backend for CpuBackend {
                                     let end = slice.offset + slice.size;
                                     slice.offset < out_end && out_start < end
                                 });
-                                if output_overlaps {
-                                    return Err(BackendError::Dispatch(
-                                        "norm_f32 batch inputs and output overlap".into(),
-                                    ));
-                                }
                                 {
                                     let data = arena.data_mut();
                                     let metadata_is_invalid = channel_slices.iter().any(|slice| {
@@ -4468,8 +4463,40 @@ impl Backend for CpuBackend {
                                         ));
                                     }
                                 }
+                                if output_overlaps {
+                                    let (data, weight, bias, running_mean, running_var) = {
+                                        let arena_data = arena.data_mut();
+                                        let copy = |slice: BufferSlice, label: &str| {
+                                            try_copy_slice(
+                                                bytemuck::cast_slice::<_, f32>(
+                                                    &arena_data
+                                                        [slice.offset..slice.offset + slice.size],
+                                                ),
+                                                label,
+                                            )
+                                        };
+                                        (
+                                            copy(input_slices[0], "batch norm data")?,
+                                            copy(input_slices[1], "batch norm weight")?,
+                                            copy(input_slices[2], "batch norm bias")?,
+                                            copy(input_slices[3], "batch norm running mean")?,
+                                            copy(input_slices[4], "batch norm running variance")?,
+                                        )
+                                    };
+                                    let output = unsafe {
+                                        arena.view_f32_mut(out_start, out_end - out_start)
+                                    };
+                                    dispatch_helpers::batch_norm_inference_f32(
+                                        &data,
+                                        &weight,
+                                        &bias,
+                                        &running_mean,
+                                        &running_var,
+                                        output,
+                                        eps,
+                                    );
                                 // Batch norm (evaluation mode): use running_mean and running_var
-                                if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] =
+                                } else if let [data_slice, weight_slice, bias_slice, mean_slice, var_slice] =
                                     &input_slices[..]
                                 {
                                     type F32Slices<'a> =
@@ -4507,36 +4534,15 @@ impl Backend for CpuBackend {
                                             &mut d[out_start..out_end],
                                         )
                                     };
-                                    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-                                    {
-                                        use crate::backend::cpu::microkernels::has_avx2;
-                                        if has_avx2() {
-                                            // SAFETY: AVX2 feature checked by has_avx2()
-                                            unsafe {
-                                                crate::backend::cpu::microkernels::batch_norm_inference_f32_avx2(
-                                                    data, weight, bias, running_mean, running_var,
-                                                    out_f32, eps,
-                                                );
-                                            }
-                                        } else {
-                                            crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                                data, weight, bias, running_mean, running_var,
-                                                out_f32, eps,
-                                            );
-                                        }
-                                    }
-                                    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-                                    {
-                                        crate::backend::cpu::microkernels::batch_norm_inference_f32(
-                                            data,
-                                            weight,
-                                            bias,
-                                            running_mean,
-                                            running_var,
-                                            out_f32,
-                                            eps,
-                                        );
-                                    }
+                                    dispatch_helpers::batch_norm_inference_f32(
+                                        data,
+                                        weight,
+                                        bias,
+                                        running_mean,
+                                        running_var,
+                                        out_f32,
+                                        eps,
+                                    );
                                 }
                             } else {
                                 if input_slices.len() != 3 {

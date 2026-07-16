@@ -10,6 +10,43 @@
 
 use super::microkernels;
 
+#[inline]
+pub(super) fn batch_norm_inference_f32(
+    data: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    running_mean: &[f32],
+    running_var: &[f32],
+    output: &mut [f32],
+    eps: f32,
+) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::has_avx2() {
+        // SAFETY: AVX2 support was checked, dispatch validated complete non-overlapping
+        // typed slices, and this wrapper receives matching input/output contracts.
+        return unsafe {
+            microkernels::batch_norm_inference_f32_avx2(
+                data,
+                weight,
+                bias,
+                running_mean,
+                running_var,
+                output,
+                eps,
+            )
+        };
+    }
+    microkernels::batch_norm_inference_f32(
+        data,
+        weight,
+        bias,
+        running_mean,
+        running_var,
+        output,
+        eps,
+    );
+}
+
 macro_rules! impl_simd_unary_wrapper {
     ($name:ident, $avx2:path, $scalar:path) => {
         #[inline]
