@@ -712,10 +712,8 @@ impl TensorType {
     pub fn numel(&self) -> Option<u64> {
         let mut total = 1u64;
         for dim in &self.shape {
-            match dim.evaluate() {
-                Some(v) => total = total.checked_mul(v)?,
-                None => return None,
-            }
+            let value = dim.evaluate()?;
+            total = total.checked_mul(value)?;
         }
         Some(total)
     }

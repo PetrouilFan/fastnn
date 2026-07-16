@@ -163,7 +163,7 @@ impl MemoryPlan {
     ) -> Result<MemoryPlan, String> {
         let mut mp = self.clone();
         let mut max_end = 0usize;
-        for (_, slot) in mp.slots.iter_mut() {
+        for slot in mp.slots.values_mut() {
             let tight_size = match graph.get_node(slot.node_id) {
                 Some(node) => {
                     let logical_size = node_output_byte_size(node, Some(shape_env))?;
@@ -183,7 +183,7 @@ impl MemoryPlan {
                 .ok_or_else(|| format!("memory slot for node {} range overflows", slot.node_id))?;
             max_end = max_end.max(slot_end);
         }
-        for (_, slot) in mp.secondary_slots.iter_mut() {
+        for slot in mp.secondary_slots.values_mut() {
             let tight_size = match graph
                 .get_node(slot.node_id)
                 .and_then(|node| node.secondary_output_type.as_ref())

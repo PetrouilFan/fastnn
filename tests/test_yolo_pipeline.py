@@ -477,7 +477,7 @@ class TestFullPipelineIntegration:
         )
         result, fnn_path = _run_pipeline(path, fnn_dir=tmp_model_dir)
 
-        assert len(result.get("output_shape", [])) > 0
+        assert len(result["graph"]["outputs"]) == 2
 
         from fastnn.io.graph_builder import build_model_from_fnn
         model = build_model_from_fnn(fnn_path)

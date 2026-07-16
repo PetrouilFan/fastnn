@@ -3581,8 +3581,8 @@ mod tests {
                 (g_val - 0.25).abs() < 1e-5,
                 "grad_a value {} not close to 0.25; grad_result[0]={:?} grad_result[1]={:?}",
                 g_val,
-                &grad_a,
-                &read_f32(&grad_result[1])
+                grad_a,
+                read_f32(&grad_result[1])
             );
         }
 
@@ -3594,8 +3594,8 @@ mod tests {
                 (g_val - 0.25).abs() < 1e-5,
                 "grad_b value {} not close to 0.25; grad_result[0]={:?} grad_result[1]={:?}",
                 g_val,
-                &read_f32(&grad_result[0]),
-                &grad_b
+                read_f32(&grad_result[0]),
+                grad_b
             );
         }
     }

@@ -605,12 +605,15 @@ pub fn try_prepare_conv2d(
         return None;
     }
 
-    // Conv2d params: [stride, padding, dilation, groups, c, h, w, kh, kw]
+    // Conv2d params begin with the stable lowering contract
+    // [stride, padding, dilation, groups, c, h, w, kh, kw]. Runtime shape
+    // tightening appends [n, f, h_out, w_out, spatial_size, col_w].
     let slice = params.as_slice();
-    if slice.len() != 9 {
+    if !matches!(slice.len(), 9 | 15) {
         return None;
     }
-    let [stride, padding, dilation, groups, c, h, w, kh, kw]: [usize; 9] = slice.try_into().ok()?;
+    let [stride, padding, dilation, groups, c, h, w, kh, kw]: [usize; 9] =
+        slice[..9].try_into().ok()?;
 
     if input_slices.len() < 2 {
         return None;
