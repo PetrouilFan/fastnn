@@ -7902,16 +7902,51 @@ impl Backend for CpuBackend {
                                     "adaptive_avg_pool2d: invalid geometry or f32 storage".into(),
                                 ));
                             }
-                            arena::with_unary_f32_slices(
-                                arena,
-                                input_slice,
-                                output_slice,
-                                |input, out_f32| {
-                                    microkernels::adaptive_avg_pool2d_f32_scalar(
-                                        input, out_f32, nc, h_in, w_in, out_h, out_w,
+                            let input_end = input_slice.offset + input_slice.size;
+                            let output_end = output_slice.offset + output_slice.size;
+                            if arena::ranges_overlap(
+                                input_slice.offset,
+                                input_end,
+                                output_slice.offset,
+                                output_end,
+                            ) {
+                                let input = {
+                                    let arena_data = arena.data_mut();
+                                    try_copy_slice(
+                                        bytemuck::cast_slice::<_, f32>(
+                                            &arena_data[input_slice.offset..input_end],
+                                        ),
+                                        "adaptive_avg_pool2d input",
+                                    )?
+                                };
+                                telemetry::record_arena_temp_copy(input_slice.size);
+                                let output = unsafe {
+                                    arena.view_f32_mut(output_slice.offset, output_slice.size)
+                                };
+                                microkernels::adaptive_avg_pool2d_f32_scalar(
+                                    &input, output, nc, h_in, w_in, out_h, out_w,
+                                );
+                            } else {
+                                let arena_data = arena.data_mut();
+                                // SAFETY: dispatch validated aligned complete f32 storage,
+                                // both ranges are in the arena, and they are disjoint.
+                                unsafe {
+                                    let input = std::slice::from_raw_parts(
+                                        arena_data.as_ptr().add(input_slice.offset).cast::<f32>(),
+                                        input_slice.size / scalar_bytes,
                                     );
-                                },
-                            );
+                                    let output = std::slice::from_raw_parts_mut(
+                                        arena_data
+                                            .as_mut_ptr()
+                                            .add(output_slice.offset)
+                                            .cast::<f32>(),
+                                        output_slice.size / scalar_bytes,
+                                    );
+                                    microkernels::adaptive_avg_pool2d_f32_scalar(
+                                        input, output, nc, h_in, w_in, out_h, out_w,
+                                    );
+                                }
+                            }
                         }
                         "repeat" => {
                             if input_slices.len() != 1 || params.is_empty() {
