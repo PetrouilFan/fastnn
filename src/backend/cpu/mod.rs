@@ -4352,10 +4352,11 @@ impl Backend for CpuBackend {
                             let num_rows = input_elements / axis_dim_size;
                             if let Some(input_slice) = input_slices.first() {
                                 let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                                arena::with_unary_f32_slices(
+                                try_with_unary_f32_slices(
                                     arena,
                                     *input_slice,
                                     output_slice,
+                                    "softmax input",
                                     |input, out_f32| {
                                         softmax_f32(
                                             input,
@@ -4365,7 +4366,7 @@ impl Backend for CpuBackend {
                                             num_rows,
                                         );
                                     },
-                                );
+                                )?;
                             }
                         }
                         "biasadd" => {

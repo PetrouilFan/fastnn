@@ -3279,6 +3279,35 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn softmax_supports_valid_in_place_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "softmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 8)],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        let values = bytemuck::cast_slice::<_, f32>(&output);
+        let expected_first = 1.0 / (1.0 + 1.0f32.exp());
+        assert!((values[0] - expected_first).abs() < 1e-6);
+        assert!((values[1] - (1.0 - expected_first)).abs() < 1e-6);
+    }
+
+    #[test]
     fn softmax_rejects_zero_stride() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
