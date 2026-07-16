@@ -3332,6 +3332,36 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn argmax_returns_indices_within_each_reduction_axis() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "argmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(24, 16),
+                secondary_output_slice: None,
+                params: vec![1, 3, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 40,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(40).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 5.0, 3.0, 9.0, 2.0, 4.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 24, 16).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, u64>(&output), &[1, 0]);
+    }
+
+    #[test]
     fn argmax_rejects_zero_reduction_dimension() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {

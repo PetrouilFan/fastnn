@@ -502,40 +502,27 @@ pub(super) fn softmax_f32(
 pub(super) fn argmax_f32(
     input: &[f32],
     output: &mut [u64],
-    axis: usize,
+    _axis: usize,
     dim_size: usize,
     inner: usize,
 ) {
-    if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
-        let max_idx = input
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u64)
-            .unwrap_or(0);
-        for v in output.iter_mut() {
-            *v = max_idx;
-        }
-    } else {
-        let outer = input.len() / (dim_size * inner);
-        for o in 0..outer {
-            for i in 0..inner {
-                let base = o * dim_size * inner + i;
-                let mut best_flat = base as u64;
-                let mut best_val = input[base];
-                for k in 1..dim_size {
-                    let flat_idx = base + k * inner;
-                    let val = input[flat_idx];
-                    if val > best_val {
-                        best_val = val;
-                        best_flat = flat_idx as u64;
-                    }
-                }
-                let out_idx = o * inner + i;
-                if out_idx < output.len() {
-                    output[out_idx] = best_flat;
+    debug_assert!(dim_size > 0 && inner > 0);
+    debug_assert!(input.len().is_multiple_of(dim_size * inner));
+    let outer = input.len() / (dim_size * inner);
+    debug_assert_eq!(output.len(), outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * dim_size * inner + i;
+            let mut best_index = 0usize;
+            let mut best_val = input[base];
+            for k in 1..dim_size {
+                let val = input[base + k * inner];
+                if val.total_cmp(&best_val).is_gt() {
+                    best_val = val;
+                    best_index = k;
                 }
             }
+            output[o * inner + i] = best_index as u64;
         }
     }
 }

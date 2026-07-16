@@ -7424,11 +7424,8 @@ impl Backend for CpuBackend {
                                         let src = bytemuck::cast_slice::<_, f32>(
                                             &d[input_slice.offset..input_end],
                                         );
-                                        let mut copy =
-                                            crate::backend::cpu::microkernels::TlsVecPool::alloc(
-                                                src.len(),
-                                            );
-                                        copy.copy_from_slice(src);
+                                        let copy =
+                                            try_copy_slice(src, "argmax input materialization")?;
                                         crate::backend::cpu::telemetry::record_arena_temp_copy(
                                             input_slice.size,
                                         );
