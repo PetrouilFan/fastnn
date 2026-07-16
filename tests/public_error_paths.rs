@@ -916,4 +916,23 @@ fn malformed_activation_attributes_fail_cpu_lowering() {
         .compile(&graph, &memory)
         .expect_err("out-of-range softmax axis must fail lowering");
     assert!(error.to_string().contains("axis"));
+
+    let builder = GraphBuilder::new();
+    let left = builder.input(&[1, 2], IrDType::F32);
+    let right = builder.input(&[1, 2], IrDType::F32);
+    let output = builder.concat(&[&left, &right], 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Concat))
+        .expect("concat node should exist")
+        .attrs
+        .insert("axis".into(), "9".into());
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("out-of-range concat axis must fail lowering");
+    assert!(error.to_string().contains("axis"));
 }

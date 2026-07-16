@@ -1396,27 +1396,50 @@ impl Backend for CpuBackend {
                     let axis: usize = node
                         .attrs
                         .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
-                    // Compute inner_stride (product of dims after axis) and
-                    // outer_count (product of dims before axis) from output shape.
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "concat node {node_id} is missing axis"
+                            ))
+                        })?
+                        .parse()
+                        .map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "concat node {node_id} has invalid axis"
+                            ))
+                        })?;
                     let output_shape: Vec<u64> = node
                         .output_type
                         .shape
                         .iter()
-                        .map(|d| d.evaluate().unwrap_or(symbol_max))
+                        .map(|dimension| dimension.evaluate().unwrap_or(symbol_max))
                         .collect();
                     let rank = output_shape.len();
-                    let inner_stride: u64 = if axis + 1 < rank {
-                        output_shape[axis + 1..].iter().product()
-                    } else {
-                        1
+                    if axis >= rank {
+                        return Err(BackendError::Compilation(format!(
+                            "concat node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
+                    }
+                    let checked_product = |dimensions: &[u64], label: &str| {
+                        dimensions.iter().try_fold(1u64, |product, &dimension| {
+                            product.checked_mul(dimension).ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "concat node {node_id} {label} overflows"
+                                ))
+                            })
+                        })
                     };
-                    let outer_count: u64 = if axis > 0 {
-                        output_shape[..axis].iter().product()
-                    } else {
-                        1
-                    };
+                    let inner_stride = checked_product(&output_shape[axis + 1..], "inner stride")?;
+                    let outer_count = checked_product(&output_shape[..axis], "outer count")?;
+                    let inner_stride = usize::try_from(inner_stride).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "concat node {node_id} inner stride does not fit usize"
+                        ))
+                    })?;
+                    let outer_count = usize::try_from(outer_count).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "concat node {node_id} outer count does not fit usize"
+                        ))
+                    })?;
                     let _input_ids_str = node
                         .inputs
                         .iter()
@@ -1439,7 +1462,7 @@ impl Backend for CpuBackend {
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![axis, inner_stride as usize, outer_count as usize],
+                        params: vec![axis, inner_stride, outer_count],
                         param_dims: None,
                         weight_meta: None,
                     });

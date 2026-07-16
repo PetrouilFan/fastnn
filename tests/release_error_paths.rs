@@ -94,6 +94,22 @@ fn run_malformed_dispatch() {
         .insert("axis".into(), "-3".into());
     let memory = plan_memory(&graph).expect("small graph should plan");
     assert!(backend.compile(&graph, &memory).is_err());
+
+    let builder = GraphBuilder::new();
+    let left = builder.input(&[1, 2], IrDType::F32);
+    let right = builder.input(&[1, 2], IrDType::F32);
+    let output = builder.concat(&[&left, &right], 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Concat))
+        .expect("concat node should exist")
+        .attrs
+        .insert("axis".into(), "9".into());
+    let memory = plan_memory(&graph).expect("small graph should plan");
+    assert!(backend.compile(&graph, &memory).is_err());
 }
 
 #[test]
