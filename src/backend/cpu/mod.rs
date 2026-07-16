@@ -5327,8 +5327,74 @@ impl Backend for CpuBackend {
                         | "conv2d_i4_silu" | "conv2d_i8" | "conv2d_i8_relu" | "conv2d_i8_gelu"
                         | "conv2d_i8_silu" => {
                             // Quantized conv2d using SWAR packed kernels.
-                            // input_slices: [activation (f32), weight (packed)]  optional: [bias (f32)]
+                            // input_slices: [activation (f32), weight (packed)] optional: [bias (f32)]
                             // weight_meta carries bit_width, shape=[OC, IC_per_group*KH*KW], scales[], zero_points[]
+                            if !(2..=3).contains(&input_slices.len()) {
+                                return Err(BackendError::Dispatch(format!(
+                                    "conv2d_i4/u8: expected 2 or 3 inputs, received {}",
+                                    input_slices.len()
+                                )));
+                            }
+                            if params.len() < 9 {
+                                return Err(BackendError::Dispatch("conv2d_i4/u8: expected at least 9 params [stride, padding, dilation, groups, input_c, input_h, input_w, kernel_h, kernel_w]".into()));
+                            }
+                            if params[0] == 0
+                                || params[2] == 0
+                                || params[3] == 0
+                                || params[4..=8].contains(&0)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4/u8: stride, dilation, groups, channels, spatial dimensions, and kernel dimensions must be positive".into(),
+                                ));
+                            }
+                            let activation = &input_slices[0];
+                            let bias = input_slices.get(2);
+                            if !activation
+                                .offset
+                                .is_multiple_of(std::mem::align_of::<f32>())
+                                || !activation.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || !output_slice
+                                    .offset
+                                    .is_multiple_of(std::mem::align_of::<f32>())
+                                || !output_slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                || bias.is_some_and(|slice| {
+                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+                                        || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+                                })
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4/u8: activation, bias, and output storage must be f32-aligned and scalar-exact".into(),
+                                ));
+                            }
+                            let output_end = output_slice.offset + output_slice.size;
+                            if input_slices.iter().any(|slice| {
+                                arena::ranges_overlap(
+                                    output_slice.offset,
+                                    output_end,
+                                    slice.offset,
+                                    slice.offset + slice.size,
+                                )
+                            }) {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4/u8: output storage overlaps an input".into(),
+                                ));
+                            }
+                            let image_elements = params[4]
+                                .checked_mul(params[5])
+                                .and_then(|value| value.checked_mul(params[6]))
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "conv2d_i4/u8: activation geometry overflows".into(),
+                                    )
+                                })?;
+                            let activation_elements = activation.size / std::mem::size_of::<f32>();
+                            if image_elements == 0
+                                || !activation_elements.is_multiple_of(image_elements)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "conv2d_i4/u8: activation storage does not contain complete images".into(),
+                                ));
+                            }
                             if input_slices.len() >= 2 {
                                 let a_slice = &input_slices[0];
                                 let w_slice = &input_slices[1];
