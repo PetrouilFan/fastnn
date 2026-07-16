@@ -842,3 +842,60 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
         "unexpected error: {message}"
     );
 }
+
+#[test]
+fn malformed_activation_attributes_fail_cpu_lowering() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.leaky_relu(&input, 0.25);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::LeakyRelu))
+        .expect("leaky relu node should exist")
+        .attrs
+        .clear();
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing leaky relu slope must fail lowering");
+    assert!(error.to_string().contains("negative_slope"));
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.clamp(&input, -1.0, 1.0);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    let clamp = graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Clamp))
+        .expect("clamp node should exist");
+    clamp.attrs.insert("min".into(), "not-a-number".into());
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("invalid clamp bound must fail lowering");
+    assert!(error.to_string().contains("min"));
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[1, 1, 4, 4], IrDType::F32);
+    let weight = builder.parameter(&[1, 1, 3, 3], IrDType::F32);
+    let output = builder.conv2d(&input, &weight, 1, 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Conv2d))
+        .expect("conv2d node should exist")
+        .attrs
+        .remove("stride");
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing convolution stride must fail lowering");
+    assert!(error.to_string().contains("stride"));
+}

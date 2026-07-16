@@ -988,24 +988,49 @@ impl Backend for CpuBackend {
                     };
                     let mut extra_params: Vec<usize> = Vec::with_capacity(graph.nodes.len());
                     if let Opcode::LeakyRelu = node.opcode {
-                        let slope: f32 = node
-                            .attrs
-                            .get("negative_slope")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0.01);
+                        let raw = node.attrs.get("negative_slope").ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "leaky relu node {node_id} is missing negative_slope"
+                            ))
+                        })?;
+                        let slope: f32 = raw.parse().map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "leaky relu node {node_id} has invalid negative_slope"
+                            ))
+                        })?;
+                        if !slope.is_finite() {
+                            return Err(BackendError::Compilation(format!(
+                                "leaky relu node {node_id} requires a finite negative_slope"
+                            )));
+                        }
                         extra_params.push(slope.to_bits() as usize);
                     }
                     if let Opcode::Clamp = node.opcode {
-                        let min: f32 = node
-                            .attrs
-                            .get("min")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0.0);
-                        let max: f32 = node
-                            .attrs
-                            .get("max")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(1.0);
+                        let parse_bound = |name: &str| -> Result<f32, BackendError> {
+                            let raw = node.attrs.get(name).ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "clamp node {node_id} is missing {name}"
+                                ))
+                            })?;
+                            let value: f32 = raw.parse().map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "clamp node {node_id} has invalid {name}"
+                                ))
+                            })?;
+                            if !value.is_finite() {
+                                return Err(BackendError::Compilation(format!(
+                                    "clamp node {node_id} requires a finite {name}"
+                                )));
+                            }
+                            Ok(value)
+                        };
+                        let min = parse_bound("min")?;
+                        let max = parse_bound("max")?;
+                        if min > max {
+                            return Err(BackendError::Compilation(format!(
+                                "clamp node {node_id} requires min <= max"
+                            )));
+                        }
                         extra_params.push(min.to_bits() as usize);
                         extra_params.push(max.to_bits() as usize);
                     }
@@ -1036,26 +1061,30 @@ impl Backend for CpuBackend {
                     }
                 }
                 Opcode::Conv2d => {
-                    let stride: usize = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
-                    let padding: usize = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|p| p.parse().ok())
-                        .unwrap_or(0);
-                    let dilation: usize = node
-                        .attrs
-                        .get("dilation")
-                        .and_then(|d| d.parse().ok())
-                        .unwrap_or(1);
-                    let groups: usize = node
-                        .attrs
-                        .get("groups")
-                        .and_then(|g| g.parse().ok())
-                        .unwrap_or(1);
+                    let parse_attr = |name: &str| -> Result<usize, BackendError> {
+                        node.attrs
+                            .get(name)
+                            .ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "conv2d node {node_id} is missing {name}"
+                                ))
+                            })?
+                            .parse::<usize>()
+                            .map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "conv2d node {node_id} has invalid {name}"
+                                ))
+                            })
+                    };
+                    let stride = parse_attr("stride")?;
+                    let padding = parse_attr("padding")?;
+                    let dilation = parse_attr("dilation")?;
+                    let groups = parse_attr("groups")?;
+                    if stride == 0 || dilation == 0 || groups == 0 {
+                        return Err(BackendError::Compilation(format!(
+                            "conv2d node {node_id} requires positive stride, dilation, and groups"
+                        )));
+                    }
                     // Detect quantized weights for packed conv2d dispatch
                     let weight_dtype = node
                         .inputs
