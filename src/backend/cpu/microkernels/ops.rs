@@ -794,8 +794,13 @@ pub fn fused_residual_add_layer_norm_f32_scalar(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert_eq!(bias.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -817,9 +822,7 @@ pub fn fused_residual_add_layer_norm_f32_scalar(
 
         for i in start..end {
             let idx = i - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
-            output[i] = (main[i] + residual[i] - mean) * inv_std * w + b;
+            output[i] = (main[i] + residual[i] - mean) * inv_std * weight[idx] + bias[idx];
         }
     }
 }
@@ -899,8 +902,13 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert_eq!(bias.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -948,16 +956,8 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
             let vm = _mm256_loadu_ps(main.as_ptr().add(i));
             let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
             let vnorm = _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(vm, vr), vmean), vinv_std);
-            let vw = if weight.len() >= 8 {
-                _mm256_loadu_ps(weight.as_ptr().add(idx))
-            } else {
-                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
-            };
-            let vb = if bias.len() >= 8 {
-                _mm256_loadu_ps(bias.as_ptr().add(idx))
-            } else {
-                _mm256_set1_ps(if idx < bias.len() { bias[idx] } else { 0.0 })
-            };
+            let vw = _mm256_loadu_ps(weight.as_ptr().add(idx));
+            let vb = _mm256_loadu_ps(bias.as_ptr().add(idx));
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
                 _mm256_add_ps(_mm256_mul_ps(vnorm, vw), vb),
@@ -966,9 +966,7 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
         }
         for j in i..end {
             let idx = j - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
-            output[j] = (main[j] + residual[j] - mean) * inv_std * w + b;
+            output[j] = (main[j] + residual[j] - mean) * inv_std * weight[idx] + bias[idx];
         }
     }
 }
@@ -1017,8 +1015,12 @@ pub fn fused_residual_add_rms_norm_f32_scalar(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -1037,8 +1039,7 @@ pub fn fused_residual_add_rms_norm_f32_scalar(
 
         for i in start..end {
             let idx = i - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            output[i] = (main[i] + residual[i]) / rms * w;
+            output[i] = (main[i] + residual[i]) / rms * weight[idx];
         }
     }
 }
@@ -1055,8 +1056,12 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -1089,11 +1094,7 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
             let vm = _mm256_loadu_ps(main.as_ptr().add(i));
             let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
             let vx = _mm256_add_ps(vm, vr);
-            let w = if weight.len() >= 8 {
-                _mm256_loadu_ps(weight.as_ptr().add(idx))
-            } else {
-                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
-            };
+            let w = _mm256_loadu_ps(weight.as_ptr().add(idx));
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
                 _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
@@ -1102,8 +1103,7 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
         }
         for j in i..end {
             let idx = j - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            output[j] = (main[j] + residual[j]) / rms * w;
+            output[j] = (main[j] + residual[j]) / rms * weight[idx];
         }
     }
 }
