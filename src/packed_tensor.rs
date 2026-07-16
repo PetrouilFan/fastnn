@@ -407,6 +407,47 @@ impl<T: PackedWord> PackedTensor<T> {
         self.data.len()
     }
 
+    /// Validate the storage and row-wise affine metadata required by packed
+    /// matrix kernels. This intentionally does not infer or repair malformed
+    /// caller-provided tensors.
+    pub(crate) fn validate_matrix_storage(&self) -> Result<(), String> {
+        if self.shape.len() != 2 {
+            return Err(format!(
+                "packed matrix must have rank 2, got rank {}",
+                self.shape.len()
+            ));
+        }
+        let rows = self.shape[0];
+        let columns = self.shape[1];
+        let words_per_row = columns.div_ceil(T::ITEMS);
+        let expected_words = rows
+            .checked_mul(words_per_row)
+            .ok_or_else(|| "packed matrix storage size overflows usize".to_string())?;
+        if self.data.len() < expected_words {
+            return Err(format!(
+                "packed matrix storage has {} words, requires at least {expected_words}",
+                self.data.len()
+            ));
+        }
+        let required_metadata = if self.group_size > 1 {
+            rows.div_ceil(self.group_size)
+        } else {
+            rows
+        };
+        for (name, values) in [("scales", &self.scales), ("zero points", &self.zeros)] {
+            if values.len() > 1 && values.len() < required_metadata {
+                return Err(format!(
+                    "packed matrix has {} {name}, requires at least {required_metadata}",
+                    values.len()
+                ));
+            }
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(format!("packed matrix {name} must be finite"));
+            }
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn numel(&self) -> usize {
         self.shape.iter().product()

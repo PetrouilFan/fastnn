@@ -123,7 +123,7 @@ fn main() {
         let mut c = vec![0.0f32; size * size];
 
         let gemm_us = bench_us(iters, || {
-            gemm_packed_i4x8(&a, &b, &mut c);
+            gemm_packed_i4x8(&a, &b, &mut c).expect("benchmark shapes must be valid");
             std::hint::black_box(&c);
         });
 
