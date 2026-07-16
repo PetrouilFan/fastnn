@@ -230,14 +230,17 @@ pub fn adaptive_avg_pool2d_f32_scalar(
     out_h: usize,
     out_w: usize,
 ) {
+    debug_assert!(h > 0 && w > 0 && out_h > 0 && out_w > 0);
+    debug_assert_eq!(input.len(), nc * h * w);
+    debug_assert_eq!(output.len(), nc * out_h * out_w);
     let hw = h * w;
     for nci in 0..nc {
         for ohi in 0..out_h {
             for owi in 0..out_w {
                 let h_start = ohi * h / out_h;
-                let h_end = (ohi + 1) * h / out_h;
+                let h_end = ((ohi + 1) * h).div_ceil(out_h);
                 let w_start = owi * w / out_w;
-                let w_end = (owi + 1) * w / out_w;
+                let w_end = ((owi + 1) * w).div_ceil(out_w);
                 let mut sum = 0.0f32;
                 let mut count = 0;
                 for hi in h_start..h_end {
@@ -247,9 +250,8 @@ pub fn adaptive_avg_pool2d_f32_scalar(
                     }
                 }
                 let out_idx = nci * out_h * out_w + ohi * out_w + owi;
-                if out_idx < output.len() {
-                    output[out_idx] = if count > 0 { sum / count as f32 } else { 0.0 };
-                }
+                debug_assert!(count > 0);
+                output[out_idx] = sum / count as f32;
             }
         }
     }

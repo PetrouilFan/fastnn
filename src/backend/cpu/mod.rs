@@ -7850,8 +7850,6 @@ impl Backend for CpuBackend {
                                 || out_w == 0
                                 || h_in == 0
                                 || w_in == 0
-                                || out_h > h_in
-                                || out_w > w_in
                                 || !input_elements.is_multiple_of(input_hw)
                                 || output_slice.size != expected_output
                                 || !input_slice

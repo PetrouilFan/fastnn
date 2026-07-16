@@ -3064,6 +3064,35 @@ mod execution_storage_size_tests {
     }
 
     #[test]
+    fn adaptive_pool_supports_larger_output_geometry() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adaptive_avg_pool2d".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 36),
+                secondary_output_slice: None,
+                params: vec![3, 3, 2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 52,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(52).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 16, 36).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&output),
+            &[1.0, 1.5, 2.0, 2.0, 2.5, 3.0, 3.0, 3.5, 4.0]
+        );
+    }
+
+    #[test]
     fn adaptive_pool_rejects_zero_input_height() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
