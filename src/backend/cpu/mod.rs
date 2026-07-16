@@ -435,6 +435,44 @@ fn try_copy_slice<T: Copy>(source: &[T], context: &str) -> Result<Vec<T>, Backen
     Ok(values)
 }
 
+fn try_with_unary_f32_slices<R>(
+    arena: &CpuBuffer,
+    input: BufferSlice,
+    output: BufferSlice,
+    context: &str,
+    f: impl FnOnce(&[f32], &mut [f32]) -> R,
+) -> Result<R, BackendError> {
+    let input_end = input.offset + input.size;
+    let output_end = output.offset + output.size;
+    if arena::ranges_overlap(input.offset, input_end, output.offset, output_end) {
+        let input_copy = {
+            let arena_data = arena.data_mut();
+            try_copy_slice(
+                bytemuck::cast_slice::<_, f32>(&arena_data[input.offset..input_end]),
+                context,
+            )?
+        };
+        telemetry::record_arena_temp_copy(input.size);
+        let output_f32 = unsafe { arena.view_f32_mut(output.offset, output.size) };
+        Ok(f(&input_copy, output_f32))
+    } else {
+        let arena_data = arena.data_mut();
+        // SAFETY: callers validate complete aligned f32 ranges before this helper;
+        // the ranges were proven disjoint, so shared input and mutable output do not alias.
+        unsafe {
+            let input_f32 = std::slice::from_raw_parts(
+                arena_data.as_ptr().add(input.offset).cast::<f32>(),
+                input.size / std::mem::size_of::<f32>(),
+            );
+            let output_f32 = std::slice::from_raw_parts_mut(
+                arena_data.as_mut_ptr().add(output.offset).cast::<f32>(),
+                output.size / std::mem::size_of::<f32>(),
+            );
+            Ok(f(input_f32, output_f32))
+        }
+    }
+}
+
 fn try_decode_f16(source: &[u8], context: &str) -> Result<Vec<f32>, BackendError> {
     let mut values = Vec::new();
     values
@@ -4102,10 +4140,11 @@ impl Backend for CpuBackend {
                                     "transpose_f32: geometry and f32 storage disagree".into(),
                                 ));
                             }
-                            arena::with_unary_f32_slices(
+                            try_with_unary_f32_slices(
                                 arena,
                                 input_slice,
                                 output_slice,
+                                "transpose_f32 input",
                                 |input, out_f32| {
                                     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                     if microkernels::simd_avx2_available() && m >= 8 && n >= 8 {
@@ -4134,7 +4173,7 @@ impl Backend for CpuBackend {
                                         );
                                     }
                                 },
-                            );
+                            )?;
                         }
                         "transpose_perm_f32" => {
                             if input_slices.len() != 1 || params.is_empty() {
@@ -7729,10 +7768,11 @@ impl Backend for CpuBackend {
                                 ));
                             }
                             let nc = input_elements / hw;
-                            arena::with_unary_f32_slices(
+                            try_with_unary_f32_slices(
                                 arena,
                                 input_slice,
                                 output_slice,
+                                "upsample_nearest2d input",
                                 |input, out_f32| {
                                     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
                                     {
@@ -7750,7 +7790,7 @@ impl Backend for CpuBackend {
                                         input, out_f32, nc, h_in, w_in, scale_h, scale_w,
                                     );
                                 },
-                            );
+                            )?;
                         }
                         "upsample_bilinear2d" => {
                             if input_slices.len() != 1 || params.len() != 4 {
