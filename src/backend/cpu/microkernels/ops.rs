@@ -27,7 +27,13 @@ pub fn batch_norm_inference_f32(
     eps: f32,
 ) {
     let c = weight.len();
-    let len = output.len().min(data.len());
+    debug_assert!(c > 0);
+    debug_assert_eq!(bias.len(), c);
+    debug_assert_eq!(running_mean.len(), c);
+    debug_assert_eq!(running_var.len(), c);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(data.len().is_multiple_of(c));
+    let len = output.len();
     // Pre-compute per-channel scale and shift
     for ch in 0..c {
         let scale = weight[ch] / (running_var[ch] + eps).sqrt();
@@ -55,7 +61,13 @@ pub unsafe fn batch_norm_inference_f32_avx2(
     eps: f32,
 ) {
     let c = weight.len();
-    let len = output.len().min(data.len());
+    debug_assert!(c > 0);
+    debug_assert_eq!(bias.len(), c);
+    debug_assert_eq!(running_mean.len(), c);
+    debug_assert_eq!(running_var.len(), c);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(data.len().is_multiple_of(c));
+    let len = output.len();
     // Pre-compute per-channel scale and shift
     let mut scale = vec![0.0f32; c];
     let mut shift = vec![0.0f32; c];
@@ -715,8 +727,11 @@ pub unsafe fn reduce_max_f32_avx2(input: &[f32], output: &mut [f32], group_size:
 
 #[inline]
 pub fn biasadd_f32_scalar(data: &[f32], bias: &[f32], output: &mut [f32], channel_stride: usize) {
-    let len = output.len().min(data.len());
-    let bias_len = bias.len().max(1);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(!bias.is_empty());
+    debug_assert!(channel_stride > 0);
+    let len = output.len();
+    let bias_len = bias.len();
     for i in 0..len {
         output[i] = data[i] + bias[(i / channel_stride) % bias_len];
     }
@@ -732,8 +747,11 @@ pub unsafe fn biasadd_f32_avx2(
     output: &mut [f32],
     channel_stride: usize,
 ) {
-    let len = output.len().min(data.len());
-    let bias_len = bias.len().max(1);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(!bias.is_empty());
+    debug_assert!(channel_stride > 0);
+    let len = output.len();
+    let bias_len = bias.len();
     let mut i = 0;
     while i + 8 <= len {
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
@@ -1172,7 +1190,8 @@ pub unsafe fn rms_norm_f32_avx2(
 
 #[inline]
 pub fn add_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = data[i] + s;
     }
@@ -1183,7 +1202,8 @@ pub fn add_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Caller must ensure `data` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn add_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
@@ -1200,7 +1220,8 @@ pub unsafe fn add_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn mul_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = data[i] * s;
     }
@@ -1211,7 +1232,8 @@ pub fn mul_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn mul_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
@@ -1228,7 +1250,8 @@ pub unsafe fn mul_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn div_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = data[i] / s;
     }
@@ -1239,7 +1262,8 @@ pub fn div_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn div_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
@@ -1258,7 +1282,8 @@ pub unsafe fn div_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn gt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = if data[i] > s { 1.0 } else { 0.0 };
     }
@@ -1269,7 +1294,8 @@ pub fn gt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn gt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     let vone = _mm256_set1_ps(1.0);
@@ -1289,7 +1315,8 @@ pub unsafe fn gt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn lt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = if data[i] < s { 1.0 } else { 0.0 };
     }
@@ -1300,7 +1327,8 @@ pub fn lt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn lt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     let vone = _mm256_set1_ps(1.0);
@@ -1320,7 +1348,8 @@ pub unsafe fn lt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn eq_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
     }
@@ -1331,7 +1360,8 @@ pub fn eq_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn eq_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     let vone = _mm256_set1_ps(1.0);
