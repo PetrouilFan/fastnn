@@ -760,6 +760,9 @@ pub unsafe fn biasadd_f32_avx2(
 /// instead of two, reducing memory traffic by ~33%.
 #[inline]
 pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -837,6 +840,9 @@ pub unsafe fn norm_layernorm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -981,6 +987,10 @@ pub fn rms_norm_f32_scalar(
     row_size: usize,
     eps: f32,
 ) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -996,12 +1006,7 @@ pub fn rms_norm_f32_scalar(
             1.0
         };
         for i in start..end {
-            let w = if i - start < weight.len() {
-                weight[i - start]
-            } else {
-                1.0
-            };
-            output[i] = input[i] / rms * w;
+            output[i] = input[i] / rms * weight[i - start];
         }
     }
 }
@@ -1119,6 +1124,10 @@ pub unsafe fn rms_norm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -1146,15 +1155,7 @@ pub unsafe fn rms_norm_f32_avx2(
         i = start;
         while i + 8 <= end {
             let vx = _mm256_loadu_ps(input.as_ptr().add(i));
-            let w = if weight.len() >= 8 {
-                _mm256_loadu_ps(weight.as_ptr().add(i - start))
-            } else {
-                _mm256_set1_ps(if i - start < weight.len() {
-                    weight[i - start]
-                } else {
-                    1.0
-                })
-            };
+            let w = _mm256_loadu_ps(weight.as_ptr().add(i - start));
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
                 _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
@@ -1162,12 +1163,7 @@ pub unsafe fn rms_norm_f32_avx2(
             i += 8;
         }
         for j in i..end {
-            let w = if j - start < weight.len() {
-                weight[j - start]
-            } else {
-                1.0
-            };
-            *output.as_mut_ptr().add(j) = input[j] / rms * w;
+            *output.as_mut_ptr().add(j) = input[j] / rms * weight[j - start];
         }
     }
 }
