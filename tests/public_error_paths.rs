@@ -898,4 +898,22 @@ fn malformed_activation_attributes_fail_cpu_lowering() {
         .compile(&graph, &memory)
         .expect_err("missing convolution stride must fail lowering");
     assert!(error.to_string().contains("stride"));
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[2, 2], IrDType::F32);
+    let output = builder.softmax(&input, 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Softmax))
+        .expect("softmax node should exist")
+        .attrs
+        .insert("axis".into(), "-3".into());
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("out-of-range softmax axis must fail lowering");
+    assert!(error.to_string().contains("axis"));
 }

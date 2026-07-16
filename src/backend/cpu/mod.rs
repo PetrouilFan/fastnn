@@ -1297,43 +1297,70 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Softmax => {
-                    // Read and normalize the axis attribute.
                     let axis: i64 = node
                         .attrs
                         .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
-                    let rank = input_shapes.first().map(|s| s.len()).unwrap_or(1);
-                    let normalized_axis = if axis < 0 {
-                        (rank as i64 + axis) as usize
-                    } else {
-                        axis as usize
-                    };
-                    // Capture the axis-dimension size for the dispatch handler,
-                    // which needs to know how many elements comprise a single
-                    // softmax "row" (all elements along the reduction axis).
-                    let axis_dim = input_shapes
-                        .first()
-                        .and_then(|s| s.get(normalized_axis).copied())
-                        .unwrap_or(1) as usize;
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "softmax node {node_id} is missing axis"
+                            ))
+                        })?
+                        .parse()
+                        .map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "softmax node {node_id} has invalid axis"
+                            ))
+                        })?;
+                    let input_shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "softmax node {node_id} is missing its input shape"
+                        ))
+                    })?;
+                    let rank = i64::try_from(input_shape.len()).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "softmax node {node_id} rank does not fit i64"
+                        ))
+                    })?;
+                    let normalized_axis = if axis < 0 { rank + axis } else { axis };
+                    if normalized_axis < 0 || normalized_axis >= rank {
+                        return Err(BackendError::Compilation(format!(
+                            "softmax node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
+                    }
+                    let normalized_axis = usize::try_from(normalized_axis).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "softmax node {node_id} axis conversion failed"
+                        ))
+                    })?;
+                    let axis_dim = usize::try_from(input_shape[normalized_axis]).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "softmax node {node_id} axis size does not fit usize"
+                        ))
+                    })?;
                     let axis_dim_dim = input_shape_dims
                         .first()
-                        .and_then(|s| s.get(normalized_axis).cloned())
-                        .unwrap_or(DimExpr::Known(1));
-                    // Compute stride: product of dims after the axis.
-                    // This is needed because softmax rows are strided for
-                    // non-last dimensions (e.g. axis=2 on [N,C,H,W]).
-                    let stride = input_shapes
-                        .first()
-                        .map(|s| {
-                            s[normalized_axis + 1..]
-                                .iter()
-                                .copied()
-                                .map(|x| x as usize)
-                                .product::<usize>()
-                                .max(1)
-                        })
-                        .unwrap_or(1);
+                        .and_then(|shape| shape.get(normalized_axis))
+                        .cloned()
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "softmax node {node_id} is missing symbolic axis metadata"
+                            ))
+                        })?;
+                    let stride = input_shape[normalized_axis + 1..].iter().try_fold(
+                        1usize,
+                        |product, &dimension| {
+                            let dimension = usize::try_from(dimension).map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "softmax node {node_id} stride dimension does not fit usize"
+                                ))
+                            })?;
+                            product.checked_mul(dimension).ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "softmax node {node_id} stride overflows"
+                                ))
+                            })
+                        },
+                    )?;
 
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),

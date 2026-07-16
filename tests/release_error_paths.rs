@@ -1,8 +1,10 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::prepared::PersistentPreparedWeights;
 use fastnn::backend::{Backend, BufferSlice, ExecutablePlan, Instruction};
+use fastnn::compiler::passes::memory_planning::plan_memory;
 use fastnn::compiler::{AllocSlot, MemoryPlan};
-use fastnn::ir::ShapeEnv;
+use fastnn::ir::builder::GraphBuilder;
+use fastnn::ir::{IrDType, Opcode, ShapeEnv};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
@@ -77,6 +79,21 @@ fn run_malformed_dispatch() {
             Some(&persistent),
         )
         .is_err());
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[2, 2], IrDType::F32);
+    let output = builder.softmax(&input, 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Softmax))
+        .expect("softmax node should exist")
+        .attrs
+        .insert("axis".into(), "-3".into());
+    let memory = plan_memory(&graph).expect("small graph should plan");
+    assert!(backend.compile(&graph, &memory).is_err());
 }
 
 #[test]
