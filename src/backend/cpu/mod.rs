@@ -5971,10 +5971,11 @@ impl Backend for CpuBackend {
                                     "pad_f32: shape and f32 storage disagree".into(),
                                 ));
                             }
-                            arena::with_unary_f32_slices(
+                            try_with_unary_f32_slices(
                                 arena,
                                 input_slice,
                                 output_slice,
+                                "pad_f32 input",
                                 |input, output| {
                                     for (output_index, value) in output.iter_mut().enumerate() {
                                         let mut remaining = output_index;
@@ -6001,7 +6002,7 @@ impl Backend for CpuBackend {
                                         *value = if inside { input[source_index] } else { 0.0 };
                                     }
                                 },
-                            );
+                            )?;
                         }
                         "gather" => {
                             if input_slices.len() != 2 || params.is_empty() {
