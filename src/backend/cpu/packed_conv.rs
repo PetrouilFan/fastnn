@@ -1173,24 +1173,15 @@ pub unsafe fn conv2d_packed_i8x4(
                     b
                 }
             });
-            let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
+            with_col_buf(num_pixels * local_oc, |temp| {
                 gemm_packed_i8x4_fused(&act_packed, &w_slice, b, activation, temp);
-                let mut found = false;
                 for pixel in 0..num_pixels {
                     for f in 0..local_oc {
-                        let v = temp[pixel * local_oc + f];
-                        if v.is_nan() {
-                            found = true;
-                            eprintln!("[FNN_NAN] conv2d_u8 out_base={} g_oc_off={} f={} pixel={} v=nan temp_slice={:?}", out_base, g_oc_off, f, pixel, &temp[..10.min(temp.len())]);
-                        }
-                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] =
+                            temp[pixel * local_oc + f];
                     }
                 }
-                found
             });
-            if nan_found {
-                panic!("NaN in u8 conv output");
-            }
         }
     }
 }
@@ -1257,24 +1248,15 @@ pub unsafe fn conv2d_packed_i4x8(
                     b
                 }
             });
-            let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
+            with_col_buf(num_pixels * local_oc, |temp| {
                 gemm_packed_i4x8_fused(&act_packed, &w_slice, b, activation, temp);
-                let mut found = false;
                 for pixel in 0..num_pixels {
                     for f in 0..local_oc {
-                        let v = temp[pixel * local_oc + f];
-                        if v.is_nan() {
-                            found = true;
-                            eprintln!("[FNN_NAN] conv2d_u8 out_base={} g_oc_off={} f={} pixel={} v=nan temp_slice={:?}", out_base, g_oc_off, f, pixel, &temp[..10.min(temp.len())]);
-                        }
-                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] =
+                            temp[pixel * local_oc + f];
                     }
                 }
-                found
             });
-            if nan_found {
-                panic!("NaN in u8 conv output");
-            }
         }
     }
 }
@@ -1404,6 +1386,33 @@ mod tests {
         }
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_i4x8_nonfinite_input_never_panics() {
+        let input = vec![f32::NAN; 8];
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&[1.0; 8], &[1, 8]);
+        let mut output = vec![0.0f32; 1];
+        unsafe {
+            conv2d_packed_i4x8(
+                &input,
+                1,
+                8,
+                1,
+                1,
+                &weight,
+                None,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                PreparedActivation::None,
+                &mut output,
+            );
+        }
+        assert_eq!(output.len(), 1);
     }
 
     #[test]
