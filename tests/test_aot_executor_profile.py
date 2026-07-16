@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 
 def test_aot_executor_profile_reports_per_kernel_timings():
@@ -160,3 +161,24 @@ def test_memory_stats_cross_references_prepared_static_weight_write_consts():
         assert row["prepared_input_index"] in {1, 2}
         assert row["prepared_constant_index"] >= 0
         assert row["prepared_constant_name"].startswith("conv_")
+
+
+def test_aot_executor_rejects_minimum_i64_input_dimension():
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "relu1",
+            "op_type": "Relu",
+            "inputs": "x",
+            "outputs": "y",
+        }
+    ]
+    with pytest.raises(ValueError, match="unsupported dimension"):
+        fnn.AotExecutor(
+            nodes,
+            {},
+            ["x"],
+            ["y"],
+            input_shapes={"x": [-(2**63), 4]},
+        )

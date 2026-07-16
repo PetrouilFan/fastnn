@@ -936,3 +936,42 @@ fn malformed_activation_attributes_fail_cpu_lowering() {
         .expect_err("out-of-range concat axis must fail lowering");
     assert!(error.to_string().contains("axis"));
 }
+
+#[test]
+fn rank_zero_quantized_weights_fail_cpu_lowering() {
+    let mut graph = ComputeGraph::new();
+    let activation = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(1)], IrDType::F32),
+    );
+    let quantized_type = TensorType::new(
+        vec![],
+        IrDType::I4 {
+            scales: vec![1.0],
+            dequant_offsets: vec![0.0],
+            codebooks: vec![],
+        },
+    );
+    let weight = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: vec![0; 4],
+            tensor_type: quantized_type.clone(),
+        }),
+        vec![],
+        quantized_type,
+    );
+    let output = graph.add_node(
+        Opcode::MatMul,
+        vec![activation, weight],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(1)], IrDType::F32),
+    );
+    graph.set_inputs(vec![activation]);
+    graph.set_outputs(vec![output]);
+
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("rank-zero quantized weight must fail lowering");
+    assert!(error.to_string().contains("weight shape"));
+}

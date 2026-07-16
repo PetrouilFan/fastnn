@@ -1293,15 +1293,19 @@ impl AotExecutor {
             for (name, dims) in shapes {
                 let ir_dims: Vec<crate::ir::DimExpr> = dims
                     .into_iter()
-                    .map(|d| {
+                    .map(|d| -> PyResult<crate::ir::DimExpr> {
+                        if d == i64::MIN {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "input {name} contains unsupported dimension {d}"
+                            )));
+                        }
                         if d < 0 {
-                            // Negative dim = symbolic (batch, height, width, etc.)
-                            crate::ir::DimExpr::Symbol(format!("d{}", -d))
+                            Ok(crate::ir::DimExpr::Symbol(format!("d{}", -d)))
                         } else {
-                            crate::ir::DimExpr::Known(d as u64)
+                            Ok(crate::ir::DimExpr::Known(d as u64))
                         }
                     })
-                    .collect();
+                    .collect::<PyResult<Vec<_>>>()?;
                 rust_input_shapes.insert(name, ir_dims);
             }
         }

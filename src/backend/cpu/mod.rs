@@ -782,6 +782,23 @@ impl Backend for CpuBackend {
                     // Extract weight metadata for quantized matmul kernels.
                     // For 2D weights, the quantized data is stored transposed
                     // ([N, K] instead of [K, N]) so the shape must match.
+                    if is_quantized {
+                        let weight_id = node.inputs.get(1).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "quantized matmul node {node_id} is missing its weight input"
+                            ))
+                        })?;
+                        let weight_node = graph.get_node(*weight_id).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "quantized matmul node {node_id} references missing weight node {weight_id}"
+                            ))
+                        })?;
+                        if weight_node.output_type.shape.is_empty() {
+                            return Err(BackendError::Compilation(format!(
+                                "quantized matmul node {node_id} weight shape must not be empty"
+                            )));
+                        }
+                    }
                     let weight_meta = if is_quantized {
                         node.inputs.get(1).and_then(|&w_id| {
                             graph.get_node(w_id).map(|wn| {
@@ -839,7 +856,7 @@ impl Backend for CpuBackend {
                                 let quant_block_size =
                                     if let Some(qbs) = wn.attrs.get("quant_block_size") {
                                         qbs.parse::<usize>().unwrap_or(0)
-                                    } else if scales.len() > w_shape[0] && w_shape.len() >= 2 {
+                                    } else if w_shape.len() >= 2 && scales.len() > w_shape[0] {
                                         let inner: usize = w_shape[1..].iter().product();
                                         let blocks_per_row = scales.len() / w_shape[0];
                                         inner / blocks_per_row
@@ -1103,6 +1120,23 @@ impl Backend for CpuBackend {
                                 | IrDType::F8R { .. }
                         )
                     });
+                    if is_quantized {
+                        let weight_id = node.inputs.get(1).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "quantized convolution node {node_id} is missing its weight input"
+                            ))
+                        })?;
+                        let weight_node = graph.get_node(*weight_id).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "quantized convolution node {node_id} references missing weight node {weight_id}"
+                            ))
+                        })?;
+                        if weight_node.output_type.shape.is_empty() {
+                            return Err(BackendError::Compilation(format!(
+                                "quantized convolution node {node_id} weight shape must not be empty"
+                            )));
+                        }
+                    }
                     let (kernel_name, weight_meta) = if is_quantized {
                         let dtype = weight_dtype.as_ref().ok_or_else(|| {
                             BackendError::Compilation(format!(
@@ -1209,7 +1243,7 @@ impl Backend for CpuBackend {
                                 let quant_block_size =
                                     if let Some(qbs) = wn.attrs.get("quant_block_size") {
                                         qbs.parse::<usize>().unwrap_or(0)
-                                    } else if scales.len() > w_shape[0] && w_shape.len() >= 2 {
+                                    } else if w_shape.len() >= 2 && scales.len() > w_shape[0] {
                                         let inner: usize = w_shape[1..].iter().product();
                                         let blocks_per_row = scales.len() / w_shape[0];
                                         inner / blocks_per_row
