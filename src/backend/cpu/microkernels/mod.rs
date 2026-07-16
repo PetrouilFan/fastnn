@@ -223,6 +223,27 @@ impl TlsVecPool {
     pub(crate) fn alloc(min_capacity: usize) -> ScopedVec {
         tls_alloc_f32(min_capacity)
     }
+
+    pub(crate) fn try_alloc(
+        min_capacity: usize,
+    ) -> Result<ScopedVec, std::collections::TryReserveError> {
+        let pooled = TLS_VEC_POOL_F32.with(|pool| pool.borrow_mut().pop());
+        let mut values = if let Some(values) = pooled {
+            crate::backend::cpu::telemetry::record_tls_vec_reuse();
+            values
+        } else {
+            crate::backend::cpu::telemetry::record_tls_vec_alloc();
+            Vec::new()
+        };
+        if values.capacity() < min_capacity {
+            values.try_reserve_exact(min_capacity - values.len())?;
+        }
+        values.resize(min_capacity, 0.0);
+        Ok(ScopedVec {
+            inner: Some(values),
+        })
+    }
+
     pub(crate) fn alloc_zeroed(len: usize) -> ScopedVec {
         tls_alloc_zeroed_f32(len)
     }
@@ -245,6 +266,11 @@ mod tls_pool_tests {
         let values = TlsVecPool::alloc(5);
         assert_eq!(values.len(), 5);
         assert_eq!(&values[2..], &[0.0, 0.0, 0.0]);
+        drop(values);
+
+        let values = TlsVecPool::try_alloc(7).unwrap();
+        assert_eq!(values.len(), 7);
+        assert_eq!(&values[5..], &[0.0, 0.0]);
     }
 }
 
