@@ -35,6 +35,44 @@ def test_aot_executor_profile_reports_per_kernel_timings():
     assert relu_entries[0]["node_name"] == "relu1"
 
 
+def test_aot_executor_preserves_dynamic_runtime_shapes_in_forward_and_profile():
+    import fastnn as fnn
+
+    nodes = [{"name": "relu1", "op_type": "Relu", "inputs": "x", "outputs": "y"}]
+    executor = fnn.AotExecutor(
+        nodes,
+        {},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [-1, 4]},
+    )
+
+    for batch in (2, 3):
+        values = np.arange(batch * 4, dtype=np.float32).reshape(batch, 4) - 2.0
+        x = fnn.tensor(values, [batch, 4])
+        forward = executor.forward({"x": x})["y"].numpy()
+        profiled = executor.profile({"x": x})["outputs"]["y"].numpy()
+        expected = np.maximum(values, 0.0)
+        assert forward.shape == (batch, 4)
+        assert profiled.shape == (batch, 4)
+        np.testing.assert_allclose(forward, expected)
+        np.testing.assert_allclose(profiled, expected)
+
+
+def test_aot_executor_rejects_duplicate_output_names():
+    import fastnn as fnn
+
+    nodes = [{"name": "relu1", "op_type": "Relu", "inputs": "x", "outputs": "y"}]
+    with pytest.raises(ValueError, match="unique"):
+        fnn.AotExecutor(
+            nodes,
+            {},
+            ["x"],
+            ["y", "y"],
+            input_shapes={"x": [1, 4]},
+        )
+
+
 def test_memory_stats_reports_instruction_level_static_traffic():
     import fastnn as fnn
 
