@@ -205,3 +205,28 @@ def test_aot_executor_rejects_noncontiguous_input_without_panicking():
     noncontiguous = fnn.zeros([2, 2]).transpose(0, 1)
     with pytest.raises(ValueError, match="cannot be passed to AOT execution"):
         executor.forward({"x": noncontiguous})
+
+
+@pytest.mark.parametrize(
+    ("op_type", "inputs", "minimum"),
+    [("Relu", "", 1), ("Add", "x", 2)],
+)
+def test_aot_executor_rejects_missing_node_inputs(op_type, inputs, minimum):
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "malformed",
+            "op_type": op_type,
+            "inputs": inputs,
+            "outputs": "y",
+        }
+    ]
+    with pytest.raises(RuntimeError, match=rf"requires at least {minimum} input"):
+        fnn.AotExecutor(
+            nodes,
+            {},
+            ["x"],
+            ["y"],
+            input_shapes={"x": [1]},
+        )

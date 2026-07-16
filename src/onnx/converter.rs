@@ -177,6 +177,24 @@ impl<'a> OnnxConverter<'a> {
 
     fn process_node(&mut self, node: &OnnxNode) -> Result<(), String> {
         let ins = self.resolve_inputs(&node.inputs)?;
+        let minimum_inputs = match node.op_type.as_str() {
+            "Constant" | "Range" | "Input" | "Parameter" => 0,
+            "QLinearMatMul" | "QLinearConv" => 8,
+            "BatchNormalization" => 5,
+            "ScatterND" | "Where" | "QuantizeLinear" | "DequantizeLinear" | "LSTM" | "GRU" => 3,
+            "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Max" | "Min" | "Greater" | "Less"
+            | "Equal" | "MatMul" | "Gemm" | "Conv" | "PRelu" | "Embedding" | "Gather"
+            | "GatherElements" => 2,
+            _ => 1,
+        };
+        if ins.len() < minimum_inputs {
+            return Err(format!(
+                "node '{}' ({}) requires at least {minimum_inputs} input(s), received {}",
+                node.name,
+                node.op_type,
+                ins.len()
+            ));
+        }
 
         match node.op_type.as_str() {
             // ── Element-wise unary ──────────────────────────────────
