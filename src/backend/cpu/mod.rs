@@ -4076,10 +4076,11 @@ impl Backend for CpuBackend {
                                     "reduce_f32: geometry and f32 storage disagree".into(),
                                 ));
                             }
-                            arena::with_unary_f32_slices(
+                            try_with_unary_f32_slices(
                                 arena,
                                 input_slice,
                                 output_slice,
+                                "reduce_f32 input",
                                 |input, output| {
                                     for outer_index in 0..outer {
                                         for inner_index in 0..inner {
@@ -4102,7 +4103,7 @@ impl Backend for CpuBackend {
                                         }
                                     }
                                 },
-                            );
+                            )?;
                         }
                         "transpose_f32" => {
                             if input_slices.len() != 1 {
