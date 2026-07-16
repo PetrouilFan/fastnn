@@ -1,7 +1,7 @@
 use fastnn::autograd;
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::backend::Backend;
+use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
 use fastnn::compiler::passes::quantization::quantize_weights;
@@ -974,4 +974,49 @@ fn rank_zero_quantized_weights_fail_cpu_lowering() {
         .compile(&graph, &memory)
         .expect_err("rank-zero quantized weight must fail lowering");
     assert!(error.to_string().contains("weight shape"));
+}
+
+#[test]
+fn slice_lowering_rejects_missing_attributes_and_normalizes_negative_end() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.slice(&input, 0, 1, 3);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    let slice = graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Slice))
+        .expect("slice node should exist");
+    slice.attrs.insert("end".into(), "-1".into());
+
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let plan = CpuBackend
+        .compile(&graph, &memory)
+        .expect("negative slice end should normalize during lowering");
+    let params = plan
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::CallKernel {
+                kernel_name,
+                params,
+                ..
+            } if kernel_name == "slice_f32" => Some(params),
+            _ => None,
+        })
+        .expect("slice instruction should exist");
+    assert_eq!(&params[params.len() - 3..], &[0, 1, 4]);
+
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Slice))
+        .expect("slice node should exist")
+        .attrs
+        .remove("end");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing slice end must fail lowering");
+    assert!(error.to_string().contains("end"));
 }

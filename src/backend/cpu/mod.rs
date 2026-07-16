@@ -1632,25 +1632,89 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Slice => {
-                    let dim: usize = node
-                        .attrs
-                        .get("dim")
-                        .and_then(|d| d.parse().ok())
-                        .unwrap_or(0);
-                    let start: usize = node
-                        .attrs
-                        .get("start")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let end: usize = node
-                        .attrs
-                        .get("end")
-                        .and_then(|e| e.parse().ok())
-                        .unwrap_or(1);
-                    let input_shape = input_shapes.first().cloned().unwrap_or_default();
+                    let parse_attr = |name: &str| -> Result<i64, BackendError> {
+                        node.attrs
+                            .get(name)
+                            .ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "slice node {node_id} is missing {name}"
+                                ))
+                            })?
+                            .parse::<i64>()
+                            .map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "slice node {node_id} has invalid {name}"
+                                ))
+                            })
+                    };
+                    let dim_value = parse_attr("dim")?;
+                    let start_value = parse_attr("start")?;
+                    let end_value = parse_attr("end")?;
+                    if dim_value < 0 || start_value < 0 {
+                        return Err(BackendError::Compilation(format!(
+                            "slice node {node_id} requires non-negative dim and start"
+                        )));
+                    }
+                    let dim = usize::try_from(dim_value).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "slice node {node_id} dimension does not fit usize"
+                        ))
+                    })?;
+                    let input_shape = input_shapes.first().ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "slice node {node_id} is missing its input shape"
+                        ))
+                    })?;
+                    if dim >= input_shape.len() {
+                        return Err(BackendError::Compilation(format!(
+                            "slice node {node_id} dimension {dim} is out of range for rank {}",
+                            input_shape.len()
+                        )));
+                    }
+                    let dimension_size = i64::try_from(input_shape[dim]).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "slice node {node_id} dimension size does not fit i64"
+                        ))
+                    })?;
+                    let normalized_end = if end_value < 0 {
+                        dimension_size
+                            .checked_add(end_value)
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or_else(|| {
+                                BackendError::Compilation(format!(
+                                    "slice node {node_id} negative end overflows"
+                                ))
+                            })?
+                    } else {
+                        end_value
+                    };
+                    if start_value >= dimension_size
+                        || normalized_end > dimension_size
+                        || start_value >= normalized_end
+                    {
+                        return Err(BackendError::Compilation(format!(
+                            "slice node {node_id} has invalid range [{start_value}, {normalized_end}) for dimension size {dimension_size}"
+                        )));
+                    }
+                    let start = usize::try_from(start_value).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "slice node {node_id} start does not fit usize"
+                        ))
+                    })?;
+                    let end = usize::try_from(normalized_end).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "slice node {node_id} end does not fit usize"
+                        ))
+                    })?;
                     let mut slice_params = Vec::with_capacity(input_shape.len() + 4);
                     slice_params.push(input_shape.len());
-                    slice_params.extend(input_shape.into_iter().map(|size| size as usize));
+                    for &size in input_shape {
+                        slice_params.push(usize::try_from(size).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} input dimension does not fit usize"
+                            ))
+                        })?);
+                    }
                     slice_params.extend([dim, start, end]);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
