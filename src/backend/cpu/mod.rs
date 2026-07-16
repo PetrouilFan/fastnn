@@ -572,44 +572,58 @@ impl Backend for CpuBackend {
             let input_slices: Vec<BufferSlice> = node
                 .inputs
                 .iter()
-                .filter_map(|&input_id| {
-                    memory_plan.slots.get(&input_id).map(|slot| {
-                        let size = graph
-                            .get_node(input_id)
-                            .and_then(|input| match &input.opcode {
-                                Opcode::Constant(TensorValue::Data { bytes, .. }) => {
-                                    Some(bytes.len())
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(slot.size);
-                        BufferSlice::new(slot.offset, size)
-                    })
+                .map(|&input_id| {
+                    let input = graph.get_node(input_id).ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "node {node_id} ({:?}) references missing input node {input_id}",
+                            node.opcode
+                        ))
+                    })?;
+                    let slot = memory_plan.slots.get(&input_id).ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "node {node_id} ({:?}) input {input_id} has no memory slot",
+                            node.opcode
+                        ))
+                    })?;
+                    let size = match &input.opcode {
+                        Opcode::Constant(TensorValue::Data { bytes, .. }) => bytes.len(),
+                        _ => slot.size,
+                    };
+                    Ok(BufferSlice::new(slot.offset, size))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, BackendError>>()?;
 
             // Collect input shapes for dimension-dependent kernels.
             // Symbolic dims that can't be resolved at compile time are
             // replaced with SYMBOL_DIM_MAX to preserve shape rank.
             let symbol_max = crate::ir::SYMBOL_DIM_MAX.load(Ordering::Relaxed);
-            let input_shapes: Vec<Vec<u64>> = node
+            let input_nodes = node
                 .inputs
                 .iter()
-                .filter_map(|&input_id| graph.get_node(input_id))
-                .map(|n| {
-                    n.output_type
+                .map(|&input_id| {
+                    graph.get_node(input_id).ok_or_else(|| {
+                        BackendError::Compilation(format!(
+                            "node {node_id} ({:?}) references missing input node {input_id}",
+                            node.opcode
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, BackendError>>()?;
+            let input_shapes: Vec<Vec<u64>> = input_nodes
+                .iter()
+                .map(|input| {
+                    input
+                        .output_type
                         .shape
                         .iter()
-                        .map(|d| d.evaluate().unwrap_or(symbol_max))
+                        .map(|dimension| dimension.evaluate().unwrap_or(symbol_max))
                         .collect()
                 })
                 .collect();
             // Also collect raw DimExpr shapes for symbolic dispatch resolution
-            let input_shape_dims: Vec<Vec<DimExpr>> = node
-                .inputs
+            let input_shape_dims: Vec<Vec<DimExpr>> = input_nodes
                 .iter()
-                .filter_map(|&input_id| graph.get_node(input_id))
-                .map(|n| n.output_type.shape.clone())
+                .map(|input| input.output_type.shape.clone())
                 .collect();
 
             let output_slice = memory_plan

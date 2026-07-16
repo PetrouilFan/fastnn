@@ -1020,3 +1020,22 @@ fn slice_lowering_rejects_missing_attributes_and_normalizes_negative_end() {
         .expect_err("missing slice end must fail lowering");
     assert!(error.to_string().contains("end"));
 }
+
+#[test]
+fn cpu_lowering_rejects_input_without_memory_slot() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.relu(&input);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    let mut memory = plan_memory(&graph).expect("memory planning should succeed");
+    memory
+        .slots
+        .remove(&input.node_id())
+        .expect("input slot should exist");
+
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing input slot must fail lowering");
+    assert!(error.to_string().contains("no memory slot"));
+}
