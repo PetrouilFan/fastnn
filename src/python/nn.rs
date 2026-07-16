@@ -1467,17 +1467,20 @@ impl AotExecutor {
         let calib = crate::compiler::passes::calibration::CalibrationData::from_json(&scales_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-        // Recompile with calibration data - the quantization pass will UPDATE
-        // existing QuantizeActivations nodes with new calibration attrs
-        let graph = std::mem::replace(&mut self.graph, crate::ir::ComputeGraph::new());
+        // Compile a clone so failure leaves the live model and all of its
+        // execution state untouched. Commit the replacement artifacts only
+        // after every derived representation has been rebuilt successfully.
         let (plan, memory_plan, graph) = self
             .executor
-            .compile_with_plan_and_quantize(graph, None, Some(calib))
+            .compile_with_plan_and_quantize(self.graph.clone(), None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan);
 
+        self.executor.invalidate_runtime_cache();
         self.plan = plan;
         self.memory_plan = memory_plan;
         self.graph = graph;
+        self.prepared_plan = prepared_plan;
 
         Ok(())
     }

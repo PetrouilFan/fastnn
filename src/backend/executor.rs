@@ -119,6 +119,14 @@ impl<B: Backend> GraphExecutor<B> {
         &self.backend
     }
 
+    /// Discard all execution state derived from a previous graph or plan.
+    /// Call this after a successful model-level recompilation before executing
+    /// the replacement artifacts.
+    pub fn invalidate_runtime_cache(&mut self) {
+        self.cached_arena = None;
+        self.static_shape_cache = None;
+    }
+
     /// Run the full compilation pipeline:
     /// 1. Shape inference
     /// 2. Operator fusion
