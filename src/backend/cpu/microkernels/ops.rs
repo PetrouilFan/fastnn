@@ -68,17 +68,12 @@ pub unsafe fn batch_norm_inference_f32_avx2(
     debug_assert_eq!(data.len(), output.len());
     debug_assert!(data.len().is_multiple_of(c));
     let len = output.len();
-    // Pre-compute per-channel scale and shift
-    let mut scale = vec![0.0f32; c];
-    let mut shift = vec![0.0f32; c];
-    for ch in 0..c {
-        scale[ch] = weight[ch] / (running_var[ch] + eps).sqrt();
-        shift[ch] = bias[ch] - running_mean[ch] * scale[ch];
-    }
-
-    let vscale_base = scale.as_ptr();
-    let vshift_base = shift.as_ptr();
+    let weight_base = weight.as_ptr();
+    let bias_base = bias.as_ptr();
+    let mean_base = running_mean.as_ptr();
+    let var_base = running_var.as_ptr();
     let vc = _mm256_set1_ps(c as f32);
+    let veps = _mm256_set1_ps(eps);
     let vinc = _mm256_set_ps(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
 
     let mut i = 0usize;
@@ -90,9 +85,12 @@ pub unsafe fn batch_norm_inference_f32_avx2(
         let vch_f = _mm256_sub_ps(vindices_f, _mm256_mul_ps(vdiv, vc));
         let vch = _mm256_cvttps_epi32(vch_f);
 
-        // Gather scale[ch] and shift[ch]
-        let vscale = _mm256_i32gather_ps(vscale_base, vch, 4);
-        let vshift = _mm256_i32gather_ps(vshift_base, vch, 4);
+        let vweight = _mm256_i32gather_ps(weight_base, vch, 4);
+        let vbias = _mm256_i32gather_ps(bias_base, vch, 4);
+        let vmean = _mm256_i32gather_ps(mean_base, vch, 4);
+        let vvar = _mm256_i32gather_ps(var_base, vch, 4);
+        let vscale = _mm256_div_ps(vweight, _mm256_sqrt_ps(_mm256_add_ps(vvar, veps)));
+        let vshift = _mm256_sub_ps(vbias, _mm256_mul_ps(vmean, vscale));
 
         // out[i] = data[i] * scale + shift
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
@@ -104,7 +102,9 @@ pub unsafe fn batch_norm_inference_f32_avx2(
     }
     for j in i..len {
         let ch = j % c;
-        output[j] = data[j] * scale[ch] + shift[ch];
+        let scale = weight[ch] / (running_var[ch] + eps).sqrt();
+        let shift = bias[ch] - running_mean[ch] * scale;
+        output[j] = data[j] * scale + shift;
     }
 }
 
