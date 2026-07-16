@@ -127,6 +127,12 @@ pub fn pool_max_f32_scalar(
     w_out: usize,
     mut indices_out: Option<&mut [i64]>,
 ) {
+    debug_assert!(kernel > 0 && stride_val > 0);
+    debug_assert_eq!(input.len(), n * c * h * w);
+    debug_assert_eq!(output.len(), n * c * h_out * w_out);
+    debug_assert!(indices_out
+        .as_ref()
+        .is_none_or(|indices| indices.len() == output.len()));
     let hw_out = h_out * w_out;
     for nn in 0..n {
         for cc in 0..c {
@@ -144,25 +150,19 @@ pub fn pool_max_f32_scalar(
                                 let w_in_s = w_in - padding_val;
                                 if h_in_s < h && w_in_s < w {
                                     let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
-                                    if idx < input.len() {
-                                        if input[idx] > val {
-                                            val = input[idx];
-                                            best_kh = kh;
-                                            best_kw = kw;
-                                        }
+                                    if input[idx] > val {
+                                        val = input[idx];
+                                        best_kh = kh;
+                                        best_kw = kw;
                                     }
                                 }
                             }
                         }
                     }
                     let out_idx = nn * (c * hw_out) + cc * hw_out + hh * w_out + ww;
-                    if out_idx < output.len() {
-                        output[out_idx] = val;
-                    }
+                    output[out_idx] = val;
                     if let Some(ref mut idx_out) = indices_out {
-                        if out_idx < idx_out.len() {
-                            idx_out[out_idx] = (best_kh * kernel + best_kw) as i64;
-                        }
+                        idx_out[out_idx] = (best_kh * kernel + best_kw) as i64;
                     }
                 }
             }
@@ -184,6 +184,9 @@ pub fn pool_avg_f32_scalar(
     h_out: usize,
     w_out: usize,
 ) {
+    debug_assert!(kernel > 0 && stride_val > 0);
+    debug_assert_eq!(input.len(), n * c * h * w);
+    debug_assert_eq!(output.len(), n * c * h_out * w_out);
     let hw_out = h_out * w_out;
     for nn in 0..n {
         for cc in 0..c {
@@ -200,10 +203,8 @@ pub fn pool_avg_f32_scalar(
                                 let w_in_s = w_in - padding_val;
                                 if h_in_s < h && w_in_s < w {
                                     let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
-                                    if idx < input.len() {
-                                        val += input[idx];
-                                        count += 1;
-                                    }
+                                    val += input[idx];
+                                    count += 1;
                                 }
                             }
                         }
@@ -212,9 +213,7 @@ pub fn pool_avg_f32_scalar(
                         val /= count as f32;
                     }
                     let out_idx = nn * (c * hw_out) + cc * hw_out + hh * w_out + ww;
-                    if out_idx < output.len() {
-                        output[out_idx] = val;
-                    }
+                    output[out_idx] = val;
                 }
             }
         }
