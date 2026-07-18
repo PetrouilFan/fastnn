@@ -476,6 +476,9 @@ impl<T: PackedWord> PackedTensor<T> {
     /// matrix kernels. This intentionally does not infer or repair malformed
     /// caller-provided tensors.
     pub(crate) fn validate_matrix_storage(&self) -> Result<(), String> {
+        self.value_representation()
+            .validate()
+            .map_err(|error| format!("invalid packed value representation: {error}"))?;
         if self.shape.len() != 2 {
             return Err(format!(
                 "packed matrix must have rank 2, got rank {}",
@@ -1633,6 +1636,27 @@ mod tests {
                 group_size: 4,
             }
         );
+    }
+
+    #[test]
+    fn packed_matrix_validation_uses_canonical_representation_rules() {
+        let negative_scale = PackedTensor::<I4x8>::from_raw(
+            vec![I4x8::default(); 2],
+            vec![2, 8],
+            vec![-1.0],
+            vec![0.0],
+        );
+        assert!(negative_scale
+            .validate_matrix_storage()
+            .unwrap_err()
+            .contains("finite positive scales"));
+
+        let missing_offsets =
+            PackedTensor::<I4x8>::from_raw(vec![I4x8::default(); 2], vec![2, 8], vec![1.0], vec![]);
+        assert!(missing_offsets
+            .validate_matrix_storage()
+            .unwrap_err()
+            .contains("finite offsets are required"));
     }
 
     #[test]
