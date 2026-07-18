@@ -18,6 +18,20 @@
 
 use crate::error::FastnnError;
 use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::types::{RepresentationTransform, ScalarType};
+
+fn has_transformed_storage(dtype: &IrDType) -> bool {
+    dtype.value_representation().is_ok_and(|representation| {
+        !matches!(representation.transform, RepresentationTransform::None)
+    })
+}
+
+fn is_auto_cast_integer_weight(dtype: &IrDType) -> bool {
+    dtype.value_representation().is_ok_and(|representation| {
+        matches!(representation.storage, ScalarType::I4 | ScalarType::I8)
+            && !matches!(representation.transform, RepresentationTransform::None)
+    })
+}
 
 /// Options for the auto-cast pass.
 #[derive(Debug, Clone, Default)]
@@ -76,16 +90,13 @@ fn quantize_weight_constants(
     let count_after = graph.node_count();
     // quantize_weights modifies nodes in-place (no new nodes), so the
     // count stays the same.  We track the number of modified nodes by
-    // checking how many Constants now have U4/U8 dtype.
+    // checking how many Constants now have the requested transformed integer storage.
     let quantized_count = graph
         .nodes
         .iter()
         .filter(|n| {
             matches!(n.opcode, Opcode::Constant(_))
-                && matches!(
-                    n.output_type.dtype,
-                    IrDType::I4 { .. } | IrDType::I8Scaled { .. }
-                )
+                && is_auto_cast_integer_weight(&n.output_type.dtype)
         })
         .count();
     let _ = count_before;
@@ -130,8 +141,9 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
                 None => continue,
             };
 
-            // Check if input is quantized (U4/U8) but consumer expects f32
-            let is_quantized = matches!(input_dtype, IrDType::I4 { .. } | IrDType::I8Scaled { .. });
+            // Any transformed storage needs dequantization when the consumer
+            // accepts only the logical floating representation.
+            let is_quantized = has_transformed_storage(input_dtype);
 
             if is_quantized && !accepts_quantized {
                 rewrites.push(DequantRewrite {
@@ -178,6 +190,28 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
 mod tests {
     use super::*;
     use crate::ir::{DimExpr, TensorValue};
+
+    #[test]
+    fn canonical_transform_classifies_all_quantized_storage_families() {
+        let u4 = IrDType::U4Scaled {
+            scales: vec![1.0],
+            dequant_offsets: vec![0.0],
+        };
+        let f4 = IrDType::F4 {
+            scales: vec![1.0],
+            dequant_offsets: vec![],
+            codebooks: vec![],
+        };
+        assert!(has_transformed_storage(&u4));
+        assert!(has_transformed_storage(&f4));
+        assert!(!has_transformed_storage(&IrDType::F32));
+        assert!(!is_auto_cast_integer_weight(&u4));
+        assert!(is_auto_cast_integer_weight(&IrDType::I4 {
+            scales: vec![1.0],
+            dequant_offsets: vec![0.0],
+            codebooks: vec![],
+        }));
+    }
 
     /// Helper to create a weight Data constant with the given dimensions.
     fn make_weight_constant(
