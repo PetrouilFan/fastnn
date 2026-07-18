@@ -1630,10 +1630,9 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Gather => {
-                    let axis: usize = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
+                    let axis = node
+                        .optional_attr::<usize>("axis")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
                     let data_shape = input_shapes.first().cloned().unwrap_or_default();
                     let indices_numel = input_shapes
@@ -1776,10 +1775,9 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
-                    let axis_i64: i64 = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
+                    let axis_i64 = node
+                        .optional_attr::<i64>("axis")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
                     let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
                     let axis = if axis_i64 < 0 {
@@ -1885,15 +1883,13 @@ impl Backend for CpuBackend {
                     }
                 }
                 Opcode::Conv1d => {
-                    let stride: usize = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
+                    let stride = node
+                        .optional_attr::<usize>("stride")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
-                    let padding: usize = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|p| p.parse().ok())
+                    let padding = node
+                        .optional_attr::<usize>("padding")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
                     let input_c = input_shapes
                         .first()
@@ -1919,20 +1915,17 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Conv3d => {
-                    let stride: usize = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
+                    let stride = node
+                        .optional_attr::<usize>("stride")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
-                    let padding: usize = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|p| p.parse().ok())
+                    let padding = node
+                        .optional_attr::<usize>("padding")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
-                    let dilation: usize = node
-                        .attrs
-                        .get("dilation")
-                        .and_then(|d| d.parse().ok())
+                    let dilation = node
+                        .optional_attr::<usize>("dilation")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
                     let input_c = input_shapes
                         .first()
