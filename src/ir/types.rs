@@ -759,164 +759,33 @@ impl TensorType {
     /// including the SIMD margin, which is needed for correct arena allocation.
     pub fn try_byte_size_with_env(&self, env: Option<&ShapeEnv>) -> Option<usize> {
         let symbol_max = SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize;
-        let numel = self.shape.iter().try_fold(1usize, |count, dimension| {
-            let value = match dimension {
-                DimExpr::Known(value) => usize::try_from(*value).ok()?,
-                DimExpr::Bounded { max, .. } => usize::try_from(*max).ok()?,
-                DimExpr::Symbol(_) => match env {
-                    Some(env) => usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?,
-                    None => symbol_max,
-                },
-            };
-            count.checked_mul(value)
-        })?;
-        let conservative_limit = usize::MAX.checked_sub(64)?.checked_div(8)?;
-        if numel > conservative_limit {
-            return None;
-        }
-        Some(self.byte_size_with_env(env))
+        let shape = self
+            .shape
+            .iter()
+            .map(|dimension| {
+                Some(match dimension {
+                    DimExpr::Known(value) => usize::try_from(*value).ok()?,
+                    DimExpr::Bounded { max, .. } => usize::try_from(*max).ok()?,
+                    DimExpr::Symbol(_) => match env {
+                        Some(env) => {
+                            usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?
+                        }
+                        None => symbol_max,
+                    },
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let representation = self.dtype.value_representation().ok()?;
+        self.dtype
+            .storage_layout()
+            .ok()?
+            .allocation_bytes(representation.storage, &shape)
+            .ok()
     }
 
     pub fn byte_size_with_env(&self, env: Option<&ShapeEnv>) -> usize {
-        let symbol_max = SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize;
-        let numel: usize = self
-            .shape
-            .iter()
-            .map(|d| match d {
-                DimExpr::Known(v) => *v as usize,
-                DimExpr::Bounded { max, .. } => *max as usize,
-                DimExpr::Symbol(_) => match env {
-                    Some(e) => d.evaluate_with_env(e).ok().unwrap_or(symbol_max as u64) as usize,
-                    None => symbol_max,
-                },
-            })
-            .product();
-        // For packed types, compute per-row packed byte size to match
-        // PackedTensor's actual storage layout (rows * ceil(inner / ITEMS) + MARGIN).
-        // This differs from flat packing (ceil(total / ITEMS)) when the inner
-        // dimension is not a multiple of ITEMS, which would cause slot under-allocation.
-        match &self.dtype {
-            IrDType::I4 { .. } => {
-                let inner_dim = self
-                    .shape
-                    .last()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as usize,
-                        DimExpr::Bounded { max, .. } => *max as usize,
-                        DimExpr::Symbol(_) => 8,
-                    })
-                    .unwrap_or(1);
-                let rows = if inner_dim > 0 {
-                    numel.div_ceil(inner_dim)
-                } else {
-                    1
-                };
-                let words = rows * inner_dim.div_ceil(8) + 16;
-                words * 4
-            }
-            IrDType::I8Scaled { .. } => {
-                let inner_dim = self
-                    .shape
-                    .last()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as usize,
-                        DimExpr::Bounded { max, .. } => *max as usize,
-                        DimExpr::Symbol(_) => 4,
-                    })
-                    .unwrap_or(1);
-                let rows = if inner_dim > 0 {
-                    numel.div_ceil(inner_dim)
-                } else {
-                    1
-                };
-                let words = rows * inner_dim.div_ceil(4) + 16;
-                words * 4
-            }
-            IrDType::I8 => {
-                // I8 activation payload includes 8-byte scale/zp header
-                numel + 8
-            }
-            IrDType::F8 { .. } | IrDType::F8R { .. } => {
-                let inner_dim = self
-                    .shape
-                    .last()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as usize,
-                        DimExpr::Bounded { max, .. } => *max as usize,
-                        DimExpr::Symbol(_) => 4,
-                    })
-                    .unwrap_or(1);
-                let rows = if inner_dim > 0 {
-                    numel.div_ceil(inner_dim)
-                } else {
-                    1
-                };
-                let words = rows * inner_dim.div_ceil(4) + 16;
-                words * 4
-            }
-            IrDType::F4 { .. } => {
-                let inner_dim = self
-                    .shape
-                    .last()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as usize,
-                        DimExpr::Bounded { max, .. } => *max as usize,
-                        DimExpr::Symbol(_) => 8,
-                    })
-                    .unwrap_or(1);
-                let rows = if inner_dim > 0 {
-                    numel.div_ceil(inner_dim)
-                } else {
-                    1
-                };
-                let words = rows * inner_dim.div_ceil(8) + 16;
-                words * 4
-            }
-            IrDType::U4Scaled { .. } => {
-                let inner_dim = self
-                    .shape
-                    .last()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as usize,
-                        DimExpr::Bounded { max, .. } => *max as usize,
-                        DimExpr::Symbol(_) => 8,
-                    })
-                    .unwrap_or(1);
-                let rows = if inner_dim > 0 {
-                    numel.div_ceil(inner_dim)
-                } else {
-                    1
-                };
-                let words = rows * inner_dim.div_ceil(8) + 16;
-                words * 4
-            }
-            IrDType::U8Scaled { .. } => {
-                let inner_dim = self
-                    .shape
-                    .last()
-                    .map(|d| match d {
-                        DimExpr::Known(v) => *v as usize,
-                        DimExpr::Bounded { max, .. } => *max as usize,
-                        DimExpr::Symbol(_) => 4,
-                    })
-                    .unwrap_or(1);
-                let rows = if inner_dim > 0 {
-                    numel.div_ceil(inner_dim)
-                } else {
-                    1
-                };
-                let words = rows * inner_dim.div_ceil(4) + 16;
-                words * 4
-            }
-            _ => {
-                numel
-                    * self
-                        .dtype
-                        .plain_storage_byte_width()
-                        .expect("plain IR dtype must have a canonical representation")
-                        .expect("plain IR dtype must be byte-addressable")
-            }
-        }
+        self.try_byte_size_with_env(env)
+            .expect("tensor allocation size overflow")
     }
 }
 
@@ -953,6 +822,32 @@ mod tests {
         .unwrap();
         assert!(packed.row_packed);
         assert_eq!(packed.suffix_bytes, 64);
+    }
+
+    #[test]
+    fn tensor_type_allocation_uses_canonical_layout() {
+        let shape = vec![DimExpr::Known(2), DimExpr::Known(9)];
+        let packed = TensorType::new(
+            shape.clone(),
+            IrDType::U4Scaled {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+            },
+        );
+        assert_eq!(packed.try_byte_size_with_env(None), Some(80));
+        assert_eq!(TensorType::new(shape.clone(), IrDType::I8).byte_size(), 26);
+        assert_eq!(TensorType::new(shape, IrDType::F32).byte_size(), 72);
+
+        let symbolic = TensorType::new(
+            vec![DimExpr::Known(2), DimExpr::Symbol("K".into())],
+            IrDType::U4Scaled {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+            },
+        );
+        let mut env = ShapeEnv::new();
+        env.try_bind("K", 9).unwrap();
+        assert_eq!(symbolic.try_byte_size_with_env(Some(&env)), Some(80));
     }
 
     #[test]
