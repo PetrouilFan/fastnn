@@ -466,6 +466,7 @@ mod graph_kind_tests {
         let node = graph.get_node(id).unwrap();
         assert!(node.required_attr::<usize>("missing").is_err());
         assert!(node.required_attr::<usize>("bit_width").is_err());
+        assert!(node.optional_attr::<usize>("bit_width").is_err());
         assert_eq!(node.optional_attr::<usize>("missing").unwrap(), None);
     }
 

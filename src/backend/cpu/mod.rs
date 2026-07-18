@@ -840,62 +840,87 @@ impl Backend for CpuBackend {
                         }
                     }
                     let weight_meta = if is_quantized {
-                        node.inputs.get(1).and_then(|&w_id| {
-                            graph.get_node(w_id).map(|wn| {
-                                let (bit_width, scales, dequant_offsets, codebooks) = match &wn
-                                    .output_type
-                                    .dtype
-                                {
-                                    IrDType::I4 {
-                                        scales,
-                                        dequant_offsets,
-                                        codebooks,
-                                    } => (
-                                        4usize,
-                                        scales.clone(),
-                                        dequant_offsets.clone(),
-                                        codebooks.clone(),
-                                    ),
-                                    IrDType::U8Scaled {
-                                        scales,
-                                        dequant_offsets,
-                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::U4Scaled {
-                                        scales,
-                                        dequant_offsets,
-                                    } => (4usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::I8Scaled {
-                                        scales,
-                                        dequant_offsets,
-                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::F4 {
-                                        scales,
-                                        dequant_offsets: zeros,
-                                        ..
-                                    } => (4usize, scales.clone(), zeros.clone(), vec![]),
-                                    IrDType::F8 { scales } => {
-                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
+                        node.inputs
+                            .get(1)
+                            .and_then(|&w_id| {
+                                graph.get_node(w_id).map(|wn| -> Result<_, BackendError> {
+                                    let (bit_width, scales, dequant_offsets, codebooks) =
+                                        match &wn.output_type.dtype {
+                                            IrDType::I4 {
+                                                scales,
+                                                dequant_offsets,
+                                                codebooks,
+                                            } => (
+                                                4usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                codebooks.clone(),
+                                            ),
+                                            IrDType::U8Scaled {
+                                                scales,
+                                                dequant_offsets,
+                                            } => (
+                                                8usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                vec![],
+                                            ),
+                                            IrDType::U4Scaled {
+                                                scales,
+                                                dequant_offsets,
+                                            } => (
+                                                4usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                vec![],
+                                            ),
+                                            IrDType::I8Scaled {
+                                                scales,
+                                                dequant_offsets,
+                                            } => (
+                                                8usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                vec![],
+                                            ),
+                                            IrDType::F4 {
+                                                scales,
+                                                dequant_offsets: zeros,
+                                                ..
+                                            } => (4usize, scales.clone(), zeros.clone(), vec![]),
+                                            IrDType::F8 { scales } => (
+                                                8usize,
+                                                scales.clone(),
+                                                vec![0.0; scales.len()],
+                                                vec![],
+                                            ),
+                                            IrDType::F8R { scales } => (
+                                                8usize,
+                                                scales.clone(),
+                                                vec![0.0; scales.len()],
+                                                vec![],
+                                            ),
+                                            _ => (0usize, vec![], vec![], vec![]),
+                                        };
+                                    let mut w_shape: Vec<usize> = wn
+                                        .output_type
+                                        .shape
+                                        .iter()
+                                        .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
+                                        .collect();
+                                    // The quantization pass transposes 2D weight data from
+                                    // [K, N] to [N, K] and records the logical shape ([K, N])
+                                    // on the node; reverse to [N, K] for the packed-gemm meta.
+                                    if w_shape.len() == 2 {
+                                        w_shape.reverse();
                                     }
-                                    IrDType::F8R { scales } => {
-                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
-                                    }
-                                    _ => (0usize, vec![], vec![], vec![]),
-                                };
-                                let mut w_shape: Vec<usize> = wn
-                                    .output_type
-                                    .shape
-                                    .iter()
-                                    .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
-                                    .collect();
-                                // The quantization pass transposes 2D weight data from
-                                // [K, N] to [N, K] and records the logical shape ([K, N])
-                                // on the node; reverse to [N, K] for the packed-gemm meta.
-                                if w_shape.len() == 2 {
-                                    w_shape.reverse();
-                                }
-                                let quant_block_size =
-                                    if let Some(qbs) = wn.attrs.get("quant_block_size") {
-                                        qbs.parse::<usize>().unwrap_or(0)
+                                    let configured_block_size =
+                                        wn.optional_attr::<usize>("quant_block_size").map_err(
+                                            |error| BackendError::Compilation(error.to_string()),
+                                        )?;
+                                    let quant_block_size = if let Some(qbs) = configured_block_size
+                                    {
+                                        qbs
                                     } else if w_shape.len() >= 2 && scales.len() > w_shape[0] {
                                         let inner: usize = w_shape[1..].iter().product();
                                         let blocks_per_row = scales.len() / w_shape[0];
@@ -903,16 +928,17 @@ impl Backend for CpuBackend {
                                     } else {
                                         0
                                     };
-                                std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                                    bit_width,
-                                    scales,
-                                    dequant_offsets,
-                                    shape: w_shape,
-                                    quant_block_size,
-                                    codebooks,
+                                    Ok(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                                        bit_width,
+                                        scales,
+                                        dequant_offsets,
+                                        shape: w_shape,
+                                        quant_block_size,
+                                        codebooks,
+                                    }))
                                 })
                             })
-                        })
+                            .transpose()?
                     } else {
                         None
                     };
@@ -1226,56 +1252,82 @@ impl Backend for CpuBackend {
                             }
                         }
 
-                        let meta = node.inputs.get(1).and_then(|&w_id| {
-                            graph.get_node(w_id).map(|wn| {
-                                let (bw, scales, dequant_offsets, codebooks) = match &wn
-                                    .output_type
-                                    .dtype
-                                {
-                                    IrDType::I4 {
-                                        scales,
-                                        dequant_offsets,
-                                        codebooks,
-                                    } => (
-                                        4usize,
-                                        scales.clone(),
-                                        dequant_offsets.clone(),
-                                        codebooks.clone(),
-                                    ),
-                                    IrDType::U8Scaled {
-                                        scales,
-                                        dequant_offsets,
-                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::U4Scaled {
-                                        scales,
-                                        dequant_offsets,
-                                    } => (4usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    IrDType::F4 {
-                                        scales,
-                                        dequant_offsets: zeros,
-                                        ..
-                                    } => (4usize, scales.clone(), zeros.clone(), vec![]),
-                                    IrDType::F8 { scales } => {
-                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
-                                    }
-                                    IrDType::F8R { scales } => {
-                                        (8usize, scales.clone(), vec![0.0; scales.len()], vec![])
-                                    }
-                                    IrDType::I8Scaled {
-                                        scales,
-                                        dequant_offsets,
-                                    } => (8usize, scales.clone(), dequant_offsets.clone(), vec![]),
-                                    _ => (bit_width, vec![], vec![], vec![]),
-                                };
-                                let w_shape: Vec<usize> = wn
-                                    .output_type
-                                    .shape
-                                    .iter()
-                                    .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
-                                    .collect();
-                                let quant_block_size =
-                                    if let Some(qbs) = wn.attrs.get("quant_block_size") {
-                                        qbs.parse::<usize>().unwrap_or(0)
+                        let meta = node
+                            .inputs
+                            .get(1)
+                            .and_then(|&w_id| {
+                                graph.get_node(w_id).map(|wn| -> Result<_, BackendError> {
+                                    let (bw, scales, dequant_offsets, codebooks) =
+                                        match &wn.output_type.dtype {
+                                            IrDType::I4 {
+                                                scales,
+                                                dequant_offsets,
+                                                codebooks,
+                                            } => (
+                                                4usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                codebooks.clone(),
+                                            ),
+                                            IrDType::U8Scaled {
+                                                scales,
+                                                dequant_offsets,
+                                            } => (
+                                                8usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                vec![],
+                                            ),
+                                            IrDType::U4Scaled {
+                                                scales,
+                                                dequant_offsets,
+                                            } => (
+                                                4usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                vec![],
+                                            ),
+                                            IrDType::F4 {
+                                                scales,
+                                                dequant_offsets: zeros,
+                                                ..
+                                            } => (4usize, scales.clone(), zeros.clone(), vec![]),
+                                            IrDType::F8 { scales } => (
+                                                8usize,
+                                                scales.clone(),
+                                                vec![0.0; scales.len()],
+                                                vec![],
+                                            ),
+                                            IrDType::F8R { scales } => (
+                                                8usize,
+                                                scales.clone(),
+                                                vec![0.0; scales.len()],
+                                                vec![],
+                                            ),
+                                            IrDType::I8Scaled {
+                                                scales,
+                                                dequant_offsets,
+                                            } => (
+                                                8usize,
+                                                scales.clone(),
+                                                dequant_offsets.clone(),
+                                                vec![],
+                                            ),
+                                            _ => (bit_width, vec![], vec![], vec![]),
+                                        };
+                                    let w_shape: Vec<usize> = wn
+                                        .output_type
+                                        .shape
+                                        .iter()
+                                        .map(|d| d.evaluate().unwrap_or(symbol_max) as usize)
+                                        .collect();
+                                    let configured_block_size =
+                                        wn.optional_attr::<usize>("quant_block_size").map_err(
+                                            |error| BackendError::Compilation(error.to_string()),
+                                        )?;
+                                    let quant_block_size = if let Some(qbs) = configured_block_size
+                                    {
+                                        qbs
                                     } else if w_shape.len() >= 2 && scales.len() > w_shape[0] {
                                         let inner: usize = w_shape[1..].iter().product();
                                         let blocks_per_row = scales.len() / w_shape[0];
@@ -1283,16 +1335,17 @@ impl Backend for CpuBackend {
                                     } else {
                                         0
                                     };
-                                std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                                    bit_width: bw,
-                                    scales,
-                                    dequant_offsets,
-                                    shape: w_shape,
-                                    quant_block_size,
-                                    codebooks,
+                                    Ok(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                                        bit_width: bw,
+                                        scales,
+                                        dequant_offsets,
+                                        shape: w_shape,
+                                        quant_block_size,
+                                        codebooks,
+                                    }))
                                 })
                             })
-                        });
+                            .transpose()?;
                         (kernel.to_string(), meta)
                     } else {
                         let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
