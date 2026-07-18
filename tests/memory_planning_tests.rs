@@ -68,6 +68,18 @@ fn shape_inference_rejects_invalid_pool_geometry() {
 
     let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
     assert!(error.to_string().contains("positive"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let reduce = graph.add_node(Opcode::ReduceSum, vec![input], tensor_type);
+    graph
+        .get_node_mut(reduce)
+        .unwrap()
+        .attrs
+        .insert("axis".into(), "-3".into());
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("out of range"), "{error}");
 }
 
 #[test]

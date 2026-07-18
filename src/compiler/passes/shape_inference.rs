@@ -144,62 +144,59 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             }),
             Opcode::TopK => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => {
-                inputs.first().map(|i| {
-                    let mut s = i.output_type.shape.clone();
-                    let keepdim: bool = node
-                        .attrs
-                        .get("keepdim")
-                        .map(|v| parse_keepdim_attr(v))
-                        .unwrap_or(true);
-                    if let Some(axis_str) = node.attrs.get("axis") {
-                        if let Ok(axis_i64) = axis_str.parse::<i64>() {
-                            let rank = s.len();
-                            let axis = if axis_i64 < 0 {
-                                let r = rank as i64;
-                                if r > 0 {
-                                    ((r + axis_i64 % r) % r) as usize
-                                } else {
-                                    0
-                                }
-                            } else {
-                                axis_i64 as usize
-                            };
-                            if axis < s.len() {
-                                if keepdim {
-                                    s[axis] = DimExpr::Known(1);
-                                } else {
-                                    s.remove(axis);
-                                }
-                            }
+                if let Some(input) = inputs.first() {
+                    let mut shape = input.output_type.shape.clone();
+                    let keepdim = node.optional_bool_attr("keepdim")?.unwrap_or(true);
+                    if let Some(raw_axis) = node.optional_attr::<i64>("axis")? {
+                        let rank = i64::try_from(shape.len()).map_err(|_| {
+                            FastnnError::shape(format!(
+                                "{:?} node {node_id} rank does not fit i64",
+                                node.opcode
+                            ))
+                        })?;
+                        let axis = if raw_axis < 0 {
+                            rank.checked_add(raw_axis)
+                        } else {
+                            Some(raw_axis)
+                        }
+                        .filter(|&axis| axis >= 0 && axis < rank)
+                        .ok_or_else(|| {
+                            FastnnError::shape(format!(
+                                "{:?} node {node_id} axis {raw_axis} is out of range for rank {rank}",
+                                node.opcode
+                            ))
+                        })? as usize;
+                        if keepdim {
+                            shape[axis] = DimExpr::Known(1);
+                        } else {
+                            shape.remove(axis);
                         }
                     }
-                    s
-                })
+                    Some(shape)
+                } else {
+                    None
+                }
             }
             Opcode::Concat => {
                 if !inputs.is_empty() {
-                    let axis_i64 = node.optional_attr::<i64>("axis")?.unwrap_or(0);
+                    let axis = node.optional_attr::<usize>("axis")?.unwrap_or(0);
                     let rank = inputs[0].output_type.shape.len();
-                    let axis = if axis_i64 < 0 {
-                        let r = rank as i64;
-                        if r > 0 {
-                            ((r + axis_i64 % r) % r) as usize
-                        } else {
-                            0
-                        }
-                    } else {
-                        axis_i64 as usize
-                    };
-                    let mut shape = inputs[0].output_type.shape.clone();
-                    if axis < shape.len() {
-                        let mut total = DimExpr::Known(0);
-                        for inp in &inputs {
-                            if axis < inp.output_type.shape.len() {
-                                total = total.add(&inp.output_type.shape[axis]);
-                            }
-                        }
-                        shape[axis] = total;
+                    if axis >= rank {
+                        return Err(FastnnError::shape(format!(
+                            "Concat node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
                     }
+                    let mut shape = inputs[0].output_type.shape.clone();
+                    let mut total = DimExpr::Known(0);
+                    for input in &inputs {
+                        if axis >= input.output_type.shape.len() {
+                            return Err(FastnnError::shape(format!(
+                                "Concat node {node_id} input rank is too small for axis {axis}"
+                            )));
+                        }
+                        total = total.add(&input.output_type.shape[axis]);
+                    }
+                    shape[axis] = total;
                     Some(shape)
                 } else {
                     None
@@ -791,11 +788,4 @@ fn conv_transpose_spatial_dim(
             }
         }
     }
-}
-
-/// Parse a `keepdim` attribute string. The builder stores it as `"1"`
-/// or `"0"` to match the rest of the IR's stringly-typed attrs, but
-/// existing call sites also pass `"true"` / `"false"`. Accept both.
-fn parse_keepdim_attr(v: &str) -> bool {
-    !matches!(v.trim(), "0" | "false" | "False" | "FALSE")
 }

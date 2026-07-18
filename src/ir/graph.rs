@@ -116,6 +116,20 @@ impl IRNode {
             .collect::<FastnnResult<Vec<_>>>()
             .map(Some)
     }
+
+    pub fn optional_bool_attr(&self, key: &str) -> FastnnResult<Option<bool>> {
+        let Some(value) = self.attrs.get(key) else {
+            return Ok(None);
+        };
+        match value.trim() {
+            "1" | "true" | "True" | "TRUE" => Ok(Some(true)),
+            "0" | "false" | "False" | "FALSE" => Ok(Some(false)),
+            _ => Err(FastnnError::shape(format!(
+                "{:?} node {} has invalid boolean {key:?} attribute {value:?}",
+                self.opcode, self.id
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -503,6 +517,11 @@ mod graph_kind_tests {
         );
         node.attrs.insert("axes".into(), "0,bad,3".into());
         assert!(node.optional_attr_list::<usize>("axes").is_err());
+
+        node.attrs.insert("keepdim".into(), "0".into());
+        assert_eq!(node.optional_bool_attr("keepdim").unwrap(), Some(false));
+        node.attrs.insert("keepdim".into(), "sometimes".into());
+        assert!(node.optional_bool_attr("keepdim").is_err());
     }
 
     #[test]
