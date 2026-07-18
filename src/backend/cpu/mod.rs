@@ -17,6 +17,7 @@ use crate::compiler::plan::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
+use crate::types::{RepresentationTransform, ScalarType};
 use bytemuck;
 use smallvec::{smallvec, SmallVec};
 use std::any::TypeId;
@@ -25,6 +26,26 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
+
+fn canonical_storage_scalar(dtype: &IrDType) -> Option<ScalarType> {
+    dtype
+        .value_representation()
+        .ok()
+        .map(|representation| representation.storage)
+}
+
+fn has_transformed_storage(dtype: &IrDType) -> bool {
+    dtype.value_representation().is_ok_and(|representation| {
+        !matches!(representation.transform, RepresentationTransform::None)
+    })
+}
+
+fn has_transformed_scalar(dtype: &IrDType, storage: ScalarType) -> bool {
+    dtype.value_representation().is_ok_and(|representation| {
+        representation.storage == storage
+            && !matches!(representation.transform, RepresentationTransform::None)
+    })
+}
 
 mod arena;
 pub mod blas;
@@ -670,18 +691,7 @@ impl Backend for CpuBackend {
                         .filter_map(|&input_id| graph.get_node(input_id))
                         .map(|n| n.output_type.dtype.clone())
                         .collect();
-                    let is_quantized = input_dtypes.iter().any(|d| {
-                        matches!(
-                            d,
-                            IrDType::I4 { .. }
-                                | IrDType::I8Scaled { .. }
-                                | IrDType::U4Scaled { .. }
-                                | IrDType::U8Scaled { .. }
-                                | IrDType::F4 { .. }
-                                | IrDType::F8 { .. }
-                                | IrDType::F8R { .. }
-                        )
-                    });
+                    let is_quantized = input_dtypes.iter().any(has_transformed_storage);
 
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
                     // Determine fusion params for the unified "matmul" kernel
@@ -705,32 +715,38 @@ impl Backend for CpuBackend {
                         (_, false) => "matmul",
                         // Quantized: I8 activation + U4 weight
                         (_, true)
-                            if input_dtypes
-                                .first()
-                                .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| {
-                                    matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })
-                                }) =>
+                            if input_dtypes.first().is_some_and(|d| {
+                                canonical_storage_scalar(d) == Some(ScalarType::I8)
+                            }) && input_dtypes.iter().any(|d| {
+                                matches!(
+                                    canonical_storage_scalar(d),
+                                    Some(ScalarType::I4 | ScalarType::U4)
+                                )
+                            }) =>
                         {
                             "matmul_i4_i8"
                         }
                         // Quantized: I8 activation + U8 weight (no U4)
                         (_, true)
-                            if input_dtypes
-                                .first()
-                                .is_some_and(|d| matches!(d, IrDType::I8))
-                                && input_dtypes.iter().any(|d| {
-                                    matches!(d, IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. })
-                                })
-                                && !input_dtypes.iter().any(|d| {
-                                    matches!(d, IrDType::I4 { .. } | IrDType::U4Scaled { .. })
-                                }) =>
+                            if input_dtypes.first().is_some_and(|d| {
+                                canonical_storage_scalar(d) == Some(ScalarType::I8)
+                            }) && input_dtypes.iter().any(|d| {
+                                has_transformed_scalar(d, ScalarType::I8)
+                                    || has_transformed_scalar(d, ScalarType::U8)
+                            }) && !input_dtypes.iter().any(|d| {
+                                matches!(
+                                    canonical_storage_scalar(d),
+                                    Some(ScalarType::I4 | ScalarType::U4)
+                                )
+                            }) =>
                         {
                             "matmul_i8_i8"
                         }
                         // Quantized: F32 activation + Signed I4 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::I4 { .. })) =>
+                            if input_dtypes
+                                .iter()
+                                .any(|d| canonical_storage_scalar(d) == Some(ScalarType::I4)) =>
                         {
                             "matmul_i4"
                         }
@@ -738,27 +754,31 @@ impl Backend for CpuBackend {
                         (_, true)
                             if input_dtypes
                                 .iter()
-                                .any(|d| matches!(d, IrDType::U4Scaled { .. })) =>
+                                .any(|d| canonical_storage_scalar(d) == Some(ScalarType::U4)) =>
                         {
                             "matmul_u4"
                         }
                         // Quantized: F32 activation + FP4 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F4 { .. })) =>
+                            if input_dtypes.iter().any(|d| {
+                                canonical_storage_scalar(d) == Some(ScalarType::Fp4E2M1)
+                            }) =>
                         {
                             "matmul_f4"
                         }
                         // Quantized: F32 activation + FP8 E4M3 weight
                         (_, true)
-                            if input_dtypes.iter().any(|d| matches!(d, IrDType::F8 { .. })) =>
+                            if input_dtypes.iter().any(|d| {
+                                canonical_storage_scalar(d) == Some(ScalarType::Fp8E4M3)
+                            }) =>
                         {
                             "matmul_f8"
                         }
                         // Quantized: F32 activation + FP8 E5M2 weight
                         (_, true)
-                            if input_dtypes
-                                .iter()
-                                .any(|d| matches!(d, IrDType::F8R { .. })) =>
+                            if input_dtypes.iter().any(|d| {
+                                canonical_storage_scalar(d) == Some(ScalarType::Fp8E5M2)
+                            }) =>
                         {
                             "matmul_f8r"
                         }
@@ -766,7 +786,7 @@ impl Backend for CpuBackend {
                         (_, true)
                             if input_dtypes
                                 .iter()
-                                .any(|d| matches!(d, IrDType::U8Scaled { .. })) =>
+                                .any(|d| canonical_storage_scalar(d) == Some(ScalarType::U8)) =>
                         {
                             "matmul_u8"
                         }
@@ -1128,18 +1148,7 @@ impl Backend for CpuBackend {
                         .get(1)
                         .and_then(|&w_id| graph.get_node(w_id))
                         .map(|wn| wn.output_type.dtype.clone());
-                    let is_quantized = weight_dtype.as_ref().is_some_and(|d| {
-                        matches!(
-                            d,
-                            IrDType::I4 { .. }
-                                | IrDType::I8Scaled { .. }
-                                | IrDType::U4Scaled { .. }
-                                | IrDType::U8Scaled { .. }
-                                | IrDType::F4 { .. }
-                                | IrDType::F8 { .. }
-                                | IrDType::F8R { .. }
-                        )
-                    });
+                    let is_quantized = weight_dtype.as_ref().is_some_and(has_transformed_storage);
                     if is_quantized {
                         let weight_id = node.inputs.get(1).ok_or_else(|| {
                             BackendError::Compilation(format!(
@@ -1163,28 +1172,32 @@ impl Backend for CpuBackend {
                                 "quantized convolution node {node_id} has no weight dtype"
                             ))
                         })?;
-                        let mut kernel = if matches!(dtype, IrDType::F4 { .. }) {
-                            "conv2d_f4".to_string()
-                        } else if matches!(dtype, IrDType::F8 { .. }) {
-                            "conv2d_f8".to_string()
-                        } else if matches!(dtype, IrDType::F8R { .. }) {
-                            "conv2d_f8r".to_string()
-                        } else if matches!(dtype, IrDType::U4Scaled { .. }) {
-                            "conv2d_u4".to_string()
-                        } else if matches!(dtype, IrDType::U8Scaled { .. }) {
-                            "conv2d_u8".to_string()
-                        } else if matches!(dtype, IrDType::I4 { .. }) {
-                            "conv2d_i4".to_string()
-                        } else {
-                            "conv2d_i8".to_string()
+                        let storage = canonical_storage_scalar(dtype).ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "quantized convolution node {node_id} has invalid weight representation"
+                            ))
+                        })?;
+                        let mut kernel = match storage {
+                            ScalarType::Fp4E2M1 => "conv2d_f4".to_string(),
+                            ScalarType::Fp8E4M3 => "conv2d_f8".to_string(),
+                            ScalarType::Fp8E5M2 => "conv2d_f8r".to_string(),
+                            ScalarType::U4 => "conv2d_u4".to_string(),
+                            ScalarType::U8 => "conv2d_u8".to_string(),
+                            ScalarType::I4 => "conv2d_i4".to_string(),
+                            ScalarType::I8 => "conv2d_i8".to_string(),
+                            other => {
+                                return Err(BackendError::Compilation(format!(
+                                    "quantized convolution node {node_id} has unsupported storage {other:?}"
+                                )))
+                            }
                         };
-                        let bit_width = if matches!(
-                            dtype,
-                            IrDType::I4 { .. } | IrDType::U4Scaled { .. } | IrDType::F4 { .. }
-                        ) {
-                            4usize
-                        } else {
-                            8usize
+                        let bit_width = match storage {
+                            ScalarType::I4 | ScalarType::U4 | ScalarType::Fp4E2M1 => 4,
+                            ScalarType::I8
+                            | ScalarType::U8
+                            | ScalarType::Fp8E4M3
+                            | ScalarType::Fp8E5M2 => 8,
+                            _ => unreachable!("unsupported storage returned above"),
                         };
 
                         // Detect signed INT8 activations from QuantizeActivations and append suffix.
@@ -1197,7 +1210,7 @@ impl Backend for CpuBackend {
                             .map(|an| an.output_type.dtype.clone());
                         if act_dtype
                             .as_ref()
-                            .is_some_and(|d| matches!(d, IrDType::I8 | IrDType::I8Scaled { .. }))
+                            .is_some_and(|d| canonical_storage_scalar(d) == Some(ScalarType::I8))
                         {
                             kernel = format!("{}_i8", kernel);
                         }
