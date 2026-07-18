@@ -1396,9 +1396,8 @@ impl Backend for CpuBackend {
                 }
                 Opcode::BatchNorm | Opcode::LayerNorm => {
                     let eps = node
-                        .attrs
-                        .get("eps")
-                        .and_then(|s| s.parse::<f32>().ok())
+                        .optional_attr::<f32>("eps")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1e-5);
                     let is_batch_norm = if matches!(node.opcode, Opcode::BatchNorm) {
                         1
@@ -1588,20 +1587,17 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::MaxPool | Opcode::AvgPool => {
-                    let kernel_size: usize = node
-                        .attrs
-                        .get("kernel_size")
-                        .and_then(|k| k.parse().ok())
+                    let kernel_size = node
+                        .optional_attr::<usize>("kernel_size")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(2);
-                    let stride: usize = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
+                    let stride = node
+                        .optional_attr::<usize>("stride")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(2);
-                    let padding: usize = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|p| p.parse().ok())
+                    let padding = node
+                        .optional_attr::<usize>("padding")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
                     let is_max = if matches!(node.opcode, Opcode::MaxPool) {
                         1
