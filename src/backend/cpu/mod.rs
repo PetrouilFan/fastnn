@@ -1071,16 +1071,9 @@ impl Backend for CpuBackend {
                     };
                     let mut extra_params: Vec<usize> = Vec::with_capacity(graph.nodes.len());
                     if let Opcode::LeakyRelu = node.opcode {
-                        let raw = node.attrs.get("negative_slope").ok_or_else(|| {
-                            BackendError::Compilation(format!(
-                                "leaky relu node {node_id} is missing negative_slope"
-                            ))
-                        })?;
-                        let slope: f32 = raw.parse().map_err(|_| {
-                            BackendError::Compilation(format!(
-                                "leaky relu node {node_id} has invalid negative_slope"
-                            ))
-                        })?;
+                        let slope = node
+                            .required_attr::<f32>("negative_slope")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
                         if !slope.is_finite() {
                             return Err(BackendError::Compilation(format!(
                                 "leaky relu node {node_id} requires a finite negative_slope"
@@ -1090,16 +1083,9 @@ impl Backend for CpuBackend {
                     }
                     if let Opcode::Clamp = node.opcode {
                         let parse_bound = |name: &str| -> Result<f32, BackendError> {
-                            let raw = node.attrs.get(name).ok_or_else(|| {
-                                BackendError::Compilation(format!(
-                                    "clamp node {node_id} is missing {name}"
-                                ))
-                            })?;
-                            let value: f32 = raw.parse().map_err(|_| {
-                                BackendError::Compilation(format!(
-                                    "clamp node {node_id} has invalid {name}"
-                                ))
-                            })?;
+                            let value = node
+                                .required_attr::<f32>(name)
+                                .map_err(|error| BackendError::Compilation(error.to_string()))?;
                             if !value.is_finite() {
                                 return Err(BackendError::Compilation(format!(
                                     "clamp node {node_id} requires a finite {name}"
@@ -1145,19 +1131,8 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Conv2d => {
                     let parse_attr = |name: &str| -> Result<usize, BackendError> {
-                        node.attrs
-                            .get(name)
-                            .ok_or_else(|| {
-                                BackendError::Compilation(format!(
-                                    "conv2d node {node_id} is missing {name}"
-                                ))
-                            })?
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                BackendError::Compilation(format!(
-                                    "conv2d node {node_id} has invalid {name}"
-                                ))
-                            })
+                        node.required_attr::<usize>(name)
+                            .map_err(|error| BackendError::Compilation(error.to_string()))
                     };
                     let stride = parse_attr("stride")?;
                     let padding = parse_attr("padding")?;
@@ -1416,20 +1391,9 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Softmax => {
-                    let axis: i64 = node
-                        .attrs
-                        .get("axis")
-                        .ok_or_else(|| {
-                            BackendError::Compilation(format!(
-                                "softmax node {node_id} is missing axis"
-                            ))
-                        })?
-                        .parse()
-                        .map_err(|_| {
-                            BackendError::Compilation(format!(
-                                "softmax node {node_id} has invalid axis"
-                            ))
-                        })?;
+                    let axis = node
+                        .required_attr::<i64>("axis")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?;
                     let input_shape = input_shapes.first().ok_or_else(|| {
                         BackendError::Compilation(format!(
                             "softmax node {node_id} is missing its input shape"
@@ -1512,20 +1476,9 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Concat => {
-                    let axis: usize = node
-                        .attrs
-                        .get("axis")
-                        .ok_or_else(|| {
-                            BackendError::Compilation(format!(
-                                "concat node {node_id} is missing axis"
-                            ))
-                        })?
-                        .parse()
-                        .map_err(|_| {
-                            BackendError::Compilation(format!(
-                                "concat node {node_id} has invalid axis"
-                            ))
-                        })?;
+                    let axis = node
+                        .required_attr::<usize>("axis")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?;
                     let output_shape: Vec<u64> = node
                         .output_type
                         .shape
