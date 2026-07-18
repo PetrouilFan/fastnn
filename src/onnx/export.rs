@@ -283,9 +283,17 @@ fn per_tensor_scale(scales: &[f32]) -> f32 {
     scales.first().copied().unwrap_or(1.0)
 }
 
-/// Extract a per-tensor zero_point from per-channel dequant_offsets.
-fn per_tensor_zero_point(dequant_offsets: &[f32]) -> i32 {
-    dequant_offsets.first().copied().unwrap_or(0.0) as i32
+/// Convert `real = q * scale + offset` metadata to ONNX's
+/// `real = (q - zero_point) * scale` convention.
+fn per_tensor_zero_point(scales: &[f32], dequant_offsets: &[f32]) -> i32 {
+    let scale = scales.first().copied().unwrap_or(1.0);
+    let offset = dequant_offsets.first().copied().unwrap_or(0.0);
+    if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+        return 0;
+    }
+    (-offset / scale)
+        .round()
+        .clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 /// Generate unique param entry names for the scale/zero_point scalars
@@ -308,40 +316,26 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         Some(n) => n,
         None => return (1.0, 0),
     };
-    match &q_node.output_type.dtype {
-        IrDType::I4 {
-            scales,
-            dequant_offsets,
-            ..
-        } => {
-            let s = scales.first().copied().unwrap_or(1.0);
-            let zp = dequant_offsets.first().copied().unwrap_or(0.0) as i32;
-            if scales.is_empty() {
-                (1.0, 0)
-            } else {
-                (s, zp)
-            }
+    let representation = match q_node.output_type.dtype.value_representation() {
+        Ok(representation) => representation,
+        Err(_) => return (1.0, 0),
+    };
+    match representation.transform {
+        RepresentationTransform::AffineDequantization {
+            scales, offsets, ..
         }
-        IrDType::I8Scaled {
-            scales,
-            dequant_offsets,
-        } => {
-            let s = scales.first().copied().unwrap_or(1.0);
-            let zp = dequant_offsets.first().copied().unwrap_or(0.0) as i32;
-            if scales.is_empty() {
-                (1.0, 0)
-            } else {
-                (s, zp)
-            }
+        | RepresentationTransform::ScaledAffine {
+            scales, offsets, ..
         }
-        IrDType::F8 { .. } | IrDType::F8R { .. } => (1.0, 0),
-        IrDType::F4 { scales, .. } => {
-            let s = scales.first().copied().unwrap_or(1.0);
-            if scales.is_empty() {
-                (1.0, 0)
-            } else {
-                (s, 0)
-            }
+        | RepresentationTransform::Codebook {
+            scales, offsets, ..
+        } if !scales.is_empty() => {
+            let scale = scales[0];
+            (scale, per_tensor_zero_point(&scales, &offsets))
+        }
+        RepresentationTransform::AffineQuantization(spec) if !spec.scales.is_empty() => {
+            let zero_point = spec.zero_points.first().copied().unwrap_or(0);
+            (spec.scales[0], zero_point)
         }
         _ => (1.0, 0),
     }
@@ -447,7 +441,8 @@ pub fn export_to_onnx_json_with_config(
             let b_src = node_output_names[&node.inputs[1]].clone();
 
             let b_scale = per_tensor_scale(&pattern.weight_scales);
-            let b_zp = per_tensor_zero_point(&pattern.weight_dequant_offsets);
+            let b_zp =
+                per_tensor_zero_point(&pattern.weight_scales, &pattern.weight_dequant_offsets);
             let a_scale = pattern.activation_scale.unwrap_or(1.0);
             let a_zp = 0;
             let (y_scale, y_zp) = extract_output_scale_zp(graph, pattern.q_output_id);
@@ -789,5 +784,13 @@ mod tests {
             Some("u4")
         );
         assert_eq!(packed_param_dtype(&IrDType::F32), None);
+    }
+
+    #[test]
+    fn dequantization_offsets_are_converted_to_onnx_zero_points() {
+        assert_eq!(per_tensor_zero_point(&[0.5], &[-1.0]), 2);
+        assert_eq!(per_tensor_zero_point(&[0.25], &[1.0]), -4);
+        assert_eq!(per_tensor_zero_point(&[], &[]), 0);
+        assert_eq!(per_tensor_zero_point(&[0.0], &[1.0]), 0);
     }
 }
