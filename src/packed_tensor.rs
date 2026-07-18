@@ -6,17 +6,7 @@ use crate::types::{
 use std::sync::{Arc, OnceLock};
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut v = Vec::with_capacity(len);
-
-    // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
-    unsafe {
-        std::ptr::write_bytes(v.as_mut_ptr() as *mut u8, 0, len * std::mem::size_of::<T>());
-        v.set_len(len);
-    }
-    v
+    vec![<T as bytemuck::Zeroable>::zeroed(); len]
 }
 
 fn kmeans_16(values: &[f32], max_iter: usize) -> [f32; 16] {
@@ -92,7 +82,7 @@ fn nearest_codebook_index(v: f32, codebook: &[f32; 16]) -> usize {
 }
 
 fn extract_nibble<T: PackedWord>(word: &T, elem: usize) -> usize {
-    let word_u32: u32 = unsafe { std::mem::transmute_copy(word) };
+    let word_u32 = word.to_bits();
     ((word_u32 >> (elem * 4)) & 0xF) as usize
 }
 
@@ -1395,10 +1385,7 @@ impl<T: PackedWord> PackedTensor<T> {
                             w |= (idx as u32) << (i * 4);
                         }
                     }
-                    packed[chunk_idx] = T::default();
-                    let word_ref: &mut T = &mut packed[chunk_idx];
-                    let word_u32: &mut u32 = unsafe { std::mem::transmute(word_ref) };
-                    *word_u32 = w;
+                    packed[chunk_idx] = T::from_bits(w);
                 }
             }
         }

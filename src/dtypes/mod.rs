@@ -33,6 +33,18 @@ pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + 
     /// For integer types: 2^(BIT_WIDTH-1)-1. For float types: format-specific max.
     const MAX_REPRESENTABLE: f32;
 
+    /// Return the exact canonical 32-bit storage word.
+    #[inline]
+    fn to_bits(self) -> u32 {
+        bytemuck::cast(self)
+    }
+
+    /// Construct a packed value from its exact canonical 32-bit storage word.
+    #[inline]
+    fn from_bits(bits: u32) -> Self {
+        bytemuck::cast(bits)
+    }
+
     /// Unpacked representation as f32 array for compute
     type Array: AsRef<[f32]> + AsMut<[f32]> + Copy + Default;
 
