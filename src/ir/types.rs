@@ -680,20 +680,14 @@ impl IrDType {
     }
 
     pub fn try_packed_byte_size(&self, numel: usize) -> Option<usize> {
-        let packed_words = |items_per_word: usize| {
-            let words = numel / items_per_word + usize::from(!numel.is_multiple_of(items_per_word));
-            words.checked_add(16)?.checked_mul(4)
-        };
-        match self {
-            IrDType::F32 | IrDType::I32 => numel.checked_mul(4),
-            IrDType::F16 | IrDType::BF16 => numel.checked_mul(2),
-            IrDType::I64 => numel.checked_mul(8),
-            IrDType::Bool | IrDType::I8 => Some(numel),
-            IrDType::I4 { .. } | IrDType::F4 { .. } | IrDType::U4Scaled { .. } => packed_words(8),
-            IrDType::I8Scaled { .. }
-            | IrDType::F8 { .. }
-            | IrDType::F8R { .. }
-            | IrDType::U8Scaled { .. } => packed_words(4),
+        let representation = self.value_representation().ok()?;
+        let payload_bytes = representation
+            .encoding
+            .storage_bytes(representation.storage, numel)
+            .ok()?;
+        match representation.encoding {
+            StorageEncoding::Plain => Some(payload_bytes),
+            StorageEncoding::Packed { .. } => payload_bytes.checked_add(16 * 4),
         }
     }
 }
