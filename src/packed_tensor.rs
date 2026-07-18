@@ -1,5 +1,8 @@
 use crate::dtypes::PackedWord;
-use crate::types::{QuantizationGranularity, RepresentationTransform, PACKED_SIMD_MARGIN_WORDS};
+use crate::types::{
+    QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
+    ValueRepresentation, PACKED_SIMD_MARGIN_WORDS,
+};
 use std::sync::{Arc, OnceLock};
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
@@ -173,6 +176,19 @@ impl<T: PackedWord> PackedTensor<T> {
                 scales: self.scales.clone(),
                 offsets: self.zeros.clone(),
             }
+        }
+    }
+
+    /// Full canonical representation resolved from the word format and runtime metadata.
+    pub fn value_representation(&self) -> ValueRepresentation {
+        ValueRepresentation {
+            logical: ScalarType::F32,
+            storage: T::SCALAR_TYPE,
+            encoding: StorageEncoding::Packed {
+                word_bits: (std::mem::size_of::<T>() * 8) as u8,
+                lanes: T::ITEMS as u8,
+            },
+            transform: self.representation_transform(),
         }
     }
 
@@ -1592,6 +1608,16 @@ mod tests {
                 ..
             }
         ));
+        let representation = per_tensor.value_representation();
+        assert_eq!(representation.storage, ScalarType::I4);
+        assert_eq!(
+            representation.encoding,
+            StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            }
+        );
+        representation.validate().unwrap();
 
         let per_channel = PackedTensor::<I4x8>::from_f32_per_channel(&data, &[4, 8]);
         assert_eq!(

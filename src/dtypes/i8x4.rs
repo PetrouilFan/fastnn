@@ -12,6 +12,7 @@ unsafe impl bytemuck::Pod for I8x4 {}
 unsafe impl bytemuck::Zeroable for I8x4 {}
 
 impl PackedWord for I8x4 {
+    const SCALAR_TYPE: crate::types::ScalarType = crate::types::ScalarType::I8;
     const ITEMS: usize = 4;
     const BIT_WIDTH: usize = 8;
     const IS_FLOAT: bool = false;

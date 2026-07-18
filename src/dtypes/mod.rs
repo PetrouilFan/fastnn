@@ -21,6 +21,8 @@ pub use u8x4::U8x4;
 /// Core trait for packed multi-precision types.
 /// Each implementor packs N values into a single u32 word.
 pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + Default {
+    /// Canonical scalar format stored in each packed lane.
+    const SCALAR_TYPE: crate::types::ScalarType;
     /// Number of values stored per u32 word
     const ITEMS: usize;
     /// Bit width of each individual value
