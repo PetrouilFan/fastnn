@@ -276,7 +276,14 @@ impl ShapeEnv {
                 continue;
             }
             if let Some(node) = graph.get_node(input_id) {
-                let elem_size = node.output_type.dtype.byte_size();
+                let elem_size = node
+                    .output_type
+                    .dtype
+                    .plain_storage_byte_width()
+                    .map_err(|error| format!("ShapeEnv: input {i} dtype: {error}"))?
+                    .ok_or_else(|| {
+                        format!("ShapeEnv: input {i} uses packed storage without a scalar stride")
+                    })?;
                 let known_numel: usize = node
                     .output_type
                     .shape
@@ -670,6 +677,16 @@ impl IrDType {
         }
     }
 
+    /// Physical byte width for byte-addressable scalar storage.
+    /// Packed encodings return `None`; callers must use encoded payload sizing.
+    pub fn plain_storage_byte_width(&self) -> FastnnResult<Option<usize>> {
+        let representation = self.value_representation()?;
+        Ok(match representation.encoding {
+            StorageEncoding::Plain => representation.storage.plain_byte_width(),
+            StorageEncoding::Packed { .. } => None,
+        })
+    }
+
     /// Actual packed storage size in bytes for a given logical element
     /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
     /// For packed types it computes word-level packing plus the SIMD margin
@@ -876,7 +893,14 @@ impl TensorType {
                 let words = rows * inner_dim.div_ceil(4) + 16;
                 words * 4
             }
-            _ => numel * self.dtype.byte_size(),
+            _ => {
+                numel
+                    * self
+                        .dtype
+                        .plain_storage_byte_width()
+                        .expect("plain IR dtype must have a canonical representation")
+                        .expect("plain IR dtype must be byte-addressable")
+            }
         }
     }
 }
@@ -884,6 +908,21 @@ impl TensorType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_plain_width_is_distinct_from_packed_payload_sizing() {
+        assert_eq!(IrDType::Bool.plain_storage_byte_width().unwrap(), Some(1));
+        assert_eq!(IrDType::F32.plain_storage_byte_width().unwrap(), Some(4));
+        assert_eq!(
+            IrDType::U4Scaled {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+            }
+            .plain_storage_byte_width()
+            .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn maps_unsigned_affine_ir_dtype_to_canonical_representation() {

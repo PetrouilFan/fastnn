@@ -588,7 +588,7 @@ pub fn export_to_onnx_json_with_config(
                                     },
                                 },
                             );
-                        } else if tensor_type.dtype.byte_size() == 4 {
+                        } else if matches!(tensor_type.dtype, IrDType::F32) {
                             // Only export F32 weights; skip Float(0) fill constants
                             let f32_data: Vec<f32> = bytes
                                 .chunks_exact(4)
