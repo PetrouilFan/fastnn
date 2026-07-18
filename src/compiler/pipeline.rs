@@ -11,7 +11,7 @@ use crate::compiler::passes::{
 use crate::compiler::plan::MemoryPlan;
 use crate::compiler::report::CompileReport;
 use crate::compiler::{CompilerError, CompilerResult};
-use crate::ir::{ComputeGraph, GraphKind};
+use crate::ir::{ComputeGraph, GraphKind, GraphResourceLimits};
 use crate::types::{CompileTarget, QuantTarget};
 
 pub struct CompilerPipeline {
@@ -36,6 +36,10 @@ impl CompilerPipeline {
     pub fn run(self, mut graph: ComputeGraph) -> CompilerResult<CompiledGraph> {
         let mut report = CompileReport::new(graph.kind, graph.nodes.len());
         validate_target_for_graph_kind(&self.target, graph.kind)?;
+        graph
+            .validate_with_limits(&GraphResourceLimits::default())
+            .map_err(|error| CompilerError::pass("graph validation", error))?;
+        report.record("graph validation", graph.nodes.len(), graph.nodes.len());
         let quant_target = match self.target {
             CompileTarget::Native => None,
             CompileTarget::WeightOnly(target) => Some(target),

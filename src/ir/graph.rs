@@ -3,6 +3,7 @@
 use super::opcode::Opcode;
 use super::types::{DimExpr, IrDType, TensorType};
 use crate::error::{FastnnError, FastnnResult};
+use bincode::Options;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -153,6 +154,27 @@ pub struct ComputeGraph {
     sorted_nodes_gen: AtomicU64,
     #[serde(skip)]
     graph_gen: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GraphResourceLimits {
+    pub max_serialized_bytes: u64,
+    pub max_nodes: usize,
+    pub max_total_edges: usize,
+    pub max_total_attributes: usize,
+    pub max_total_attribute_bytes: usize,
+}
+
+impl Default for GraphResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_serialized_bytes: 8 * 1024 * 1024 * 1024,
+            max_nodes: 1_000_000,
+            max_total_edges: 16_000_000,
+            max_total_attributes: 16_000_000,
+            max_total_attribute_bytes: 256_000_000,
+        }
+    }
 }
 
 impl Clone for ComputeGraph {
@@ -455,6 +477,86 @@ impl ComputeGraph {
         self.mark_mutated();
     }
 
+    pub fn validate_with_limits(&self, limits: &GraphResourceLimits) -> FastnnResult<()> {
+        if self.nodes.len() > limits.max_nodes {
+            return Err(FastnnError::compilation(format!(
+                "graph has {} nodes, exceeding limit {}",
+                self.nodes.len(),
+                limits.max_nodes
+            )));
+        }
+        let ids: HashSet<_> = self.nodes.iter().map(|node| node.id).collect();
+        if ids.len() != self.nodes.len() {
+            return Err(FastnnError::compilation(
+                "graph contains duplicate node IDs",
+            ));
+        }
+        let mut total_edges = 0usize;
+        let mut total_attributes = 0usize;
+        let mut total_attribute_bytes = 0usize;
+        for node in &self.nodes {
+            total_edges = total_edges
+                .checked_add(node.inputs.len())
+                .ok_or_else(|| FastnnError::compilation("graph edge count overflows usize"))?;
+            total_attributes = total_attributes
+                .checked_add(node.attrs.len())
+                .ok_or_else(|| FastnnError::compilation("graph attribute count overflows usize"))?;
+            for (key, value) in &node.attrs {
+                total_attribute_bytes = total_attribute_bytes
+                    .checked_add(key.len())
+                    .and_then(|total| total.checked_add(value.len()))
+                    .ok_or_else(|| {
+                        FastnnError::compilation("graph attribute byte count overflows usize")
+                    })?;
+            }
+            if let Some(missing) = node.inputs.iter().find(|input| !ids.contains(input)) {
+                return Err(FastnnError::compilation(format!(
+                    "node {} references missing input node {missing}",
+                    node.id
+                )));
+            }
+        }
+        if total_edges > limits.max_total_edges {
+            return Err(FastnnError::compilation(format!(
+                "graph has {total_edges} edges, exceeding limit {}",
+                limits.max_total_edges
+            )));
+        }
+        if total_attributes > limits.max_total_attributes {
+            return Err(FastnnError::compilation(format!(
+                "graph has {total_attributes} attributes, exceeding limit {}",
+                limits.max_total_attributes
+            )));
+        }
+        if total_attribute_bytes > limits.max_total_attribute_bytes {
+            return Err(FastnnError::compilation(format!(
+                "graph attributes use {total_attribute_bytes} bytes, exceeding limit {}",
+                limits.max_total_attribute_bytes
+            )));
+        }
+        for (kind, node_ids) in [
+            ("input", self.inputs.as_slice()),
+            ("output", self.outputs.as_slice()),
+        ] {
+            if let Some(missing) = node_ids.iter().find(|node_id| !ids.contains(node_id)) {
+                return Err(FastnnError::compilation(format!(
+                    "graph {kind} references missing node {missing}"
+                )));
+            }
+        }
+        if let Some(missing) = self
+            .required_nodes
+            .iter()
+            .find(|node_id| !ids.contains(node_id))
+        {
+            return Err(FastnnError::compilation(format!(
+                "graph required node set references missing node {missing}"
+            )));
+        }
+        self.try_topological_sort()?;
+        Ok(())
+    }
+
     /// Save the ComputeGraph to a .fnn binary file.
     pub fn save_fnn(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let bytes = bincode::serialize(self)?;
@@ -464,8 +566,29 @@ impl ComputeGraph {
 
     /// Load a ComputeGraph from a .fnn binary file created by [`save_fnn`](Self::save_fnn).
     pub fn load_fnn(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_fnn_with_limits(path, GraphResourceLimits::default())
+    }
+
+    pub fn load_fnn_with_limits(
+        path: &str,
+        limits: GraphResourceLimits,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file_size = std::fs::metadata(path)?.len();
+        if file_size > limits.max_serialized_bytes {
+            return Err(format!(
+                "serialized graph has {file_size} bytes, exceeding limit {}",
+                limits.max_serialized_bytes
+            )
+            .into());
+        }
         let bytes = std::fs::read(path)?;
-        let graph: ComputeGraph = bincode::deserialize(&bytes)?;
+        let mut graph: ComputeGraph = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(limits.max_serialized_bytes)
+            .deserialize(&bytes)?;
+        graph.rebuild_node_index();
+        graph.validate_with_limits(&limits)?;
         Ok(graph)
     }
 
@@ -488,7 +611,7 @@ impl ComputeGraph {
 
 #[cfg(test)]
 mod graph_kind_tests {
-    use super::{ComputeGraph, GraphKind};
+    use super::{ComputeGraph, GraphKind, GraphResourceLimits};
     use crate::ir::{IrDType, Opcode, TensorType};
     use std::collections::HashMap;
 
@@ -532,5 +655,26 @@ mod graph_kind_tests {
         let bytes = bincode::serialize(&graph).unwrap();
         let decoded: ComputeGraph = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded.kind, GraphKind::TrainingForward);
+    }
+
+    #[test]
+    fn bounded_graph_loading_rebuilds_indexes_and_enforces_limits() {
+        let mut graph = ComputeGraph::new();
+        let id = graph.add_node(Opcode::Input, vec![], TensorType::new(vec![], IrDType::F32));
+        graph.set_inputs(vec![id]);
+        graph.set_outputs(vec![id]);
+        let path =
+            std::env::temp_dir().join(format!("fastnn-graph-load-{}-{id}.fnn", std::process::id()));
+        graph.save_fnn(path.to_str().unwrap()).unwrap();
+
+        let loaded = ComputeGraph::load_fnn(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.get_node(id).unwrap().opcode, Opcode::Input);
+
+        let limits = GraphResourceLimits {
+            max_nodes: 0,
+            ..GraphResourceLimits::default()
+        };
+        assert!(ComputeGraph::load_fnn_with_limits(path.to_str().unwrap(), limits).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }
