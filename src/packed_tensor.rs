@@ -1,5 +1,5 @@
 use crate::dtypes::PackedWord;
-use crate::types::PACKED_SIMD_MARGIN_WORDS;
+use crate::types::{QuantizationGranularity, RepresentationTransform, PACKED_SIMD_MARGIN_WORDS};
 use std::sync::{Arc, OnceLock};
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
@@ -127,6 +127,55 @@ pub struct PackedTensor<T: PackedWord> {
 }
 
 impl<T: PackedWord> PackedTensor<T> {
+    /// Canonical quantization granularity owned by this runtime tensor descriptor.
+    pub fn quantization_granularity(&self) -> QuantizationGranularity {
+        if self.quant_block_size > 0 {
+            QuantizationGranularity::PerGroup {
+                axis: self.shape.len().saturating_sub(1),
+                group_size: self.quant_block_size,
+            }
+        } else if self.group_size > 1 {
+            QuantizationGranularity::PerGroup {
+                axis: 0,
+                group_size: self.group_size,
+            }
+        } else if self.scales.len() > 1 {
+            QuantizationGranularity::PerAxis { axis: 0 }
+        } else {
+            QuantizationGranularity::PerTensor
+        }
+    }
+
+    /// Resolve the runtime-owned scale, offset, codebook, and granularity metadata.
+    pub fn representation_transform(&self) -> RepresentationTransform {
+        let granularity = self.quantization_granularity();
+        if !self.codebooks.is_empty() {
+            return RepresentationTransform::Codebook {
+                granularity,
+                entries: self
+                    .codebooks
+                    .iter()
+                    .map(|codebook| codebook.to_vec())
+                    .collect(),
+                scales: self.scales.clone(),
+                offsets: self.zeros.clone(),
+            };
+        }
+        if T::IS_FLOAT {
+            RepresentationTransform::ScaledAffine {
+                granularity,
+                scales: self.scales.clone(),
+                offsets: self.zeros.clone(),
+            }
+        } else {
+            RepresentationTransform::AffineDequantization {
+                granularity,
+                scales: self.scales.clone(),
+                offsets: self.zeros.clone(),
+            }
+        }
+    }
+
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         let packed_len = if shape.len() >= 2 {
@@ -1525,6 +1574,38 @@ mod tests {
         assert_eq!(
             tensor.data.len() * std::mem::size_of::<I4x8>(),
             layout.allocation_bytes(ScalarType::I4, &shape).unwrap()
+        );
+    }
+
+    #[test]
+    fn packed_tensor_resolves_runtime_quantization_metadata() {
+        let data = [0.0; 32];
+        let per_tensor = PackedTensor::<I4x8>::from_f32_slice(&data, &[4, 8], 1.0, 0.0);
+        assert_eq!(
+            per_tensor.quantization_granularity(),
+            QuantizationGranularity::PerTensor
+        );
+        assert!(matches!(
+            per_tensor.representation_transform(),
+            RepresentationTransform::AffineDequantization {
+                granularity: QuantizationGranularity::PerTensor,
+                ..
+            }
+        ));
+
+        let per_channel = PackedTensor::<I4x8>::from_f32_per_channel(&data, &[4, 8]);
+        assert_eq!(
+            per_channel.quantization_granularity(),
+            QuantizationGranularity::PerAxis { axis: 0 }
+        );
+
+        let per_block = PackedTensor::<I4x8>::from_f32_per_block_asymmetric(&data, &[4, 8], 4);
+        assert_eq!(
+            per_block.quantization_granularity(),
+            QuantizationGranularity::PerGroup {
+                axis: 1,
+                group_size: 4,
+            }
         );
     }
 
