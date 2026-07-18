@@ -71,6 +71,65 @@ pub enum StorageEncoding {
     Packed { word_bits: u8, lanes: u8 },
 }
 
+/// Physical allocation rules layered on top of an encoded scalar payload.
+///
+/// Prefix/suffix bytes are allocation capacity, not logical tensor elements.
+/// `row_packed` means each innermost row starts on a complete packed word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TensorStorageLayout {
+    pub encoding: StorageEncoding,
+    pub row_packed: bool,
+    pub prefix_bytes: usize,
+    pub suffix_bytes: usize,
+}
+
+impl TensorStorageLayout {
+    pub const fn contiguous(encoding: StorageEncoding) -> Self {
+        Self {
+            encoding,
+            row_packed: false,
+            prefix_bytes: 0,
+            suffix_bytes: 0,
+        }
+    }
+
+    pub fn allocation_bytes(self, scalar: ScalarType, shape: &[usize]) -> FastnnResult<usize> {
+        self.encoding.validate_for(scalar)?;
+        if self.row_packed && matches!(self.encoding, StorageEncoding::Plain) {
+            return Err(FastnnError::dtype(
+                "row-packed allocation requires a packed storage encoding",
+            ));
+        }
+        let numel = shape.iter().try_fold(1usize, |total, &dimension| {
+            total
+                .checked_mul(dimension)
+                .ok_or_else(|| FastnnError::Overflow("tensor element count overflow".into()))
+        })?;
+        let payload_bytes = match (self.encoding, self.row_packed, shape.last().copied()) {
+            (StorageEncoding::Packed { word_bits, lanes }, true, Some(inner)) => {
+                let rows =
+                    shape[..shape.len() - 1]
+                        .iter()
+                        .try_fold(1usize, |total, &dimension| {
+                            total.checked_mul(dimension).ok_or_else(|| {
+                                FastnnError::Overflow("tensor row count overflow".into())
+                            })
+                        })?;
+                rows.checked_mul(inner.div_ceil(usize::from(lanes)))
+                    .and_then(|words| words.checked_mul(usize::from(word_bits / 8)))
+                    .ok_or_else(|| {
+                        FastnnError::Overflow("row-packed tensor payload overflow".into())
+                    })?
+            }
+            _ => self.encoding.storage_bytes(scalar, numel)?,
+        };
+        self.prefix_bytes
+            .checked_add(payload_bytes)
+            .and_then(|bytes| bytes.checked_add(self.suffix_bytes))
+            .ok_or_else(|| FastnnError::Overflow("tensor allocation size overflow".into()))
+    }
+}
+
 impl StorageEncoding {
     pub fn validate_for(self, scalar: ScalarType) -> FastnnResult<()> {
         match self {
@@ -421,6 +480,24 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    #[test]
+    fn allocation_layout_separates_row_padding_and_capacity_margin() {
+        let layout = TensorStorageLayout {
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: 64,
+        };
+        assert_eq!(
+            layout.allocation_bytes(ScalarType::U4, &[2, 9]).unwrap(),
+            80
+        );
+        assert_eq!(layout.allocation_bytes(ScalarType::U4, &[18]).unwrap(), 76);
     }
 
     #[test]

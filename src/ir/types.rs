@@ -3,7 +3,7 @@
 use super::graph::{ComputeGraph, NodeId};
 use crate::types::{
     QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
-    ValueRepresentation,
+    TensorStorageLayout, ValueRepresentation,
 };
 use crate::FastnnResult;
 use serde::{Deserialize, Serialize};
@@ -682,6 +682,26 @@ impl IrDType {
         })
     }
 
+    /// Canonical physical allocation layout for this legacy IR dtype.
+    pub fn storage_layout(&self) -> FastnnResult<TensorStorageLayout> {
+        let representation = self.value_representation()?;
+        Ok(match (&representation.encoding, self) {
+            (StorageEncoding::Plain, Self::I8) => TensorStorageLayout {
+                encoding: representation.encoding,
+                row_packed: false,
+                prefix_bytes: 8,
+                suffix_bytes: 0,
+            },
+            (StorageEncoding::Packed { .. }, _) => TensorStorageLayout {
+                encoding: representation.encoding,
+                row_packed: true,
+                prefix_bytes: 0,
+                suffix_bytes: 64,
+            },
+            (StorageEncoding::Plain, _) => TensorStorageLayout::contiguous(representation.encoding),
+        })
+    }
+
     /// Actual packed storage size in bytes for a given logical element
     /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
     /// For packed types it computes word-level packing plus the SIMD margin
@@ -917,6 +937,22 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn ir_dtype_exposes_runtime_headers_and_packed_margins_as_layout() {
+        let activation = IrDType::I8.storage_layout().unwrap();
+        assert_eq!(activation.prefix_bytes, 8);
+        assert_eq!(activation.suffix_bytes, 0);
+
+        let packed = IrDType::U4Scaled {
+            scales: vec![1.0],
+            dequant_offsets: vec![0.0],
+        }
+        .storage_layout()
+        .unwrap();
+        assert!(packed.row_packed);
+        assert_eq!(packed.suffix_bytes, 64);
     }
 
     #[test]
