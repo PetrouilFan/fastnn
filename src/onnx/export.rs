@@ -16,6 +16,7 @@
 //! ```
 
 use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
+use crate::types::RepresentationTransform;
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for ONNX export behavior.
@@ -176,30 +177,29 @@ fn detect_qlinear_patterns(
             None => continue,
         };
 
-        // Extract scales/dequant_offsets from the packed weight's dtype.
-        let (weight_scales, weight_dequant_offsets) = match &packed_node.output_type.dtype {
-            IrDType::I4 {
-                scales,
-                dequant_offsets,
-                ..
-            } => (scales.clone(), dequant_offsets.clone()),
-            IrDType::I8Scaled {
-                scales,
-                dequant_offsets,
-            } => (scales.clone(), dequant_offsets.clone()),
-            IrDType::F4 {
-                scales,
-                dequant_offsets: zeros,
-                ..
+        // Extract affine metadata from the canonical representation rather
+        // than maintaining another list of packed IR dtype variants.
+        let representation = match packed_node.output_type.dtype.value_representation() {
+            Ok(representation) => representation,
+            Err(_) => continue,
+        };
+        let (weight_scales, weight_dequant_offsets) = match representation.transform {
+            RepresentationTransform::AffineDequantization {
+                scales, offsets, ..
+            }
+            | RepresentationTransform::ScaledAffine {
+                scales, offsets, ..
+            }
+            | RepresentationTransform::Codebook {
+                scales, offsets, ..
             } => (
-                scales.clone(),
-                if zeros.is_empty() {
-                    vec![0.0f32]
+                scales,
+                if offsets.is_empty() {
+                    vec![0.0]
                 } else {
-                    zeros.clone()
+                    offsets
                 },
             ),
-            IrDType::F8 { scales } | IrDType::F8R { scales } => (scales.clone(), vec![0.0f32]),
             _ => continue,
         };
 
