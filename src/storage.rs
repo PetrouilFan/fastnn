@@ -173,19 +173,13 @@ impl DType {
 
     /// Canonical logical/storage/transform contract represented by this runtime dtype.
     pub fn value_representation(self) -> crate::types::ValueRepresentation {
-        use crate::types::{
-            QuantizationGranularity, RepresentationTransform, ScalarType, ValueRepresentation,
-        };
+        use crate::types::{RepresentationTransform, ScalarType, ValueRepresentation};
         let storage = self.scalar_type();
         let transform = match self {
             DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled => {
-                RepresentationTransform::RuntimeAffineQuantization {
-                    granularity: QuantizationGranularity::PerTensor,
-                }
+                RepresentationTransform::RuntimeAffineQuantization
             }
-            DType::F4 | DType::F8 | DType::F8R => RepresentationTransform::RuntimeScaledAffine {
-                granularity: QuantizationGranularity::PerTensor,
-            },
+            DType::F4 | DType::F8 | DType::F8R => RepresentationTransform::RuntimeScaledAffine,
             _ => RepresentationTransform::None,
         };
         ValueRepresentation {
@@ -590,11 +584,11 @@ mod dtype_tests {
         );
         assert!(matches!(
             DType::U4Scaled.value_representation().transform,
-            RepresentationTransform::RuntimeAffineQuantization { .. }
+            RepresentationTransform::RuntimeAffineQuantization
         ));
         assert!(matches!(
             DType::F4.value_representation().transform,
-            RepresentationTransform::RuntimeScaledAffine { .. }
+            RepresentationTransform::RuntimeScaledAffine
         ));
     }
 }

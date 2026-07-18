@@ -606,9 +606,7 @@ impl IrDType {
                 logical: ScalarType::F32,
                 storage: ScalarType::I8,
                 encoding: StorageEncoding::Plain,
-                transform: RepresentationTransform::RuntimeAffineQuantization {
-                    granularity: QuantizationGranularity::PerTensor,
-                },
+                transform: RepresentationTransform::RuntimeAffineQuantization,
             }),
             Self::I4 {
                 scales,
@@ -854,9 +852,7 @@ mod tests {
         let representation = IrDType::I8.value_representation().unwrap();
         assert!(matches!(
             representation.transform,
-            RepresentationTransform::RuntimeAffineQuantization {
-                granularity: QuantizationGranularity::PerTensor
-            }
+            RepresentationTransform::RuntimeAffineQuantization
         ));
         representation.validate().unwrap();
     }

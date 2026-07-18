@@ -272,14 +272,10 @@ pub enum RepresentationTransform {
         scales: Vec<f32>,
         offsets: Vec<f32>,
     },
-    /// Quantization parameters are carried in the runtime tensor payload.
-    RuntimeAffineQuantization {
-        granularity: QuantizationGranularity,
-    },
-    /// Floating scale/offset parameters are carried alongside the runtime payload.
-    RuntimeScaledAffine {
-        granularity: QuantizationGranularity,
-    },
+    /// Quantization parameters and granularity are carried by the runtime tensor descriptor.
+    RuntimeAffineQuantization,
+    /// Floating scale/offset parameters and granularity are carried by the runtime tensor descriptor.
+    RuntimeScaledAffine,
     Scaled {
         scales: Vec<f32>,
     },
@@ -326,7 +322,7 @@ impl ValueRepresentation {
                 }
                 quantization.validate()
             }
-            RepresentationTransform::RuntimeAffineQuantization { .. } => {
+            RepresentationTransform::RuntimeAffineQuantization => {
                 if !self.logical.is_float() || !self.storage.is_integer() {
                     return Err(FastnnError::dtype(
                         "runtime affine quantization requires floating logical and integer storage types",
@@ -334,7 +330,7 @@ impl ValueRepresentation {
                 }
                 Ok(())
             }
-            RepresentationTransform::RuntimeScaledAffine { .. } => {
+            RepresentationTransform::RuntimeScaledAffine => {
                 if !self.logical.is_float() || !self.storage.is_float() {
                     return Err(FastnnError::dtype(
                         "runtime scaled affine representation requires floating logical and storage types",
