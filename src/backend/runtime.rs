@@ -17,7 +17,8 @@
 //! The runtime skips shape inference, operator fusion, and memory planning —
 //! it just loads the plan, maps the arena, and dispatches.
 
-use crate::backend::{Backend, BackendError, ExecutablePlan};
+use crate::backend::executor::ExecutionResourceLimits;
+use crate::backend::{deserialize_executable_plan, Backend, BackendError, ExecutablePlan};
 use crate::compiler::MemoryPlan;
 use crate::ir::ShapeEnv;
 
@@ -30,6 +31,7 @@ pub struct Runtime<B: Backend> {
     backend: B,
     plan: ExecutablePlan,
     memory_plan: MemoryPlan,
+    resource_limits: ExecutionResourceLimits,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
 }
 
@@ -40,9 +42,23 @@ impl<B: Backend> Runtime<B> {
         plan: ExecutablePlan,
         memory_plan: MemoryPlan,
     ) -> Result<Self, BackendError> {
-        plan.validate()?;
+        Self::new_with_resource_limits(
+            backend,
+            plan,
+            memory_plan,
+            ExecutionResourceLimits::default(),
+        )
+    }
+
+    pub fn new_with_resource_limits(
+        backend: B,
+        plan: ExecutablePlan,
+        memory_plan: MemoryPlan,
+        resource_limits: ExecutionResourceLimits,
+    ) -> Result<Self, BackendError> {
+        plan.validate_with_limits(&resource_limits.executable)?;
         memory_plan
-            .validate()
+            .validate_with_limits(&resource_limits.memory)
             .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
         if memory_plan.total_size > plan.arena_size {
             return Err(BackendError::Dispatch(format!(
@@ -54,6 +70,7 @@ impl<B: Backend> Runtime<B> {
             backend,
             plan,
             memory_plan,
+            resource_limits,
             cached_arena: None,
         })
     }
@@ -68,13 +85,48 @@ impl<B: Backend> Runtime<B> {
         plan_path: &str,
         memory_path: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let plan_bytes = std::fs::read(plan_path)?;
-        let plan: ExecutablePlan = bincode::deserialize(&plan_bytes)?;
+        Self::load_with_resource_limits(
+            backend,
+            plan_path,
+            memory_path,
+            ExecutionResourceLimits::default(),
+        )
+    }
 
+    pub fn load_with_resource_limits(
+        backend: B,
+        plan_path: &str,
+        memory_path: &str,
+        resource_limits: ExecutionResourceLimits,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let plan_file_size = std::fs::metadata(plan_path)?.len();
+        if plan_file_size > resource_limits.executable.max_serialized_bytes {
+            return Err(format!(
+                "serialized executable plan has {plan_file_size} bytes, exceeding limit {}",
+                resource_limits.executable.max_serialized_bytes
+            )
+            .into());
+        }
+        let plan_bytes = std::fs::read(plan_path)?;
+        let plan = deserialize_executable_plan(&plan_bytes, &resource_limits.executable)?;
+
+        let memory_file_size = std::fs::metadata(memory_path)?.len();
+        if memory_file_size > resource_limits.memory.max_serialized_bytes {
+            return Err(format!(
+                "serialized memory plan has {memory_file_size} bytes, exceeding limit {}",
+                resource_limits.memory.max_serialized_bytes
+            )
+            .into());
+        }
         let memory_json = std::fs::read_to_string(memory_path)?;
         let memory_plan: MemoryPlan = serde_json::from_str(&memory_json)?;
 
-        Ok(Self::new(backend, plan, memory_plan)?)
+        Ok(Self::new_with_resource_limits(
+            backend,
+            plan,
+            memory_plan,
+            resource_limits,
+        )?)
     }
 
     /// Save the plan and memory plan to files for later use by the runtime.
@@ -105,36 +157,11 @@ impl<B: Backend> Runtime<B> {
     ///
     /// Returns the output data for each graph output.
     pub fn run(&mut self, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>, BackendError> {
-        self.plan.validate()?;
+        self.plan
+            .validate_with_limits(&self.resource_limits.executable)?;
         self.memory_plan
-            .validate()
+            .validate_with_limits(&self.resource_limits.memory)
             .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
-        let arena_size = self.plan.arena_size;
-        let enough_capacity = self
-            .cached_arena
-            .as_ref()
-            .is_some_and(|(cap, _)| *cap >= arena_size);
-        if !enough_capacity {
-            self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
-        }
-        let arena_ref = &self
-            .cached_arena
-            .as_ref()
-            .ok_or_else(|| {
-                BackendError::Dispatch("runtime arena allocation returned no buffer".into())
-            })?
-            .1;
-        if enough_capacity {
-            let mut zeroed = Vec::new();
-            zeroed.try_reserve_exact(arena_size).map_err(|error| {
-                BackendError::Dispatch(format!(
-                    "failed to allocate {arena_size}-byte arena reset buffer: {error}"
-                ))
-            })?;
-            zeroed.resize(arena_size, 0);
-            self.backend.try_write_arena(arena_ref, 0, &zeroed)?;
-        }
-
         if inputs.len() != self.memory_plan.inputs.len() {
             return Err(BackendError::Dispatch(format!(
                 "runtime expected {} inputs, received {}",
@@ -161,6 +188,45 @@ impl<B: Backend> Runtime<B> {
                     slot.size
                 )));
             }
+        }
+        let arena_size = self.plan.arena_size;
+        let enough_capacity = self
+            .cached_arena
+            .as_ref()
+            .is_some_and(|(cap, _)| *cap >= arena_size);
+        if !enough_capacity {
+            self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
+        }
+        let arena_ref = &self
+            .cached_arena
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::Dispatch("runtime arena allocation returned no buffer".into())
+            })?
+            .1;
+        if enough_capacity {
+            let mut zeroed = Vec::new();
+            zeroed.try_reserve_exact(arena_size).map_err(|error| {
+                BackendError::Dispatch(format!(
+                    "failed to allocate {arena_size}-byte arena reset buffer: {error}"
+                ))
+            })?;
+            zeroed.resize(arena_size, 0);
+            self.backend.try_write_arena(arena_ref, 0, &zeroed)?;
+        }
+
+        for (input_index, (&node_id, input_bytes)) in self
+            .memory_plan
+            .inputs
+            .iter()
+            .zip(inputs.iter())
+            .enumerate()
+        {
+            let slot = self.memory_plan.slots.get(&node_id).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "runtime input {input_index} node {node_id} has no slot"
+                ))
+            })?;
             self.backend
                 .try_write_arena(arena_ref, slot.offset, input_bytes)?;
         }
@@ -217,9 +283,13 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
+        assert!(runtime.run(&[]).is_err());
+        assert!(
+            runtime.cached_arena.is_none(),
+            "invalid inputs must be rejected before arena allocation"
+        );
         let outputs = runtime.run(&[&input_bytes]).expect("runtime must execute");
         assert_eq!(outputs.len(), 1);
-        assert!(runtime.run(&[]).is_err());
 
         let undersized = vec![0u8; input_bytes.len() - 1];
         assert!(runtime.run(&[&undersized]).is_err());
@@ -243,5 +313,24 @@ mod tests {
             tightened_params: std::collections::HashMap::new(),
         };
         assert!(Runtime::new(CpuBackend, plan, memory_plan).is_err());
+    }
+
+    #[test]
+    fn runtime_enforces_configured_resource_limits() {
+        let builder = GraphBuilder::new();
+        let input = builder.input(&[1, 4], IrDType::F32);
+        let output = builder.relu(&input);
+        let (plan, memory_plan, _) = builder
+            .compile(&[&output], CpuBackend)
+            .expect("compile must succeed");
+        let limits = ExecutionResourceLimits {
+            executable: crate::backend::PlanResourceLimits {
+                max_instructions: 0,
+                ..crate::backend::PlanResourceLimits::default()
+            },
+            ..ExecutionResourceLimits::default()
+        };
+
+        assert!(Runtime::new_with_resource_limits(CpuBackend, plan, memory_plan, limits).is_err());
     }
 }

@@ -14,6 +14,28 @@ pub struct PreparedExecutablePlan {
     constant_arena: Option<PreparedConstantArena>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedPlanResourceLimits {
+    pub max_arena_bytes: usize,
+    pub max_scratch_bytes: usize,
+    pub max_instructions: usize,
+    pub max_constant_entries: usize,
+    pub max_constant_bytes: usize,
+}
+
+impl Default for PreparedPlanResourceLimits {
+    fn default() -> Self {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        Self {
+            max_arena_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
+            max_scratch_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_instructions: 1_000_000,
+            max_constant_entries: 1_000_000,
+            max_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum PreparedInstruction {
     Generic { instruction_index: usize },
@@ -1011,7 +1033,58 @@ pub fn validate_prepared_against_plan(
     prepared: &PreparedExecutablePlan,
     plan: &ExecutablePlan,
 ) -> Result<(), crate::backend::BackendError> {
+    validate_prepared_against_plan_with_limits(
+        prepared,
+        plan,
+        &PreparedPlanResourceLimits::default(),
+    )
+}
+
+pub fn validate_prepared_against_plan_with_limits(
+    prepared: &PreparedExecutablePlan,
+    plan: &ExecutablePlan,
+    limits: &PreparedPlanResourceLimits,
+) -> Result<(), crate::backend::BackendError> {
     use crate::backend::BackendError;
+    if prepared.arena_size > limits.max_arena_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan arena requests {} bytes, exceeding limit {}",
+            prepared.arena_size, limits.max_arena_bytes
+        )));
+    }
+    if prepared.scratch_size > limits.max_scratch_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan scratch requests {} bytes, exceeding limit {}",
+            prepared.scratch_size, limits.max_scratch_bytes
+        )));
+    }
+    if prepared.instructions.len() > limits.max_instructions {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan has {} instructions, exceeding limit {}",
+            prepared.instructions.len(),
+            limits.max_instructions
+        )));
+    }
+    if let Some(arena) = prepared.constant_arena.as_ref() {
+        if arena.entries.len() > limits.max_constant_entries {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena has {} entries, exceeding limit {}",
+                arena.entries.len(),
+                limits.max_constant_entries
+            )));
+        }
+        let total_bytes = arena.entries.iter().try_fold(0usize, |total, entry| {
+            total.checked_add(entry.byte_len).ok_or_else(|| {
+                BackendError::Dispatch("prepared constant arena size overflows".into())
+            })
+        })?;
+        if total_bytes > limits.max_constant_bytes {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena has {total_bytes} bytes, exceeding limit {}",
+                limits.max_constant_bytes
+            )));
+        }
+    }
     if prepared.arena_size < plan.arena_size {
         return Err(BackendError::Dispatch(format!(
             "prepared fallback: prepared arena size {} is smaller than plan arena size {}",
@@ -1090,7 +1163,27 @@ pub fn validate_prepared_against_plan(
 pub fn prepare_executable_plan(
     plan: &ExecutablePlan,
 ) -> Result<PreparedExecutablePlan, BackendError> {
+    prepare_executable_plan_with_limits(plan, &PreparedPlanResourceLimits::default())
+}
+
+pub fn prepare_executable_plan_with_limits(
+    plan: &ExecutablePlan,
+    limits: &PreparedPlanResourceLimits,
+) -> Result<PreparedExecutablePlan, BackendError> {
     plan.validate()?;
+    if plan.instructions.len() > limits.max_instructions {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan would have {} instructions, exceeding limit {}",
+            plan.instructions.len(),
+            limits.max_instructions
+        )));
+    }
+    if plan.arena_size > limits.max_arena_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan arena would use {} bytes, exceeding limit {}",
+            plan.arena_size, limits.max_arena_bytes
+        )));
+    }
     let mut arena = PreparedConstantArena::new();
     let bindings = detect_static_weights(plan, &mut arena);
 
@@ -1121,7 +1214,7 @@ pub fn prepare_executable_plan(
         })
         .collect();
 
-    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions)?;
+    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions, limits)?;
 
     let mut prepared = PreparedExecutablePlan {
         instructions,
@@ -1130,6 +1223,7 @@ pub fn prepare_executable_plan(
         constant_arena: None,
     };
     prepared.register_constant_arena(arena);
+    validate_prepared_against_plan_with_limits(&prepared, plan, limits)?;
     Ok(prepared)
 }
 
@@ -1211,6 +1305,7 @@ fn transpose_row_major_mk_to_km(
 fn materialize_transposed_fp32_conv_weights(
     arena: &mut PreparedConstantArena,
     instructions: &mut [PreparedInstruction],
+    limits: &PreparedPlanResourceLimits,
 ) -> Result<(), BackendError> {
     let mut candidates = Vec::new();
     candidates
@@ -1251,8 +1346,7 @@ fn materialize_transposed_fp32_conv_weights(
         if source.len() != expected_len {
             continue;
         }
-        let transposed = transpose_row_major_mk_to_km(source, m, k)?;
-        let byte_len = transposed
+        let byte_len = source
             .len()
             .checked_mul(PackedWeightKind::Fp32.element_bytes())
             .ok_or_else(|| {
@@ -1261,6 +1355,32 @@ fn materialize_transposed_fp32_conv_weights(
                 ))
             })?;
         let name = format!("conv_transposed_fp32_i{}", instruction_index);
+        if arena.id_for(&name).is_none() {
+            let next_entry_count = arena.len().checked_add(1).ok_or_else(|| {
+                BackendError::Dispatch("prepared constant entry count overflows".into())
+            })?;
+            if next_entry_count > limits.max_constant_entries {
+                return Err(BackendError::Dispatch(format!(
+                    "prepared constant arena would have {next_entry_count} entries, exceeding limit {}",
+                    limits.max_constant_entries
+                )));
+            }
+            let next_total_bytes = arena
+                .entries
+                .iter()
+                .try_fold(0usize, |total, entry| total.checked_add(entry.byte_len))
+                .and_then(|total| total.checked_add(byte_len))
+                .ok_or_else(|| {
+                    BackendError::Dispatch("prepared constant arena size overflows".into())
+                })?;
+            if next_total_bytes > limits.max_constant_bytes {
+                return Err(BackendError::Dispatch(format!(
+                    "prepared constant arena would use {next_total_bytes} bytes, exceeding limit {}",
+                    limits.max_constant_bytes
+                )));
+            }
+        }
+        let transposed = transpose_row_major_mk_to_km(source, m, k)?;
         let transposed_id = arena.insert_store(
             name,
             PackedWeightKind::Fp32,
@@ -3593,6 +3713,40 @@ mod tests {
             prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         validate_prepared_against_plan(&prepared, &plan)
             .expect("consistent plan must validate cleanly");
+    }
+
+    #[test]
+    fn prepared_validation_enforces_resource_limits() {
+        let plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            levels: vec![],
+        };
+        let prepared = PreparedExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            scratch_size: 1,
+            constant_arena: None,
+        };
+        let limits = PreparedPlanResourceLimits {
+            max_scratch_bytes: 0,
+            ..PreparedPlanResourceLimits::default()
+        };
+        assert!(validate_prepared_against_plan_with_limits(&prepared, &plan, &limits).is_err());
+
+        let nonempty_plan = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: BufferSlice::new(0, 4),
+                value: 0.0,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let construction_limits = PreparedPlanResourceLimits {
+            max_instructions: 0,
+            ..PreparedPlanResourceLimits::default()
+        };
+        assert!(prepare_executable_plan_with_limits(&nonempty_plan, &construction_limits).is_err());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::ir::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -190,10 +191,14 @@ pub struct ProfileEntry {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PlanResourceLimits {
+    pub max_serialized_bytes: u64,
     pub max_arena_bytes: usize,
     pub max_instructions: usize,
     pub max_inputs_per_instruction: usize,
+    pub max_total_input_slices: usize,
     pub max_total_params: usize,
+    pub max_total_param_dims: usize,
+    pub max_total_kernel_name_bytes: usize,
     pub max_total_constant_bytes: usize,
     pub max_total_quant_metadata: usize,
 }
@@ -202,10 +207,14 @@ impl Default for PlanResourceLimits {
     fn default() -> Self {
         const GIB: u64 = 1024 * 1024 * 1024;
         Self {
+            max_serialized_bytes: 8 * GIB,
             max_arena_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
             max_instructions: 1_000_000,
             max_inputs_per_instruction: 1_024,
+            max_total_input_slices: 16_000_000,
             max_total_params: 16_000_000,
+            max_total_param_dims: 16_000_000,
+            max_total_kernel_name_bytes: 64_000_000,
             max_total_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
             max_total_quant_metadata: 16_000_000,
         }
@@ -222,9 +231,17 @@ impl ExecutablePlan {
 
     /// Load a plan from a binary file created by [`save`](Self::save).
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let limits = PlanResourceLimits::default();
+        let file_size = std::fs::metadata(path)?.len();
+        if file_size > limits.max_serialized_bytes {
+            return Err(format!(
+                "serialized executable plan has {file_size} bytes, exceeding limit {}",
+                limits.max_serialized_bytes
+            )
+            .into());
+        }
         let bytes = std::fs::read(path)?;
-        let plan: ExecutablePlan = bincode::deserialize(&bytes)?;
-        plan.validate()?;
+        let plan = deserialize_executable_plan(&bytes, &limits)?;
         Ok(plan)
     }
 
@@ -274,24 +291,55 @@ impl ExecutablePlan {
             Ok(())
         };
 
+        let mut total_input_slices = 0usize;
         let mut total_params = 0usize;
+        let mut total_param_dims = 0usize;
+        let mut total_kernel_name_bytes = 0usize;
         let mut total_constant_bytes = 0usize;
         let mut total_quant_metadata = 0usize;
         for (instruction_index, instruction) in self.instructions.iter().enumerate() {
             match instruction {
                 Instruction::CallKernel {
+                    kernel_name,
                     input_slices,
                     output_slice,
                     secondary_output_slice,
                     params,
+                    param_dims,
                     weight_meta,
-                    ..
+                    node_id: _,
                 } => {
                     if input_slices.len() > limits.max_inputs_per_instruction {
                         return Err(BackendError::Dispatch(format!(
                             "instruction {instruction_index} has {} inputs, exceeding limit {}",
                             input_slices.len(),
                             limits.max_inputs_per_instruction
+                        )));
+                    }
+                    total_input_slices = total_input_slices
+                        .checked_add(input_slices.len())
+                        .ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "executable plan input slice count overflows".into(),
+                            )
+                        })?;
+                    if total_input_slices > limits.max_total_input_slices {
+                        return Err(BackendError::Dispatch(format!(
+                            "executable plan has {total_input_slices} input slices, exceeding limit {}",
+                            limits.max_total_input_slices
+                        )));
+                    }
+                    total_kernel_name_bytes = total_kernel_name_bytes
+                        .checked_add(kernel_name.len())
+                        .ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "executable plan kernel name bytes overflow".into(),
+                            )
+                        })?;
+                    if total_kernel_name_bytes > limits.max_total_kernel_name_bytes {
+                        return Err(BackendError::Dispatch(format!(
+                            "executable plan has {total_kernel_name_bytes} kernel name bytes, exceeding limit {}",
+                            limits.max_total_kernel_name_bytes
                         )));
                     }
                     total_params = total_params.checked_add(params.len()).ok_or_else(|| {
@@ -301,6 +349,19 @@ impl ExecutablePlan {
                         return Err(BackendError::Dispatch(format!(
                             "executable plan has {total_params} kernel parameters, exceeding limit {}",
                             limits.max_total_params
+                        )));
+                    }
+                    total_param_dims = total_param_dims
+                        .checked_add(param_dims.as_ref().map_or(0, Vec::len))
+                        .ok_or_else(|| {
+                            BackendError::Dispatch(
+                                "executable plan parameter dimension count overflows".into(),
+                            )
+                        })?;
+                    if total_param_dims > limits.max_total_param_dims {
+                        return Err(BackendError::Dispatch(format!(
+                            "executable plan has {total_param_dims} parameter dimensions, exceeding limit {}",
+                            limits.max_total_param_dims
                         )));
                     }
                     for (input_index, &slice) in input_slices.iter().enumerate() {
@@ -402,6 +463,29 @@ impl ExecutablePlan {
     }
 }
 
+pub(crate) fn deserialize_executable_plan(
+    bytes: &[u8],
+    limits: &PlanResourceLimits,
+) -> Result<ExecutablePlan, BackendError> {
+    let byte_count = u64::try_from(bytes.len()).map_err(|_| {
+        BackendError::Dispatch("serialized executable plan size exceeds u64".into())
+    })?;
+    if byte_count > limits.max_serialized_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "serialized executable plan has {byte_count} bytes, exceeding limit {}",
+            limits.max_serialized_bytes
+        )));
+    }
+    let plan: ExecutablePlan = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(limits.max_serialized_bytes)
+        .deserialize(bytes)
+        .map_err(|error| BackendError::Dispatch(format!("executable plan decode: {error}")))?;
+    plan.validate_with_limits(limits)?;
+    Ok(plan)
+}
+
 #[cfg(test)]
 mod executable_plan_validation_tests {
     use super::*;
@@ -494,6 +578,64 @@ mod executable_plan_validation_tests {
             ..PlanResourceLimits::default()
         };
         assert!(plan.validate_with_limits(&limits).is_err());
+    }
+
+    #[test]
+    fn bounded_deserialization_preserves_format_and_rejects_oversized_payloads() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: BufferSlice::new(0, 4),
+                value: 1.0,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let bytes = bincode::serialize(&plan).expect("plan serialization must succeed");
+        let decoded = deserialize_executable_plan(&bytes, &PlanResourceLimits::default())
+            .expect("bounded decoder must accept the existing format");
+        assert_eq!(decoded.instructions.len(), 1);
+
+        let limits = PlanResourceLimits {
+            max_serialized_bytes: u64::try_from(bytes.len() - 1).unwrap(),
+            ..PlanResourceLimits::default()
+        };
+        assert!(deserialize_executable_plan(&bytes, &limits).is_err());
+    }
+
+    #[test]
+    fn executable_limits_cover_nested_kernel_metadata() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "relu".into(),
+                input_slices: vec![BufferSlice::new(0, 4)],
+                output_slice: BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1],
+                node_id: None,
+                param_dims: Some(vec![DimExpr::Known(1)]),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+
+        let input_limits = PlanResourceLimits {
+            max_total_input_slices: 0,
+            ..PlanResourceLimits::default()
+        };
+        assert!(plan.validate_with_limits(&input_limits).is_err());
+
+        let dimension_limits = PlanResourceLimits {
+            max_total_param_dims: 0,
+            ..PlanResourceLimits::default()
+        };
+        assert!(plan.validate_with_limits(&dimension_limits).is_err());
+
+        let name_limits = PlanResourceLimits {
+            max_total_kernel_name_bytes: 3,
+            ..PlanResourceLimits::default()
+        };
+        assert!(plan.validate_with_limits(&name_limits).is_err());
     }
 }
 

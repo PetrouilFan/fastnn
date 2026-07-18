@@ -5,5 +5,5 @@ pub mod plan;
 pub mod report;
 
 pub use error::{CompilerError, CompilerResult};
-pub use plan::{AllocSlot, MemoryPlan};
+pub use plan::{AllocSlot, MemoryPlan, MemoryPlanResourceLimits};
 pub use report::{CompileReport, PassReport};

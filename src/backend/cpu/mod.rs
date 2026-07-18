@@ -11062,10 +11062,14 @@ impl Backend for CpuBackend {
                 }
                 Instruction::WriteConst { dst, data } => {
                     let arena_data = arena.data_mut();
-                    let end = dst.offset.checked_add(data.len()).ok_or_else(|| {
+                    let slot_end = dst.offset.checked_add(dst.size).ok_or_else(|| {
                         BackendError::Dispatch("constant destination range overflows".into())
                     })?;
-                    arena_data[dst.offset..end].copy_from_slice(data);
+                    let data_end = dst.offset.checked_add(data.len()).ok_or_else(|| {
+                        BackendError::Dispatch("constant data range overflows".into())
+                    })?;
+                    arena_data[dst.offset..slot_end].fill(0);
+                    arena_data[dst.offset..data_end].copy_from_slice(data);
                 }
             }
 

@@ -15,10 +15,14 @@
 //! ```
 
 use crate::autograd::build_backward_graph;
-use crate::backend::{Backend, BackendError, ExecutablePlan, Instruction, ProfileEntry};
+use crate::backend::prepared::PreparedPlanResourceLimits;
+use crate::backend::{
+    Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, PlanResourceLimits,
+    ProfileEntry,
+};
 use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
-use crate::compiler::MemoryPlan;
+use crate::compiler::{MemoryPlan, MemoryPlanResourceLimits};
 #[cfg(test)]
 use crate::ir::IrDType;
 use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv, TensorValue};
@@ -34,12 +38,178 @@ struct StaticShapeCache {
     filtered_plan: ExecutablePlan,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutionResourceLimits {
+    pub executable: PlanResourceLimits,
+    pub memory: MemoryPlanResourceLimits,
+    pub prepared: PreparedPlanResourceLimits,
+}
+
+fn validate_compiled_artifacts(
+    graph: &ComputeGraph,
+    plan: &ExecutablePlan,
+    memory_plan: &MemoryPlan,
+    limits: &ExecutionResourceLimits,
+) -> Result<(), BackendError> {
+    plan.validate_with_limits(&limits.executable)?;
+    memory_plan
+        .validate_with_limits(&limits.memory)
+        .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+    if memory_plan.inputs != graph.inputs {
+        return Err(BackendError::Dispatch(
+            "memory plan inputs do not match graph input order".into(),
+        ));
+    }
+    if memory_plan.outputs != graph.outputs {
+        return Err(BackendError::Dispatch(
+            "memory plan outputs do not match graph output order".into(),
+        ));
+    }
+
+    let validate_slice_in_slot =
+        |slice: BufferSlice, slot: &crate::compiler::AllocSlot, label: &str| {
+            let slice_end = slice
+                .offset
+                .checked_add(slice.size)
+                .ok_or_else(|| BackendError::Dispatch(format!("{label} slice range overflows")))?;
+            let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+                BackendError::Dispatch(format!("{label} memory slot range overflows"))
+            })?;
+            if slice.offset < slot.offset || slice_end > slot_end {
+                return Err(BackendError::Dispatch(format!(
+                    "{label} slice {}..{slice_end} is outside memory slot {}..{slot_end}",
+                    slice.offset, slot.offset
+                )));
+            }
+            Ok(())
+        };
+
+    let validate_slice_in_any_slot = |slice: BufferSlice, label: &str| {
+        let belongs_to_slot = memory_plan
+            .slots
+            .values()
+            .chain(memory_plan.secondary_slots.values())
+            .any(|slot| {
+                let (Some(slice_end), Some(slot_end)) = (
+                    slice.offset.checked_add(slice.size),
+                    slot.offset.checked_add(slot.size),
+                ) else {
+                    return false;
+                };
+                slice.offset >= slot.offset && slice_end <= slot_end
+            });
+        if !belongs_to_slot {
+            return Err(BackendError::Dispatch(format!(
+                "{label} slice {}..{} is not backed by a memory-plan slot",
+                slice.offset,
+                slice.offset.saturating_add(slice.size)
+            )));
+        }
+        Ok(())
+    };
+
+    for (instruction_index, instruction) in plan.instructions.iter().enumerate() {
+        match instruction {
+            Instruction::CallKernel { node_id: None, .. } => {
+                return Err(BackendError::Dispatch(format!(
+                    "instruction {instruction_index} kernel is not associated with a graph node"
+                )));
+            }
+            Instruction::MemCopy { src, dst } => {
+                validate_slice_in_any_slot(
+                    *src,
+                    &format!("instruction {instruction_index} copy source"),
+                )?;
+                validate_slice_in_any_slot(
+                    *dst,
+                    &format!("instruction {instruction_index} copy destination"),
+                )?;
+            }
+            Instruction::Fill { dst, .. } => validate_slice_in_any_slot(
+                *dst,
+                &format!("instruction {instruction_index} fill destination"),
+            )?,
+            Instruction::WriteConst { dst, .. } => validate_slice_in_any_slot(
+                *dst,
+                &format!("instruction {instruction_index} constant destination"),
+            )?,
+            Instruction::CallKernel { .. } => {}
+        }
+    }
+
+    for (instruction_index, instruction) in plan.instructions.iter().enumerate() {
+        let Instruction::CallKernel {
+            input_slices,
+            output_slice,
+            secondary_output_slice,
+            node_id: Some(node_id),
+            ..
+        } = instruction
+        else {
+            continue;
+        };
+        let node = graph.get_node(*node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "instruction {instruction_index} references missing graph node {node_id}"
+            ))
+        })?;
+        let output_slot = memory_plan.slots.get(node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "instruction {instruction_index} node {node_id} has no output slot"
+            ))
+        })?;
+        validate_slice_in_slot(
+            *output_slice,
+            output_slot,
+            &format!("instruction {instruction_index} output"),
+        )?;
+        if input_slices.len() != node.inputs.len() {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} node {node_id} has {} input slices for {} graph inputs",
+                input_slices.len(),
+                node.inputs.len()
+            )));
+        }
+        for (input_index, (&input_node_id, &input_slice)) in
+            node.inputs.iter().zip(input_slices).enumerate()
+        {
+            let input_slot = memory_plan.slots.get(&input_node_id).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "instruction {instruction_index} input {input_index} node {input_node_id} has no slot"
+                ))
+            })?;
+            validate_slice_in_slot(
+                input_slice,
+                input_slot,
+                &format!("instruction {instruction_index} input {input_index}"),
+            )?;
+        }
+        if let Some(secondary_slice) = secondary_output_slice {
+            let secondary_slot = memory_plan
+                .secondary_slots
+                .get(&(*node_id, 1))
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "instruction {instruction_index} node {node_id} has no secondary output slot"
+                    ))
+                })?;
+            validate_slice_in_slot(
+                *secondary_slice,
+                secondary_slot,
+                &format!("instruction {instruction_index} secondary output"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
 /// Generic over the backend type `B` (e.g. `CpuBackend`).
 pub struct GraphExecutor<B: Backend> {
     backend: B,
+    resource_limits: ExecutionResourceLimits,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
     /// Populated after the first inference when `graph.has_static_shapes()`
     /// is true. Subsequent calls skip ShapeEnv/tighten/tighten_slices.
@@ -139,8 +309,13 @@ fn checked_execution_storage_size(dtype: &IrDType, numel: usize) -> Result<usize
 impl<B: Backend> GraphExecutor<B> {
     /// Create a new executor backed by the given backend.
     pub fn new(backend: B) -> Self {
+        Self::with_resource_limits(backend, ExecutionResourceLimits::default())
+    }
+
+    pub fn with_resource_limits(backend: B, resource_limits: ExecutionResourceLimits) -> Self {
         GraphExecutor {
             backend,
+            resource_limits,
             cached_arena: None,
             static_shape_cache: None,
             last_output_shapes: Vec::new(),
@@ -242,6 +417,7 @@ impl<B: Backend> GraphExecutor<B> {
         let graph = compiled.graph;
         let memory_plan = compiled.memory_plan;
         let plan = self.backend.compile(&graph, &memory_plan)?;
+        validate_compiled_artifacts(&graph, &plan, &memory_plan, &self.resource_limits)?;
 
         Ok((plan, memory_plan, graph))
     }
@@ -293,7 +469,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared), None)
     }
 
@@ -335,7 +515,11 @@ impl<B: Backend> GraphExecutor<B> {
         // mismatch detected here would silently desynchronise prepared
         // metadata from the live plan and must be reported loudly
         // instead.
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         // Delegate to the existing execution path so we inherit every
         // tightening / shape-env / arena-reuse behaviour of the
         // default forward().
@@ -360,7 +544,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         self.execute_internal(
             graph,
             plan,
@@ -413,7 +601,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
         self.execute_internal_with_persistent_view(
             graph,
@@ -439,7 +631,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
         self.execute_internal_with_persistent_view(
             graph,
@@ -463,7 +659,7 @@ impl<B: Backend> GraphExecutor<B> {
         #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        plan.validate()?;
+        validate_compiled_artifacts(graph, plan, memory_plan, &self.resource_limits)?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
         let (tightened_memory_plan, shape_env, cached_filtered_plan) =
             if let Some(StaticShapeCache {
@@ -490,6 +686,11 @@ impl<B: Backend> GraphExecutor<B> {
                 let tightened_memory_plan = memory_plan
                     .try_tighten(graph, &shape_env)
                     .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+                tightened_memory_plan
+                    .validate_with_limits(&self.resource_limits.memory)
+                    .map_err(|error| {
+                        BackendError::Dispatch(format!("tightened memory plan: {error}"))
+                    })?;
                 tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
 
                 // Cache for static-shape models so subsequent calls
@@ -568,6 +769,39 @@ impl<B: Backend> GraphExecutor<B> {
         // SYMBOL_DIM_MAX=8192 for symbolic dimensions — for batch=1
         // this can be ~50MB vs ~400MB.
         let arena_size = tightened_memory_plan.total_size;
+        if inputs.len() != graph.inputs.len() {
+            return Err(BackendError::Dispatch(format!(
+                "expected {} graph inputs, received {}",
+                graph.inputs.len(),
+                inputs.len()
+            )));
+        }
+        for (i, (&input_node_id, input_bytes)) in graph.inputs.iter().zip(inputs.iter()).enumerate()
+        {
+            let slot = tightened_memory_plan
+                .slots
+                .get(&input_node_id)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!("no memory slot for input node {input_node_id}"))
+                })?;
+            if input_bytes.len() != slot.size {
+                return Err(BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}",
+                    input_bytes.len(), slot.size
+                )));
+            }
+            let input_end = slot.offset.checked_add(input_bytes.len()).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} arena range overflows"
+                ))
+            })?;
+            if input_end > arena_size {
+                return Err(BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} range {}..{input_end} exceeds arena size {arena_size}",
+                    slot.offset
+                )));
+            }
+        }
         let enough_capacity = self
             .cached_arena
             .as_ref()
@@ -583,44 +817,13 @@ impl<B: Backend> GraphExecutor<B> {
             })?
             .1;
 
-        if inputs.len() != graph.inputs.len() {
-            return Err(BackendError::Dispatch(format!(
-                "expected {} graph inputs, received {}",
-                graph.inputs.len(),
-                inputs.len()
-            )));
-        }
-        for (i, &input_node_id) in graph.inputs.iter().enumerate() {
-            let input_bytes = inputs.get(i).ok_or_else(|| {
-                BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
-            })?;
+        for (&input_node_id, input_bytes) in graph.inputs.iter().zip(inputs.iter()) {
             let slot = tightened_memory_plan
                 .slots
                 .get(&input_node_id)
                 .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "no memory slot for input node {}",
-                        input_node_id
-                    ))
+                    BackendError::Dispatch(format!("no memory slot for input node {input_node_id}"))
                 })?;
-            if input_bytes.len() != slot.size {
-                return Err(BackendError::Dispatch(format!(
-                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}",
-                    input_bytes.len(),
-                    slot.size
-                )));
-            }
-            let input_end = slot.offset.checked_add(input_bytes.len()).ok_or_else(|| {
-                BackendError::Dispatch(format!(
-                    "input {i} for node {input_node_id} arena range overflows"
-                ))
-            })?;
-            if input_end > arena_size {
-                return Err(BackendError::Dispatch(format!(
-                    "input {i} for node {input_node_id} range {}..{input_end} exceeds arena size {arena_size}",
-                    slot.offset
-                )));
-            }
             self.backend
                 .try_write_arena(arena, slot.offset, input_bytes)?;
         }
@@ -1884,6 +2087,10 @@ mod prepared_fallback_tests {
         assert!(executor
             .execute(&compiled_graph, &mut plan, &memory_plan, &[&input, &extra],)
             .is_err());
+        assert!(
+            executor.cached_arena.is_none(),
+            "invalid inputs must be rejected before arena allocation"
+        );
 
         let oversized = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         assert!(executor
@@ -2216,6 +2423,73 @@ mod prepared_fallback_tests {
             executor.static_shape_cache.is_none(),
             "static shape cache must NOT be populated for a graph with Symbol dims"
         );
+    }
+
+    #[test]
+    fn execute_rejects_memory_plan_graph_interface_mismatch() {
+        let g = GraphBuilder::new();
+        let a = g.input(&[4], IrDType::F32);
+        let b = g.input(&[4], IrDType::F32);
+        let output = g.add(&a, &b);
+        let (mut plan, mut memory_plan, compiled_graph) = g
+            .compile(&[&output], CpuBackend)
+            .expect("compile must succeed");
+        memory_plan.inputs.reverse();
+
+        let input = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let error = executor
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&input, &input])
+            .expect_err("mismatched graph and memory-plan inputs must be rejected");
+        assert!(matches!(error, BackendError::Dispatch(_)));
+    }
+
+    #[test]
+    fn executor_enforces_configured_resource_limits() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[4], IrDType::F32);
+        let output = g.relu(&input);
+        let limits = ExecutionResourceLimits {
+            executable: PlanResourceLimits {
+                max_instructions: 0,
+                ..PlanResourceLimits::default()
+            },
+            ..ExecutionResourceLimits::default()
+        };
+        let executor = GraphExecutor::with_resource_limits(CpuBackend, limits);
+        let mut graph = g.to_graph();
+        graph.outputs = vec![output.node_id];
+        let error = executor
+            .compile_with_plan(graph)
+            .expect_err("configured instruction limit must reject the compiled plan");
+        assert!(matches!(error, BackendError::Dispatch(_)));
+    }
+
+    #[test]
+    fn compiled_artifact_validation_rejects_unowned_instruction_slices() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1], IrDType::F32);
+        let y = g.relu(&x);
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let unowned_offset = plan.arena_size;
+        plan.arena_size = plan
+            .arena_size
+            .checked_add(4)
+            .expect("small test arena must not overflow");
+        plan.instructions.push(Instruction::WriteConst {
+            dst: BufferSlice::new(unowned_offset, 4),
+            data: vec![0; 4],
+        });
+        plan.levels.push(plan.levels.last().copied().unwrap_or(0));
+
+        assert!(validate_compiled_artifacts(
+            &compiled_graph,
+            &plan,
+            &memory_plan,
+            &ExecutionResourceLimits::default(),
+        )
+        .is_err());
     }
 
     // ── helpers ────────────────────────────────────────────────
@@ -3971,6 +4245,28 @@ mod execution_storage_size_tests {
         };
         let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
         assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn write_const_initializes_destination_padding() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        backend.try_write_arena(&arena, 0, &[0xff; 8]).unwrap();
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(0, 8),
+                data: vec![1, 2, 3, 4],
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        backend
+            .dispatch(&plan, &arena, &ShapeEnv::new())
+            .expect("valid constant write must dispatch");
+        assert_eq!(
+            backend.try_read_arena(&arena, 0, 8).unwrap(),
+            vec![1, 2, 3, 4, 0, 0, 0, 0]
+        );
     }
 
     #[test]

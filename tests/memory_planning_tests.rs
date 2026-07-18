@@ -1,8 +1,48 @@
 use fastnn::compiler::passes::memory_planning;
 use fastnn::compiler::passes::shape_inference;
-use fastnn::compiler::{AllocSlot, MemoryPlan};
+use fastnn::compiler::{AllocSlot, MemoryPlan, MemoryPlanResourceLimits};
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorType};
 use std::collections::HashMap;
+
+#[test]
+fn memory_plan_validation_enforces_resource_limits() {
+    let mut slots = HashMap::new();
+    slots.insert(
+        0,
+        AllocSlot {
+            offset: 0,
+            size: 4,
+            node_id: 0,
+            output_index: 0,
+        },
+    );
+    let plan = MemoryPlan {
+        total_size: 4,
+        slots,
+        inputs: vec![0],
+        secondary_slots: HashMap::new(),
+        outputs: vec![0],
+        tightened_params: HashMap::from([(0, vec![1, 2])]),
+    };
+
+    let limits = MemoryPlanResourceLimits {
+        max_total_tightened_params: 1,
+        ..MemoryPlanResourceLimits::default()
+    };
+    assert!(plan.validate_with_limits(&limits).is_err());
+
+    let limits = MemoryPlanResourceLimits {
+        max_primary_slots: 0,
+        ..MemoryPlanResourceLimits::default()
+    };
+    assert!(plan.validate_with_limits(&limits).is_err());
+
+    let limits = MemoryPlanResourceLimits {
+        max_arena_bytes: 3,
+        ..MemoryPlanResourceLimits::default()
+    };
+    assert!(plan.validate_with_limits(&limits).is_err());
+}
 
 #[test]
 fn test_memory_plan_basic_reuse() {

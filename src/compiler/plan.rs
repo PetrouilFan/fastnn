@@ -94,8 +94,86 @@ pub struct MemoryPlan {
     pub tightened_params: HashMap<NodeId, Vec<usize>>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MemoryPlanResourceLimits {
+    pub max_serialized_bytes: u64,
+    pub max_arena_bytes: usize,
+    pub max_primary_slots: usize,
+    pub max_secondary_slots: usize,
+    pub max_graph_inputs: usize,
+    pub max_graph_outputs: usize,
+    pub max_total_tightened_params: usize,
+}
+
+impl Default for MemoryPlanResourceLimits {
+    fn default() -> Self {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        Self {
+            max_serialized_bytes: GIB,
+            max_arena_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
+            max_primary_slots: 1_000_000,
+            max_secondary_slots: 1_000_000,
+            max_graph_inputs: 1_024,
+            max_graph_outputs: 1_024,
+            max_total_tightened_params: 16_000_000,
+        }
+    }
+}
+
 impl MemoryPlan {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_limits(&MemoryPlanResourceLimits::default())
+    }
+
+    pub fn validate_with_limits(&self, limits: &MemoryPlanResourceLimits) -> Result<(), String> {
+        if self.total_size > limits.max_arena_bytes {
+            return Err(format!(
+                "memory plan arena requests {} bytes, exceeding limit {}",
+                self.total_size, limits.max_arena_bytes
+            ));
+        }
+        if self.slots.len() > limits.max_primary_slots {
+            return Err(format!(
+                "memory plan has {} primary slots, exceeding limit {}",
+                self.slots.len(),
+                limits.max_primary_slots
+            ));
+        }
+        if self.secondary_slots.len() > limits.max_secondary_slots {
+            return Err(format!(
+                "memory plan has {} secondary slots, exceeding limit {}",
+                self.secondary_slots.len(),
+                limits.max_secondary_slots
+            ));
+        }
+        if self.inputs.len() > limits.max_graph_inputs {
+            return Err(format!(
+                "memory plan has {} graph inputs, exceeding limit {}",
+                self.inputs.len(),
+                limits.max_graph_inputs
+            ));
+        }
+        if self.outputs.len() > limits.max_graph_outputs {
+            return Err(format!(
+                "memory plan has {} graph outputs, exceeding limit {}",
+                self.outputs.len(),
+                limits.max_graph_outputs
+            ));
+        }
+        let total_tightened_params =
+            self.tightened_params
+                .values()
+                .try_fold(0usize, |total, params| {
+                    total.checked_add(params.len()).ok_or_else(|| {
+                        "memory plan tightened parameter count overflows".to_string()
+                    })
+                })?;
+        if total_tightened_params > limits.max_total_tightened_params {
+            return Err(format!(
+                "memory plan has {total_tightened_params} tightened parameters, exceeding limit {}",
+                limits.max_total_tightened_params
+            ));
+        }
         for (&node_id, slot) in &self.slots {
             if slot.node_id != node_id || slot.output_index != 0 {
                 return Err(format!(
