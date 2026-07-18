@@ -582,11 +582,31 @@ impl ComputeGraph {
             .into());
         }
         let bytes = std::fs::read(path)?;
+        Ok(Self::from_fnn_bytes_with_limits(&bytes, limits)?)
+    }
+
+    pub fn from_fnn_bytes(bytes: &[u8]) -> FastnnResult<Self> {
+        Self::from_fnn_bytes_with_limits(bytes, GraphResourceLimits::default())
+    }
+
+    pub fn from_fnn_bytes_with_limits(
+        bytes: &[u8],
+        limits: GraphResourceLimits,
+    ) -> FastnnResult<Self> {
+        let byte_count = u64::try_from(bytes.len())
+            .map_err(|_| FastnnError::Serialization("serialized graph size exceeds u64".into()))?;
+        if byte_count > limits.max_serialized_bytes {
+            return Err(FastnnError::Serialization(format!(
+                "serialized graph has {byte_count} bytes, exceeding limit {}",
+                limits.max_serialized_bytes
+            )));
+        }
         let mut graph: ComputeGraph = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .allow_trailing_bytes()
             .with_limit(limits.max_serialized_bytes)
-            .deserialize(&bytes)?;
+            .deserialize(bytes)
+            .map_err(|error| FastnnError::Serialization(format!("graph decode: {error}")))?;
         graph.rebuild_node_index();
         graph.validate_with_limits(&limits)?;
         Ok(graph)
@@ -669,6 +689,13 @@ mod graph_kind_tests {
 
         let loaded = ComputeGraph::load_fnn(path.to_str().unwrap()).unwrap();
         assert_eq!(loaded.get_node(id).unwrap().opcode, Opcode::Input);
+
+        let bytes = std::fs::read(&path).unwrap();
+        let byte_limits = GraphResourceLimits {
+            max_serialized_bytes: u64::try_from(bytes.len() - 1).unwrap(),
+            ..GraphResourceLimits::default()
+        };
+        assert!(ComputeGraph::from_fnn_bytes_with_limits(&bytes, byte_limits).is_err());
 
         let limits = GraphResourceLimits {
             max_nodes: 0,
