@@ -27,6 +27,10 @@ quantization redesign is separately specified in
 compute-family, and benchmark policy is evaluated in
 [CPU Low-Bit Engine Direction](cpu-low-bit-engine.md).
 
+The dated [Safety and Assurance Inventory](safety-inventory-2026-07-18.md)
+records the pre-redesign unsafe, determinism, concurrency, and fuzzing
+boundaries that constrain the dtype/storage migration.
+
 **Upcoming:**
 
 - WGPU-resident arena execution
