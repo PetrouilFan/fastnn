@@ -1,7 +1,7 @@
 use crate::error::FastnnError;
 use crate::ir::{ComputeGraph, DimExpr, IRNode, Opcode};
 use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
     let order = graph.try_topological_sort()?;
@@ -99,30 +99,31 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 }
             }
             Opcode::Reshape => node.attrs.get("shape").map(|s| parse_shape_attr(s)),
-            Opcode::Transpose => inputs.first().map(|i| {
-                if let Some(perm_str) = node.attrs.get("perm") {
-                    // Use explicit permutation if available
-                    let perm: Vec<usize> = perm_str
-                        .split(',')
-                        .filter_map(|v| v.trim().parse().ok())
-                        .collect();
-                    if perm.len() == i.output_type.shape.len() {
-                        perm.iter()
-                            .map(|&p| i.output_type.shape[p].clone())
-                            .collect()
-                    } else {
-                        // Fallback: if perm length doesn't match, reverse
-                        let mut s = i.output_type.shape.clone();
-                        s.reverse();
-                        s
+            Opcode::Transpose => {
+                if let Some(input) = inputs.first() {
+                    let rank = input.output_type.shape.len();
+                    let perm = node
+                        .optional_attr_list::<usize>("perm")?
+                        .filter(|perm| !perm.is_empty())
+                        .unwrap_or_else(|| (0..rank).rev().collect());
+                    let valid = perm.len() == rank && perm.iter().all(|&axis| axis < rank) && {
+                        let unique: HashSet<_> = perm.iter().copied().collect();
+                        unique.len() == rank
+                    };
+                    if !valid {
+                        return Err(FastnnError::shape(format!(
+                            "Transpose node {node_id} has invalid permutation {perm:?} for rank {rank}"
+                        )));
                     }
+                    Some(
+                        perm.iter()
+                            .map(|&axis| input.output_type.shape[axis].clone())
+                            .collect(),
+                    )
                 } else {
-                    // No perm attribute: reverse all dims (legacy behavior)
-                    let mut s = i.output_type.shape.clone();
-                    s.reverse();
-                    s
+                    None
                 }
-            }),
+            }
             Opcode::Flatten => inputs.first().map(|i| {
                 let shape = &i.output_type.shape;
                 if shape.len() >= 2 {
@@ -335,11 +336,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
-                    if let Some(pads_str) = node.attrs.get("pads") {
-                        let pads: Vec<u64> = pads_str
-                            .split(',')
-                            .filter_map(|s| s.trim().parse().ok())
-                            .collect();
+                    if let Some(pads) = node.optional_attr_list::<u64>("pads")? {
                         let n_dims = shape.len().min(pads.len() / 2);
                         for i in 0..n_dims {
                             let lo = DimExpr::Known(pads[2 * i]);

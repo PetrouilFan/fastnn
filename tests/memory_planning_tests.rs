@@ -25,6 +25,25 @@ fn cpu_lowering_rejects_malformed_list_attributes() {
     let message = error.to_string();
     assert!(message.contains("Pad node"), "{message}");
     assert!(message.contains("item 1"), "{message}");
+
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32),
+    );
+    let transpose = graph.add_node(
+        Opcode::Transpose,
+        vec![input],
+        TensorType::new(vec![DimExpr::Known(3), DimExpr::Known(2)], IrDType::F32),
+    );
+    graph
+        .get_node_mut(transpose)
+        .unwrap()
+        .attrs
+        .insert("perm".into(), "1,bad".into());
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("item 1"), "{error}");
 }
 
 #[test]
