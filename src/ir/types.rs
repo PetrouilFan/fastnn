@@ -3,7 +3,7 @@
 use super::graph::{ComputeGraph, NodeId};
 use crate::types::{
     QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
-    TensorStorageLayout, ValueRepresentation,
+    TensorStorageLayout, ValueRepresentation, PACKED_SIMD_MARGIN_BYTES,
 };
 use crate::FastnnResult;
 use serde::{Deserialize, Serialize};
@@ -688,7 +688,7 @@ impl IrDType {
                 encoding: representation.encoding,
                 row_packed: true,
                 prefix_bytes: 0,
-                suffix_bytes: 64,
+                suffix_bytes: PACKED_SIMD_MARGIN_BYTES,
             },
             (StorageEncoding::Plain, _) => TensorStorageLayout::contiguous(representation.encoding),
         })

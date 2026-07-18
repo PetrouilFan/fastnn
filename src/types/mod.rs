@@ -71,6 +71,10 @@ pub enum StorageEncoding {
     Packed { word_bits: u8, lanes: u8 },
 }
 
+pub const PACKED_WORD_BYTES: usize = std::mem::size_of::<u32>();
+pub const PACKED_SIMD_MARGIN_WORDS: usize = 16;
+pub const PACKED_SIMD_MARGIN_BYTES: usize = PACKED_SIMD_MARGIN_WORDS * PACKED_WORD_BYTES;
+
 /// Physical allocation rules layered on top of an encoded scalar payload.
 ///
 /// Prefix/suffix bytes are allocation capacity, not logical tensor elements.

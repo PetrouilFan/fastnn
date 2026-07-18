@@ -1,4 +1,5 @@
 use crate::dtypes::PackedWord;
+use crate::types::PACKED_SIMD_MARGIN_WORDS;
 use std::sync::{Arc, OnceLock};
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
@@ -223,8 +224,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         if scale != 1.0 || zero != 0.0 {
             let inv_scale = 1.0 / scale;
@@ -741,8 +741,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             let row_scale = if scales.len() == 1 {
@@ -834,8 +833,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             let gi = row / group_size;
@@ -1019,8 +1017,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             let (_scale_idx, inv_scale, zp) = if group_size > 1 {
@@ -1174,8 +1171,7 @@ impl<T: PackedWord> PackedTensor<T> {
 
         let k_packed = inner.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             for blk in 0..blocks_per_row {
@@ -1302,9 +1298,8 @@ impl<T: PackedWord> PackedTensor<T> {
 
         // Step 3: Packing — nibble = nearest(v / blk_scale, codebook).
         let k_packed = inner.div_ceil(items);
-        const SIMD_MARGIN: usize = 16;
         let packed_len = m * k_packed;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             for blk in 0..blocks_per_row {
@@ -1512,6 +1507,26 @@ mod tests {
     use crate::dtypes::F16x2;
     use crate::dtypes::F32x1;
     use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4};
+    use crate::types::{ScalarType, StorageEncoding, TensorStorageLayout};
+
+    #[test]
+    fn packed_tensor_capacity_matches_canonical_layout() {
+        let shape = [2, 9];
+        let tensor = PackedTensor::<I4x8>::from_f32_slice(&[0.0; 18], &shape, 1.0, 0.0);
+        let layout = TensorStorageLayout {
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        assert_eq!(
+            tensor.data.len() * std::mem::size_of::<I4x8>(),
+            layout.allocation_bytes(ScalarType::I4, &shape).unwrap()
+        );
+    }
 
     #[test]
     fn test_packed_tensor_zeros() {
