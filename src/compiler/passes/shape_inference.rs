@@ -178,11 +178,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             }
             Opcode::Concat => {
                 if !inputs.is_empty() {
-                    let axis_i64: i64 = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
+                    let axis_i64 = node.optional_attr::<i64>("axis")?.unwrap_or(0);
                     let rank = inputs[0].output_type.shape.len();
                     let axis = if axis_i64 < 0 {
                         let r = rank as i64;
@@ -215,34 +211,37 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             Opcode::MaxPool | Opcode::AvgPool => {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
-                    let kernel: i64 = node
-                        .attrs
-                        .get("kernel_size")
-                        .and_then(|k| k.parse().ok())
-                        .unwrap_or(2);
-                    let stride: i64 = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(2);
+                    let kernel = node.optional_attr::<i64>("kernel_size")?.unwrap_or(2);
+                    let stride = node.optional_attr::<i64>("stride")?.unwrap_or(2);
+                    if kernel <= 0 || stride <= 0 {
+                        return Err(FastnnError::shape(format!(
+                            "{:?} node {node_id} requires positive kernel_size and stride",
+                            node.opcode
+                        )));
+                    }
                     // Parse padding: ONNX pads = [top, left, bottom, right] for 2D.
                     // If absent, assume 0 (valid padding).
                     // The builder stores symmetric `padding` as a single int; fall back
                     // to the ONNX `pads` CSV format when `padding` is absent.
-                    let symmetric_pad: i64 = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
+                    let symmetric_pad = node.optional_attr::<i64>("padding")?.unwrap_or(0);
+                    if symmetric_pad < 0 {
+                        return Err(FastnnError::shape(format!(
+                            "{:?} node {node_id} requires non-negative padding",
+                            node.opcode
+                        )));
+                    }
                     let pads: Vec<i64> = if symmetric_pad > 0 {
                         // Symmetric padding: total pad = 2 * per-side padding
                         vec![symmetric_pad; 4]
                     } else {
-                        node.attrs
-                            .get("pads")
-                            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
-                            .unwrap_or_default()
+                        node.optional_attr_list::<i64>("pads")?.unwrap_or_default()
                     };
+                    if pads.iter().any(|&pad| pad < 0) {
+                        return Err(FastnnError::shape(format!(
+                            "{:?} node {node_id} requires non-negative pads",
+                            node.opcode
+                        )));
+                    }
                     let pad_h =
                         pads.first().copied().unwrap_or(0) + pads.get(2).copied().unwrap_or(0);
                     let pad_w =
@@ -352,13 +351,15 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             Opcode::Gather => {
                 // ONNX Gather output shape: data_shape[:axis] + indices_shape + data_shape[axis+1:]
                 if inputs.len() >= 2 {
-                    let axis: usize = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
+                    let axis = node.optional_attr::<usize>("axis")?.unwrap_or(0);
                     let data_shape = &inputs[0].output_type.shape;
                     let indices_shape = &inputs[1].output_type.shape;
+                    if axis >= data_shape.len() {
+                        return Err(FastnnError::shape(format!(
+                            "Gather node {node_id} axis {axis} is out of range for rank {}",
+                            data_shape.len()
+                        )));
+                    }
                     let mut new_shape: Vec<DimExpr> = data_shape[..axis].to_vec();
                     new_shape.extend_from_slice(indices_shape);
                     new_shape.extend_from_slice(&data_shape[axis + 1..]);

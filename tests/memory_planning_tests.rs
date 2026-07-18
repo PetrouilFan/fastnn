@@ -47,6 +47,30 @@ fn cpu_lowering_rejects_malformed_list_attributes() {
 }
 
 #[test]
+fn shape_inference_rejects_invalid_pool_geometry() {
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(
+        vec![
+            DimExpr::Known(1),
+            DimExpr::Known(1),
+            DimExpr::Known(4),
+            DimExpr::Known(4),
+        ],
+        IrDType::F32,
+    );
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let pool = graph.add_node(Opcode::MaxPool, vec![input], tensor_type);
+    graph
+        .get_node_mut(pool)
+        .unwrap()
+        .attrs
+        .insert("stride".into(), "0".into());
+
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("positive"), "{error}");
+}
+
+#[test]
 fn memory_plan_validation_enforces_resource_limits() {
     let mut slots = HashMap::new();
     slots.insert(
