@@ -340,7 +340,10 @@ impl MemoryPlan {
                     } else {
                         // N-D permute transpose: params = [rank, d0..dN, p0..pN]
                         // The perm comes from node attrs (e.g. "0,3,1,2")
-                        let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
+                        let perm = node
+                            .optional_attr_list::<usize>("perm")
+                            .map_err(|error| error.to_string())?
+                            .unwrap_or_default();
                         let capacity = rank
                             .checked_mul(2)
                             .and_then(|value| value.checked_add(1))
@@ -352,17 +355,12 @@ impl MemoryPlan {
                         for &dimension in input_shape {
                             params.push(to_usize(dimension, "transpose dimension")?);
                         }
-                        if perm_str.is_empty() {
+                        if perm.is_empty() {
                             // Default: reverse
                             for i in (0..rank).rev() {
                                 params.push(i);
                             }
                         } else {
-                            let perm: Result<Vec<usize>, _> =
-                                perm_str.split(',').map(str::parse).collect();
-                            let perm = perm.map_err(|_| {
-                                format!("transpose node {node_id} has invalid permutation")
-                            })?;
                             if perm.len() != rank
                                 || perm.iter().any(|&axis| axis >= rank)
                                 || (0..rank).any(|axis| !perm.contains(&axis))
@@ -378,11 +376,8 @@ impl MemoryPlan {
                 }
                 Opcode::Softmax => {
                     let axis: i64 = node
-                        .attrs
-                        .get("axis")
-                        .ok_or_else(|| format!("softmax node {node_id} is missing its axis"))?
-                        .parse()
-                        .map_err(|_| format!("softmax node {node_id} has invalid axis"))?;
+                        .required_attr("axis")
+                        .map_err(|error| error.to_string())?;
                     let input_shape = resolved_input_shapes
                         .first()
                         .ok_or_else(|| format!("softmax node {node_id} is missing its input"))?;
@@ -409,11 +404,8 @@ impl MemoryPlan {
                 }
                 Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
                     let axis: usize = node
-                        .attrs
-                        .get("axis")
-                        .ok_or_else(|| format!("reduction node {node_id} is missing its axis"))?
-                        .parse()
-                        .map_err(|_| format!("reduction node {node_id} has invalid axis"))?;
+                        .required_attr("axis")
+                        .map_err(|error| error.to_string())?;
                     let input_shape = resolved_input_shapes
                         .first()
                         .ok_or_else(|| format!("reduction node {node_id} is missing its input"))?;
@@ -437,15 +429,7 @@ impl MemoryPlan {
                 }
                 Opcode::Conv2d => {
                     let get_attr = |name: &str| -> Result<usize, String> {
-                        node.attrs
-                            .get(name)
-                            .ok_or_else(|| {
-                                format!("conv2d node {node_id} missing {name} attribute")
-                            })?
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                format!("conv2d node {node_id} has invalid {name} attribute")
-                            })
+                        node.required_attr(name).map_err(|error| error.to_string())
                     };
                     let stride = get_attr("stride")?;
                     let padding = get_attr("padding")?;
