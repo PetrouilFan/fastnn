@@ -410,33 +410,27 @@ impl TensorImpl {
             Storage::Cpu(cpu) => {
                 let offset = self.storage_offset as usize;
                 let numel = self.numel() as usize;
-                let end = offset.checked_add(numel).ok_or_else(|| {
-                    FastnnError::Overflow("F32 slice element range overflow".into())
+                let scalar_bytes = self.dtype.scalar_byte_width().ok_or_else(|| {
+                    FastnnError::dtype("F32 slice access requires plain scalar storage")
                 })?;
-                let storage_len = cpu.data.len() / std::mem::size_of::<f32>();
-                if end > storage_len {
+                let byte_offset = offset.checked_mul(scalar_bytes).ok_or_else(|| {
+                    FastnnError::Overflow("F32 slice byte offset overflow".into())
+                })?;
+                let byte_len = numel.checked_mul(scalar_bytes).ok_or_else(|| {
+                    FastnnError::Overflow("F32 slice byte length overflow".into())
+                })?;
+                let byte_end = byte_offset
+                    .checked_add(byte_len)
+                    .ok_or_else(|| FastnnError::Overflow("F32 slice byte range overflow".into()))?;
+                if byte_end > cpu.data.len() {
                     return Err(FastnnError::OutOfBounds(format!(
-                        "F32 slice range {offset}..{end} exceeds storage length {storage_len}"
+                        "F32 slice byte range {byte_offset}..{byte_end} exceeds storage length {}",
+                        cpu.data.len()
                     )));
                 }
-                let byte_offset =
-                    offset
-                        .checked_mul(std::mem::size_of::<f32>())
-                        .ok_or_else(|| {
-                            FastnnError::Overflow("F32 slice byte offset overflow".into())
-                        })?;
-                let base = cpu.data.as_ref().as_ptr();
-                // SAFETY: dtype is F32, the checked element range is within the backing
-                // allocation, the byte offset is checked, and the returned lifetime is
-                // bounded by `self`. CPU allocations used by Storage are suitably aligned.
-                let ptr = unsafe { base.add(byte_offset) as *const f32 };
-                if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
-                    return Err(FastnnError::Internal(
-                        "CPU storage is not aligned for F32 access".into(),
-                    ));
-                }
-                // SAFETY: bounds, alignment, element type, and lifetime are validated above.
-                Ok(unsafe { std::slice::from_raw_parts(ptr, numel) })
+                bytemuck::try_cast_slice(&cpu.data[byte_offset..byte_end]).map_err(|error| {
+                    FastnnError::Internal(format!("CPU storage cannot be viewed as F32: {error}"))
+                })
             }
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => Err(FastnnError::device(
@@ -470,35 +464,34 @@ impl TensorImpl {
         }
         let offset = self.storage_offset as usize;
         let numel = self.numel() as usize;
-        let end = offset
-            .checked_add(numel)
-            .ok_or_else(|| FastnnError::Overflow("mutable F32 slice range overflow".into()))?;
+        let scalar_bytes = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("mutable F32 slice access requires plain scalar storage")
+        })?;
         let byte_offset = offset
-            .checked_mul(std::mem::size_of::<f32>())
+            .checked_mul(scalar_bytes)
             .ok_or_else(|| FastnnError::Overflow("mutable F32 byte offset overflow".into()))?;
+        let byte_len = numel
+            .checked_mul(scalar_bytes)
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 byte length overflow".into()))?;
+        let byte_end = byte_offset
+            .checked_add(byte_len)
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 byte range overflow".into()))?;
 
         let storage = Arc::make_mut(&mut self.storage);
         match storage {
             Storage::Cpu(cpu) => {
                 let data = Arc::make_mut(&mut cpu.data);
-                let storage_len = data.len() / std::mem::size_of::<f32>();
-                if end > storage_len {
+                if byte_end > data.len() {
                     return Err(FastnnError::OutOfBounds(format!(
-                        "mutable F32 slice range {offset}..{end} exceeds storage length {storage_len}"
+                        "mutable F32 byte range {byte_offset}..{byte_end} exceeds storage length {}",
+                        data.len()
                     )));
                 }
-                let base = data.as_mut_ptr();
-                // SAFETY: dtype is F32, byte offset arithmetic and the complete element
-                // range are checked against the allocation, and `&mut self` plus
-                // `Arc::make_mut` guarantee exclusive access for the returned lifetime.
-                let ptr = unsafe { base.add(byte_offset) as *mut f32 };
-                if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
-                    return Err(FastnnError::Internal(
-                        "CPU storage is not aligned for mutable F32 access".into(),
-                    ));
-                }
-                // SAFETY: bounds, alignment, type, exclusivity, and lifetime are validated above.
-                Ok(unsafe { std::slice::from_raw_parts_mut(ptr, numel) })
+                bytemuck::try_cast_slice_mut(&mut data[byte_offset..byte_end]).map_err(|error| {
+                    FastnnError::Internal(format!(
+                        "CPU storage cannot be mutably viewed as F32: {error}"
+                    ))
+                })
             }
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => Err(FastnnError::device(
