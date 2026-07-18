@@ -1,8 +1,31 @@
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::Backend;
 use fastnn::compiler::passes::memory_planning;
 use fastnn::compiler::passes::shape_inference;
 use fastnn::compiler::{AllocSlot, MemoryPlan, MemoryPlanResourceLimits};
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorType};
 use std::collections::HashMap;
+
+#[test]
+fn cpu_lowering_rejects_malformed_list_attributes() {
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(2)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let pad = graph.add_node(Opcode::Pad, vec![input], tensor_type);
+    graph
+        .get_node_mut(pad)
+        .unwrap()
+        .attrs
+        .insert("pads".into(), "0,not-a-number,0,0".into());
+    graph.set_inputs(vec![input]);
+    graph.set_outputs(vec![pad]);
+
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("Pad node"), "{message}");
+    assert!(message.contains("item 1"), "{message}");
+}
 
 #[test]
 fn memory_plan_validation_enforces_resource_limits() {

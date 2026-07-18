@@ -90,6 +90,32 @@ impl IRNode {
             })
             .transpose()
     }
+
+    pub fn optional_attr_list<T>(&self, key: &str) -> FastnnResult<Option<Vec<T>>>
+    where
+        T: FromStr,
+        T::Err: Display,
+    {
+        let Some(raw) = self.attrs.get(key) else {
+            return Ok(None);
+        };
+        if raw.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        raw.split(',')
+            .enumerate()
+            .map(|(index, value)| {
+                let value = value.trim();
+                value.parse::<T>().map_err(|error| {
+                    FastnnError::shape(format!(
+                        "{:?} node {} has invalid {key:?} item {index} {value:?}: {error}",
+                        self.opcode, self.id
+                    ))
+                })
+            })
+            .collect::<FastnnResult<Vec<_>>>()
+            .map(Some)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -468,6 +494,15 @@ mod graph_kind_tests {
         assert!(node.required_attr::<usize>("bit_width").is_err());
         assert!(node.optional_attr::<usize>("bit_width").is_err());
         assert_eq!(node.optional_attr::<usize>("missing").unwrap(), None);
+
+        let mut node = node.clone();
+        node.attrs.insert("axes".into(), "0, 2,3".into());
+        assert_eq!(
+            node.optional_attr_list::<usize>("axes").unwrap(),
+            Some(vec![0, 2, 3])
+        );
+        node.attrs.insert("axes".into(), "0,bad,3".into());
+        assert!(node.optional_attr_list::<usize>("axes").is_err());
     }
 
     #[test]

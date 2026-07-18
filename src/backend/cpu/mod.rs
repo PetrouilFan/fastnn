@@ -1605,11 +1605,10 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Pad => {
-                    let pads_str = node.attrs.get("pads").cloned().unwrap_or_default();
-                    let parsed_pads: Vec<usize> = pads_str
-                        .split(',')
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect();
+                    let parsed_pads = node
+                        .optional_attr_list::<usize>("pads")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or_default();
                     let input_shape = input_shapes.first().cloned().unwrap_or_default();
                     let rank = input_shape.len();
                     let mut pad_params = Vec::with_capacity(1 + rank * 3);
@@ -1837,13 +1836,11 @@ impl Backend for CpuBackend {
                         .unwrap_or_default();
                     let rank = input_shape.len();
 
-                    // Read perm from node attrs (e.g. "0,3,1,2")
-                    let perm_str: String = node.attrs.get("perm").cloned().unwrap_or_default();
-                    let perm: Vec<usize> = if perm_str.is_empty() {
-                        (0..rank).rev().collect()
-                    } else {
-                        perm_str.split(',').filter_map(|s| s.parse().ok()).collect()
-                    };
+                    let perm = node
+                        .optional_attr_list::<usize>("perm")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .filter(|perm| !perm.is_empty())
+                        .unwrap_or_else(|| (0..rank).rev().collect());
 
                     // Simple 2D transpose [1,0] on a rank-2 tensor â†’ use fast kernel
                     if rank == 2 && perm.len() >= 2 && perm[0] == 1 && perm[1] == 0 {
