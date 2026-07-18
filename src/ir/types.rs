@@ -488,38 +488,30 @@ impl IrDType {
 
 /// Macro that generates simple per-variant constant lookup methods for IrDType.
 macro_rules! impl_ir_dtype_props {
-    ($(($variant:pat, $as_str:expr, $bit_width:expr, $items_per_word:expr)),* $(,)?) => {
+    ($(($variant:pat, $as_str:expr)),* $(,)?) => {
         impl IrDType {
             pub fn as_str(&self) -> &'static str {
                 match self { $( $variant => $as_str, )* }
-            }
-
-            pub fn bit_width(&self) -> usize {
-                match self { $( $variant => $bit_width, )* }
-            }
-
-            pub fn items_per_word(&self) -> usize {
-                match self { $( $variant => $items_per_word, )* }
             }
         }
     };
 }
 
 impl_ir_dtype_props!(
-    (Self::F32, "f32", 32, 1),
-    (Self::F16, "f16", 16, 2),
-    (Self::BF16, "bf16", 16, 2),
-    (Self::I32, "i32", 32, 1),
-    (Self::I64, "i64", 64, 1),
-    (Self::Bool, "bool", 1, 32),
-    (Self::I8, "i8", 8, 4),
-    (Self::I4 { .. }, "i4", 4, 8),
-    (Self::I8Scaled { .. }, "i8", 8, 4),
-    (Self::F8 { .. }, "f8", 8, 4),
-    (Self::F8R { .. }, "f8r", 8, 4),
-    (Self::F4 { .. }, "f4", 4, 8),
-    (Self::U4Scaled { .. }, "u4", 4, 8),
-    (Self::U8Scaled { .. }, "u8", 8, 4),
+    (Self::F32, "f32"),
+    (Self::F16, "f16"),
+    (Self::BF16, "bf16"),
+    (Self::I32, "i32"),
+    (Self::I64, "i64"),
+    (Self::Bool, "bool"),
+    (Self::I8, "i8"),
+    (Self::I4 { .. }, "i4"),
+    (Self::I8Scaled { .. }, "i8"),
+    (Self::F8 { .. }, "f8"),
+    (Self::F8R { .. }, "f8r"),
+    (Self::F4 { .. }, "f4"),
+    (Self::U4Scaled { .. }, "u4"),
+    (Self::U8Scaled { .. }, "u8"),
 );
 
 fn quantization_granularity(parameter_count: usize) -> QuantizationGranularity {
@@ -700,27 +692,6 @@ impl IrDType {
             },
             (StorageEncoding::Plain, _) => TensorStorageLayout::contiguous(representation.encoding),
         })
-    }
-
-    /// Actual packed storage size in bytes for a given logical element
-    /// count.  For F32/F16/etc. this equals `numel * byte_size()`.
-    /// For packed types it computes word-level packing plus the SIMD margin
-    /// that [`PackedTensor`] allocates (16 extra u32 words = 64 bytes).
-    pub fn packed_byte_size(&self, numel: usize) -> usize {
-        self.try_packed_byte_size(numel)
-            .expect("packed dtype storage size overflow")
-    }
-
-    pub fn try_packed_byte_size(&self, numel: usize) -> Option<usize> {
-        let representation = self.value_representation().ok()?;
-        let payload_bytes = representation
-            .encoding
-            .storage_bytes(representation.storage, numel)
-            .ok()?;
-        match representation.encoding {
-            StorageEncoding::Plain => Some(payload_bytes),
-            StorageEncoding::Packed { .. } => payload_bytes.checked_add(16 * 4),
-        }
     }
 }
 

@@ -350,14 +350,13 @@ fn read_execution_outputs<B: Backend>(
 
 #[cfg(test)]
 fn checked_execution_storage_size(dtype: &IrDType, numel: usize) -> Result<usize, BackendError> {
-    if matches!(dtype, IrDType::I8) {
-        return numel.checked_add(8).ok_or_else(|| {
-            BackendError::Dispatch("I8 execution storage size overflows usize".into())
-        });
-    }
+    let representation = dtype
+        .value_representation()
+        .map_err(|error| BackendError::Dispatch(error.to_string()))?;
     dtype
-        .try_packed_byte_size(numel)
-        .ok_or_else(|| BackendError::Dispatch("execution storage size overflows usize".into()))
+        .storage_layout()
+        .and_then(|layout| layout.allocation_bytes(representation.storage, &[numel]))
+        .map_err(|error| BackendError::Dispatch(error.to_string()))
 }
 
 impl<B: Backend> GraphExecutor<B> {
@@ -2649,11 +2648,11 @@ mod execution_storage_size_tests {
         for numel in [1, 7, 8, 9, 17, 64] {
             assert_eq!(
                 checked_execution_storage_size(&u4, numel).unwrap(),
-                u4.packed_byte_size(numel)
+                numel.div_ceil(8) * 4 + 64
             );
             assert_eq!(
                 checked_execution_storage_size(&u8, numel).unwrap(),
-                u8.packed_byte_size(numel)
+                numel.div_ceil(4) * 4 + 64
             );
         }
     }
@@ -4529,7 +4528,7 @@ mod execution_storage_size_tests {
 
     #[test]
     fn checked_storage_sizes_reject_overflow() {
-        assert!(IrDType::F32.try_packed_byte_size(usize::MAX).is_none());
+        assert!(checked_execution_storage_size(&IrDType::F32, usize::MAX).is_err());
         assert!(checked_execution_storage_size(&IrDType::I8, usize::MAX).is_err());
         assert!(crate::backend::cpu::CpuBackend
             .try_allocate_arena(usize::MAX)
