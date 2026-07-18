@@ -37,6 +37,7 @@ use crate::backend::{Backend, BackendError, ExecutablePlan};
 use crate::compiler::plan::MemoryPlan;
 use crate::error::{FastnnError, FastnnResult};
 use crate::ir::*;
+use crate::types::{RepresentationTransform, ScalarType};
 
 // ============================================================
 // Plan cache — avoids recompilation when the same graph is
@@ -2033,9 +2034,16 @@ impl GraphBuilder {
 
     /// Extract the bit width from a packed dtype.
     fn packed_bit_width(dtype: &IrDType) -> Option<usize> {
-        match dtype {
-            IrDType::I4 { .. } | IrDType::U4Scaled { .. } => Some(4),
-            IrDType::I8Scaled { .. } | IrDType::U8Scaled { .. } => Some(8),
+        let representation = dtype.value_representation().ok()?;
+        if !matches!(
+            representation.transform,
+            RepresentationTransform::AffineDequantization { .. }
+        ) {
+            return None;
+        }
+        match representation.storage {
+            ScalarType::I4 | ScalarType::U4 => Some(4),
+            ScalarType::I8 | ScalarType::U8 => Some(8),
             _ => None,
         }
     }
@@ -2867,6 +2875,26 @@ mod tests {
     use super::*;
     use crate::backend::cpu::CpuBackend;
     use bytemuck;
+
+    #[test]
+    fn optimizer_bit_width_uses_canonical_affine_storage() {
+        assert_eq!(
+            GraphBuilder::packed_bit_width(&IrDType::U4Scaled {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+            }),
+            Some(4)
+        );
+        assert_eq!(
+            GraphBuilder::packed_bit_width(&IrDType::I4 {
+                scales: vec![1.0],
+                dequant_offsets: vec![],
+                codebooks: vec![[0.0; 16]],
+            }),
+            None
+        );
+        assert_eq!(GraphBuilder::packed_bit_width(&IrDType::F32), None);
+    }
 
     /// Create an f32 input tensor of f32 bytes.
     fn f32_data(values: &[f32]) -> Vec<u8> {
