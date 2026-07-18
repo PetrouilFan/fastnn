@@ -559,9 +559,36 @@ impl ComputeGraph {
 
     /// Save the ComputeGraph to a .fnn binary file.
     pub fn save_fnn(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let bytes = bincode::serialize(self)?;
+        self.save_fnn_with_limits(path, &GraphResourceLimits::default())
+    }
+
+    pub fn save_fnn_with_limits(
+        &self,
+        path: &str,
+        limits: &GraphResourceLimits,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = self.to_fnn_bytes_with_limits(limits)?;
         std::fs::write(path, bytes)?;
         Ok(())
+    }
+
+    pub fn to_fnn_bytes(&self) -> FastnnResult<Vec<u8>> {
+        self.to_fnn_bytes_with_limits(&GraphResourceLimits::default())
+    }
+
+    pub fn to_fnn_bytes_with_limits(&self, limits: &GraphResourceLimits) -> FastnnResult<Vec<u8>> {
+        self.validate_with_limits(limits)?;
+        let serialized_size = bincode::serialized_size(self).map_err(|error| {
+            FastnnError::Serialization(format!("graph size calculation: {error}"))
+        })?;
+        if serialized_size > limits.max_serialized_bytes {
+            return Err(FastnnError::Serialization(format!(
+                "serialized graph would have {serialized_size} bytes, exceeding limit {}",
+                limits.max_serialized_bytes
+            )));
+        }
+        bincode::serialize(self)
+            .map_err(|error| FastnnError::Serialization(format!("graph encode: {error}")))
     }
 
     /// Load a ComputeGraph from a .fnn binary file created by [`save_fnn`](Self::save_fnn).
@@ -696,6 +723,7 @@ mod graph_kind_tests {
             ..GraphResourceLimits::default()
         };
         assert!(ComputeGraph::from_fnn_bytes_with_limits(&bytes, byte_limits).is_err());
+        assert!(graph.to_fnn_bytes_with_limits(&byte_limits).is_err());
 
         let limits = GraphResourceLimits {
             max_nodes: 0,
