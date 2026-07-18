@@ -134,31 +134,53 @@ pub enum DType {
 }
 
 impl DType {
+    /// Canonical scalar stored by this legacy dtype label.
+    pub const fn scalar_type(self) -> crate::types::ScalarType {
+        use crate::types::ScalarType;
+        match self {
+            DType::F32 => ScalarType::F32,
+            DType::F64 => ScalarType::F64,
+            DType::I32 => ScalarType::I32,
+            DType::I64 => ScalarType::I64,
+            DType::Bool => ScalarType::Bool,
+            DType::F16 => ScalarType::F16,
+            DType::BF16 => ScalarType::BF16,
+            DType::I4 => ScalarType::I4,
+            DType::I8Scaled => ScalarType::I8,
+            DType::F8 => ScalarType::Fp8E4M3,
+            DType::F8R => ScalarType::Fp8E5M2,
+            DType::F4 => ScalarType::Fp4E2M1,
+            DType::U4Scaled => ScalarType::U4,
+            DType::U8Scaled => ScalarType::U8,
+        }
+    }
+
+    /// Canonical physical encoding used by this legacy dtype label.
+    pub const fn storage_encoding(self) -> crate::types::StorageEncoding {
+        use crate::types::StorageEncoding;
+        match self {
+            DType::I4 | DType::F4 | DType::U4Scaled => StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            DType::I8Scaled | DType::F8 | DType::F8R | DType::U8Scaled => StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+            _ => StorageEncoding::Plain,
+        }
+    }
+
     /// Logical width of one encoded value.
     pub fn logical_bit_width(self) -> usize {
-        match self {
-            DType::F64 | DType::I64 => 64,
-            DType::F32 | DType::I32 => 32,
-            DType::F16 | DType::BF16 => 16,
-            DType::Bool | DType::I8Scaled | DType::F8 | DType::F8R | DType::U8Scaled => 8,
-            DType::I4 | DType::F4 | DType::U4Scaled => 4,
-        }
+        usize::from(self.scalar_type().bit_width())
     }
 
     /// Byte width for plain scalar storage. Packed representations return `None`.
     pub fn scalar_byte_width(self) -> Option<usize> {
-        match self {
-            DType::F32 | DType::I32 => Some(4),
-            DType::F64 | DType::I64 => Some(8),
-            DType::F16 | DType::BF16 => Some(2),
-            DType::Bool => Some(1),
-            DType::I4
-            | DType::I8Scaled
-            | DType::F8
-            | DType::F8R
-            | DType::F4
-            | DType::U4Scaled
-            | DType::U8Scaled => None,
+        match self.storage_encoding() {
+            crate::types::StorageEncoding::Plain => self.scalar_type().plain_byte_width(),
+            crate::types::StorageEncoding::Packed { .. } => None,
         }
     }
 
@@ -169,17 +191,8 @@ impl DType {
     }
 
     pub fn try_storage_bytes(self, numel: usize) -> crate::FastnnResult<usize> {
-        let bytes = match self {
-            DType::F32 | DType::I32 => numel.checked_mul(4),
-            DType::F64 | DType::I64 => numel.checked_mul(8),
-            DType::F16 | DType::BF16 => numel.checked_mul(2),
-            DType::Bool => Some(numel),
-            DType::I4 | DType::F4 | DType::U4Scaled => numel.div_ceil(8).checked_mul(4),
-            DType::I8Scaled | DType::F8 | DType::F8R | DType::U8Scaled => {
-                numel.div_ceil(4).checked_mul(4)
-            }
-        };
-        bytes.ok_or_else(|| crate::FastnnError::Overflow("tensor storage size overflow".into()))
+        self.storage_encoding()
+            .storage_bytes(self.scalar_type(), numel)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -510,6 +523,7 @@ pub fn allocator_stats() -> String {
 #[cfg(test)]
 mod dtype_tests {
     use super::DType;
+    use crate::types::{ScalarType, StorageEncoding};
 
     #[test]
     fn separates_logical_width_from_scalar_storage_width() {
@@ -525,5 +539,26 @@ mod dtype_tests {
         assert_eq!(DType::U4Scaled.storage_bytes(8), 4);
         assert_eq!(DType::U4Scaled.storage_bytes(9), 8);
         assert_eq!(DType::U8Scaled.storage_bytes(5), 8);
+    }
+
+    #[test]
+    fn legacy_dtype_storage_contract_maps_to_canonical_types() {
+        assert_eq!(DType::F32.scalar_type(), ScalarType::F32);
+        assert_eq!(DType::F32.storage_encoding(), StorageEncoding::Plain);
+        assert_eq!(DType::U4Scaled.scalar_type(), ScalarType::U4);
+        assert_eq!(
+            DType::U4Scaled.storage_encoding(),
+            StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            }
+        );
+        assert_eq!(
+            DType::U4Scaled.try_storage_bytes(9).unwrap(),
+            DType::U4Scaled
+                .storage_encoding()
+                .storage_bytes(DType::U4Scaled.scalar_type(), 9)
+                .unwrap()
+        );
     }
 }

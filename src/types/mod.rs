@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ScalarType {
     F32,
+    F64,
     F16,
     BF16,
     Fp8E4M3,
@@ -26,11 +27,11 @@ pub enum ScalarType {
 impl ScalarType {
     pub const fn bit_width(self) -> u8 {
         match self {
+            Self::F64 | Self::I64 => 64,
             Self::F32 | Self::I32 => 32,
             Self::F16 | Self::BF16 => 16,
             Self::Fp8E4M3 | Self::Fp8E5M2 | Self::I8 | Self::U8 => 8,
             Self::Fp4E2M1 | Self::I4 | Self::U4 => 4,
-            Self::I64 => 64,
             Self::Bool => 1,
         }
     }
@@ -38,7 +39,13 @@ impl ScalarType {
     pub const fn is_float(self) -> bool {
         matches!(
             self,
-            Self::F32 | Self::F16 | Self::BF16 | Self::Fp8E4M3 | Self::Fp8E5M2 | Self::Fp4E2M1
+            Self::F32
+                | Self::F64
+                | Self::F16
+                | Self::BF16
+                | Self::Fp8E4M3
+                | Self::Fp8E5M2
+                | Self::Fp4E2M1
         )
     }
 
@@ -47,6 +54,14 @@ impl ScalarType {
             self,
             Self::I64 | Self::I32 | Self::I8 | Self::U8 | Self::I4 | Self::U4
         )
+    }
+
+    pub const fn plain_byte_width(self) -> Option<usize> {
+        match self {
+            Self::Bool => Some(1),
+            Self::Fp4E2M1 | Self::I4 | Self::U4 => None,
+            _ => Some((self.bit_width() / 8) as usize),
+        }
     }
 }
 
@@ -59,7 +74,7 @@ pub enum StorageEncoding {
 impl StorageEncoding {
     pub fn validate_for(self, scalar: ScalarType) -> FastnnResult<()> {
         match self {
-            Self::Plain if scalar.bit_width() < 8 => Err(FastnnError::dtype(format!(
+            Self::Plain if scalar.plain_byte_width().is_none() => Err(FastnnError::dtype(format!(
                 "{}-bit scalar requires an explicit packed storage encoding",
                 scalar.bit_width()
             ))),
@@ -94,7 +109,9 @@ impl StorageEncoding {
         self.validate_for(scalar)?;
         match self {
             Self::Plain => numel
-                .checked_mul(usize::from(scalar.bit_width() / 8))
+                .checked_mul(scalar.plain_byte_width().ok_or_else(|| {
+                    FastnnError::dtype("plain storage requires a byte-addressable scalar")
+                })?)
                 .ok_or_else(|| FastnnError::Overflow("tensor storage size overflow".into())),
             Self::Packed { word_bits, lanes } => numel
                 .div_ceil(usize::from(lanes))
@@ -394,6 +411,16 @@ mod tests {
         assert_eq!(encoding.storage_bytes(ScalarType::U4, 1).unwrap(), 4);
         assert_eq!(encoding.storage_bytes(ScalarType::U4, 8).unwrap(), 4);
         assert_eq!(encoding.storage_bytes(ScalarType::U4, 9).unwrap(), 8);
+    }
+
+    #[test]
+    fn plain_bool_storage_uses_one_byte_per_value() {
+        assert_eq!(
+            StorageEncoding::Plain
+                .storage_bytes(ScalarType::Bool, 3)
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
