@@ -171,6 +171,35 @@ impl DType {
         }
     }
 
+    /// Canonical logical/storage/transform contract represented by this runtime dtype.
+    pub fn value_representation(self) -> crate::types::ValueRepresentation {
+        use crate::types::{
+            QuantizationGranularity, RepresentationTransform, ScalarType, ValueRepresentation,
+        };
+        let storage = self.scalar_type();
+        let transform = match self {
+            DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled => {
+                RepresentationTransform::RuntimeAffineQuantization {
+                    granularity: QuantizationGranularity::PerTensor,
+                }
+            }
+            DType::F4 | DType::F8 | DType::F8R => RepresentationTransform::RuntimeScaledAffine {
+                granularity: QuantizationGranularity::PerTensor,
+            },
+            _ => RepresentationTransform::None,
+        };
+        ValueRepresentation {
+            logical: if matches!(transform, RepresentationTransform::None) {
+                storage
+            } else {
+                ScalarType::F32
+            },
+            storage,
+            encoding: self.storage_encoding(),
+            transform,
+        }
+    }
+
     /// Logical width of one encoded value.
     pub fn logical_bit_width(self) -> usize {
         usize::from(self.scalar_type().bit_width())
@@ -191,8 +220,7 @@ impl DType {
     }
 
     pub fn try_storage_bytes(self, numel: usize) -> crate::FastnnResult<usize> {
-        self.storage_encoding()
-            .storage_bytes(self.scalar_type(), numel)
+        self.value_representation().storage_bytes(numel)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -523,7 +551,7 @@ pub fn allocator_stats() -> String {
 #[cfg(test)]
 mod dtype_tests {
     use super::DType;
-    use crate::types::{ScalarType, StorageEncoding};
+    use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
 
     #[test]
     fn separates_logical_width_from_scalar_storage_width() {
@@ -560,5 +588,13 @@ mod dtype_tests {
                 .storage_bytes(DType::U4Scaled.scalar_type(), 9)
                 .unwrap()
         );
+        assert!(matches!(
+            DType::U4Scaled.value_representation().transform,
+            RepresentationTransform::RuntimeAffineQuantization { .. }
+        ));
+        assert!(matches!(
+            DType::F4.value_representation().transform,
+            RepresentationTransform::RuntimeScaledAffine { .. }
+        ));
     }
 }
