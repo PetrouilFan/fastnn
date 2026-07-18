@@ -16,8 +16,25 @@
 //! ```
 
 use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
-use crate::types::RepresentationTransform;
+use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
 use std::collections::{HashMap, HashSet};
+
+fn packed_param_dtype(dtype: &IrDType) -> Option<&'static str> {
+    let representation = dtype.value_representation().ok()?;
+    if !matches!(representation.encoding, StorageEncoding::Packed { .. }) {
+        return None;
+    }
+    match representation.storage {
+        ScalarType::I4 => Some("i4"),
+        ScalarType::U4 => Some("u4"),
+        ScalarType::I8 => Some("i8"),
+        ScalarType::U8 => Some("u8"),
+        ScalarType::Fp4E2M1 => Some("f4"),
+        ScalarType::Fp8E4M3 => Some("f8"),
+        ScalarType::Fp8E5M2 => Some("f8r"),
+        _ => None,
+    }
+}
 
 /// Configuration for ONNX export behavior.
 pub struct ExportConfig {
@@ -556,15 +573,7 @@ pub fn export_to_onnx_json_with_config(
                 // Constant nodes become weight params, not ONNX ops
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
-                        let is_packed = matches!(
-                            &tensor_type.dtype,
-                            IrDType::I4 { .. }
-                                | IrDType::I8Scaled { .. }
-                                | IrDType::F4 { .. }
-                                | IrDType::F8 { .. }
-                                | IrDType::F8R { .. }
-                        );
-                        if is_packed {
+                        if let Some(dtype) = packed_param_dtype(&tensor_type.dtype) {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
                                 .shape
@@ -578,14 +587,7 @@ pub fn export_to_onnx_json_with_config(
                                 OnnxExportParam {
                                     data: serde_json::json!(data),
                                     shape,
-                                    dtype: match &tensor_type.dtype {
-                                        IrDType::I4 { .. } => "u4".to_string(),
-                                        IrDType::I8Scaled { .. } => "i8".to_string(),
-                                        IrDType::F4 { .. } => "f4".to_string(),
-                                        IrDType::F8 { .. } => "f8".to_string(),
-                                        IrDType::F8R { .. } => "f8r".to_string(),
-                                        _ => unreachable!(),
-                                    },
+                                    dtype: dtype.to_string(),
                                 },
                             );
                         } else if matches!(tensor_type.dtype, IrDType::F32) {
@@ -763,4 +765,29 @@ pub fn export_to_onnx_file_with_config(
 ) -> Result<(), String> {
     let json = export_to_onnx_json_with_config(graph, config)?;
     std::fs::write(path, &json).map_err(|e| format!("ONNX export file write: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_param_dtype_uses_canonical_storage_identity() {
+        assert_eq!(
+            packed_param_dtype(&IrDType::I4 {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+                codebooks: vec![],
+            }),
+            Some("i4")
+        );
+        assert_eq!(
+            packed_param_dtype(&IrDType::U4Scaled {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+            }),
+            Some("u4")
+        );
+        assert_eq!(packed_param_dtype(&IrDType::F32), None);
+    }
 }
