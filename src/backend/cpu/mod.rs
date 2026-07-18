@@ -2766,11 +2766,9 @@ impl Backend for CpuBackend {
                     }
                 }
                 Opcode::Quantize => {
-                    let bit_width: usize = node
-                        .attrs
-                        .get("bit_width")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(4);
+                    let bit_width = node
+                        .required_attr::<usize>("bit_width")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?;
                     let kernel_name = match bit_width {
                         4 => "quantize_f32_u4",
                         8 => "quantize_f32_u8",

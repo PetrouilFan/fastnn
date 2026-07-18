@@ -44,11 +44,8 @@ pub(crate) fn node_output_byte_size(
             .ok_or_else(|| format!("quantize node {} element count overflows", node.id))
     })?;
     let bit_width = node
-        .attrs
-        .get("bit_width")
-        .ok_or_else(|| format!("quantize node {} is missing bit_width", node.id))?
-        .parse::<usize>()
-        .map_err(|_| format!("quantize node {} has invalid bit_width", node.id))?;
+        .required_attr::<usize>("bit_width")
+        .map_err(|error| error.to_string())?;
     if !matches!(bit_width, 4 | 8) {
         return Err(format!(
             "quantize node {} has unsupported bit_width {bit_width}",

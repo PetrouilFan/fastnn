@@ -7,6 +7,8 @@ use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Display;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub type NodeId = usize;
@@ -50,6 +52,43 @@ impl IRNode {
         } else {
             1
         }
+    }
+
+    pub fn required_attr<T>(&self, key: &str) -> FastnnResult<T>
+    where
+        T: FromStr,
+        T::Err: Display,
+    {
+        let value = self.attrs.get(key).ok_or_else(|| {
+            FastnnError::shape(format!(
+                "{:?} node {} is missing required attribute {key:?}",
+                self.opcode, self.id
+            ))
+        })?;
+        value.parse::<T>().map_err(|error| {
+            FastnnError::shape(format!(
+                "{:?} node {} has invalid {key:?} attribute {value:?}: {error}",
+                self.opcode, self.id
+            ))
+        })
+    }
+
+    pub fn optional_attr<T>(&self, key: &str) -> FastnnResult<Option<T>>
+    where
+        T: FromStr,
+        T::Err: Display,
+    {
+        self.attrs
+            .get(key)
+            .map(|value| {
+                value.parse::<T>().map_err(|error| {
+                    FastnnError::shape(format!(
+                        "{:?} node {} has invalid {key:?} attribute {value:?}: {error}",
+                        self.opcode, self.id
+                    ))
+                })
+            })
+            .transpose()
     }
 }
 
@@ -410,6 +449,25 @@ impl ComputeGraph {
 #[cfg(test)]
 mod graph_kind_tests {
     use super::{ComputeGraph, GraphKind};
+    use crate::ir::{IrDType, Opcode, TensorType};
+    use std::collections::HashMap;
+
+    #[test]
+    fn typed_attribute_access_rejects_missing_and_malformed_values() {
+        let mut graph = ComputeGraph::new();
+        let mut attrs = HashMap::new();
+        attrs.insert("bit_width".to_string(), "four".to_string());
+        let id = graph.add_node_with_attrs(
+            Opcode::Quantize,
+            vec![],
+            TensorType::new(vec![], IrDType::F32),
+            attrs,
+        );
+        let node = graph.get_node(id).unwrap();
+        assert!(node.required_attr::<usize>("missing").is_err());
+        assert!(node.required_attr::<usize>("bit_width").is_err());
+        assert_eq!(node.optional_attr::<usize>("missing").unwrap(), None);
+    }
 
     #[test]
     fn graph_kind_is_preserved_by_clone_and_serialization() {
