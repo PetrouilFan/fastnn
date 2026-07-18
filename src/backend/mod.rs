@@ -224,9 +224,33 @@ impl Default for PlanResourceLimits {
 impl ExecutablePlan {
     /// Save the plan to a binary file using bincode serialization.
     pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let bytes = bincode::serialize(self)?;
+        self.save_with_limits(path, &PlanResourceLimits::default())
+    }
+
+    pub fn save_with_limits(
+        &self,
+        path: &str,
+        limits: &PlanResourceLimits,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = self.to_bytes_with_limits(limits)?;
         std::fs::write(path, bytes)?;
         Ok(())
+    }
+
+    pub fn to_bytes_with_limits(
+        &self,
+        limits: &PlanResourceLimits,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        self.validate_with_limits(limits)?;
+        let serialized_size = bincode::serialized_size(self)?;
+        if serialized_size > limits.max_serialized_bytes {
+            return Err(format!(
+                "serialized executable plan would have {serialized_size} bytes, exceeding limit {}",
+                limits.max_serialized_bytes
+            )
+            .into());
+        }
+        Ok(bincode::serialize(self)?)
     }
 
     /// Load a plan from a binary file created by [`save`](Self::save).
@@ -600,6 +624,7 @@ mod executable_plan_validation_tests {
             ..PlanResourceLimits::default()
         };
         assert!(deserialize_executable_plan(&bytes, &limits).is_err());
+        assert!(plan.to_bytes_with_limits(&limits).is_err());
     }
 
     #[test]

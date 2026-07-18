@@ -139,10 +139,25 @@ impl<B: Backend> Runtime<B> {
         plan_path: &str,
         memory_path: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let plan_bytes = bincode::serialize(&self.plan)?;
-        std::fs::write(plan_path, plan_bytes)?;
-
+        self.plan
+            .validate_with_limits(&self.resource_limits.executable)?;
+        self.memory_plan
+            .validate_with_limits(&self.resource_limits.memory)?;
+        super::executor::validate_instruction_slice_ownership(&self.plan, &self.memory_plan)?;
+        let plan_bytes = self
+            .plan
+            .to_bytes_with_limits(&self.resource_limits.executable)?;
         let memory_json = serde_json::to_string_pretty(&self.memory_plan)?;
+        let memory_size = u64::try_from(memory_json.len())?;
+        if memory_size > self.resource_limits.memory.max_serialized_bytes {
+            return Err(format!(
+                "serialized memory plan would have {memory_size} bytes, exceeding limit {}",
+                self.resource_limits.memory.max_serialized_bytes
+            )
+            .into());
+        }
+
+        std::fs::write(plan_path, plan_bytes)?;
         std::fs::write(memory_path, memory_json)?;
 
         Ok(())
