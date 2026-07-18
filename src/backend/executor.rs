@@ -2533,6 +2533,29 @@ mod prepared_fallback_tests {
     }
 
     #[test]
+    fn cast_lowering_uses_semantic_kernel_names() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[2], IrDType::F32);
+        let output = g.cast_op(&input, IrDType::I64);
+        let (plan, _, _) = g
+            .compile(&[&output], CpuBackend)
+            .expect("supported typed cast must compile");
+        assert!(plan.instructions.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::CallKernel { kernel_name, params, .. }
+                if kernel_name == "cast_f32_i64" && params.is_empty()
+        )));
+    }
+
+    #[test]
+    fn equal_width_semantic_cast_is_not_lowered_as_memcopy() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[2], IrDType::F32);
+        let output = g.cast_op(&input, IrDType::I32);
+        assert!(g.compile(&[&output], CpuBackend).is_err());
+    }
+
+    #[test]
     fn tightened_executable_plan_is_rechecked_against_resource_limits() {
         let g = GraphBuilder::new();
         let input = g.input(&[4], IrDType::F32);
@@ -3128,14 +3151,14 @@ mod execution_storage_size_tests {
     }
 
     #[test]
-    fn cast_dispatch_rejects_missing_width_metadata() {
+    fn typed_cast_dispatch_rejects_legacy_width_metadata() {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::CallKernel {
-                kernel_name: "cast".into(),
+                kernel_name: "cast_f32_i64".into(),
                 input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
                 output_slice: crate::backend::BufferSlice::new(4, 8),
                 secondary_output_slice: None,
-                params: vec![],
+                params: vec![4, 8],
                 param_dims: None,
                 node_id: Some(0),
                 weight_meta: None,

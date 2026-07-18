@@ -488,13 +488,8 @@ impl IrDType {
 
 /// Macro that generates simple per-variant constant lookup methods for IrDType.
 macro_rules! impl_ir_dtype_props {
-    ($(($variant:pat, $byte_size:expr, $as_str:expr, $bit_width:expr, $items_per_word:expr)),* $(,)?) => {
+    ($(($variant:pat, $as_str:expr, $bit_width:expr, $items_per_word:expr)),* $(,)?) => {
         impl IrDType {
-            /// Logical byte size per element (conservative over-estimate for packed types).
-            pub fn byte_size(&self) -> usize {
-                match self { $( $variant => $byte_size, )* }
-            }
-
             pub fn as_str(&self) -> &'static str {
                 match self { $( $variant => $as_str, )* }
             }
@@ -511,20 +506,20 @@ macro_rules! impl_ir_dtype_props {
 }
 
 impl_ir_dtype_props!(
-    (Self::F32, 4, "f32", 32, 1),
-    (Self::F16, 2, "f16", 16, 2),
-    (Self::BF16, 2, "bf16", 16, 2),
-    (Self::I32, 4, "i32", 32, 1),
-    (Self::I64, 8, "i64", 64, 1),
-    (Self::Bool, 1, "bool", 1, 32),
-    (Self::I8, 1, "i8", 8, 4),
-    (Self::I4 { .. }, 1, "i4", 4, 8),
-    (Self::I8Scaled { .. }, 1, "i8", 8, 4),
-    (Self::F8 { .. }, 1, "f8", 8, 4),
-    (Self::F8R { .. }, 1, "f8r", 8, 4),
-    (Self::F4 { .. }, 1, "f4", 4, 8),
-    (Self::U4Scaled { .. }, 1, "u4", 4, 8),
-    (Self::U8Scaled { .. }, 1, "u8", 8, 4),
+    (Self::F32, "f32", 32, 1),
+    (Self::F16, "f16", 16, 2),
+    (Self::BF16, "bf16", 16, 2),
+    (Self::I32, "i32", 32, 1),
+    (Self::I64, "i64", 64, 1),
+    (Self::Bool, "bool", 1, 32),
+    (Self::I8, "i8", 8, 4),
+    (Self::I4 { .. }, "i4", 4, 8),
+    (Self::I8Scaled { .. }, "i8", 8, 4),
+    (Self::F8 { .. }, "f8", 8, 4),
+    (Self::F8R { .. }, "f8r", 8, 4),
+    (Self::F4 { .. }, "f4", 4, 8),
+    (Self::U4Scaled { .. }, "u4", 4, 8),
+    (Self::U8Scaled { .. }, "u8", 8, 4),
 );
 
 fn quantization_granularity(parameter_count: usize) -> QuantizationGranularity {

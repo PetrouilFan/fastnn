@@ -2704,19 +2704,18 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Cast => {
-                    // Cast: same-shape, potentially different dtype.
-                    // For same-byte-size casts, MemCopy is sufficient.
-                    // For different byte sizes, do element conversion.
                     let in_type = node
                         .inputs
                         .first()
                         .and_then(|id| graph.get_node(*id))
-                        .map(|n| n.output_type.dtype.clone());
+                        .map(|n| n.output_type.dtype.clone())
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "Cast node {node_id} has no typed input"
+                            ))
+                        })?;
                     let out_type = node.output_type.dtype.clone();
-                    let in_byte_size = in_type.as_ref().map(|d| d.byte_size()).unwrap_or(4);
-                    let out_byte_size = out_type.byte_size();
-                    if in_byte_size == out_byte_size {
-                        // Same byte size: just copy.
+                    if in_type == out_type {
                         if let Some(&input_id) = node.inputs.first() {
                             if let Some(in_slot) = memory_plan.slots.get(&input_id) {
                                 instructions.push(Instruction::MemCopy {
@@ -2726,18 +2725,28 @@ impl Backend for CpuBackend {
                             }
                         }
                     } else {
-                        // Different byte size: use a kernel call.
+                        let kernel_name = match (&in_type, &out_type) {
+                            (IrDType::F32, IrDType::I64) => "cast_f32_i64",
+                            (IrDType::I64, IrDType::F32) => "cast_i64_f32",
+                            _ => {
+                                return Err(BackendError::Compilation(format!(
+                                    "Cast node {node_id} does not support {} -> {}",
+                                    in_type.as_str(),
+                                    out_type.as_str()
+                                )))
+                            }
+                        };
                         let in_slot = node.inputs.first().and_then(|id| memory_plan.slots.get(id));
                         let input_slices = in_slot
                             .map(|s| vec![BufferSlice::new(s.offset, s.size)])
                             .unwrap_or_default();
                         instructions.push(Instruction::CallKernel {
                             node_id: Some(node_id),
-                            kernel_name: "cast".to_string(),
+                            kernel_name: kernel_name.to_string(),
                             input_slices,
                             output_slice,
                             secondary_output_slice: None,
-                            params: vec![in_byte_size, out_byte_size],
+                            params: vec![],
                             param_dims: None,
                             weight_meta: None,
                         });
@@ -9727,18 +9736,17 @@ impl Backend for CpuBackend {
                                 chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
                             }
                         }
-                        "cast" => {
-                            if input_slices.len() != 1 || params.len() != 2 {
+                        "cast_f32_i64" | "cast_i64_f32" => {
+                            if input_slices.len() != 1 || !params.is_empty() {
                                 return Err(BackendError::Dispatch(
-                                    "cast: expected one input and input/output byte widths".into(),
+                                    "cast: expected one input and no untyped width parameters"
+                                        .into(),
                                 ));
                             }
                             let input_slice = input_slices[0];
                             let output_size = out_end - out_start;
-                            let in_byte_size = params[0];
-                            let out_byte_size = params[1];
-                            match (in_byte_size, out_byte_size) {
-                                (4, 8) => {
+                            match kernel_name.as_str() {
+                                "cast_f32_i64" => {
                                     let numel = input_slice.size / 4;
                                     let expected_output =
                                         numel.checked_mul(8).ok_or_else(|| {
@@ -9774,7 +9782,7 @@ impl Backend for CpuBackend {
                                             .copy_from_slice(&(*value as i64).to_le_bytes());
                                     }
                                 }
-                                (8, 4) => {
+                                "cast_i64_f32" => {
                                     let numel = input_slice.size / 8;
                                     let expected_output =
                                         numel.checked_mul(4).ok_or_else(|| {
@@ -9812,7 +9820,7 @@ impl Backend for CpuBackend {
                                 }
                                 _ => {
                                     return Err(BackendError::Dispatch(format!(
-                                        "cast: unsupported byte-width conversion {in_byte_size}->{out_byte_size}"
+                                        "unsupported typed cast kernel {kernel_name}"
                                     )));
                                 }
                             }
