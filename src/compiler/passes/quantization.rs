@@ -9,7 +9,22 @@ use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4};
 use crate::error::FastnnError;
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
-use crate::types::QuantTarget;
+use crate::types::{QuantTarget, RepresentationTransform, ScalarType};
+
+fn optimizer_affine_metadata(dtype: &IrDType) -> Option<(usize, Vec<f32>, Vec<f32>)> {
+    let representation = dtype.value_representation().ok()?;
+    let bit_width = match representation.storage {
+        ScalarType::I4 => 4,
+        ScalarType::I8 => 8,
+        _ => return None,
+    };
+    match representation.transform {
+        RepresentationTransform::AffineDequantization {
+            scales, offsets, ..
+        } => Some((bit_width, scales, offsets)),
+        _ => None,
+    }
+}
 
 /// Quantize all f32 weight constants feeding MatMul / Conv2d nodes to the
 /// requested bit-width (4 or 8).
@@ -550,10 +565,9 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
             None => return Ok(()),
         };
 
-        let bit_width = match &weight_node.output_type.dtype {
-            IrDType::I4 { .. } => 4,
-            IrDType::I8Scaled { .. } => 8,
-            _ => return Ok(()), // weight is not quantized, skip
+        let bit_width = match optimizer_affine_metadata(&weight_node.output_type.dtype) {
+            Some((bit_width, _, _)) => bit_width,
+            None => return Ok(()), // weight is not supported affine storage, skip
         };
 
         // Save the remaining inputs (grad, m, v) and attrs
@@ -603,19 +617,12 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         // can skip the O(N×K) per-channel abs-max scan on every optimizer step.
         let (orig_scales, orig_zeros) = graph
             .get_node(wrap.weight_id)
-            .map(|wn| match &wn.output_type.dtype {
-                IrDType::I4 {
-                    scales,
-                    dequant_offsets,
-                    ..
-                } => (scales.clone(), dequant_offsets.clone()),
-                IrDType::I8Scaled {
-                    scales,
-                    dequant_offsets,
-                    ..
-                } => (scales.clone(), dequant_offsets.clone()),
-                _ => (vec![], vec![]),
-            })
+            .map(
+                |wn| match optimizer_affine_metadata(&wn.output_type.dtype) {
+                    Some((_, scales, offsets)) => (scales, offsets),
+                    None => (vec![], vec![]),
+                },
+            )
             .unwrap_or_default();
 
         let u_type = TensorType::new(
@@ -683,6 +690,26 @@ mod tests {
         let mut graph = ComputeGraph::new();
         let error = quantize_weights_fp(&mut graph, &QuantTarget::I4, None).unwrap_err();
         assert!(error.to_string().contains("floating or codebook target"));
+    }
+
+    #[test]
+    fn optimizer_metadata_uses_canonical_affine_storage() {
+        let dtype = IrDType::I4 {
+            scales: vec![0.5],
+            dequant_offsets: vec![-1.0],
+            codebooks: vec![],
+        };
+        assert_eq!(
+            optimizer_affine_metadata(&dtype),
+            Some((4, vec![0.5], vec![-1.0]))
+        );
+
+        let codebook = IrDType::I4 {
+            scales: vec![1.0],
+            dequant_offsets: vec![],
+            codebooks: vec![[0.0; 16]],
+        };
+        assert_eq!(optimizer_affine_metadata(&codebook), None);
     }
 
     /// Helper: create a ComputeGraph with a MatMul and f32 Constant weight.
