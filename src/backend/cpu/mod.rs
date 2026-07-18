@@ -1660,19 +1660,8 @@ impl Backend for CpuBackend {
                 }
                 Opcode::Slice => {
                     let parse_attr = |name: &str| -> Result<i64, BackendError> {
-                        node.attrs
-                            .get(name)
-                            .ok_or_else(|| {
-                                BackendError::Compilation(format!(
-                                    "slice node {node_id} is missing {name}"
-                                ))
-                            })?
-                            .parse::<i64>()
-                            .map_err(|_| {
-                                BackendError::Compilation(format!(
-                                    "slice node {node_id} has invalid {name}"
-                                ))
-                            })
+                        node.required_attr(name)
+                            .map_err(|error| BackendError::Compilation(error.to_string()))
                     };
                     let dim_value = parse_attr("dim")?;
                     let start_value = parse_attr("start")?;

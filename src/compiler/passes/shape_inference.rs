@@ -282,52 +282,66 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
-                    if let Some(dim_str) = node.attrs.get("dim") {
-                        if let Ok(dim) = dim_str.parse::<usize>() {
-                            let start: u64 = node
-                                .attrs
-                                .get("start")
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0);
-                            let end: u64 = node
-                                .attrs
-                                .get("end")
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0);
-                            if dim < shape.len() && end > start {
-                                shape[dim] = DimExpr::Known(end - start);
-                            }
+                    let dim = node.required_attr::<usize>("dim")?;
+                    let start = node.required_attr::<u64>("start")?;
+                    let end = node.required_attr::<u64>("end")?;
+                    if dim >= shape.len() {
+                        return Err(FastnnError::shape(format!(
+                            "Slice node {} dimension {dim} is out of range for rank {}",
+                            node.id,
+                            shape.len()
+                        )));
+                    }
+                    if end <= start {
+                        return Err(FastnnError::shape(format!(
+                            "Slice node {} requires end greater than start, got {start}..{end}",
+                            node.id
+                        )));
+                    }
+                    shape[dim] = DimExpr::Known(end - start);
+                    Some(shape)
+                } else {
+                    None
+                }
+            }
+            Opcode::Squeeze => {
+                if let Some(input) = inputs.first() {
+                    let mut shape = input.output_type.shape.clone();
+                    if let Some(dim) = node.optional_attr::<usize>("dim")? {
+                        if dim >= shape.len() {
+                            return Err(FastnnError::shape(format!(
+                                "Squeeze node {} dimension {dim} is out of range for rank {}",
+                                node.id,
+                                shape.len()
+                            )));
                         }
+                        shape.remove(dim);
+                    } else {
+                        shape.retain(|d| !matches!(d, DimExpr::Known(1)));
                     }
                     Some(shape)
                 } else {
                     None
                 }
             }
-            Opcode::Squeeze => inputs.first().map(|i| {
-                let mut shape = i.output_type.shape.clone();
-                if let Some(dim_str) = node.attrs.get("dim") {
-                    if let Ok(dim) = dim_str.parse::<usize>() {
-                        if dim < shape.len() {
-                            shape.remove(dim);
+            Opcode::Unsqueeze => {
+                if let Some(input) = inputs.first() {
+                    let mut shape = input.output_type.shape.clone();
+                    if let Some(dim) = node.optional_attr::<usize>("dim")? {
+                        if dim > shape.len() {
+                            return Err(FastnnError::shape(format!(
+                                "Unsqueeze node {} dimension {dim} is out of range for rank {}",
+                                node.id,
+                                shape.len()
+                            )));
                         }
+                        shape.insert(dim, DimExpr::Known(1));
                     }
+                    Some(shape)
                 } else {
-                    shape.retain(|d| !matches!(d, DimExpr::Known(1)));
+                    None
                 }
-                shape
-            }),
-            Opcode::Unsqueeze => inputs.first().map(|i| {
-                let mut shape = i.output_type.shape.clone();
-                if let Some(dim_str) = node.attrs.get("dim") {
-                    if let Ok(dim) = dim_str.parse::<usize>() {
-                        if dim <= shape.len() {
-                            shape.insert(dim, DimExpr::Known(1));
-                        }
-                    }
-                }
-                shape
-            }),
+            }
             Opcode::Pad => {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
@@ -460,11 +474,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 // Expand output shape: try to use the DAG builder's pre-computed
                 // "expand_shape" attr, which contains concrete target dims.
                 if inputs.len() >= 2 {
-                    let inferred = if let Some(shape_str) = node.attrs.get("expand_shape") {
-                        let target: Vec<u64> = shape_str
-                            .split(',')
-                            .filter_map(|s| s.trim().parse::<u64>().ok())
-                            .collect();
+                    if let Some(target) = node.optional_attr_list::<u64>("expand_shape")? {
                         if !target.is_empty() {
                             let data_shape = &inputs[0].output_type.shape;
                             let data_rank = data_shape.len();
@@ -497,8 +507,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                         // No expand_shape attr: fallback to data shape.
                         // The expand kernel will read the target shape at runtime.
                         Some(inputs[0].output_type.shape.clone())
-                    };
-                    inferred
+                    }
                 } else {
                     inputs.first().map(|i| i.output_type.shape.clone())
                 }
