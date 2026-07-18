@@ -1,4 +1,4 @@
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -38,7 +38,13 @@ impl AlignedVec {
             };
         }
         let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN).expect("AlignedVec layout");
+        // SAFETY: `layout` has non-zero size and valid 64-byte alignment. The
+        // returned allocation is owned exclusively by this `AlignedVec` and is
+        // deallocated with the identical layout in `Drop`.
         let ptr = unsafe { alloc_zeroed(layout) };
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
         AlignedVec { ptr, len: nbytes }
     }
 
@@ -76,6 +82,8 @@ impl Drop for AlignedVec {
             // Layout must match the one used in new_zeroed.
             let layout = Layout::from_size_align(self.len, CACHE_LINE_ALIGN)
                 .expect("AlignedVec dealloc layout");
+            // SAFETY: non-empty `AlignedVec` values own a live allocation made
+            // by `alloc_zeroed` with this exact size and alignment.
             unsafe { dealloc(self.ptr, layout) };
         }
     }
@@ -88,6 +96,8 @@ impl Deref for AlignedVec {
         if self.len == 0 {
             &[]
         } else {
+            // SAFETY: `self.ptr` is non-null, 64-byte aligned, initialized for
+            // `self.len` bytes, and remains alive for the returned borrow.
             unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
         }
     }
@@ -98,6 +108,8 @@ impl DerefMut for AlignedVec {
         if self.len == 0 {
             &mut []
         } else {
+            // SAFETY: `&mut self` guarantees exclusive access; `self.ptr` is
+            // non-null, aligned, initialized, and valid for `self.len` bytes.
             unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
         }
     }
@@ -544,8 +556,17 @@ pub fn allocator_stats() -> String {
 
 #[cfg(test)]
 mod dtype_tests {
-    use super::DType;
+    use super::{AlignedVec, DType, CACHE_LINE_ALIGN};
     use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
+
+    #[test]
+    fn aligned_vec_is_zeroed_and_cache_line_aligned() {
+        let mut storage = AlignedVec::new_zeroed(65);
+        assert_eq!((storage.as_ptr() as usize) % CACHE_LINE_ALIGN, 0);
+        assert!(storage.iter().all(|byte| *byte == 0));
+        storage[64] = 7;
+        assert_eq!(storage[64], 7);
+    }
 
     #[test]
     fn separates_logical_width_from_scalar_storage_width() {
