@@ -328,13 +328,26 @@ impl PreparedConstantArena {
     /// is already registered the existing id is returned and `data` is
     /// dropped — duplicate names never duplicate storage.
     pub fn insert(&mut self, name: impl Into<String>, data: Vec<f32>) -> PackedWeightId {
+        self.try_insert(name, data)
+            .expect("prepared fp32 constant byte size overflow")
+    }
+
+    pub fn try_insert(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<f32>,
+    ) -> Result<PackedWeightId, BackendError> {
         let name = name.into();
         if let Some(id) = self.name_to_id.get(&name) {
-            return *id;
+            return Ok(*id);
         }
         let index = self.entries.len();
         let numel = data.len();
-        let byte_len = numel * PackedWeightKind::Fp32.element_bytes();
+        let byte_len = numel
+            .checked_mul(PackedWeightKind::Fp32.element_bytes())
+            .ok_or_else(|| {
+                BackendError::Dispatch("prepared fp32 constant byte size overflows".into())
+            })?;
         let id = PackedWeightId::new(index);
         self.entries.push(PreparedConstantEntry {
             id,
@@ -345,7 +358,7 @@ impl PreparedConstantArena {
             store: PackedWeightStore::unpacked(data),
         });
         self.name_to_id.insert(name, id);
-        id
+        Ok(id)
     }
 
     /// Register a named constant with an explicit storage variant.
@@ -533,14 +546,14 @@ pub type StaticWeightMap = Vec<StaticWeightBinding>;
 /// Snapshot of one [`Instruction::WriteConst`] in the plan. Used as an
 /// intermediate representation while we match consumer input slots
 /// against static producers.
-#[derive(Clone, Debug)]
-struct WriteConstEntry {
+#[derive(Clone, Copy, Debug)]
+struct WriteConstEntry<'a> {
     /// Plan-wide index of the WriteConst instruction.
     writer_idx: usize,
     /// Destination slot the WriteConst materialises.
     dst: BufferSlice,
     /// Raw bytes the WriteConst deposits into the arena.
-    data: Vec<u8>,
+    data: &'a [u8],
 }
 
 /// Map a kernel name suffix to the corresponding [`PreparedActivation`].
@@ -825,7 +838,15 @@ fn detect_weight_kind(
 pub fn detect_static_weights(
     plan: &ExecutablePlan,
     arena: &mut PreparedConstantArena,
-) -> StaticWeightMap {
+) -> Result<StaticWeightMap, BackendError> {
+    detect_static_weights_with_limits(plan, arena, &PreparedPlanResourceLimits::default())
+}
+
+fn detect_static_weights_with_limits(
+    plan: &ExecutablePlan,
+    arena: &mut PreparedConstantArena,
+    limits: &PreparedPlanResourceLimits,
+) -> Result<StaticWeightMap, BackendError> {
     // First pass: collect every WriteConst in the plan.
     let mut const_slots: Vec<WriteConstEntry> = Vec::new();
     for (writer_idx, inst) in plan.instructions.iter().enumerate() {
@@ -834,7 +855,7 @@ pub fn detect_static_weights(
                 const_slots.push(WriteConstEntry {
                     writer_idx,
                     dst: *dst,
-                    data: data.clone(),
+                    data,
                 });
             }
         }
@@ -882,7 +903,8 @@ pub fn detect_static_weights(
                 weight_slice,
                 role,
                 weight_kind,
-            ) {
+                limits,
+            )? {
                 bindings.push(binding);
             }
         }
@@ -900,13 +922,14 @@ pub fn detect_static_weights(
                 bias_slice,
                 role,
                 PackedWeightKind::Fp32,
-            ) {
+                limits,
+            )? {
                 bindings.push(binding);
             }
         }
     }
 
-    bindings
+    Ok(bindings)
 }
 
 /// Look up a `WriteConst` covering `slot`, register it in `arena` under
@@ -914,37 +937,70 @@ pub fn detect_static_weights(
 /// [`StaticWeightBinding`]. Returns `None` when no `WriteConst` covers
 /// the slot — the consumer is treated as dynamic in that case.
 fn bind_consumer_input(
-    const_slots: &[WriteConstEntry],
+    const_slots: &[WriteConstEntry<'_>],
     arena: &mut PreparedConstantArena,
     instruction_index: usize,
     input_index: usize,
     slot: &BufferSlice,
     role: &str,
     kind: PackedWeightKind,
-) -> Option<StaticWeightBinding> {
-    let producer = find_covering_write_const(const_slots, slot)?;
-    let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
-    let weight_id = if kind == PackedWeightKind::Fp32 {
-        let payload = bytes_to_f32_vec(&producer.data);
-        arena.insert(&name, payload)
-    } else {
-        arena.insert_raw(&name, producer.data.clone(), kind)
+    limits: &PreparedPlanResourceLimits,
+) -> Result<Option<StaticWeightBinding>, BackendError> {
+    let Some(producer) = find_covering_write_const(const_slots, slot) else {
+        return Ok(None);
     };
-    Some(StaticWeightBinding {
+    let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
+    if !arena.name_to_id.contains_key(&name) {
+        let next_entries = arena.entries.len().checked_add(1).ok_or_else(|| {
+            BackendError::Dispatch("prepared constant entry count overflows".into())
+        })?;
+        if next_entries > limits.max_constant_entries {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena would have {next_entries} entries, exceeding limit {}",
+                limits.max_constant_entries
+            )));
+        }
+        let payload_bytes = if kind == PackedWeightKind::Fp32 {
+            producer.data.len() / std::mem::size_of::<f32>() * std::mem::size_of::<f32>()
+        } else {
+            producer.data.len()
+        };
+        let current_bytes = arena.entries.iter().try_fold(0usize, |total, entry| {
+            total.checked_add(entry.byte_len).ok_or_else(|| {
+                BackendError::Dispatch("prepared constant arena size overflows".into())
+            })
+        })?;
+        let next_bytes = current_bytes.checked_add(payload_bytes).ok_or_else(|| {
+            BackendError::Dispatch("prepared constant arena size overflows".into())
+        })?;
+        if next_bytes > limits.max_constant_bytes {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena would use {next_bytes} bytes, exceeding limit {}",
+                limits.max_constant_bytes
+            )));
+        }
+    }
+    let weight_id = if kind == PackedWeightKind::Fp32 {
+        let payload = bytes_to_f32_vec(producer.data);
+        arena.try_insert(&name, payload)?
+    } else {
+        arena.insert_raw(&name, producer.data.to_vec(), kind)
+    };
+    Ok(Some(StaticWeightBinding {
         instruction_index,
         input_index,
         weight_id,
         kind,
-    })
+    }))
 }
 
 /// Return the first `WriteConst` whose destination either equals
 /// `slot` (byte-exact) or strictly covers it. Order of producers
 /// follows plan order, so a tie-break favours the earliest writer.
 fn find_covering_write_const<'a>(
-    const_slots: &'a [WriteConstEntry],
+    const_slots: &'a [WriteConstEntry<'a>],
     slot: &BufferSlice,
-) -> Option<&'a WriteConstEntry> {
+) -> Option<&'a WriteConstEntry<'a>> {
     const_slots
         .iter()
         .find(|entry| covers_slice(&entry.dst, entry.data.len(), slot))
@@ -1185,7 +1241,7 @@ pub fn prepare_executable_plan_with_limits(
         )));
     }
     let mut arena = PreparedConstantArena::new();
-    let bindings = detect_static_weights(plan, &mut arena);
+    let bindings = detect_static_weights_with_limits(plan, &mut arena, limits)?;
 
     // Bucket bindings by consumer instruction index so the
     // per-instruction pass below can locate its bindings in O(1).
@@ -3357,8 +3413,30 @@ mod tests {
     #[test]
     fn detect_static_weights_empty_plan() {
         let mut arena = PreparedConstantArena::new();
-        let bindings = detect_static_weights(&empty_plan(), &mut arena);
+        let bindings = detect_static_weights(&empty_plan(), &mut arena).unwrap();
         assert!(bindings.is_empty());
+        assert!(arena.is_empty());
+    }
+
+    #[test]
+    fn static_weight_limits_are_checked_before_payload_allocation() {
+        let weight_payload: Vec<f32> = (0..6).map(|i| i as f32).collect();
+        let wc_weight = make_write_const(BufferSlice::new(0, 24), &weight_payload);
+        let mut mm = make_matmul_instruction("matmul", 4, 3, 2, false);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[1] = BufferSlice::new(0, 24);
+        }
+        let plan = ExecutablePlan {
+            instructions: vec![wc_weight, mm],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let limits = PreparedPlanResourceLimits {
+            max_constant_bytes: 23,
+            ..PreparedPlanResourceLimits::default()
+        };
+        let mut arena = PreparedConstantArena::new();
+        assert!(detect_static_weights_with_limits(&plan, &mut arena, &limits).is_err());
         assert!(arena.is_empty());
     }
 

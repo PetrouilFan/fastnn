@@ -45,6 +45,60 @@ pub struct ExecutionResourceLimits {
     pub prepared: PreparedPlanResourceLimits,
 }
 
+pub(crate) fn validate_instruction_slice_ownership(
+    plan: &ExecutablePlan,
+    memory_plan: &MemoryPlan,
+) -> Result<(), BackendError> {
+    let validate_slice = |slice: BufferSlice, label: &str| {
+        let belongs_to_slot = memory_plan
+            .slots
+            .values()
+            .chain(memory_plan.secondary_slots.values())
+            .any(|slot| {
+                let (Some(slice_end), Some(slot_end)) = (
+                    slice.offset.checked_add(slice.size),
+                    slot.offset.checked_add(slot.size),
+                ) else {
+                    return false;
+                };
+                slice.offset >= slot.offset && slice_end <= slot_end
+            });
+        if !belongs_to_slot {
+            return Err(BackendError::Dispatch(format!(
+                "{label} slice {}..{} is not backed by a memory-plan slot",
+                slice.offset,
+                slice.offset.saturating_add(slice.size)
+            )));
+        }
+        Ok(())
+    };
+
+    for (instruction_index, instruction) in plan.instructions.iter().enumerate() {
+        match instruction {
+            Instruction::MemCopy { src, dst } => {
+                validate_slice(
+                    *src,
+                    &format!("instruction {instruction_index} copy source"),
+                )?;
+                validate_slice(
+                    *dst,
+                    &format!("instruction {instruction_index} copy destination"),
+                )?;
+            }
+            Instruction::Fill { dst, .. } => validate_slice(
+                *dst,
+                &format!("instruction {instruction_index} fill destination"),
+            )?,
+            Instruction::WriteConst { dst, .. } => validate_slice(
+                *dst,
+                &format!("instruction {instruction_index} constant destination"),
+            )?,
+            Instruction::CallKernel { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 fn validate_compiled_artifacts(
     graph: &ComputeGraph,
     plan: &ExecutablePlan,
@@ -692,6 +746,10 @@ impl<B: Backend> GraphExecutor<B> {
                         BackendError::Dispatch(format!("tightened memory plan: {error}"))
                     })?;
                 tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+                plan.validate_with_limits(&self.resource_limits.executable)
+                    .map_err(|error| {
+                        BackendError::Dispatch(format!("tightened executable plan: {error}"))
+                    })?;
 
                 // Cache for static-shape models so subsequent calls
                 // skip the entire preamble.
@@ -1086,6 +1144,15 @@ impl<B: Backend> GraphExecutor<B> {
             let mut plan = plan;
             tighten_slices(&mut plan, &memory_plan, &tightened_mp, &final_graph)
                 .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
+            plan.validate_with_limits(&self.resource_limits.executable)
+                .map_err(|error| {
+                    BackendError::Compilation(format!("tightened executable plan: {error}"))
+                })?;
+            tightened_mp
+                .validate_with_limits(&self.resource_limits.memory)
+                .map_err(|error| {
+                    BackendError::Compilation(format!("tightened memory plan: {error}"))
+                })?;
             (plan, tightened_mp)
         } else {
             (plan, memory_plan)
@@ -2463,6 +2530,27 @@ mod prepared_fallback_tests {
             .compile_with_plan(graph)
             .expect_err("configured instruction limit must reject the compiled plan");
         assert!(matches!(error, BackendError::Dispatch(_)));
+    }
+
+    #[test]
+    fn tightened_executable_plan_is_rechecked_against_resource_limits() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[4], IrDType::F32);
+        let output = g.relu(&input);
+        let (mut plan, memory_plan, graph) = g
+            .compile(&[&output], CpuBackend)
+            .expect("compile must succeed");
+        let mut tightened_memory_plan = memory_plan.clone();
+        tightened_memory_plan
+            .tightened_params
+            .insert(output.node_id, vec![1, 2]);
+        tighten_slices(&mut plan, &memory_plan, &tightened_memory_plan, &graph)
+            .expect("tightening must succeed");
+        let limits = PlanResourceLimits {
+            max_total_params: 1,
+            ..PlanResourceLimits::default()
+        };
+        assert!(plan.validate_with_limits(&limits).is_err());
     }
 
     #[test]

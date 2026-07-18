@@ -60,6 +60,7 @@ impl<B: Backend> Runtime<B> {
         memory_plan
             .validate_with_limits(&resource_limits.memory)
             .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+        super::executor::validate_instruction_slice_ownership(&plan, &memory_plan)?;
         if memory_plan.total_size > plan.arena_size {
             return Err(BackendError::Dispatch(format!(
                 "memory plan arena size {} exceeds executable arena size {}",
@@ -162,6 +163,7 @@ impl<B: Backend> Runtime<B> {
         self.memory_plan
             .validate_with_limits(&self.resource_limits.memory)
             .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+        super::executor::validate_instruction_slice_ownership(&self.plan, &self.memory_plan)?;
         if inputs.len() != self.memory_plan.inputs.len() {
             return Err(BackendError::Dispatch(format!(
                 "runtime expected {} inputs, received {}",
@@ -308,6 +310,35 @@ mod tests {
             total_size: 4,
             slots: std::collections::HashMap::new(),
             inputs: vec![1],
+            secondary_slots: std::collections::HashMap::new(),
+            outputs: vec![],
+            tightened_params: std::collections::HashMap::new(),
+        };
+        assert!(Runtime::new(CpuBackend, plan, memory_plan).is_err());
+    }
+
+    #[test]
+    fn runtime_rejects_instruction_slices_without_memory_ownership() {
+        let plan = ExecutablePlan {
+            instructions: vec![crate::backend::Instruction::Fill {
+                dst: crate::backend::BufferSlice::new(4, 4),
+                value: 0.0,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let memory_plan = MemoryPlan {
+            total_size: 8,
+            slots: std::collections::HashMap::from([(
+                1,
+                crate::compiler::AllocSlot {
+                    offset: 0,
+                    size: 4,
+                    node_id: 1,
+                    output_index: 0,
+                },
+            )]),
+            inputs: vec![],
             secondary_slots: std::collections::HashMap::new(),
             outputs: vec![],
             tightened_params: std::collections::HashMap::new(),
