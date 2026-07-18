@@ -9,14 +9,7 @@ use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4};
 use crate::error::FastnnError;
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::packed_tensor::PackedTensor;
-
-/// Target floating-point packed dtype for weight quantization.
-pub enum FpDtype {
-    F8x4,
-    F8x4R,
-    F4x8,
-    I4Codebook,
-}
+use crate::types::QuantTarget;
 
 /// Quantize all f32 weight constants feeding MatMul / Conv2d nodes to the
 /// requested bit-width (4 or 8).
@@ -280,9 +273,17 @@ pub fn quantize_weights(
 /// each channel's absolute max divided by the dtype's `MAX_REPRESENTABLE`.
 pub fn quantize_weights_fp(
     graph: &mut ComputeGraph,
-    fp_dtype: &FpDtype,
+    fp_dtype: &QuantTarget,
     group_size: Option<usize>,
 ) -> Result<(), FastnnError> {
+    if matches!(
+        fp_dtype,
+        QuantTarget::I8 | QuantTarget::U8 | QuantTarget::I4 | QuantTarget::U4
+    ) {
+        return Err(FastnnError::compilation(
+            "floating/codebook quantization requires a floating or codebook target",
+        ));
+    }
     let mut to_quantize: Vec<(NodeId, NodeId)> = Vec::with_capacity(graph.nodes.len());
 
     let graph_ref = &*graph;
@@ -376,7 +377,7 @@ pub fn quantize_weights_fp(
         let mut f4x8_use_per_block = false;
 
         let (packed_bytes, scales, zeros, codebooks) = match fp_dtype {
-            FpDtype::F8x4 => {
+            QuantTarget::Fp8E4M3 => {
                 let pt = match group_size {
                     Some(gs) => PackedTensor::<F8x4>::from_f32_per_channel_grouped(
                         &quant_data,
@@ -387,7 +388,7 @@ pub fn quantize_weights_fp(
                 };
                 (pt.as_bytes().to_vec(), pt.scales, vec![], vec![])
             }
-            FpDtype::F8x4R => {
+            QuantTarget::Fp8E5M2 => {
                 let pt = match group_size {
                     Some(gs) => PackedTensor::<F8x4R>::from_f32_per_channel_grouped(
                         &quant_data,
@@ -398,7 +399,7 @@ pub fn quantize_weights_fp(
                 };
                 (pt.as_bytes().to_vec(), pt.scales, vec![], vec![])
             }
-            FpDtype::F4x8 => {
+            QuantTarget::Fp4E2M1 => {
                 let _inner = if quant_shape.len() >= 2 {
                     quant_shape[1..].iter().product::<usize>()
                 } else {
@@ -432,7 +433,7 @@ pub fn quantize_weights_fp(
                 // per-block asymmetric packing use non-zero zero points.
                 (pt.as_bytes().to_vec(), pt.scales, pt.zeros.clone(), vec![])
             }
-            FpDtype::I4Codebook => {
+            QuantTarget::I4Codebook => {
                 let pt = PackedTensor::<I4x8>::from_f32_per_block_codebook(
                     &quant_data,
                     &quant_shape,
@@ -445,21 +446,23 @@ pub fn quantize_weights_fp(
                     pt.codebooks.clone(),
                 )
             }
+            _ => unreachable!("integer targets were rejected before graph traversal"),
         };
 
         let new_dtype = match fp_dtype {
-            FpDtype::F8x4 => IrDType::F8 { scales },
-            FpDtype::F8x4R => IrDType::F8R { scales },
-            FpDtype::F4x8 => IrDType::F4 {
+            QuantTarget::Fp8E4M3 => IrDType::F8 { scales },
+            QuantTarget::Fp8E5M2 => IrDType::F8R { scales },
+            QuantTarget::Fp4E2M1 => IrDType::F4 {
                 scales,
                 dequant_offsets: zeros,
                 codebooks: vec![],
             },
-            FpDtype::I4Codebook => IrDType::I4 {
+            QuantTarget::I4Codebook => IrDType::I4 {
                 scales,
                 dequant_offsets: vec![],
                 codebooks,
             },
+            _ => unreachable!("integer targets were rejected before graph traversal"),
         };
 
         let new_tensor_type = TensorType {
@@ -483,7 +486,7 @@ pub fn quantize_weights_fp(
             // Only set for I4Codebook (always per-block) and F4x8 when per-block was
             // actually used.  Per-channel F4x8 must NOT carry qbs — it makes the backend
             // attempt per-block dequant on per-channel scales, causing scale_for_elem OOB.
-            if matches!(fp_dtype, FpDtype::I4Codebook) || f4x8_use_per_block {
+            if matches!(fp_dtype, QuantTarget::I4Codebook) || f4x8_use_per_block {
                 node_mut
                     .attrs
                     .insert("quant_block_size".to_string(), f4_block_size.to_string());
@@ -674,6 +677,13 @@ mod tests {
     use crate::backend::executor::GraphExecutor;
     use crate::ir::builder::GraphBuilder;
     use crate::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorValue};
+
+    #[test]
+    fn floating_quantization_rejects_integer_policy_targets() {
+        let mut graph = ComputeGraph::new();
+        let error = quantize_weights_fp(&mut graph, &QuantTarget::I4, None).unwrap_err();
+        assert!(error.to_string().contains("floating or codebook target"));
+    }
 
     /// Helper: create a ComputeGraph with a MatMul and f32 Constant weight.
     fn build_matmul_graph(weight_data: &[f32], weight_shape: &[usize]) -> ComputeGraph {

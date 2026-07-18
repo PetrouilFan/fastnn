@@ -140,19 +140,15 @@ fn validate_target_for_graph_kind(
 }
 
 fn apply_weight_quantization(graph: &mut ComputeGraph, target: QuantTarget) -> CompilerResult<()> {
-    use quantization::FpDtype;
-
     let result = match target {
         QuantTarget::I4 => quantization::quantize_weights(graph, 4, true, None),
         QuantTarget::I8 => quantization::quantize_weights(graph, 8, true, None),
         QuantTarget::U4 => quantization::quantize_weights(graph, 4, false, None),
         QuantTarget::U8 => quantization::quantize_weights(graph, 8, false, None),
-        QuantTarget::Fp8E4M3 => quantization::quantize_weights_fp(graph, &FpDtype::F8x4, None),
-        QuantTarget::Fp8E5M2 => quantization::quantize_weights_fp(graph, &FpDtype::F8x4R, None),
-        QuantTarget::Fp4E2M1 => quantization::quantize_weights_fp(graph, &FpDtype::F4x8, None),
-        QuantTarget::I4Codebook => {
-            quantization::quantize_weights_fp(graph, &FpDtype::I4Codebook, None)
-        }
+        QuantTarget::Fp8E4M3
+        | QuantTarget::Fp8E5M2
+        | QuantTarget::Fp4E2M1
+        | QuantTarget::I4Codebook => quantization::quantize_weights_fp(graph, &target, None),
     };
     result.map_err(|error| CompilerError::pass("quantization", error))
 }
