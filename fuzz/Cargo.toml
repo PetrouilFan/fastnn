@@ -40,3 +40,10 @@ path = "fuzz_targets/runtime_tightening.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "quantization_metadata"
+path = "fuzz_targets/quantization_metadata.rs"
+test = false
+doc = false
+bench = false
