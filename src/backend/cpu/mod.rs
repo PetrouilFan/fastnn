@@ -17,6 +17,7 @@ use crate::compiler::plan::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
 use crate::ir::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
+use crate::storage::AlignedVec;
 use crate::types::{RepresentationTransform, ScalarType};
 use bytemuck;
 use smallvec::{smallvec, SmallVec};
@@ -214,7 +215,7 @@ fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
 ///
 /// # Soundness
 ///
-/// `CpuBuffer` wraps [`Vec<u8>`] in an [`UnsafeCell`] so that the
+/// `CpuBuffer` wraps an [`AlignedVec`] in an [`UnsafeCell`] so that the
 /// [`dispatch`](Backend::dispatch) method can mutate the arena through
 /// a shared `&CpuBuffer` reference.  Dispatch is single-threaded and
 /// processes instructions sequentially, so the `&mut [u8]` slices
@@ -230,11 +231,11 @@ fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
 /// let buffer = CpuBuffer::new(vec![0; 16]);
 /// let _ = buffer.data_mut();
 /// ```
-pub struct CpuBuffer(UnsafeCell<Vec<u8>>);
+pub struct CpuBuffer(UnsafeCell<AlignedVec>);
 
 impl CpuBuffer {
     pub fn new(data: Vec<u8>) -> Self {
-        CpuBuffer(UnsafeCell::new(data))
+        CpuBuffer(UnsafeCell::new(AlignedVec::from_vec(data)))
     }
 
     /// Get a mutable slice to the arena data.
@@ -247,10 +248,10 @@ impl CpuBuffer {
     /// `data_mut` call's borrow ends before the next one begins.
     #[allow(clippy::mut_from_ref)]
     pub(crate) fn data_mut(&self) -> &mut [u8] {
-        // SAFETY: The `UnsafeCell` gives `&mut` to the inner `Vec<u8>`. This is safe because
+        // SAFETY: The `UnsafeCell` gives `&mut` to the inner `AlignedVec`. This is safe because
         // `data_mut()` returns a borrow that is never aliased â€” dispatch processes instructions
         // sequentially and each borrow ends before the next begins.
-        unsafe { &mut *self.0.get() }.as_mut_slice()
+        unsafe { &mut *self.0.get() }
     }
 
     /// Create a zero-copy `&[f32]` view over `[offset, offset + size)` bytes.
