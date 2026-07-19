@@ -103,9 +103,9 @@ fn prepared_execution_is_repeatable_across_concurrent_executors() {
         workers.push(thread::spawn(move || {
             let input_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
             let input_bytes = bytemuck::cast_slice(&input_values);
+            let mut executor = GraphExecutor::new(CpuBackend);
             barrier.wait();
             for _ in 0..100 {
-                let mut executor = GraphExecutor::new(CpuBackend);
                 let outputs = executor
                     .execute_prepared_fallback(
                         &graph,

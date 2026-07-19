@@ -268,9 +268,9 @@ pub fn plan_memory_with_env(
     // operand is otherwise dead; the shared operand lifetime is extended to
     // cover the output lifetime below.
     //
-    // We do NOT reuse buffers of Input nodes -- the autograd backward pass
-    // reads forward inputs directly, and sharing an input's buffer with an
-    // elementwise output can cause subtle data-race-like issues.
+    // We do NOT reuse buffers of Input or Constant nodes. Inputs may be read by
+    // autograd after forward execution, while constants must remain intact
+    // across repeated executions that reuse the same arena.
     //
     // IMPORTANT: This analysis MUST run before the allocation loop below.
     // The original code ran it after allocation, which caused a double-free
@@ -340,8 +340,8 @@ pub fn plan_memory_with_env(
         let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
         let mut reusable_input_id = None;
         for input_id in candidate_input_ids {
-            // Skip Input nodes -- their buffer is used directly by the executor
-            // and sharing it can interfere with autograd backward reads.
+            // Skip Input and Constant nodes. Their storage is persistent across
+            // an execution boundary and cannot become an in-place output.
             // Also never reuse graph outputs or required nodes: callers may
             // read those values after this node writes its output, so sharing
             // their storage would corrupt externally-visible tensors.
@@ -349,7 +349,7 @@ pub fn plan_memory_with_env(
                 continue;
             }
             if let Some(input_node) = graph.get_node(input_id) {
-                if matches!(input_node.opcode, Opcode::Input) {
+                if matches!(input_node.opcode, Opcode::Input | Opcode::Constant(_)) {
                     continue;
                 }
             }
