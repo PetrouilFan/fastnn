@@ -26,3 +26,10 @@ path = "fuzz_targets/executable_deserialization.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "typed_attributes"
+path = "fuzz_targets/typed_attributes.rs"
+test = false
+doc = false
+bench = false
