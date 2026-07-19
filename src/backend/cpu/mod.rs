@@ -2932,19 +2932,8 @@ impl Backend for CpuBackend {
                     }
                     let num_channels = if is_per_channel {
                         let value = node
-                            .attrs
-                            .get("num_channels")
-                            .ok_or_else(|| {
-                                BackendError::Compilation(format!(
-                                    "activation quantization node {node_id} is missing num_channels"
-                                ))
-                            })?
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                BackendError::Compilation(format!(
-                                    "activation quantization node {node_id} has invalid num_channels"
-                                ))
-                            })?;
+                            .required_attr::<usize>("num_channels")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
                         if value == 0
                             || value > u32::MAX as usize
                             || numel % value != 0
@@ -2959,22 +2948,13 @@ impl Backend for CpuBackend {
                         0
                     };
                     let parse_affine = |name: &str| -> Result<Vec<f32>, BackendError> {
-                        node.attrs
-                            .get(name)
+                        node.optional_attr_list::<f32>(name)
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?
                             .ok_or_else(|| {
                                 BackendError::Compilation(format!(
                                     "activation quantization node {node_id} is missing {name}"
                                 ))
-                            })?
-                            .split(',')
-                            .map(|value| {
-                                value.parse::<f32>().map_err(|_| {
-                                    BackendError::Compilation(format!(
-                                        "activation quantization node {node_id} has invalid {name}"
-                                    ))
-                                })
                             })
-                            .collect()
                     };
                     let mut params = vec![numel, usize::from(is_per_channel), num_channels];
                     if is_per_channel {
@@ -2994,19 +2974,15 @@ impl Backend for CpuBackend {
                         params.extend(scales.into_iter().map(|value| value.to_bits() as usize));
                         params.extend(offsets.into_iter().map(|value| value.to_bits() as usize));
                     } else {
-                        match (node.attrs.get("scale"), node.attrs.get("zero_point")) {
+                        let scale = node
+                            .optional_attr::<f32>("scale")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                        let offset = node
+                            .optional_attr::<f32>("zero_point")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                        match (scale, offset) {
                             (None, None) => params.push(0),
                             (Some(scale), Some(offset)) => {
-                                let scale = scale.parse::<f32>().map_err(|_| {
-                                    BackendError::Compilation(format!(
-                                        "activation quantization node {node_id} has invalid scale"
-                                    ))
-                                })?;
-                                let offset = offset.parse::<f32>().map_err(|_| {
-                                    BackendError::Compilation(format!(
-                                        "activation quantization node {node_id} has invalid zero_point"
-                                    ))
-                                })?;
                                 if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
                                     return Err(BackendError::Compilation(format!(
                                         "activation quantization node {node_id} has invalid affine metadata"
