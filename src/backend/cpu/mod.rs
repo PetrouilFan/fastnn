@@ -3078,19 +3078,8 @@ impl Backend for CpuBackend {
                     }
                     let num_channels = if is_per_channel {
                         let channels = predecessor
-                            .attrs
-                            .get("num_channels")
-                            .ok_or_else(|| {
-                                BackendError::Compilation(format!(
-                                    "activation dequantization node {node_id} is missing num_channels"
-                                ))
-                            })?
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                BackendError::Compilation(format!(
-                                    "activation dequantization node {node_id} has invalid num_channels"
-                                ))
-                            })?;
+                            .required_attr::<usize>("num_channels")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
                         if channels == 0 || numel % channels != 0 {
                             return Err(BackendError::Compilation(format!(
                                 "activation dequantization node {node_id} has incompatible channels"
@@ -3113,26 +3102,40 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::FusedResidualAddNorm => {
-                    let eps: f32 = node
-                        .attrs
-                        .get("eps")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1e-5);
+                    let eps = optional_f32_attr(node, "eps", 1e-5)?;
+                    if !eps.is_finite() || eps <= 0.0 {
+                        return Err(BackendError::Compilation(format!(
+                            "FusedResidualAddNorm node {node_id} requires positive finite epsilon"
+                        )));
+                    }
                     let norm_type = node
                         .attrs
                         .get("norm_type")
                         .map(|s| s.as_str())
                         .unwrap_or("layer_norm");
+                    if !matches!(norm_type, "layer_norm" | "rms_norm") {
+                        return Err(BackendError::Compilation(format!(
+                            "FusedResidualAddNorm node {node_id} has unsupported norm_type '{norm_type}'"
+                        )));
+                    }
                     let kernel_name = format!("fused_residual_add_{}", norm_type);
 
                     let output_numel = input_shapes
                         .first()
                         .map(|s| s.iter().product::<u64>() as usize)
                         .unwrap_or(1);
-                    let row_size = node
-                        .attrs
-                        .get("normalized_ndims")
-                        .and_then(|s| s.parse::<usize>().ok())
+                    let normalized_ndims = node
+                        .optional_attr::<usize>("normalized_ndims")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                    if let (Some(ndims), Some(shape)) = (normalized_ndims, input_shapes.first()) {
+                        if ndims == 0 || ndims > shape.len() {
+                            return Err(BackendError::Compilation(format!(
+                                "FusedResidualAddNorm node {node_id} normalized_ndims {ndims} is invalid for rank {}",
+                                shape.len()
+                            )));
+                        }
+                    }
+                    let row_size = normalized_ndims
                         .and_then(|ndims| {
                             input_shapes.first().map(|shape| {
                                 let start = shape.len().saturating_sub(ndims);
@@ -3150,10 +3153,7 @@ impl Backend for CpuBackend {
                                 .map(|s| s.iter().product::<u64>() as usize)
                         })
                         .unwrap_or(output_numel.max(1));
-                    let row_size_dim = node
-                        .attrs
-                        .get("normalized_ndims")
-                        .and_then(|s| s.parse::<usize>().ok())
+                    let row_size_dim = normalized_ndims
                         .and_then(|ndims| {
                             input_shape_dims.first().map(|shape| {
                                 let start = shape.len().saturating_sub(ndims);
@@ -3176,11 +3176,12 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::GradientScale => {
-                    let scale: f32 = node
-                        .attrs
-                        .get("scale")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1.0);
+                    let scale = optional_f32_attr(node, "scale", 1.0)?;
+                    if !scale.is_finite() {
+                        return Err(BackendError::Compilation(format!(
+                            "GradientScale node {node_id} requires a finite scale"
+                        )));
+                    }
                     let numel = input_shapes
                         .first()
                         .map(|s| s.iter().product::<u64>() as usize)
