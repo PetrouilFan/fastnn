@@ -33,3 +33,10 @@ path = "fuzz_targets/typed_attributes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "runtime_tightening"
+path = "fuzz_targets/runtime_tightening.rs"
+test = false
+doc = false
+bench = false
