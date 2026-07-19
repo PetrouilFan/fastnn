@@ -2240,11 +2240,10 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Repeat => {
-                    let repeats_str = node.attrs.get("repeats").cloned().unwrap_or_default();
-                    let repeats: Vec<usize> = repeats_str
-                        .split(',')
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect();
+                    let repeats = node
+                        .optional_attr_list::<usize>("repeats")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or_default();
                     let input_shape = input_shapes.first().cloned().unwrap_or_default();
                     let mut repeat_params =
                         Vec::with_capacity(1 + input_shape.len() + repeats.len());
@@ -2263,22 +2262,27 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::CumSum => {
-                    let dim: usize = node
-                        .attrs
-                        .get("dim")
-                        .and_then(|d| d.parse().ok())
+                    let dim = node
+                        .optional_attr::<usize>("dim")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
-                    let exclusive: usize = node
-                        .attrs
-                        .get("exclusive")
-                        .and_then(|e| e.parse().ok())
-                        .unwrap_or(0);
-                    let rev: usize = node
-                        .attrs
-                        .get("reverse")
-                        .and_then(|r| r.parse().ok())
-                        .unwrap_or(0);
+                    let exclusive = usize::from(
+                        node.optional_bool_attr("exclusive")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?
+                            .unwrap_or(false),
+                    );
+                    let rev = usize::from(
+                        node.optional_bool_attr("reverse")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?
+                            .unwrap_or(false),
+                    );
                     let input_shape = input_shapes.first().cloned().unwrap_or_default();
+                    if dim >= input_shape.len() {
+                        return Err(BackendError::Compilation(format!(
+                            "CumSum node {node_id} dimension {dim} is out of range for rank {}",
+                            input_shape.len()
+                        )));
+                    }
                     let mut cumsum_params = Vec::with_capacity(input_shape.len() + 4);
                     cumsum_params.push(input_shape.len());
                     cumsum_params.extend(input_shape.into_iter().map(|size| size as usize));
@@ -2307,12 +2311,17 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Flip => {
-                    let dims_str = node.attrs.get("dims").cloned().unwrap_or_default();
-                    let dims: Vec<usize> = dims_str
-                        .split(',')
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect();
+                    let dims = node
+                        .optional_attr_list::<usize>("dims")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or_default();
                     let input_shape: Vec<u64> = input_shapes.first().cloned().unwrap_or_default();
+                    if let Some(dim) = dims.iter().find(|&&dim| dim >= input_shape.len()) {
+                        return Err(BackendError::Compilation(format!(
+                            "Flip node {node_id} dimension {dim} is out of range for rank {}",
+                            input_shape.len()
+                        )));
+                    }
                     let mut params = vec![dims.len()];
                     params.extend_from_slice(&dims);
                     params.extend(input_shape.iter().map(|&s| s as usize));
@@ -2340,15 +2349,13 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::TopK => {
-                    let k: usize = node
-                        .attrs
-                        .get("k")
-                        .and_then(|s| s.parse().ok())
+                    let k = node
+                        .optional_attr::<usize>("k")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
-                    let axis: i64 = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|s| s.parse().ok())
+                    let axis = node
+                        .optional_attr::<i64>("axis")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(-1);
                     let shape = input_shapes.first().ok_or_else(|| {
                         BackendError::Compilation(format!(
@@ -2373,6 +2380,16 @@ impl Backend for CpuBackend {
                     if normalized < 0 || normalized as usize >= rank {
                         return Err(BackendError::Compilation(format!(
                             "TopK node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
+                    }
+                    let axis_len = usize::try_from(shape[normalized as usize]).map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "TopK node {node_id} axis size does not fit usize"
+                        ))
+                    })?;
+                    if k == 0 || k > axis_len {
+                        return Err(BackendError::Compilation(format!(
+                            "TopK node {node_id} requires k in 1..={axis_len}, got {k}"
                         )));
                     }
                     let mut params = Vec::with_capacity(rank + 3);

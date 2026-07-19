@@ -44,6 +44,19 @@ fn cpu_lowering_rejects_malformed_list_attributes() {
         .insert("perm".into(), "1,bad".into());
     let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
     assert!(error.to_string().contains("item 1"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let repeat = graph.add_node(Opcode::Repeat, vec![input], tensor_type);
+    graph
+        .get_node_mut(repeat)
+        .unwrap()
+        .attrs
+        .insert("repeats".into(), "2,bad".into());
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    assert!(error.to_string().contains("item 1"), "{error}");
 }
 
 #[test]
