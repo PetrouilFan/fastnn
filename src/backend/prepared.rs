@@ -949,6 +949,21 @@ fn bind_consumer_input(
     let Some(producer) = find_covering_write_const(const_slots, slot) else {
         return Ok(None);
     };
+    let relative_start = slot
+        .offset
+        .checked_sub(producer.dst.offset)
+        .ok_or_else(|| {
+            BackendError::Dispatch("prepared constant relative offset underflows".into())
+        })?;
+    let relative_end = relative_start.checked_add(slot.size).ok_or_else(|| {
+        BackendError::Dispatch("prepared constant relative range overflows".into())
+    })?;
+    let payload_bytes = producer
+        .data
+        .get(relative_start..relative_end)
+        .ok_or_else(|| {
+            BackendError::Dispatch("prepared constant source does not cover consumer slice".into())
+        })?;
     let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
     if !arena.name_to_id.contains_key(&name) {
         let next_entries = arena.entries.len().checked_add(1).ok_or_else(|| {
@@ -960,11 +975,7 @@ fn bind_consumer_input(
                 limits.max_constant_entries
             )));
         }
-        let payload_bytes = if kind == PackedWeightKind::Fp32 {
-            producer.data.len() / std::mem::size_of::<f32>() * std::mem::size_of::<f32>()
-        } else {
-            producer.data.len()
-        };
+        let payload_bytes = payload_bytes.len();
         let current_bytes = arena.entries.iter().try_fold(0usize, |total, entry| {
             total.checked_add(entry.byte_len).ok_or_else(|| {
                 BackendError::Dispatch("prepared constant arena size overflows".into())
@@ -981,10 +992,10 @@ fn bind_consumer_input(
         }
     }
     let weight_id = if kind == PackedWeightKind::Fp32 {
-        let payload = bytes_to_f32_vec(producer.data);
+        let payload = bytes_to_f32_vec(payload_bytes)?;
         arena.try_insert(&name, payload)?
     } else {
-        arena.insert_raw(&name, producer.data.to_vec(), kind)
+        arena.insert_raw(&name, payload_bytes.to_vec(), kind)
     };
     Ok(Some(StaticWeightBinding {
         instruction_index,
@@ -1014,18 +1025,22 @@ fn covers_slice(producer: &BufferSlice, producer_bytes: usize, slot: &BufferSlic
     producer.offset <= slot.offset && producer_end >= slot_end && producer_bytes > 0
 }
 
-/// Interpret `bytes` as a little-endian `f32` payload. Trailing bytes
-/// that do not form a complete `f32` are dropped — `WriteConst` always
-/// carries whole-element payloads in practice.
-fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes
+/// Interpret an exact little-endian `f32` payload.
+fn bytes_to_f32_vec(bytes: &[u8]) -> Result<Vec<f32>, BackendError> {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return Err(BackendError::Dispatch(format!(
+            "prepared fp32 constant payload has {} trailing byte(s)",
+            bytes.len() % std::mem::size_of::<f32>()
+        )));
+    }
+    Ok(bytes
         .chunks_exact(4)
         .map(|chunk| {
             // chunks_exact guarantees exactly 4 bytes per chunk.
             let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
             f32::from_le_bytes(arr)
         })
-        .collect()
+        .collect())
 }
 
 /// Apply a slice of [`StaticWeightBinding`]s to a prepared instruction,
@@ -3440,21 +3455,18 @@ mod tests {
         assert!(arena.is_empty());
     }
 
-    /// Helper sanity check: `bytes_to_f32_vec` reads little-endian
-    /// f32 payloads and drops trailing partial elements.
+    /// Helper sanity check: `bytes_to_f32_vec` reads exact little-endian
+    /// f32 payloads and rejects trailing partial elements.
     #[test]
     fn bytes_to_f32_vec_round_trip() {
         let payload: Vec<f32> = vec![1.5, -2.25, 3.125, 4.0];
         let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let recovered = bytes_to_f32_vec(&bytes);
+        let recovered = bytes_to_f32_vec(&bytes).unwrap();
         assert_eq!(recovered, payload);
 
-        // A trailing partial chunk (1 byte after a single f32) is
-        // dropped: only the first 4 bytes survive as 1 f32.
         let mut partial = payload[0].to_le_bytes().to_vec();
         partial.push(0xff);
-        let recovered_partial = bytes_to_f32_vec(&partial);
-        assert_eq!(recovered_partial, vec![payload[0]]);
+        assert!(bytes_to_f32_vec(&partial).is_err());
     }
 
     // ── introspection helpers: static_weight_binding_count ────
