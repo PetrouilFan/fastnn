@@ -2543,21 +2543,9 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::MuonUpdate => {
-                    let lr: f32 = node
-                        .attrs
-                        .get("lr")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.01);
-                    let beta1: f32 = node
-                        .attrs
-                        .get("beta1")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.9);
-                    let weight_decay: f32 = node
-                        .attrs
-                        .get("weight_decay")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0);
+                    let lr = optional_f32_attr(node, "lr", 0.01)?;
+                    let beta1 = optional_f32_attr(node, "beta1", 0.9)?;
+                    let weight_decay = optional_f32_attr(node, "weight_decay", 0.0)?;
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "muon_update_f32".to_string(),
@@ -2574,26 +2562,10 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::LionUpdate => {
-                    let lr: f32 = node
-                        .attrs
-                        .get("lr")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.001);
-                    let beta1: f32 = node
-                        .attrs
-                        .get("beta1")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.9);
-                    let beta2: f32 = node
-                        .attrs
-                        .get("beta2")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.999);
-                    let wd: f32 = node
-                        .attrs
-                        .get("weight_decay")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0);
+                    let lr = optional_f32_attr(node, "lr", 0.001)?;
+                    let beta1 = optional_f32_attr(node, "beta1", 0.9)?;
+                    let beta2 = optional_f32_attr(node, "beta2", 0.999)?;
+                    let wd = optional_f32_attr(node, "weight_decay", 0.0)?;
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "lion_update_f32".to_string(),
@@ -2611,21 +2583,9 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::RmspropUpdate => {
-                    let lr: f32 = node
-                        .attrs
-                        .get("lr")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.001);
-                    let beta: f32 = node
-                        .attrs
-                        .get("beta")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.99);
-                    let eps: f32 = node
-                        .attrs
-                        .get("eps")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1e-8);
+                    let lr = optional_f32_attr(node, "lr", 0.001)?;
+                    let beta = optional_f32_attr(node, "beta", 0.99)?;
+                    let eps = optional_f32_attr(node, "eps", 1e-8)?;
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "rmsprop_update_f32".to_string(),
