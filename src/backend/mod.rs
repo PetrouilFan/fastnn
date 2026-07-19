@@ -253,6 +253,17 @@ impl ExecutablePlan {
         Ok(bincode::serialize(self)?)
     }
 
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BackendError> {
+        Self::from_bytes_with_limits(bytes, &PlanResourceLimits::default())
+    }
+
+    pub fn from_bytes_with_limits(
+        bytes: &[u8],
+        limits: &PlanResourceLimits,
+    ) -> Result<Self, BackendError> {
+        decode_executable_plan(bytes, limits)
+    }
+
     /// Load a plan from a binary file created by [`save`](Self::save).
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let limits = PlanResourceLimits::default();
@@ -265,7 +276,7 @@ impl ExecutablePlan {
             .into());
         }
         let bytes = std::fs::read(path)?;
-        let plan = deserialize_executable_plan(&bytes, &limits)?;
+        let plan = Self::from_bytes_with_limits(&bytes, &limits)?;
         Ok(plan)
     }
 
@@ -488,6 +499,13 @@ impl ExecutablePlan {
 }
 
 pub(crate) fn deserialize_executable_plan(
+    bytes: &[u8],
+    limits: &PlanResourceLimits,
+) -> Result<ExecutablePlan, BackendError> {
+    ExecutablePlan::from_bytes_with_limits(bytes, limits)
+}
+
+fn decode_executable_plan(
     bytes: &[u8],
     limits: &PlanResourceLimits,
 ) -> Result<ExecutablePlan, BackendError> {
