@@ -71,6 +71,20 @@ fn cpu_lowering_rejects_malformed_list_attributes() {
     let memory_plan = memory_planning::plan_memory(&graph).unwrap();
     let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
     assert!(error.to_string().contains("eps"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2)], IrDType::F32);
+    let weight = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let grad = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let update = graph.add_node(Opcode::SgdUpdate, vec![weight, grad], tensor_type);
+    graph
+        .get_node_mut(update)
+        .unwrap()
+        .attrs
+        .insert("lr".into(), "invalid".into());
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    assert!(error.to_string().contains("lr"), "{error}");
 }
 
 #[test]

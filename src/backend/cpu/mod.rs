@@ -15,7 +15,7 @@ use crate::backend::prepared::PreparedActivation;
 use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::compiler::plan::MemoryPlan;
 use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
-use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use crate::types::{RepresentationTransform, ScalarType};
 use bytemuck;
@@ -26,6 +26,18 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
+
+fn optional_f32_attr(node: &IRNode, name: &str, default: f32) -> Result<f32, BackendError> {
+    node.optional_attr::<f32>(name)
+        .map(|value| value.unwrap_or(default))
+        .map_err(|error| BackendError::Compilation(error.to_string()))
+}
+
+fn optional_u64_attr(node: &IRNode, name: &str, default: u64) -> Result<u64, BackendError> {
+    node.optional_attr::<u64>(name)
+        .map(|value| value.unwrap_or(default))
+        .map_err(|error| BackendError::Compilation(error.to_string()))
+}
 
 fn canonical_storage_scalar(dtype: &IrDType) -> Option<ScalarType> {
     dtype
@@ -2432,16 +2444,8 @@ impl Backend for CpuBackend {
                 }
                 // â”€â”€ Optimizer ops â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 Opcode::SgdUpdate => {
-                    let lr: f32 = node
-                        .attrs
-                        .get("lr")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.01);
-                    let wd: f32 = node
-                        .attrs
-                        .get("weight_decay")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.0);
+                    let lr = optional_f32_attr(node, "lr", 0.01)?;
+                    let wd = optional_f32_attr(node, "weight_decay", 0.0)?;
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "sgd_update_f32".to_string(),
@@ -2454,31 +2458,11 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::AdamUpdate => {
-                    let lr: f32 = node
-                        .attrs
-                        .get("lr")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.001);
-                    let beta1: f32 = node
-                        .attrs
-                        .get("beta1")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.9);
-                    let beta2: f32 = node
-                        .attrs
-                        .get("beta2")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.999);
-                    let eps: f32 = node
-                        .attrs
-                        .get("eps")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1e-8);
-                    let t: u64 = node
-                        .attrs
-                        .get("t")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
+                    let lr = optional_f32_attr(node, "lr", 0.001)?;
+                    let beta1 = optional_f32_attr(node, "beta1", 0.9)?;
+                    let beta2 = optional_f32_attr(node, "beta2", 0.999)?;
+                    let eps = optional_f32_attr(node, "eps", 1e-8)?;
+                    let t = optional_u64_attr(node, "t", 1)?;
                     // Detect F16 state tensors (m and v at inputs[2] and inputs[3]).
                     let has_f16_state = node.inputs.len() >= 4
                         && graph
@@ -2512,31 +2496,11 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::AdamWUpdate => {
-                    let lr: f32 = node
-                        .attrs
-                        .get("lr")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.001);
-                    let beta1: f32 = node
-                        .attrs
-                        .get("beta1")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.9);
-                    let beta2: f32 = node
-                        .attrs
-                        .get("beta2")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.999);
-                    let eps: f32 = node
-                        .attrs
-                        .get("eps")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1e-8);
-                    let wd: f32 = node
-                        .attrs
-                        .get("weight_decay")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0.01);
+                    let lr = optional_f32_attr(node, "lr", 0.001)?;
+                    let beta1 = optional_f32_attr(node, "beta1", 0.9)?;
+                    let beta2 = optional_f32_attr(node, "beta2", 0.999)?;
+                    let eps = optional_f32_attr(node, "eps", 1e-8)?;
+                    let wd = optional_f32_attr(node, "weight_decay", 0.01)?;
                     let has_f16_state = node.inputs.len() >= 4
                         && graph
                             .get_node(node.inputs[2])
@@ -2551,11 +2515,7 @@ impl Backend for CpuBackend {
                     } else {
                         "adamw_update_f32"
                     };
-                    let t_attr: u64 = node
-                        .attrs
-                        .get("t")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
+                    let t_attr = optional_u64_attr(node, "t", 1)?;
                     let has_t_input = node.inputs.len() >= 5;
                     let mut adamw_params = vec![
                         lr.to_bits() as usize,
