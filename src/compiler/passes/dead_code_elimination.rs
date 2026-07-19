@@ -114,17 +114,9 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
                 // Full-tensor slice: Slice(0..dim) that covers the entire dimension
                 node.inputs.first().copied().and_then(|inp_id| {
                     let input_node = graph_ref.get_node(inp_id)?;
-                    let dim: usize = node.attrs.get("dim").and_then(|s| s.parse().ok())?;
-                    let start: u64 = node
-                        .attrs
-                        .get("start")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let end: u64 = node
-                        .attrs
-                        .get("end")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+                    let dim = node.required_attr::<usize>("dim").ok()?;
+                    let start = node.required_attr::<u64>("start").ok()?;
+                    let end = node.required_attr::<u64>("end").ok()?;
 
                     if dim < input_node.output_type.shape.len() && start == 0 {
                         let input_dim = &input_node.output_type.shape[dim];
