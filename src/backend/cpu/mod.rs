@@ -1959,16 +1959,19 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::ConvTranspose2d => {
-                    let stride: usize = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
+                    let stride = node
+                        .optional_attr::<usize>("stride")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
-                    let padding: usize = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|p| p.parse().ok())
+                    let padding = node
+                        .optional_attr::<usize>("padding")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(0);
+                    if stride == 0 {
+                        return Err(BackendError::Compilation(format!(
+                            "ConvTranspose2d node {node_id} requires positive stride"
+                        )));
+                    }
                     let input_c = input_shapes
                         .first()
                         .and_then(|s| s.get(1).copied())
@@ -2044,10 +2047,14 @@ impl Backend for CpuBackend {
                 }
                 Opcode::RMSNorm => {
                     let eps = node
-                        .attrs
-                        .get("eps")
-                        .and_then(|s| s.parse::<f32>().ok())
+                        .optional_attr::<f32>("eps")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1e-5);
+                    if !eps.is_finite() || eps <= 0.0 {
+                        return Err(BackendError::Compilation(format!(
+                            "RMSNorm node {node_id} requires positive finite epsilon, got {eps}"
+                        )));
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "rms_norm".to_string(),
@@ -2137,17 +2144,17 @@ impl Backend for CpuBackend {
                     // No instruction needed.
                 }
                 Opcode::ArgMax => {
-                    let axis: i64 = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
+                    let axis = node
+                        .optional_attr::<i64>("axis")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(-1);
                     let rank = input_shapes.first().map(|s| s.len() as i64).unwrap_or(0);
-                    let normalized = if axis < 0 {
-                        (rank + axis).max(0)
-                    } else {
-                        axis.min((rank - 1).max(0))
-                    };
+                    let normalized = if axis < 0 { rank + axis } else { axis };
+                    if normalized < 0 || normalized >= rank {
+                        return Err(BackendError::Compilation(format!(
+                            "ArgMax node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
+                    }
                     let (dim_size, inner) = input_shapes
                         .first()
                         .and_then(|s| {
@@ -2174,16 +2181,19 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::UpsampleNearest2d | Opcode::UpsampleBilinear2d => {
-                    let scale_h: usize = node
-                        .attrs
-                        .get("scale_h")
-                        .and_then(|s| s.parse().ok())
+                    let scale_h = node
+                        .optional_attr::<usize>("scale_h")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(2);
-                    let scale_w: usize = node
-                        .attrs
-                        .get("scale_w")
-                        .and_then(|s| s.parse().ok())
+                    let scale_w = node
+                        .optional_attr::<usize>("scale_w")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(2);
+                    if scale_h == 0 || scale_w == 0 {
+                        return Err(BackendError::Compilation(format!(
+                            "Upsample node {node_id} requires positive scales"
+                        )));
+                    }
                     // Pass input spatial dims so the kernel doesn't need to guess H,W
                     // from flat buffer size (which is ambiguous for NCHW layouts).
                     let h_in = input_shapes
@@ -2210,16 +2220,19 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::AdaptiveAvgPool2d => {
-                    let out_h: usize = node
-                        .attrs
-                        .get("output_h")
-                        .and_then(|s| s.parse().ok())
+                    let out_h = node
+                        .optional_attr::<usize>("output_h")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
-                    let out_w: usize = node
-                        .attrs
-                        .get("output_w")
-                        .and_then(|s| s.parse().ok())
+                    let out_w = node
+                        .optional_attr::<usize>("output_w")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
                         .unwrap_or(1);
+                    if out_h == 0 || out_w == 0 {
+                        return Err(BackendError::Compilation(format!(
+                            "AdaptiveAvgPool2d node {node_id} requires positive output dimensions"
+                        )));
+                    }
                     let h_in = input_shapes
                         .first()
                         .and_then(|shape| shape.get(2).copied())
