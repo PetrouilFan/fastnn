@@ -82,10 +82,7 @@ pub fn quantize_weights(
 
             // Only quantize f32/bf16/f16 constants (skip already-quantized).
             if let Opcode::Constant(ref val) = weight_node.opcode {
-                let is_float = matches!(
-                    &weight_node.output_type.dtype,
-                    IrDType::F32 | IrDType::F16 | IrDType::BF16
-                );
+                let is_float = weight_node.output_type.is_native_float();
                 // Skip non-Data constants (scalar floats) and already-quantized.
                 let is_data = matches!(val, TensorValue::Data { .. });
                 if is_float && is_data {
@@ -316,10 +313,7 @@ pub fn quantize_weights_fp(
                 None => return Ok(()),
             };
             if let Opcode::Constant(ref val) = weight_node.opcode {
-                let is_float = matches!(
-                    &weight_node.output_type.dtype,
-                    IrDType::F32 | IrDType::F16 | IrDType::BF16
-                );
+                let is_float = weight_node.output_type.is_native_float();
                 let is_data = matches!(val, TensorValue::Data { .. });
                 if is_float && is_data {
                     to_quantize.push((weight_id, node_id));

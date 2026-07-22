@@ -1253,33 +1253,17 @@ pub fn dtype_to_ir(dt: DType) -> FastnnResult<IrDType> {
         DType::Bool => IrDType::Bool,
         DType::F16 => IrDType::F16,
         DType::BF16 => IrDType::BF16,
-        // I4/I8/F4/F8/F8R need per-channel scale/zp metadata that lives in the IR node,
-        // not in the Tensor-level DType.  Use default values here; the actual
-        // scales are filled in by the quantization compiler pass.
-        DType::I4 => IrDType::I4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-            codebooks: vec![],
-        },
-        DType::I8Scaled => IrDType::I8Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        },
-        DType::F8 => IrDType::F8 { scales: vec![1.0] },
-        DType::F8R => IrDType::F8R { scales: vec![1.0] },
-        DType::F4 => IrDType::F4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![],
-            codebooks: vec![],
-        },
-        DType::U4Scaled => IrDType::U4Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        },
-        DType::U8Scaled => IrDType::U8Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        },
+        DType::I4
+        | DType::I8Scaled
+        | DType::F8
+        | DType::F8R
+        | DType::F4
+        | DType::U4Scaled
+        | DType::U8Scaled => {
+            return Err(FastnnError::dtype(
+                "packed eager dtype cannot enter executable IR without representation metadata",
+            ))
+        }
     })
 }
 

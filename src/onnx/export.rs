@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType, TensorValue};
+use crate::ir::{ComputeGraph, NodeId, Opcode, TensorType, TensorValue};
 use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
 use std::collections::{HashMap, HashSet};
 
@@ -585,7 +585,7 @@ pub fn export_to_onnx_json_with_config(
                                     dtype: dtype.to_string(),
                                 },
                             );
-                        } else if matches!(tensor_type.dtype, IrDType::F32) {
+                        } else if tensor_type.is_native_scalar(ScalarType::F32) {
                             // Only export F32 weights; skip Float(0) fill constants
                             let f32_data: Vec<f32> = bytes
                                 .chunks_exact(4)
@@ -765,6 +765,7 @@ pub fn export_to_onnx_file_with_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::IrDType;
 
     #[test]
     fn packed_param_dtype_uses_canonical_storage_identity() {

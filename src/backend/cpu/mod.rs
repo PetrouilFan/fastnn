@@ -2502,11 +2502,11 @@ impl Backend for CpuBackend {
                     let has_f16_state = node.inputs.len() >= 4
                         && graph
                             .get_node(node.inputs[2])
-                            .map(|n| n.output_type.dtype == IrDType::F16)
+                            .map(|n| n.output_type.is_native_scalar(ScalarType::F16))
                             .unwrap_or(false)
                         && graph
                             .get_node(node.inputs[3])
-                            .map(|n| n.output_type.dtype == IrDType::F16)
+                            .map(|n| n.output_type.is_native_scalar(ScalarType::F16))
                             .unwrap_or(false);
                     let kernel_name = if has_f16_state {
                         "adam_update_f16_state"
@@ -2539,11 +2539,11 @@ impl Backend for CpuBackend {
                     let has_f16_state = node.inputs.len() >= 4
                         && graph
                             .get_node(node.inputs[2])
-                            .map(|n| n.output_type.dtype == IrDType::F16)
+                            .map(|n| n.output_type.is_native_scalar(ScalarType::F16))
                             .unwrap_or(false)
                         && graph
                             .get_node(node.inputs[3])
-                            .map(|n| n.output_type.dtype == IrDType::F16)
+                            .map(|n| n.output_type.is_native_scalar(ScalarType::F16))
                             .unwrap_or(false);
                     let kernel_name = if has_f16_state {
                         "adamw_update_f16_state"

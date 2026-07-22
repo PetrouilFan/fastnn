@@ -202,6 +202,15 @@ fn unsupported_eager_dtype_cannot_enter_executable_ir() {
 }
 
 #[test]
+fn packed_eager_dtype_cannot_invent_executable_ir_metadata() {
+    let error = dtype_to_ir(DType::U4Scaled)
+        .expect_err("packed eager dtype must require explicit representation metadata");
+    assert!(error
+        .to_string()
+        .contains("without representation metadata"));
+}
+
+#[test]
 fn malformed_reshape_returns_structured_errors() {
     let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
 

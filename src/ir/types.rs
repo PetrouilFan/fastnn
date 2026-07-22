@@ -723,6 +723,21 @@ impl TensorType {
         self.dtype.affine_dequantization()
     }
 
+    pub fn is_native_scalar(&self, scalar: ScalarType) -> bool {
+        self.value_representation().is_ok_and(|representation| {
+            representation.logical == scalar
+                && representation.storage == scalar
+                && matches!(representation.encoding, StorageEncoding::Plain)
+                && matches!(representation.transform, RepresentationTransform::None)
+        })
+    }
+
+    pub fn is_native_float(&self) -> bool {
+        [ScalarType::F32, ScalarType::F16, ScalarType::BF16]
+            .into_iter()
+            .any(|scalar| self.is_native_scalar(scalar))
+    }
+
     pub fn numel(&self) -> Option<u64> {
         let mut total = 1u64;
         for dim in &self.shape {

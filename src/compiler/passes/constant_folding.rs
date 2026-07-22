@@ -201,7 +201,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     .iter()
                     .filter_map(|d| d.evaluate())
                     .product();
-                if output_type.dtype == IrDType::F32 && n == 1 {
+                if output_type.is_native_scalar(crate::types::ScalarType::F32) && n == 1 {
                     Some(TensorValue::Data {
                         bytes: v.to_le_bytes().to_vec(),
                         tensor_type: output_type.clone(),
@@ -216,7 +216,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     .iter()
                     .filter_map(|d| d.evaluate())
                     .product();
-                if output_type.dtype == IrDType::I64 && n == 1 {
+                if output_type.is_native_scalar(crate::types::ScalarType::I64) && n == 1 {
                     Some(TensorValue::Data {
                         bytes: v.to_le_bytes().to_vec(),
                         tensor_type: output_type.clone(),
