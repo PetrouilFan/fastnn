@@ -2353,19 +2353,32 @@ impl AotExecutor {
                     "AotExecutor: output node not found in graph",
                 )
             })?;
-            let ir_dtype = output_node.output_type.dtype.clone();
-            let (q_scales, q_dequant_offsets) = match &ir_dtype {
-                crate::ir::IrDType::I4 {
-                    scales,
-                    dequant_offsets,
-                    ..
+            let representation = output_node
+                .output_type
+                .value_representation()
+                .map_err(|error| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "AotExecutor: output {name} has invalid representation: {error}"
+                    ))
+                })?;
+            let (q_scales, q_dequant_offsets) = match &representation.transform {
+                crate::types::RepresentationTransform::AffineDequantization {
+                    scales, offsets, ..
                 }
-                | crate::ir::IrDType::I8Scaled {
-                    scales,
-                    dequant_offsets,
-                } => (scales.clone(), dequant_offsets.clone()),
+                | crate::types::RepresentationTransform::ScaledAffine {
+                    scales, offsets, ..
+                } => (scales.clone(), offsets.clone()),
+                crate::types::RepresentationTransform::Scaled { scales } => {
+                    (scales.clone(), vec![0.0; scales.len()])
+                }
+                crate::types::RepresentationTransform::Codebook { .. } => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "AotExecutor: direct codebook output {name} is not supported"
+                    )))
+                }
                 _ => (vec![], vec![]),
             };
+            let ir_dtype = output_node.output_type.dtype.clone();
             let dtype: crate::storage::DType =
                 crate::tensor::ir_to_dtype(ir_dtype).map_err(PyErr::from)?;
             let runtime_shape = self.executor.last_output_shapes().get(*idx).ok_or_else(|| {

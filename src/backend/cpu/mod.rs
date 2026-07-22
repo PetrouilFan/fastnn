@@ -2766,29 +2766,23 @@ impl Backend for CpuBackend {
                         .inputs
                         .first()
                         .and_then(|&input_id| graph.get_node(input_id))
-                        .map(|n| match &n.output_type.dtype {
-                            IrDType::I4 {
-                                scales,
-                                dequant_offsets,
-                                ..
-                            }
-                            | IrDType::U4Scaled {
-                                scales,
-                                dequant_offsets,
-                                ..
-                            }
-                            | IrDType::I8Scaled {
-                                scales,
-                                dequant_offsets,
-                                ..
-                            }
-                            | IrDType::U8Scaled {
-                                scales,
-                                dequant_offsets,
-                                ..
-                            } => (scales.clone(), dequant_offsets.clone()),
-                            _ => (vec![], vec![]),
+                        .map(|n| -> Result<_, BackendError> {
+                            let representation = n
+                                .output_type
+                                .value_representation()
+                                .map_err(|error| {
+                                    BackendError::Compilation(format!(
+                                        "quantize node {node_id} predecessor has invalid representation: {error}"
+                                    ))
+                                })?;
+                            Ok(match representation.transform {
+                                RepresentationTransform::AffineDequantization {
+                                    scales, offsets, ..
+                                } => (scales, offsets),
+                                _ => (vec![], vec![]),
+                            })
                         })
+                        .transpose()?
                         .unwrap_or_default();
 
                     let mut params = vec![num_channels, num_elems_per_channel, numel];
@@ -2844,32 +2838,34 @@ impl Backend for CpuBackend {
                     })?;
                     // Preserve the storage width explicitly; dispatch must not infer
                     // representation from payload length.
-                    let (scales, mut dequant_offsets, bit_width) =
-                        match &input_node.output_type.dtype {
-                            IrDType::I4 {
-                                scales,
-                                dequant_offsets,
-                                ..
-                            }
-                            | IrDType::U4Scaled {
-                                scales,
-                                dequant_offsets,
-                                ..
-                            } => (scales.clone(), dequant_offsets.clone(), 4usize),
-                            IrDType::I8Scaled {
-                                scales,
-                                dequant_offsets,
-                            }
-                            | IrDType::U8Scaled {
-                                scales,
-                                dequant_offsets,
-                            } => (scales.clone(), dequant_offsets.clone(), 8usize),
-                            dtype => {
-                                return Err(BackendError::Compilation(format!(
-                                "dequantize node {node_id} has unsupported input dtype {dtype:?}"
+                    let representation = input_node
+                        .output_type
+                        .value_representation()
+                        .map_err(|error| {
+                            BackendError::Compilation(format!(
+                                "dequantize node {node_id} has invalid input representation: {error}"
+                            ))
+                        })?;
+                    if !representation.storage.is_integer()
+                        || !matches!(representation.storage.bit_width(), 4 | 8)
+                    {
+                        return Err(BackendError::Compilation(format!(
+                            "dequantize node {node_id} requires 4-bit or 8-bit integer storage, got {:?}",
+                            representation.storage
+                        )));
+                    }
+                    let bit_width = usize::from(representation.storage.bit_width());
+                    let (scales, mut dequant_offsets) = match representation.transform {
+                        RepresentationTransform::AffineDequantization {
+                            scales, offsets, ..
+                        } => (scales, offsets),
+                        RepresentationTransform::RuntimeAffineQuantization => (vec![], vec![]),
+                        transform => {
+                            return Err(BackendError::Compilation(format!(
+                                "dequantize node {node_id} requires affine integer metadata, got {transform:?}"
                             )))
-                            }
-                        };
+                        }
+                    };
                     if dequant_offsets.is_empty() && !scales.is_empty() {
                         dequant_offsets.resize(scales.len(), 0.0);
                     }

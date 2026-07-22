@@ -152,15 +152,15 @@ mod tests {
             .iter()
             .find(|n| matches!(n.opcode, Opcode::QuantizeGradient))
             .unwrap();
-        match &q.output_type.dtype {
-            IrDType::F8R { scales } => {
+        match q.output_type.value_representation().unwrap().transform {
+            crate::types::RepresentationTransform::Scaled { scales } => {
                 assert_eq!(scales.len(), 1, "F8R should have one scale");
                 assert!(
                     (scales[0] - 1.0).abs() < 1e-6,
                     "Default scale should be 1.0"
                 );
             }
-            _ => panic!("Expected F8R dtype"),
+            transform => panic!("Expected scaled F8R representation, got {transform:?}"),
         }
     }
 
