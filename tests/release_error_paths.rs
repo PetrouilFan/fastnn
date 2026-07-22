@@ -96,6 +96,11 @@ fn run_malformed_dispatch() {
                 shape: vec![1, 1, 1, 1],
                 quant_block_size: 0,
                 codebooks: vec![],
+                execution: fastnn::backend::QuantizedExecutionContract::current_for_kernel(
+                    "conv2d_i4",
+                    4,
+                    false,
+                ),
             })),
         }],
         arena_size: 16,
@@ -124,6 +129,11 @@ fn run_malformed_dispatch() {
                 shape: vec![1, 1],
                 quant_block_size: 0,
                 codebooks: vec![],
+                execution: fastnn::backend::QuantizedExecutionContract::current_for_kernel(
+                    "conv2d_i4_i8",
+                    4,
+                    false,
+                ),
             })),
         }],
         arena_size: 20,

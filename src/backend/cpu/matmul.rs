@@ -198,6 +198,11 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
                 shape: vec![m, k],
                 quant_block_size: 0,
                 codebooks: vec![],
+                execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                    kernel_name,
+                    bit_width,
+                    false,
+                ),
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;

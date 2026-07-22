@@ -1020,6 +1020,11 @@ impl Backend for CpuBackend {
                                         shape: w_shape,
                                         quant_block_size,
                                         codebooks,
+                                        execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                                            kernel_name,
+                                            bit_width,
+                                            has_bias,
+                                        ),
                                     }))
                                 })
                             })
@@ -1364,6 +1369,11 @@ impl Backend for CpuBackend {
                                         shape: w_shape,
                                         quant_block_size,
                                         codebooks,
+                                        execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                                            &kernel,
+                                            bw,
+                                            node.inputs.len() > 2,
+                                        ),
                                     }))
                                 })
                             })

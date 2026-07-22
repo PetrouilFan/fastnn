@@ -1,4 +1,5 @@
 use crate::ir::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
+use crate::types::ScalarType;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -37,6 +38,129 @@ impl BufferSlice {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BiasDomain {
+    None,
+    FloatOutput,
+    I32Accumulator,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ZeroPointCorrection {
+    None,
+    AffineInputAndWeight,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RequantizationMode {
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoundingMode {
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SaturationMode {
+    None,
+}
+
+/// Numerical semantics selected for a quantized kernel invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantizedExecutionContract {
+    pub activation_storage: ScalarType,
+    pub weight_storage: ScalarType,
+    pub accumulator: ScalarType,
+    pub bias_domain: BiasDomain,
+    pub zero_point_correction: ZeroPointCorrection,
+    pub requantization: RequantizationMode,
+    pub rounding: RoundingMode,
+    pub saturation: SaturationMode,
+    pub output_storage: ScalarType,
+}
+
+impl QuantizedExecutionContract {
+    pub fn current_for_kernel(kernel_name: &str, bit_width: usize, has_bias: bool) -> Self {
+        let activation_storage = if kernel_name.ends_with("_i8") {
+            ScalarType::I8
+        } else {
+            ScalarType::F32
+        };
+        let unsigned = kernel_name.contains("_u4") || kernel_name.contains("_u8");
+        let weight_storage = match (bit_width, unsigned) {
+            (4, true) => ScalarType::U4,
+            (4, false) => ScalarType::I4,
+            (8, true) => ScalarType::U8,
+            (8, false) => ScalarType::I8,
+            _ => ScalarType::I8,
+        };
+        Self::current_f32_output(activation_storage, weight_storage, has_bias)
+    }
+
+    pub fn current_f32_output(
+        activation_storage: ScalarType,
+        weight_storage: ScalarType,
+        has_bias: bool,
+    ) -> Self {
+        let integer_activation = activation_storage == ScalarType::I8;
+        Self {
+            activation_storage,
+            weight_storage,
+            accumulator: if integer_activation {
+                ScalarType::I32
+            } else {
+                ScalarType::F32
+            },
+            bias_domain: if has_bias {
+                BiasDomain::FloatOutput
+            } else {
+                BiasDomain::None
+            },
+            zero_point_correction: if integer_activation {
+                ZeroPointCorrection::AffineInputAndWeight
+            } else {
+                ZeroPointCorrection::None
+            },
+            requantization: RequantizationMode::None,
+            rounding: RoundingMode::NotApplicable,
+            saturation: SaturationMode::None,
+            output_storage: ScalarType::F32,
+        }
+    }
+
+    fn validate(&self, instruction_index: usize) -> Result<(), BackendError> {
+        if !matches!(
+            self.weight_storage,
+            ScalarType::I4 | ScalarType::I8 | ScalarType::U4 | ScalarType::U8
+        ) {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} has unsupported quantized weight storage {:?}",
+                self.weight_storage
+            )));
+        }
+        match self.activation_storage {
+            ScalarType::F32 if self.accumulator == ScalarType::F32 => {}
+            ScalarType::I8 if self.accumulator == ScalarType::I32 => {}
+            _ => {
+                return Err(BackendError::Dispatch(format!(
+                    "instruction {instruction_index} has incompatible quantized activation/accumulator contract"
+                )))
+            }
+        }
+        if self.output_storage != ScalarType::F32
+            || !matches!(self.requantization, RequantizationMode::None)
+            || !matches!(self.rounding, RoundingMode::NotApplicable)
+            || !matches!(self.saturation, SaturationMode::None)
+        {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} requests an unsupported quantized output contract"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Quantized weight metadata for packed precision kernels.
 /// Carries per-channel scales, dequantization offsets, shape, and bit-width
 /// so the backend dispatch can construct a [`PackedTensor`] for SIMD
@@ -56,10 +180,13 @@ pub struct QuantizedWeightMeta {
     /// Per-block codebooks for I4 codebook quantization (16 centroids per block, normalized to [-1, 1]).
     /// Empty when not using codebook quantization.
     pub codebooks: Vec<[f32; 16]>,
+    /// Explicit numerical contract for the consuming quantized kernel.
+    pub execution: QuantizedExecutionContract,
 }
 
 impl QuantizedWeightMeta {
     fn validate(&self, instruction_index: usize) -> Result<(), BackendError> {
+        self.execution.validate(instruction_index)?;
         if !matches!(self.bit_width, 4 | 8) {
             return Err(BackendError::Dispatch(format!(
                 "instruction {instruction_index} has unsupported quantized weight bit width {}",
@@ -127,6 +254,32 @@ impl QuantizedWeightMeta {
                     "instruction {instruction_index} quantized codebook contains non-finite values"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_for_kernel(
+        &self,
+        instruction_index: usize,
+        kernel_name: &str,
+    ) -> Result<(), BackendError> {
+        self.validate(instruction_index)?;
+        let expected = QuantizedExecutionContract::current_for_kernel(
+            kernel_name,
+            self.bit_width,
+            !matches!(self.execution.bias_domain, BiasDomain::None),
+        );
+        let correction_matches = std::mem::discriminant(&self.execution.zero_point_correction)
+            == std::mem::discriminant(&expected.zero_point_correction);
+        if self.execution.activation_storage != expected.activation_storage
+            || self.execution.weight_storage != expected.weight_storage
+            || self.execution.accumulator != expected.accumulator
+            || !correction_matches
+            || self.execution.output_storage != expected.output_storage
+        {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} quantized execution contract does not match kernel {kernel_name}"
+            )));
         }
         Ok(())
     }
@@ -436,7 +589,7 @@ impl ExecutablePlan {
                                 limits.max_total_quant_metadata
                             )));
                         }
-                        weight_meta.validate(instruction_index)?;
+                        weight_meta.validate_for_kernel(instruction_index, kernel_name)?;
                     }
                 }
                 Instruction::MemCopy { dst, src } => {
@@ -532,6 +685,51 @@ fn decode_executable_plan(
 mod executable_plan_validation_tests {
     use super::*;
 
+    fn valid_i4_meta(kernel_name: &str) -> QuantizedWeightMeta {
+        QuantizedWeightMeta {
+            bit_width: 4,
+            scales: vec![1.0],
+            dequant_offsets: vec![0.0],
+            shape: vec![1, 4],
+            quant_block_size: 0,
+            codebooks: vec![],
+            execution: QuantizedExecutionContract::current_for_kernel(kernel_name, 4, false),
+        }
+    }
+
+    #[test]
+    fn quantized_execution_contract_distinguishes_float_and_integer_accumulation() {
+        let float = valid_i4_meta("matmul_i4");
+        assert_eq!(float.execution.activation_storage, ScalarType::F32);
+        assert_eq!(float.execution.accumulator, ScalarType::F32);
+        assert!(matches!(
+            float.execution.zero_point_correction,
+            ZeroPointCorrection::None
+        ));
+
+        let integer = valid_i4_meta("matmul_i4_i8");
+        assert_eq!(integer.execution.activation_storage, ScalarType::I8);
+        assert_eq!(integer.execution.accumulator, ScalarType::I32);
+        assert!(matches!(
+            integer.execution.zero_point_correction,
+            ZeroPointCorrection::AffineInputAndWeight
+        ));
+        assert!(matches!(integer.execution.bias_domain, BiasDomain::None));
+        assert!(matches!(
+            integer.execution.requantization,
+            RequantizationMode::None
+        ));
+        assert!(matches!(
+            integer.execution.rounding,
+            RoundingMode::NotApplicable
+        ));
+        assert!(matches!(integer.execution.saturation, SaturationMode::None));
+        assert_eq!(integer.execution.output_storage, ScalarType::F32);
+
+        assert!(integer.validate_for_kernel(0, "matmul_i4_i8").is_ok());
+        assert!(integer.validate_for_kernel(0, "matmul_i4").is_err());
+    }
+
     #[test]
     fn rejects_malformed_quantized_weight_metadata() {
         let invalid = QuantizedWeightMeta {
@@ -541,6 +739,7 @@ mod executable_plan_validation_tests {
             shape: vec![2, 4],
             quant_block_size: 0,
             codebooks: vec![],
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4", 4, false),
         };
         assert!(invalid.validate(0).is_err());
 
@@ -551,6 +750,7 @@ mod executable_plan_validation_tests {
             shape: vec![1, 4],
             quant_block_size: 0,
             codebooks: vec![],
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i8", 8, false),
         };
         assert!(non_finite.validate(0).is_err());
     }
