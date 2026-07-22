@@ -162,7 +162,7 @@ fn validate_representations(graph: &ComputeGraph) -> CompilerResult<()> {
         for tensor_type in
             std::iter::once(&node.output_type).chain(node.secondary_output_type.as_ref())
         {
-            let representation = tensor_type.dtype.value_representation().map_err(|error| {
+            let representation = tensor_type.value_representation().map_err(|error| {
                 CompilerError::InvalidRepresentation {
                     node_id: node.id,
                     message: error.to_string(),

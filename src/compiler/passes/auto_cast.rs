@@ -20,17 +20,21 @@ use crate::error::FastnnError;
 use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 use crate::types::{RepresentationTransform, ScalarType};
 
-fn has_transformed_storage(dtype: &IrDType) -> bool {
-    dtype.value_representation().is_ok_and(|representation| {
-        !matches!(representation.transform, RepresentationTransform::None)
-    })
+fn has_transformed_storage(tensor_type: &TensorType) -> bool {
+    tensor_type
+        .value_representation()
+        .is_ok_and(|representation| {
+            !matches!(representation.transform, RepresentationTransform::None)
+        })
 }
 
-fn is_auto_cast_integer_weight(dtype: &IrDType) -> bool {
-    dtype.value_representation().is_ok_and(|representation| {
-        matches!(representation.storage, ScalarType::I4 | ScalarType::I8)
-            && !matches!(representation.transform, RepresentationTransform::None)
-    })
+fn is_auto_cast_integer_weight(tensor_type: &TensorType) -> bool {
+    tensor_type
+        .value_representation()
+        .is_ok_and(|representation| {
+            matches!(representation.storage, ScalarType::I4 | ScalarType::I8)
+                && !matches!(representation.transform, RepresentationTransform::None)
+        })
 }
 
 /// Options for the auto-cast pass.
@@ -95,8 +99,7 @@ fn quantize_weight_constants(
         .nodes
         .iter()
         .filter(|n| {
-            matches!(n.opcode, Opcode::Constant(_))
-                && is_auto_cast_integer_weight(&n.output_type.dtype)
+            matches!(n.opcode, Opcode::Constant(_)) && is_auto_cast_integer_weight(&n.output_type)
         })
         .count();
     let _ = count_before;
@@ -136,14 +139,14 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
         );
 
         for (i, &input_id) in node.inputs.iter().enumerate() {
-            let input_dtype = match graph_ref.get_node(input_id) {
-                Some(n) => &n.output_type.dtype,
+            let input_type = match graph_ref.get_node(input_id) {
+                Some(n) => &n.output_type,
                 None => continue,
             };
 
             // Any transformed storage needs dequantization when the consumer
             // accepts only the logical floating representation.
-            let is_quantized = has_transformed_storage(input_dtype);
+            let is_quantized = has_transformed_storage(input_type);
 
             if is_quantized && !accepts_quantized {
                 rewrites.push(DequantRewrite {
@@ -193,24 +196,35 @@ mod tests {
 
     #[test]
     fn canonical_transform_classifies_all_quantized_storage_families() {
-        let u4 = IrDType::U4Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        };
-        let f4 = IrDType::F4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![],
-            codebooks: vec![],
-        };
+        let u4 = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::U4Scaled {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+            },
+        );
+        let f4 = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::F4 {
+                scales: vec![1.0],
+                dequant_offsets: vec![],
+                codebooks: vec![],
+            },
+        );
+        let f32 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F32);
+        let i4 = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::I4 {
+                scales: vec![1.0],
+                dequant_offsets: vec![0.0],
+                codebooks: vec![],
+            },
+        );
         assert!(has_transformed_storage(&u4));
         assert!(has_transformed_storage(&f4));
-        assert!(!has_transformed_storage(&IrDType::F32));
+        assert!(!has_transformed_storage(&f32));
         assert!(!is_auto_cast_integer_weight(&u4));
-        assert!(is_auto_cast_integer_weight(&IrDType::I4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-            codebooks: vec![],
-        }));
+        assert!(is_auto_cast_integer_weight(&i4));
     }
 
     /// Helper to create a weight Data constant with the given dimensions.

@@ -2032,9 +2032,9 @@ impl GraphBuilder {
 
     // ── Optimizer ops (v2.1 training via IR) ───────────────────────────────
 
-    /// Extract the bit width from a packed dtype.
-    fn packed_bit_width(dtype: &IrDType) -> Option<usize> {
-        let representation = dtype.value_representation().ok()?;
+    /// Extract the bit width from a statically affine packed tensor representation.
+    fn packed_bit_width(tensor_type: &TensorType) -> Option<usize> {
+        let representation = tensor_type.value_representation().ok()?;
         if !matches!(
             representation.transform,
             RepresentationTransform::AffineDequantization { .. }
@@ -2055,8 +2055,7 @@ impl GraphBuilder {
     /// Otherwise returns (dequantized_weight, bit_width) where the caller
     /// should quantize the optimizer's output.
     fn unwrap_quantized_weight(&self, weight: &GraphTensor) -> (GraphTensor, Option<usize>) {
-        let dtype = weight.tensor_type().dtype.clone();
-        if let Some(bit_width) = Self::packed_bit_width(&dtype) {
+        if let Some(bit_width) = Self::packed_bit_width(weight.tensor_type()) {
             (self.dequantize(weight), Some(bit_width))
         } else {
             (weight.clone(), None)
@@ -2878,22 +2877,25 @@ mod tests {
 
     #[test]
     fn optimizer_bit_width_uses_canonical_affine_storage() {
-        assert_eq!(
-            GraphBuilder::packed_bit_width(&IrDType::U4Scaled {
+        let u4 = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::U4Scaled {
                 scales: vec![1.0],
                 dequant_offsets: vec![0.0],
-            }),
-            Some(4)
+            },
         );
-        assert_eq!(
-            GraphBuilder::packed_bit_width(&IrDType::I4 {
+        let codebook = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::I4 {
                 scales: vec![1.0],
                 dequant_offsets: vec![],
                 codebooks: vec![[0.0; 16]],
-            }),
-            None
+            },
         );
-        assert_eq!(GraphBuilder::packed_bit_width(&IrDType::F32), None);
+        let f32 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F32);
+        assert_eq!(GraphBuilder::packed_bit_width(&u4), Some(4));
+        assert_eq!(GraphBuilder::packed_bit_width(&codebook), None);
+        assert_eq!(GraphBuilder::packed_bit_width(&f32), None);
     }
 
     /// Create an f32 input tensor of f32 bytes.

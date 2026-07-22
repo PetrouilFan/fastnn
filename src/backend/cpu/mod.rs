@@ -18,7 +18,7 @@ use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord, U4x8, U8x4};
 use crate::ir::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::packed_tensor::PackedTensor;
 use crate::storage::AlignedVec;
-use crate::types::{RepresentationTransform, ScalarType};
+use crate::types::{RepresentationTransform, ScalarType, ValueRepresentation};
 use bytemuck;
 use smallvec::{smallvec, SmallVec};
 use std::any::TypeId;
@@ -40,24 +40,130 @@ fn optional_u64_attr(node: &IRNode, name: &str, default: u64) -> Result<u64, Bac
         .map_err(|error| BackendError::Compilation(error.to_string()))
 }
 
-fn canonical_storage_scalar(dtype: &IrDType) -> Option<ScalarType> {
-    dtype
-        .value_representation()
-        .ok()
-        .map(|representation| representation.storage)
+fn canonical_storage_scalar(representation: &ValueRepresentation) -> ScalarType {
+    representation.storage
 }
 
-fn has_transformed_storage(dtype: &IrDType) -> bool {
-    dtype.value_representation().is_ok_and(|representation| {
-        !matches!(representation.transform, RepresentationTransform::None)
+fn has_transformed_storage(representation: &ValueRepresentation) -> bool {
+    !matches!(representation.transform, RepresentationTransform::None)
+}
+
+fn has_transformed_scalar(representation: &ValueRepresentation, storage: ScalarType) -> bool {
+    representation.storage == storage && has_transformed_storage(representation)
+}
+
+#[derive(Debug)]
+struct CanonicalQuantizedWeightMetadata {
+    bit_width: usize,
+    scales: Vec<f32>,
+    dequant_offsets: Vec<f32>,
+    codebooks: Vec<[f32; 16]>,
+}
+
+fn canonical_quantized_weight_metadata(
+    representation: &ValueRepresentation,
+) -> Result<CanonicalQuantizedWeightMetadata, BackendError> {
+    representation
+        .validate()
+        .map_err(|error| BackendError::Compilation(error.to_string()))?;
+    let bit_width = usize::from(representation.storage.bit_width());
+    if !matches!(bit_width, 4 | 8) {
+        return Err(BackendError::Compilation(format!(
+            "quantized CPU weights require 4-bit or 8-bit storage, got {bit_width}-bit {:?}",
+            representation.storage
+        )));
+    }
+
+    let (scales, dequant_offsets, codebooks) = match &representation.transform {
+        RepresentationTransform::AffineDequantization {
+            scales, offsets, ..
+        }
+        | RepresentationTransform::ScaledAffine {
+            scales, offsets, ..
+        } => (scales.clone(), offsets.clone(), vec![]),
+        RepresentationTransform::Scaled { scales } => {
+            (scales.clone(), vec![0.0; scales.len()], vec![])
+        }
+        RepresentationTransform::Codebook {
+            entries,
+            scales,
+            offsets,
+            ..
+        } => {
+            let codebooks = entries
+                .iter()
+                .map(|entry| {
+                    entry.as_slice().try_into().map_err(|_| {
+                        BackendError::Compilation(format!(
+                            "quantized CPU codebooks require 16 entries, got {}",
+                            entry.len()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<[f32; 16]>, _>>()?;
+            (scales.clone(), offsets.clone(), codebooks)
+        }
+        transform => {
+            return Err(BackendError::Compilation(format!(
+                "quantized CPU weights require static dequantization metadata, got {transform:?}"
+            )))
+        }
+    };
+
+    Ok(CanonicalQuantizedWeightMetadata {
+        bit_width,
+        scales,
+        dequant_offsets,
+        codebooks,
     })
 }
 
-fn has_transformed_scalar(dtype: &IrDType, storage: ScalarType) -> bool {
-    dtype.value_representation().is_ok_and(|representation| {
-        representation.storage == storage
-            && !matches!(representation.transform, RepresentationTransform::None)
-    })
+#[cfg(test)]
+mod canonical_quantized_weight_metadata_tests {
+    use super::canonical_quantized_weight_metadata;
+    use crate::types::{
+        QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
+        ValueRepresentation,
+    };
+
+    #[test]
+    fn extracts_affine_metadata_from_canonical_representation() {
+        let representation = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::U4,
+            8,
+            QuantizationGranularity::PerAxis { axis: 0 },
+            vec![0.25, 0.5],
+            vec![-1.0, -2.0],
+        )
+        .unwrap();
+
+        let metadata = canonical_quantized_weight_metadata(&representation).unwrap();
+        assert_eq!(metadata.bit_width, 4);
+        assert_eq!(metadata.scales, vec![0.25, 0.5]);
+        assert_eq!(metadata.dequant_offsets, vec![-1.0, -2.0]);
+        assert!(metadata.codebooks.is_empty());
+    }
+
+    #[test]
+    fn rejects_codebooks_with_non_kernel_entry_counts() {
+        let representation = ValueRepresentation {
+            logical: ScalarType::F32,
+            storage: ScalarType::I4,
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            transform: RepresentationTransform::Codebook {
+                granularity: QuantizationGranularity::PerTensor,
+                entries: vec![vec![0.0, 1.0, 2.0]],
+                scales: vec![1.0],
+                offsets: vec![],
+            },
+        };
+
+        let error = canonical_quantized_weight_metadata(&representation).unwrap_err();
+        assert!(error.to_string().contains("require 16 entries"));
+    }
 }
 
 mod arena;
@@ -697,14 +803,20 @@ impl Backend for CpuBackend {
                     }
                 },
                 Opcode::MatMul => {
-                    // Detect quantized dtypes from input nodes to select the right kernel
-                    let input_dtypes: Vec<_> = node
+                    // Select kernels from canonical input representations.
+                    let input_representations: Vec<_> = node
                         .inputs
                         .iter()
                         .filter_map(|&input_id| graph.get_node(input_id))
-                        .map(|n| n.output_type.dtype.clone())
-                        .collect();
-                    let is_quantized = input_dtypes.iter().any(has_transformed_storage);
+                        .map(|n| {
+                            n.output_type.value_representation().map_err(|error| {
+                                BackendError::Compilation(format!(
+                                    "matmul node {node_id} has invalid input representation: {error}"
+                                ))
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let is_quantized = input_representations.iter().any(has_transformed_storage);
 
                     let fused_type = node.attrs.get("fused_op").map(|s| s.as_str());
                     // Determine fusion params for the unified "matmul" kernel
@@ -715,97 +827,98 @@ impl Backend for CpuBackend {
                         Some("MatMulAddSilu") | Some("OpSilu") => 3, // SiLU
                         _ => 0,                                      // No activation
                     };
-                    let kernel_name = match (fused_type, is_quantized) {
-                        // Non-quantized fused patterns: use specialized kernels for now
-                        // (they have mature, tested implementations)
-                        (Some("MatMulAddRelu"), false) => "fused_matmul_add_relu",
-                        (Some("MatMulAddGelu"), false) => "fused_matmul_add_gelu",
-                        (Some("MatMulAddSilu"), false) => "fused_matmul_add_silu",
-                        (Some("OpRelu"), false) => "matmul_relu",
-                        (Some("OpGelu"), false) => "matmul_gelu",
-                        (Some("OpSilu"), false) => "matmul_silu",
-                        // Non-quantized non-fused: use unified "matmul" kernel
-                        (_, false) => "matmul",
-                        // Quantized: I8 activation + U4 weight
-                        (_, true)
-                            if input_dtypes.first().is_some_and(|d| {
-                                canonical_storage_scalar(d) == Some(ScalarType::I8)
-                            }) && input_dtypes.iter().any(|d| {
-                                matches!(
-                                    canonical_storage_scalar(d),
-                                    Some(ScalarType::I4 | ScalarType::U4)
-                                )
-                            }) =>
-                        {
-                            "matmul_i4_i8"
-                        }
-                        // Quantized: I8 activation + U8 weight (no U4)
-                        (_, true)
-                            if input_dtypes.first().is_some_and(|d| {
-                                canonical_storage_scalar(d) == Some(ScalarType::I8)
-                            }) && input_dtypes.iter().any(|d| {
-                                has_transformed_scalar(d, ScalarType::I8)
-                                    || has_transformed_scalar(d, ScalarType::U8)
-                            }) && !input_dtypes.iter().any(|d| {
-                                matches!(
-                                    canonical_storage_scalar(d),
-                                    Some(ScalarType::I4 | ScalarType::U4)
-                                )
-                            }) =>
-                        {
-                            "matmul_i8_i8"
-                        }
-                        // Quantized: F32 activation + Signed I4 weight
-                        (_, true)
-                            if input_dtypes
-                                .iter()
-                                .any(|d| canonical_storage_scalar(d) == Some(ScalarType::I4)) =>
-                        {
-                            "matmul_i4"
-                        }
-                        // Quantized: F32 activation + Unsigned U4 weight
-                        (_, true)
-                            if input_dtypes
-                                .iter()
-                                .any(|d| canonical_storage_scalar(d) == Some(ScalarType::U4)) =>
-                        {
-                            "matmul_u4"
-                        }
-                        // Quantized: F32 activation + FP4 weight
-                        (_, true)
-                            if input_dtypes.iter().any(|d| {
-                                canonical_storage_scalar(d) == Some(ScalarType::Fp4E2M1)
-                            }) =>
-                        {
-                            "matmul_f4"
-                        }
-                        // Quantized: F32 activation + FP8 E4M3 weight
-                        (_, true)
-                            if input_dtypes.iter().any(|d| {
-                                canonical_storage_scalar(d) == Some(ScalarType::Fp8E4M3)
-                            }) =>
-                        {
-                            "matmul_f8"
-                        }
-                        // Quantized: F32 activation + FP8 E5M2 weight
-                        (_, true)
-                            if input_dtypes.iter().any(|d| {
-                                canonical_storage_scalar(d) == Some(ScalarType::Fp8E5M2)
-                            }) =>
-                        {
-                            "matmul_f8r"
-                        }
-                        // Quantized: F32 activation + Unsigned U8 weight
-                        (_, true)
-                            if input_dtypes
-                                .iter()
-                                .any(|d| canonical_storage_scalar(d) == Some(ScalarType::U8)) =>
-                        {
-                            "matmul_u8"
-                        }
-                        // Quantized: F32 activation + Signed I8 weight
-                        (_, true) => "matmul_i8",
-                    };
+                    let kernel_name =
+                        match (fused_type, is_quantized) {
+                            // Non-quantized fused patterns: use specialized kernels for now
+                            // (they have mature, tested implementations)
+                            (Some("MatMulAddRelu"), false) => "fused_matmul_add_relu",
+                            (Some("MatMulAddGelu"), false) => "fused_matmul_add_gelu",
+                            (Some("MatMulAddSilu"), false) => "fused_matmul_add_silu",
+                            (Some("OpRelu"), false) => "matmul_relu",
+                            (Some("OpGelu"), false) => "matmul_gelu",
+                            (Some("OpSilu"), false) => "matmul_silu",
+                            // Non-quantized non-fused: use unified "matmul" kernel
+                            (_, false) => "matmul",
+                            // Quantized: I8 activation + U4 weight
+                            (_, true)
+                                if input_representations.first().is_some_and(|d| {
+                                    canonical_storage_scalar(d) == ScalarType::I8
+                                }) && input_representations.iter().any(|d| {
+                                    matches!(
+                                        canonical_storage_scalar(d),
+                                        ScalarType::I4 | ScalarType::U4
+                                    )
+                                }) =>
+                            {
+                                "matmul_i4_i8"
+                            }
+                            // Quantized: I8 activation + U8 weight (no U4)
+                            (_, true)
+                                if input_representations.first().is_some_and(|d| {
+                                    canonical_storage_scalar(d) == ScalarType::I8
+                                }) && input_representations.iter().any(|d| {
+                                    has_transformed_scalar(d, ScalarType::I8)
+                                        || has_transformed_scalar(d, ScalarType::U8)
+                                }) && !input_representations.iter().any(|d| {
+                                    matches!(
+                                        canonical_storage_scalar(d),
+                                        ScalarType::I4 | ScalarType::U4
+                                    )
+                                }) =>
+                            {
+                                "matmul_i8_i8"
+                            }
+                            // Quantized: F32 activation + Signed I4 weight
+                            (_, true)
+                                if input_representations
+                                    .iter()
+                                    .any(|d| canonical_storage_scalar(d) == ScalarType::I4) =>
+                            {
+                                "matmul_i4"
+                            }
+                            // Quantized: F32 activation + Unsigned U4 weight
+                            (_, true)
+                                if input_representations
+                                    .iter()
+                                    .any(|d| canonical_storage_scalar(d) == ScalarType::U4) =>
+                            {
+                                "matmul_u4"
+                            }
+                            // Quantized: F32 activation + FP4 weight
+                            (_, true)
+                                if input_representations.iter().any(|d| {
+                                    canonical_storage_scalar(d) == ScalarType::Fp4E2M1
+                                }) =>
+                            {
+                                "matmul_f4"
+                            }
+                            // Quantized: F32 activation + FP8 E4M3 weight
+                            (_, true)
+                                if input_representations.iter().any(|d| {
+                                    canonical_storage_scalar(d) == ScalarType::Fp8E4M3
+                                }) =>
+                            {
+                                "matmul_f8"
+                            }
+                            // Quantized: F32 activation + FP8 E5M2 weight
+                            (_, true)
+                                if input_representations.iter().any(|d| {
+                                    canonical_storage_scalar(d) == ScalarType::Fp8E5M2
+                                }) =>
+                            {
+                                "matmul_f8r"
+                            }
+                            // Quantized: F32 activation + Unsigned U8 weight
+                            (_, true)
+                                if input_representations
+                                    .iter()
+                                    .any(|d| canonical_storage_scalar(d) == ScalarType::U8) =>
+                            {
+                                "matmul_u8"
+                            }
+                            // Quantized: F32 activation + Signed I8 weight
+                            (_, true) => "matmul_i8",
+                        };
                     // Extract M, K, N from input shapes
                     let m = input_shapes
                         .first()
@@ -857,64 +970,23 @@ impl Backend for CpuBackend {
                             .get(1)
                             .and_then(|&w_id| {
                                 graph.get_node(w_id).map(|wn| -> Result<_, BackendError> {
-                                    let (bit_width, scales, dequant_offsets, codebooks) =
-                                        match &wn.output_type.dtype {
-                                            IrDType::I4 {
-                                                scales,
-                                                dequant_offsets,
-                                                codebooks,
-                                            } => (
-                                                4usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                codebooks.clone(),
-                                            ),
-                                            IrDType::U8Scaled {
-                                                scales,
-                                                dequant_offsets,
-                                            } => (
-                                                8usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                vec![],
-                                            ),
-                                            IrDType::U4Scaled {
-                                                scales,
-                                                dequant_offsets,
-                                            } => (
-                                                4usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                vec![],
-                                            ),
-                                            IrDType::I8Scaled {
-                                                scales,
-                                                dequant_offsets,
-                                            } => (
-                                                8usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                vec![],
-                                            ),
-                                            IrDType::F4 {
-                                                scales,
-                                                dequant_offsets: zeros,
-                                                ..
-                                            } => (4usize, scales.clone(), zeros.clone(), vec![]),
-                                            IrDType::F8 { scales } => (
-                                                8usize,
-                                                scales.clone(),
-                                                vec![0.0; scales.len()],
-                                                vec![],
-                                            ),
-                                            IrDType::F8R { scales } => (
-                                                8usize,
-                                                scales.clone(),
-                                                vec![0.0; scales.len()],
-                                                vec![],
-                                            ),
-                                            _ => (0usize, vec![], vec![], vec![]),
-                                        };
+                                    let representation = wn
+                                        .output_type
+                                        .value_representation()
+                                        .map_err(|error| {
+                                            BackendError::Compilation(format!(
+                                                "matmul weight node {} has invalid representation: {error}",
+                                                wn.id
+                                            ))
+                                        })?;
+                                    let metadata =
+                                        canonical_quantized_weight_metadata(&representation)?;
+                                    let CanonicalQuantizedWeightMetadata {
+                                        bit_width,
+                                        scales,
+                                        dequant_offsets,
+                                        codebooks,
+                                    } = metadata;
                                     let mut w_shape: Vec<usize> = wn
                                         .output_type
                                         .shape
@@ -1157,12 +1229,21 @@ impl Backend for CpuBackend {
                         )));
                     }
                     // Detect quantized weights for packed conv2d dispatch
-                    let weight_dtype = node
+                    let weight_representation = node
                         .inputs
                         .get(1)
                         .and_then(|&w_id| graph.get_node(w_id))
-                        .map(|wn| wn.output_type.dtype.clone());
-                    let is_quantized = weight_dtype.as_ref().is_some_and(has_transformed_storage);
+                        .map(|wn| {
+                            wn.output_type.value_representation().map_err(|error| {
+                                BackendError::Compilation(format!(
+                                    "conv2d node {node_id} has invalid weight representation: {error}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+                    let is_quantized = weight_representation
+                        .as_ref()
+                        .is_some_and(has_transformed_storage);
                     if is_quantized {
                         let weight_id = node.inputs.get(1).ok_or_else(|| {
                             BackendError::Compilation(format!(
@@ -1181,16 +1262,12 @@ impl Backend for CpuBackend {
                         }
                     }
                     let (kernel_name, weight_meta) = if is_quantized {
-                        let dtype = weight_dtype.as_ref().ok_or_else(|| {
+                        let representation = weight_representation.as_ref().ok_or_else(|| {
                             BackendError::Compilation(format!(
-                                "quantized convolution node {node_id} has no weight dtype"
+                                "quantized convolution node {node_id} has no weight representation"
                             ))
                         })?;
-                        let storage = canonical_storage_scalar(dtype).ok_or_else(|| {
-                            BackendError::Compilation(format!(
-                                "quantized convolution node {node_id} has invalid weight representation"
-                            ))
-                        })?;
+                        let storage = canonical_storage_scalar(representation);
                         let mut kernel = match storage {
                             ScalarType::Fp4E2M1 => "conv2d_f4".to_string(),
                             ScalarType::Fp8E4M3 => "conv2d_f8".to_string(),
@@ -1205,26 +1282,24 @@ impl Backend for CpuBackend {
                                 )))
                             }
                         };
-                        let bit_width = match storage {
-                            ScalarType::I4 | ScalarType::U4 | ScalarType::Fp4E2M1 => 4,
-                            ScalarType::I8
-                            | ScalarType::U8
-                            | ScalarType::Fp8E4M3
-                            | ScalarType::Fp8E5M2 => 8,
-                            _ => unreachable!("unsupported storage returned above"),
-                        };
-
                         // Detect signed INT8 activations from QuantizeActivations and append suffix.
                         // Treat both IrDType::I8 and IrDType::I8Scaled as i8-activation sources, because the
                         // activation-quantization compiler pass currently emits U8 payloads.
-                        let act_dtype = node
+                        let act_representation = node
                             .inputs
                             .first()
                             .and_then(|&a_id| graph.get_node(a_id))
-                            .map(|an| an.output_type.dtype.clone());
-                        if act_dtype
+                            .map(|an| {
+                                an.output_type.value_representation().map_err(|error| {
+                                    BackendError::Compilation(format!(
+                                        "conv2d node {node_id} has invalid activation representation: {error}"
+                                    ))
+                                })
+                            })
+                            .transpose()?;
+                        if act_representation
                             .as_ref()
-                            .is_some_and(|d| canonical_storage_scalar(d) == Some(ScalarType::I8))
+                            .is_some_and(|d| canonical_storage_scalar(d) == ScalarType::I8)
                         {
                             kernel = format!("{}_i8", kernel);
                         }
@@ -1245,64 +1320,23 @@ impl Backend for CpuBackend {
                             .get(1)
                             .and_then(|&w_id| {
                                 graph.get_node(w_id).map(|wn| -> Result<_, BackendError> {
-                                    let (bw, scales, dequant_offsets, codebooks) =
-                                        match &wn.output_type.dtype {
-                                            IrDType::I4 {
-                                                scales,
-                                                dequant_offsets,
-                                                codebooks,
-                                            } => (
-                                                4usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                codebooks.clone(),
-                                            ),
-                                            IrDType::U8Scaled {
-                                                scales,
-                                                dequant_offsets,
-                                            } => (
-                                                8usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                vec![],
-                                            ),
-                                            IrDType::U4Scaled {
-                                                scales,
-                                                dequant_offsets,
-                                            } => (
-                                                4usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                vec![],
-                                            ),
-                                            IrDType::F4 {
-                                                scales,
-                                                dequant_offsets: zeros,
-                                                ..
-                                            } => (4usize, scales.clone(), zeros.clone(), vec![]),
-                                            IrDType::F8 { scales } => (
-                                                8usize,
-                                                scales.clone(),
-                                                vec![0.0; scales.len()],
-                                                vec![],
-                                            ),
-                                            IrDType::F8R { scales } => (
-                                                8usize,
-                                                scales.clone(),
-                                                vec![0.0; scales.len()],
-                                                vec![],
-                                            ),
-                                            IrDType::I8Scaled {
-                                                scales,
-                                                dequant_offsets,
-                                            } => (
-                                                8usize,
-                                                scales.clone(),
-                                                dequant_offsets.clone(),
-                                                vec![],
-                                            ),
-                                            _ => (bit_width, vec![], vec![], vec![]),
-                                        };
+                                    let representation = wn
+                                        .output_type
+                                        .value_representation()
+                                        .map_err(|error| {
+                                            BackendError::Compilation(format!(
+                                                "conv2d weight node {} has invalid representation: {error}",
+                                                wn.id
+                                            ))
+                                        })?;
+                                    let metadata =
+                                        canonical_quantized_weight_metadata(&representation)?;
+                                    let CanonicalQuantizedWeightMetadata {
+                                        bit_width: bw,
+                                        scales,
+                                        dequant_offsets,
+                                        codebooks,
+                                    } = metadata;
                                     let w_shape: Vec<usize> = wn
                                         .output_type
                                         .shape

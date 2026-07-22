@@ -11,8 +11,8 @@ use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType, Tens
 use crate::packed_tensor::PackedTensor;
 use crate::types::{QuantTarget, RepresentationTransform, ScalarType};
 
-fn optimizer_affine_metadata(dtype: &IrDType) -> Option<(usize, Vec<f32>, Vec<f32>)> {
-    let representation = dtype.value_representation().ok()?;
+fn optimizer_affine_metadata(tensor_type: &TensorType) -> Option<(usize, Vec<f32>, Vec<f32>)> {
+    let representation = tensor_type.value_representation().ok()?;
     let bit_width = match representation.storage {
         ScalarType::I4 => 4,
         ScalarType::I8 => 8,
@@ -565,7 +565,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
             None => return Ok(()),
         };
 
-        let bit_width = match optimizer_affine_metadata(&weight_node.output_type.dtype) {
+        let bit_width = match optimizer_affine_metadata(&weight_node.output_type) {
             Some((bit_width, _, _)) => bit_width,
             None => return Ok(()), // weight is not supported affine storage, skip
         };
@@ -617,12 +617,10 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         // can skip the O(N×K) per-channel abs-max scan on every optimizer step.
         let (orig_scales, orig_zeros) = graph
             .get_node(wrap.weight_id)
-            .map(
-                |wn| match optimizer_affine_metadata(&wn.output_type.dtype) {
-                    Some((_, scales, offsets)) => (scales, offsets),
-                    None => (vec![], vec![]),
-                },
-            )
+            .map(|wn| match optimizer_affine_metadata(&wn.output_type) {
+                Some((_, scales, offsets)) => (scales, offsets),
+                None => (vec![], vec![]),
+            })
             .unwrap_or_default();
 
         let u_type = TensorType::new(
@@ -694,21 +692,27 @@ mod tests {
 
     #[test]
     fn optimizer_metadata_uses_canonical_affine_storage() {
-        let dtype = IrDType::I4 {
-            scales: vec![0.5],
-            dequant_offsets: vec![-1.0],
-            codebooks: vec![],
-        };
+        let tensor_type = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::I4 {
+                scales: vec![0.5],
+                dequant_offsets: vec![-1.0],
+                codebooks: vec![],
+            },
+        );
         assert_eq!(
-            optimizer_affine_metadata(&dtype),
+            optimizer_affine_metadata(&tensor_type),
             Some((4, vec![0.5], vec![-1.0]))
         );
 
-        let codebook = IrDType::I4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![],
-            codebooks: vec![[0.0; 16]],
-        };
+        let codebook = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::I4 {
+                scales: vec![1.0],
+                dequant_offsets: vec![],
+                codebooks: vec![[0.0; 16]],
+            },
+        );
         assert_eq!(optimizer_affine_metadata(&codebook), None);
     }
 

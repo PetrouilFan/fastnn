@@ -3,8 +3,6 @@ use crate::{
     impl_training_state,
     nn::{Module, TrainingState},
 };
-use rand::Rng;
-
 #[derive(Clone)]
 pub struct Dropout {
     pub p: f64,
@@ -29,8 +27,6 @@ impl Module for Dropout {
             let x_data = x.as_f32_slice();
             let numel = x_data.len();
 
-            let mut rng = rand::thread_rng();
-
             let mask_data: Vec<f32> = if numel > 100_000 {
                 let mut data = Vec::with_capacity(numel);
                 let chunk_size = 4096;
@@ -39,7 +35,7 @@ impl Module for Dropout {
                     let chunk_len = chunk_end - chunk_start;
 
                     let mut rand_vals = vec![0.0f32; chunk_len];
-                    rng.fill(&mut rand_vals[..]);
+                    crate::fill_random_f32(&mut rand_vals);
 
                     for i in 0..chunk_len {
                         data.push(if rand_vals[i] < keep_prob as f32 {
@@ -52,7 +48,7 @@ impl Module for Dropout {
                 data
             } else {
                 let mut data = vec![0.0f32; numel];
-                rng.fill(&mut data[..]);
+                crate::fill_random_f32(&mut data);
                 for val in data.iter_mut() {
                     *val = if *val < keep_prob as f32 { scale } else { 0.0 };
                 }
@@ -105,10 +101,9 @@ impl Module for Dropout2d {
             let keep_prob = 1.0 - self.p;
 
             // Generate mask: [N, C, 1, 1] that will broadcast
-            let mut rng = rand::thread_rng();
             let num_masks = batch * channels;
             let mut rand_vals = vec![0.0f32; num_masks];
-            rng.fill(&mut rand_vals[..]);
+            crate::fill_random_f32(&mut rand_vals);
             let channel_mask_data: Vec<f32> = rand_vals
                 .iter()
                 .map(|&v| if v < keep_prob as f32 { scale } else { 0.0 })

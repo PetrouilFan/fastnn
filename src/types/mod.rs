@@ -298,6 +298,52 @@ pub struct ValueRepresentation {
 }
 
 impl ValueRepresentation {
+    pub fn native(scalar: ScalarType) -> Self {
+        Self {
+            logical: scalar,
+            storage: scalar,
+            encoding: StorageEncoding::Plain,
+            transform: RepresentationTransform::None,
+        }
+    }
+
+    pub fn runtime_affine(storage: ScalarType, encoding: StorageEncoding) -> FastnnResult<Self> {
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding,
+            transform: RepresentationTransform::RuntimeAffineQuantization,
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
+    pub fn packed_affine_dequantization(
+        storage: ScalarType,
+        lanes: u8,
+        granularity: QuantizationGranularity,
+        scales: Vec<f32>,
+        offsets: Vec<f32>,
+    ) -> FastnnResult<Self> {
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding: StorageEncoding::Packed {
+                word_bits: storage.bit_width().checked_mul(lanes).ok_or_else(|| {
+                    FastnnError::Overflow("packed storage word width overflow".into())
+                })?,
+                lanes,
+            },
+            transform: RepresentationTransform::AffineDequantization {
+                granularity,
+                scales,
+                offsets,
+            },
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
     pub fn validate(&self) -> FastnnResult<()> {
         self.encoding.validate_for(self.storage)?;
         match &self.transform {
@@ -549,6 +595,40 @@ mod tests {
             }),
         };
         assert_eq!(representation.storage_bytes(17).unwrap(), 12);
+    }
+
+    #[test]
+    fn canonical_constructors_reject_invalid_affine_metadata() {
+        assert!(ValueRepresentation::packed_affine_dequantization(
+            ScalarType::U4,
+            8,
+            QuantizationGranularity::PerTensor,
+            vec![0.125],
+            vec![],
+        )
+        .is_err());
+        assert!(
+            ValueRepresentation::runtime_affine(ScalarType::F32, StorageEncoding::Plain,).is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_packed_affine_constructor_preserves_fractional_offsets() {
+        let representation = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::I8,
+            4,
+            QuantizationGranularity::PerTensor,
+            vec![0.25],
+            vec![1.5],
+        )
+        .unwrap();
+        assert!(matches!(
+            representation.transform,
+            RepresentationTransform::AffineDequantization {
+                offsets,
+                ..
+            } if offsets == vec![1.5]
+        ));
     }
 
     #[test]

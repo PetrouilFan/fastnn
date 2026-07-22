@@ -278,7 +278,6 @@ impl ShapeEnv {
             if let Some(node) = graph.get_node(input_id) {
                 let elem_size = node
                     .output_type
-                    .dtype
                     .plain_storage_byte_width()
                     .map_err(|error| format!("ShapeEnv: input {i} dtype: {error}"))?
                     .ok_or_else(|| {
@@ -522,15 +521,6 @@ fn quantization_granularity(parameter_count: usize) -> QuantizationGranularity {
     }
 }
 
-fn plain_representation(scalar: ScalarType) -> ValueRepresentation {
-    ValueRepresentation {
-        logical: scalar,
-        storage: scalar,
-        encoding: StorageEncoding::Plain,
-        transform: RepresentationTransform::None,
-    }
-}
-
 fn scaled_float_representation(
     storage: ScalarType,
     lanes: u8,
@@ -583,31 +573,23 @@ impl IrDType {
             lanes,
         };
         let affine = |storage, lanes, scales: &Vec<f32>, offsets: &Vec<f32>| {
-            Ok(ValueRepresentation {
-                logical: ScalarType::F32,
+            ValueRepresentation::packed_affine_dequantization(
                 storage,
-                encoding: packed(lanes),
-                transform: RepresentationTransform::AffineDequantization {
-                    granularity: quantization_granularity(scales.len()),
-                    scales: scales.clone(),
-                    offsets: offsets.clone(),
-                },
-            })
+                lanes,
+                quantization_granularity(scales.len()),
+                scales.clone(),
+                offsets.clone(),
+            )
         };
 
         match self {
-            Self::F32 => Ok(plain_representation(ScalarType::F32)),
-            Self::F16 => Ok(plain_representation(ScalarType::F16)),
-            Self::BF16 => Ok(plain_representation(ScalarType::BF16)),
-            Self::I32 => Ok(plain_representation(ScalarType::I32)),
-            Self::I64 => Ok(plain_representation(ScalarType::I64)),
-            Self::Bool => Ok(plain_representation(ScalarType::Bool)),
-            Self::I8 => Ok(ValueRepresentation {
-                logical: ScalarType::F32,
-                storage: ScalarType::I8,
-                encoding: StorageEncoding::Plain,
-                transform: RepresentationTransform::RuntimeAffineQuantization,
-            }),
+            Self::F32 => Ok(ValueRepresentation::native(ScalarType::F32)),
+            Self::F16 => Ok(ValueRepresentation::native(ScalarType::F16)),
+            Self::BF16 => Ok(ValueRepresentation::native(ScalarType::BF16)),
+            Self::I32 => Ok(ValueRepresentation::native(ScalarType::I32)),
+            Self::I64 => Ok(ValueRepresentation::native(ScalarType::I64)),
+            Self::Bool => Ok(ValueRepresentation::native(ScalarType::Bool)),
+            Self::I8 => ValueRepresentation::runtime_affine(ScalarType::I8, StorageEncoding::Plain),
             Self::I4 {
                 scales,
                 dequant_offsets,
@@ -704,6 +686,31 @@ impl TensorType {
         TensorType { shape, dtype }
     }
 
+    /// Resolve the canonical logical/storage/transform contract for this tensor.
+    ///
+    /// Callers should use this tensor-level API rather than reaching through the
+    /// legacy dtype field. That keeps representation ownership movable without
+    /// coupling compiler and backend code to the transitional IR schema.
+    pub fn value_representation(&self) -> FastnnResult<ValueRepresentation> {
+        self.dtype.value_representation()
+    }
+
+    pub fn storage_layout(&self) -> FastnnResult<TensorStorageLayout> {
+        self.dtype.storage_layout()
+    }
+
+    pub fn plain_storage_byte_width(&self) -> FastnnResult<Option<usize>> {
+        let representation = self.value_representation()?;
+        Ok(match representation.encoding {
+            StorageEncoding::Plain => representation.storage.plain_byte_width(),
+            StorageEncoding::Packed { .. } => None,
+        })
+    }
+
+    pub fn affine_dequantization(&self) -> Option<(&[f32], &[f32])> {
+        self.dtype.affine_dequantization()
+    }
+
     pub fn numel(&self) -> Option<u64> {
         let mut total = 1u64;
         for dim in &self.shape {
@@ -744,9 +751,8 @@ impl TensorType {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        let representation = self.dtype.value_representation().ok()?;
-        self.dtype
-            .storage_layout()
+        let representation = self.value_representation().ok()?;
+        self.storage_layout()
             .ok()?
             .allocation_bytes(representation.storage, &shape)
             .ok()
@@ -874,6 +880,31 @@ mod tests {
                 if offsets == &[1.5]
         ));
         representation.validate().unwrap();
+    }
+
+    #[test]
+    fn tensor_type_exposes_canonical_representation_queries() {
+        let tensor_type = TensorType::new(
+            vec![DimExpr::Known(2), DimExpr::Known(8)],
+            IrDType::I8Scaled {
+                scales: vec![0.25],
+                dequant_offsets: vec![1.5],
+            },
+        );
+
+        let representation = tensor_type.value_representation().unwrap();
+        assert_eq!(representation.storage, ScalarType::I8);
+        assert!(matches!(
+            representation.transform,
+            RepresentationTransform::AffineDequantization { ref offsets, .. }
+                if offsets == &[1.5]
+        ));
+        assert_eq!(tensor_type.plain_storage_byte_width().unwrap(), None);
+        assert!(tensor_type.storage_layout().unwrap().row_packed);
+        assert_eq!(
+            tensor_type.affine_dequantization(),
+            Some((&[0.25][..], &[1.5][..]))
+        );
     }
 
     #[test]

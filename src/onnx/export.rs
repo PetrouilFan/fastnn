@@ -15,12 +15,12 @@
 //! }
 //! ```
 
-use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType, TensorValue};
 use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
 use std::collections::{HashMap, HashSet};
 
-fn packed_param_dtype(dtype: &IrDType) -> Option<&'static str> {
-    let representation = dtype.value_representation().ok()?;
+fn packed_param_dtype(tensor_type: &TensorType) -> Option<&'static str> {
+    let representation = tensor_type.value_representation().ok()?;
     if !matches!(representation.encoding, StorageEncoding::Packed { .. }) {
         return None;
     }
@@ -196,7 +196,7 @@ fn detect_qlinear_patterns(
 
         // Extract affine metadata from the canonical representation rather
         // than maintaining another list of packed IR dtype variants.
-        let representation = match packed_node.output_type.dtype.value_representation() {
+        let representation = match packed_node.output_type.value_representation() {
             Ok(representation) => representation,
             Err(_) => continue,
         };
@@ -316,7 +316,7 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         Some(n) => n,
         None => return (1.0, 0),
     };
-    let representation = match q_node.output_type.dtype.value_representation() {
+    let representation = match q_node.output_type.value_representation() {
         Ok(representation) => representation,
         Err(_) => return (1.0, 0),
     };
@@ -568,7 +568,7 @@ pub fn export_to_onnx_json_with_config(
                 // Constant nodes become weight params, not ONNX ops
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
-                        if let Some(dtype) = packed_param_dtype(&tensor_type.dtype) {
+                        if let Some(dtype) = packed_param_dtype(tensor_type) {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
                                 .shape
@@ -768,22 +768,25 @@ mod tests {
 
     #[test]
     fn packed_param_dtype_uses_canonical_storage_identity() {
-        assert_eq!(
-            packed_param_dtype(&IrDType::I4 {
+        let i4 = TensorType::new(
+            vec![crate::ir::DimExpr::Known(8)],
+            IrDType::I4 {
                 scales: vec![1.0],
                 dequant_offsets: vec![0.0],
                 codebooks: vec![],
-            }),
-            Some("i4")
+            },
         );
-        assert_eq!(
-            packed_param_dtype(&IrDType::U4Scaled {
+        let u4 = TensorType::new(
+            vec![crate::ir::DimExpr::Known(8)],
+            IrDType::U4Scaled {
                 scales: vec![1.0],
                 dequant_offsets: vec![0.0],
-            }),
-            Some("u4")
+            },
         );
-        assert_eq!(packed_param_dtype(&IrDType::F32), None);
+        let f32 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::F32);
+        assert_eq!(packed_param_dtype(&i4), Some("i4"));
+        assert_eq!(packed_param_dtype(&u4), Some("u4"));
+        assert_eq!(packed_param_dtype(&f32), None);
     }
 
     #[test]

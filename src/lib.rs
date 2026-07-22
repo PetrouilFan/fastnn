@@ -91,10 +91,54 @@ pub fn random_f32() -> f32 {
     }
 }
 
-#[cfg(feature = "python")]
+pub(crate) fn fill_random_f32(values: &mut [f32]) {
+    if let Some(rng_mutex) = SEEDED_RNG.get() {
+        let mut rng = rng_mutex.lock();
+        rng.fill(values);
+    } else {
+        rand::thread_rng().fill(values);
+    }
+}
+
+#[cfg(any(feature = "python", test))]
 pub(crate) fn set_seeded_rng(seed: u64) {
     use rand::SeedableRng;
     let rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mutex = SEEDED_RNG.get_or_init(|| Mutex::new(rng.clone()));
     *mutex.lock() = rng;
+}
+
+#[cfg(test)]
+mod seeded_rng_tests {
+    use super::*;
+    use crate::nn::dropout::{Dropout, Dropout2d};
+    use crate::nn::Module;
+    use crate::tensor::Tensor;
+
+    fn values(tensor: &Tensor) -> Vec<f32> {
+        tensor.as_f32_slice().to_vec()
+    }
+
+    #[test]
+    fn dropout_variants_use_the_process_seeded_rng() {
+        let dropout = Dropout::new(0.5);
+        let input = Tensor::from_vec(vec![1.0; 32], vec![32]);
+
+        set_seeded_rng(17);
+        let first = values(&dropout.forward(&input));
+        set_seeded_rng(17);
+        let second = values(&dropout.forward(&input));
+
+        assert_eq!(first, second);
+
+        let dropout = Dropout2d::new(0.5);
+        let input = Tensor::from_vec(vec![1.0; 16], vec![1, 4, 2, 2]);
+
+        set_seeded_rng(29);
+        let first = values(&dropout.forward(&input));
+        set_seeded_rng(29);
+        let second = values(&dropout.forward(&input));
+
+        assert_eq!(first, second);
+    }
 }
