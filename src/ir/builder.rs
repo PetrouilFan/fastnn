@@ -192,7 +192,7 @@ impl GraphTensor {
 
     /// The data type of this tensor.
     pub fn dtype(&self) -> IrDType {
-        self.tensor_type.dtype.clone()
+        self.tensor_type.dtype()
     }
 
     /// Full type information (shape + dtype).
@@ -906,7 +906,7 @@ impl GraphBuilder {
                 output_shape[dim] = total;
             }
         }
-        let output_type = TensorType::new(output_shape, tensors[0].dtype());
+        let output_type = tensors[0].tensor_type.with_shape(output_shape);
         let input_ids: Vec<NodeId> = tensors.iter().map(|t| t.node_id).collect();
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
@@ -1019,15 +1019,12 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(
-            vec![
-                batch.clone(),
-                channels.clone(),
-                h_out.clone(),
-                w_out.clone(),
-            ],
-            input.dtype(),
-        );
+        let output_type = input.tensor_type.with_shape(vec![
+            batch.clone(),
+            channels.clone(),
+            h_out.clone(),
+            w_out.clone(),
+        ]);
         let idx_type = TensorType::new(vec![batch, channels, h_out, w_out], IrDType::I64);
         let mut attrs = HashMap::new();
         attrs.insert("kernel_size".to_string(), kernel_size.to_string());
@@ -1199,7 +1196,7 @@ impl GraphBuilder {
             .chain(data_shape[axis + 1..].iter())
             .cloned()
             .collect();
-        let output_type = TensorType::new(new_shape, input.tensor_type.dtype.clone());
+        let output_type = input.tensor_type.with_shape(new_shape);
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), axis.to_string());
         let mut inner = self.inner.borrow_mut();
@@ -1269,15 +1266,8 @@ impl GraphBuilder {
     pub fn quantize(&self, input: &GraphTensor, bit_width: usize) -> FastnnResult<GraphTensor> {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
-            4 => IrDType::I4 {
-                scales: vec![],
-                dequant_offsets: vec![],
-                codebooks: vec![],
-            },
-            8 => IrDType::I8Scaled {
-                scales: vec![],
-                dequant_offsets: vec![],
-            },
+            4 => IrDType::I4,
+            8 => IrDType::I8Scaled,
             _ => {
                 return Err(FastnnError::dtype(format!(
                     "quantize bit width must be 4 or 8, got {bit_width}"
@@ -1306,14 +1296,8 @@ impl GraphBuilder {
     ) -> FastnnResult<GraphTensor> {
         let output_shape = input.shape().to_vec();
         let output_dtype = match bit_width {
-            4 => IrDType::U4Scaled {
-                scales: vec![],
-                dequant_offsets: vec![],
-            },
-            8 => IrDType::U8Scaled {
-                scales: vec![],
-                dequant_offsets: vec![],
-            },
+            4 => IrDType::U4Scaled,
+            8 => IrDType::U8Scaled,
             _ => {
                 return Err(FastnnError::dtype(format!(
                     "unsigned quantize bit width must be 4 or 8, got {bit_width}"
@@ -1700,7 +1684,7 @@ impl GraphBuilder {
         let embed_dim = w_shape.get(1).cloned().unwrap_or(DimExpr::Known(1));
         let mut output_shape = indices.shape().to_vec();
         output_shape.push(embed_dim);
-        let output_type = TensorType::new(output_shape, weight.dtype());
+        let output_type = weight.tensor_type.with_shape(output_shape);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Embedding,
@@ -1717,7 +1701,7 @@ impl GraphBuilder {
     /// Element-wise power.
     pub fn pow(&self, input: &GraphTensor, exponent: &GraphTensor) -> GraphTensor {
         let output_shape = broadcast_shape(&input.tensor_type.shape, &exponent.tensor_type.shape);
-        let output_type = TensorType::new(output_shape, input.tensor_type.dtype.clone());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Pow,
@@ -2023,12 +2007,7 @@ impl GraphBuilder {
     /// Quantize gradient F32 -> F8x4R for storage/communication reduction.
     pub fn quantize_gradient(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
         let output_shape = input.shape().to_vec();
-        let output_type = TensorType::new(
-            output_shape,
-            IrDType::F8R {
-                scales: vec![scale],
-            },
-        );
+        let output_type = TensorType::new(output_shape, IrDType::F8R);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("scale".to_string(), scale.to_string());
         let mut inner = self.inner.borrow_mut();
@@ -2127,7 +2106,7 @@ impl GraphBuilder {
             )));
         }
         let (w, bw) = self.unwrap_quantized_weight(weight);
-        if w.tensor_type().dtype != grad.tensor_type().dtype {
+        if w.tensor_type().dtype() != grad.tensor_type().dtype() {
             return Err(FastnnError::dtype(
                 "SGD weight and gradient dtypes must match after dequantizing packed weights",
             ));
@@ -2204,20 +2183,20 @@ impl GraphBuilder {
                 )));
             }
         }
-        if grad.tensor_type().dtype != weight.tensor_type().dtype {
+        if grad.tensor_type().dtype() != weight.tensor_type().dtype() {
             return Err(FastnnError::dtype(format!(
                 "{operation} gradient dtype does not match weight dtype"
             )));
         }
-        if m.tensor_type().dtype != v.tensor_type().dtype {
+        if m.tensor_type().dtype() != v.tensor_type().dtype() {
             return Err(FastnnError::dtype(format!(
                 "{operation} moment dtypes do not match"
             )));
         }
-        let moment_dtype = &m.tensor_type().dtype;
-        let weight_dtype = &weight.tensor_type().dtype;
+        let moment_dtype = m.tensor_type().dtype();
+        let weight_dtype = weight.tensor_type().dtype();
         if moment_dtype != weight_dtype
-            && !(*weight_dtype == IrDType::F32 && *moment_dtype == IrDType::F16)
+            && !(weight_dtype == IrDType::F32 && moment_dtype == IrDType::F16)
         {
             return Err(FastnnError::dtype(format!(
                 "{operation} moment dtype must match the weight dtype or use F16 state for F32 weights"
@@ -2404,7 +2383,7 @@ impl GraphBuilder {
                     weight.tensor_type().shape
                 )));
             }
-            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
+            if tensor.tensor_type().dtype() != weight.tensor_type().dtype() {
                 return Err(FastnnError::dtype(format!(
                     "Muon {name} dtype does not match weight dtype"
                 )));
@@ -2488,7 +2467,7 @@ impl GraphBuilder {
                     weight.tensor_type().shape
                 )));
             }
-            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
+            if tensor.tensor_type().dtype() != weight.tensor_type().dtype() {
                 return Err(FastnnError::dtype(format!(
                     "Lion {name} dtype does not match weight dtype"
                 )));
@@ -2567,7 +2546,7 @@ impl GraphBuilder {
                     weight.tensor_type().shape
                 )));
             }
-            if tensor.tensor_type().dtype != weight.tensor_type().dtype {
+            if tensor.tensor_type().dtype() != weight.tensor_type().dtype() {
                 return Err(FastnnError::dtype(format!(
                     "RMSprop {name} dtype does not match weight dtype"
                 )));
@@ -2901,21 +2880,27 @@ mod tests {
 
     #[test]
     fn optimizer_bit_width_uses_canonical_affine_storage() {
-        let u4 = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::U4Scaled {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
+        // Construct TensorType with explicit AffineDequantization metadata
+        let u4_rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::U4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.5],
+            vec![-1.0],
+        )
+        .unwrap();
+        let u4_layout = crate::types::TensorStorageLayout {
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
             },
-        );
-        let codebook = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::I4 {
-                scales: vec![1.0],
-                dequant_offsets: vec![],
-                codebooks: vec![[0.0; 16]],
-            },
-        );
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        let u4 = TensorType::from_parts(vec![DimExpr::Known(8)], u4_rep, u4_layout);
+        // I4 with RuntimeAffineQuantization (no static metadata)
+        let codebook = TensorType::new(vec![DimExpr::Known(8)], IrDType::I4);
         let f32 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F32);
         assert_eq!(GraphBuilder::packed_bit_width(&u4), Some(4));
         assert_eq!(GraphBuilder::packed_bit_width(&codebook), None);
@@ -2925,13 +2910,7 @@ mod tests {
     #[test]
     fn reshape_preserves_quantized_tensor_contract() {
         let builder = GraphBuilder::new();
-        let input = builder.input(
-            &[2, 4],
-            IrDType::U4Scaled {
-                scales: vec![0.25, 0.5],
-                dequant_offsets: vec![-1.0, -2.0],
-            },
-        );
+        let input = builder.input(&[2, 4], IrDType::U4Scaled);
         let reshaped = builder.reshape(&input, &[DimExpr::Known(8)]);
 
         assert_eq!(
@@ -2946,22 +2925,32 @@ mod tests {
 
     #[test]
     fn plan_cache_key_includes_quantization_metadata() {
-        fn key(scale: f32, offset: f32) -> u64 {
+        fn key_with_scales(scales: Vec<f32>) -> u64 {
             let builder = GraphBuilder::new();
-            let tensor_type = TensorType::new(
-                vec![DimExpr::Known(8)],
-                IrDType::U4Scaled {
-                    scales: vec![scale],
-                    dequant_offsets: vec![offset],
+            let rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+                crate::types::ScalarType::U4,
+                8,
+                crate::types::QuantizationGranularity::PerTensor,
+                scales,
+                vec![-1.0],
+            )
+            .unwrap();
+            let layout = crate::types::TensorStorageLayout {
+                encoding: crate::types::StorageEncoding::Packed {
+                    word_bits: 32,
+                    lanes: 8,
                 },
-            );
+                row_packed: true,
+                prefix_bytes: 0,
+                suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+            };
+            let tensor_type = TensorType::from_parts(vec![DimExpr::Known(8)], rep, layout);
             builder.constant(&[0, 0, 0, 0], tensor_type);
-            let key = plan_cache_key(&builder.inner.borrow().graph, &[], None).unwrap();
-            key
+            let inner = builder.inner.borrow();
+            plan_cache_key(&inner.graph, &[], None).unwrap()
         }
 
-        assert_ne!(key(0.25, -1.0), key(0.5, -1.0));
-        assert_ne!(key(0.25, -1.0), key(0.25, -2.0));
+        assert_ne!(key_with_scales(vec![0.5]), key_with_scales(vec![1.0]));
     }
 
     /// Create an f32 input tensor of f32 bytes.

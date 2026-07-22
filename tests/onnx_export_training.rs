@@ -253,14 +253,24 @@ fn test_quantized_matmul_export_still_works() {
     let gb = GraphBuilder::new();
     let input = gb.input(&[1, 2], IrDType::F32);
     let weight_shape = vec![DimExpr::Known(2), DimExpr::Known(4)];
-    let weight_tt = TensorType::new(
-        weight_shape,
-        IrDType::I4 {
-            scales: vec![0.1, 0.2, 0.3, 0.4],
-            dequant_offsets: vec![0.0, 0.0, 0.0, 0.0],
-            codebooks: vec![],
+    let rep = fastnn::types::ValueRepresentation::packed_affine_dequantization(
+        fastnn::types::ScalarType::I4,
+        8,
+        fastnn::types::QuantizationGranularity::PerTensor,
+        vec![1.0],
+        vec![-1.0],
+    )
+    .expect("valid affine representation");
+    let layout = fastnn::types::TensorStorageLayout {
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
         },
-    );
+        row_packed: true,
+        prefix_bytes: 0,
+        suffix_bytes: fastnn::types::PACKED_SIMD_MARGIN_BYTES,
+    };
+    let weight_tt = TensorType::from_parts(weight_shape, rep, layout);
     let weight_data = vec![0u8; 80];
     let weight = gb.constant(&weight_data, weight_tt);
     let deq_weight = gb.dequantize(&weight);

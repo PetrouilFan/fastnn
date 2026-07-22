@@ -2636,14 +2636,8 @@ mod execution_storage_size_tests {
 
     #[test]
     fn unsigned_packed_types_use_exact_packed_storage_size() {
-        let u4 = IrDType::U4Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        };
-        let u8 = IrDType::U8Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        };
+        let u4 = IrDType::U4Scaled;
+        let u8 = IrDType::U8Scaled;
 
         for numel in [1, 7, 8, 9, 17, 64] {
             assert_eq!(

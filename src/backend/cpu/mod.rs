@@ -2687,13 +2687,13 @@ impl Backend for CpuBackend {
                         .inputs
                         .first()
                         .and_then(|id| graph.get_node(*id))
-                        .map(|n| n.output_type.dtype.clone())
+                        .map(|n| n.output_type.dtype())
                         .ok_or_else(|| {
                             BackendError::Compilation(format!(
                                 "Cast node {node_id} has no typed input"
                             ))
                         })?;
-                    let out_type = node.output_type.dtype.clone();
+                    let out_type = node.output_type.dtype();
                     if in_type == out_type {
                         if let Some(&input_id) = node.inputs.first() {
                             if let Some(in_slot) = memory_plan.slots.get(&input_id) {

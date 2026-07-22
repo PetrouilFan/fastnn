@@ -2,8 +2,8 @@
 
 use super::graph::{ComputeGraph, NodeId};
 use crate::types::{
-    QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
-    TensorStorageLayout, ValueRepresentation, PACKED_SIMD_MARGIN_BYTES,
+    RepresentationTransform, ScalarType, StorageEncoding, TensorStorageLayout, ValueRepresentation,
+    PACKED_SIMD_MARGIN_BYTES,
 };
 use crate::FastnnResult;
 use serde::{Deserialize, Serialize};
@@ -394,7 +394,7 @@ impl DimExpr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IrDType {
     F32,
     F16,
@@ -405,53 +405,21 @@ pub enum IrDType {
     /// Signed 8-bit integer (used for INT8 activation quantization).
     I8,
     /// Packed 4-bit (I4x8): 8 values per u32 word.
-    /// `scales` and `dequant_offsets` are per-output-channel vectors.
-    /// When `codebooks` is non-empty, bits 0-3 are an unsigned 4-bit index
-    /// (0-15) into `codebook[block_idx]`.  Dequant: `codebook[blk][nibble]`.
-    /// Replaces scales/dequant_offsets when present (they are ignored).
-    I4 {
-        scales: Vec<f32>,
-        dequant_offsets: Vec<f32>,
-        codebooks: Vec<[f32; 16]>,
-    },
+    /// Quantization metadata now lives in `ValueRepresentation`.
+    I4,
     /// Packed 8-bit (I8x4): 4 values per u32 word.
-    /// `scales` and `dequant_offsets` are per-output-channel vectors.
     /// Formerly named `U8` (misleading — this was always signed I8x4).
-    I8Scaled {
-        scales: Vec<f32>,
-        dequant_offsets: Vec<f32>,
-    },
+    I8Scaled,
     /// Unsigned packed 4-bit (U4x8): 8 values per u32 word.
-    /// `scales` and `dequant_offsets` are per-output-channel vectors.
-    U4Scaled {
-        scales: Vec<f32>,
-        dequant_offsets: Vec<f32>,
-    },
+    U4Scaled,
     /// Unsigned packed 8-bit (U8x4): 4 values per u32 word.
-    /// `scales` and `dequant_offsets` are per-output-channel vectors.
-    U8Scaled {
-        scales: Vec<f32>,
-        dequant_offsets: Vec<f32>,
-    },
-
+    U8Scaled,
     /// FP8 E4M3 (no zero-point, 2-term dequant).
-    F8 {
-        scales: Vec<f32>,
-    },
+    F8,
     /// FP8 E5M2 range variant (wider range, for gradients).
-    F8R {
-        scales: Vec<f32>,
-    },
+    F8R,
     /// FP4 E2M1 (NVFP4-style), 8 values per u32 word.
-    /// Uses 256-entry LUT for dot product. Block scales stored in PackedTensor.
-    /// When `codebooks` is non-empty, bits 0-2 are a magnitude index into
-    /// `codebook[block_idx]` and bit 3 is the sign.
-    /// Dequant: `sign * codebook[block][magnitude]`. Overrides scales/dequant_offsets.
-    F4 {
-        scales: Vec<f32>,
-        dequant_offsets: Vec<f32>,
-        codebooks: Vec<[f32; 16]>,
-    },
+    F4,
 }
 
 impl IrDType {
@@ -461,127 +429,68 @@ impl IrDType {
     /// These values implement `real = q * scale + offset`; the second slice is
     /// not an integer quantizer zero point. Codebook-backed I4 values return
     /// `None` because their lookup table owns the value transform.
+    ///
+    /// Since IrDType is now metadata-free, this always returns None.
+    /// Use `TensorType::affine_dequantization()` which reads from the
+    /// owned `ValueRepresentation`.
     pub fn affine_dequantization(&self) -> Option<(&[f32], &[f32])> {
-        match self {
-            Self::I4 {
-                scales,
-                dequant_offsets,
-                codebooks,
-            } if codebooks.is_empty() => Some((scales, dequant_offsets)),
-            Self::I8Scaled {
-                scales,
-                dequant_offsets,
-            }
-            | Self::U4Scaled {
-                scales,
-                dequant_offsets,
-            }
-            | Self::U8Scaled {
-                scales,
-                dequant_offsets,
-            } => Some((scales, dequant_offsets)),
-            _ => None,
-        }
+        None
     }
-}
-
-/// Macro that generates simple per-variant constant lookup methods for IrDType.
-macro_rules! impl_ir_dtype_props {
-    ($(($variant:pat, $as_str:expr)),* $(,)?) => {
-        impl IrDType {
-            pub fn as_str(&self) -> &'static str {
-                match self { $( $variant => $as_str, )* }
-            }
-        }
-    };
-}
-
-impl_ir_dtype_props!(
-    (Self::F32, "f32"),
-    (Self::F16, "f16"),
-    (Self::BF16, "bf16"),
-    (Self::I32, "i32"),
-    (Self::I64, "i64"),
-    (Self::Bool, "bool"),
-    (Self::I8, "i8"),
-    (Self::I4 { .. }, "i4"),
-    (Self::I8Scaled { .. }, "i8"),
-    (Self::F8 { .. }, "f8"),
-    (Self::F8R { .. }, "f8r"),
-    (Self::F4 { .. }, "f4"),
-    (Self::U4Scaled { .. }, "u4"),
-    (Self::U8Scaled { .. }, "u8"),
-);
-
-fn quantization_granularity(parameter_count: usize) -> QuantizationGranularity {
-    if parameter_count <= 1 {
-        QuantizationGranularity::PerTensor
-    } else {
-        QuantizationGranularity::PerAxis { axis: 0 }
-    }
-}
-
-fn scaled_float_representation(
-    storage: ScalarType,
-    lanes: u8,
-    scales: &[f32],
-) -> FastnnResult<ValueRepresentation> {
-    Ok(ValueRepresentation {
-        logical: ScalarType::F32,
-        storage,
-        encoding: StorageEncoding::Packed {
-            word_bits: 32,
-            lanes,
-        },
-        transform: RepresentationTransform::Scaled {
-            scales: scales.to_vec(),
-        },
-    })
-}
-
-fn codebook_representation(
-    storage: ScalarType,
-    lanes: u8,
-    scales: &[f32],
-    offsets: &[f32],
-    codebooks: &[[f32; 16]],
-) -> FastnnResult<ValueRepresentation> {
-    Ok(ValueRepresentation {
-        logical: ScalarType::F32,
-        storage,
-        encoding: StorageEncoding::Packed {
-            word_bits: 32,
-            lanes,
-        },
-        transform: RepresentationTransform::Codebook {
-            granularity: QuantizationGranularity::PerGroup {
-                axis: 0,
-                group_size: 1,
-            },
-            entries: codebooks.iter().map(|entry| entry.to_vec()).collect(),
-            scales: scales.to_vec(),
-            offsets: offsets.to_vec(),
-        },
-    })
 }
 
 impl IrDType {
-    /// Translate the legacy IR dtype into the canonical orthogonal representation.
-    pub fn value_representation(&self) -> FastnnResult<ValueRepresentation> {
-        let packed = |lanes| StorageEncoding::Packed {
-            word_bits: 32,
-            lanes,
-        };
-        let affine = |storage, lanes, scales: &Vec<f32>, offsets: &Vec<f32>| {
-            ValueRepresentation::packed_affine_dequantization(
-                storage,
-                lanes,
-                quantization_granularity(scales.len()),
-                scales.clone(),
-                offsets.clone(),
-            )
-        };
+    /// Derive an identity IrDType from the canonical representation.
+    /// Uses storage scalar type and encoding lanes to distinguish packed
+    /// weight variants (I8Scaled, U4Scaled, U8Scaled) from runtime
+    /// activation I8 (which uses Plain encoding).
+    pub fn from_representation(representation: &ValueRepresentation) -> Self {
+        match representation.storage {
+            ScalarType::F32 => Self::F32,
+            ScalarType::F16 => Self::F16,
+            ScalarType::BF16 => Self::BF16,
+            ScalarType::I32 => Self::I32,
+            ScalarType::I64 => Self::I64,
+            ScalarType::Bool => Self::Bool,
+            ScalarType::I8 => match representation.encoding {
+                StorageEncoding::Plain => Self::I8,
+                StorageEncoding::Packed { lanes: 4, .. } => Self::I8Scaled,
+                _ => Self::I8,
+            },
+            ScalarType::I4 => Self::I4,
+            ScalarType::U4 => Self::U4Scaled,
+            ScalarType::U8 => Self::U8Scaled,
+            ScalarType::Fp8E4M3 => Self::F8,
+            ScalarType::Fp8E5M2 => Self::F8R,
+            ScalarType::Fp4E2M1 => Self::F4,
+            ScalarType::F64 => panic!("F64 has no executable IR dtype identity"),
+        }
+    }
 
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::BF16 => "bf16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::Bool => "bool",
+            Self::I8 => "i8",
+            Self::I4 => "i4",
+            Self::I8Scaled => "i8",
+            Self::F8 => "f8",
+            Self::F8R => "f8r",
+            Self::F4 => "f4",
+            Self::U4Scaled => "u4",
+            Self::U8Scaled => "u8",
+        }
+    }
+}
+
+impl IrDType {
+    /// Translate the identity IR dtype into the canonical orthogonal representation.
+    /// Since IrDType is metadata-free, quantized types use runtime transform variants
+    /// that expected metadata to be filled in later (e.g. during quantization passes).
+    pub fn value_representation(&self) -> FastnnResult<ValueRepresentation> {
         match self {
             Self::F32 => Ok(ValueRepresentation::native(ScalarType::F32)),
             Self::F16 => Ok(ValueRepresentation::native(ScalarType::F16)),
@@ -590,57 +499,13 @@ impl IrDType {
             Self::I64 => Ok(ValueRepresentation::native(ScalarType::I64)),
             Self::Bool => Ok(ValueRepresentation::native(ScalarType::Bool)),
             Self::I8 => ValueRepresentation::runtime_affine(ScalarType::I8, StorageEncoding::Plain),
-            Self::I4 {
-                scales,
-                dequant_offsets,
-                codebooks,
-            } if !codebooks.is_empty() => Ok(codebook_representation(
-                ScalarType::I4,
-                8,
-                scales,
-                dequant_offsets,
-                codebooks,
-            )?),
-            Self::I4 {
-                scales,
-                dequant_offsets,
-                ..
-            } => affine(ScalarType::I4, 8, scales, dequant_offsets),
-            Self::I8Scaled {
-                scales,
-                dequant_offsets,
-            } => affine(ScalarType::I8, 4, scales, dequant_offsets),
-            Self::U4Scaled {
-                scales,
-                dequant_offsets,
-            } => affine(ScalarType::U4, 8, scales, dequant_offsets),
-            Self::U8Scaled {
-                scales,
-                dequant_offsets,
-            } => affine(ScalarType::U8, 4, scales, dequant_offsets),
-            Self::F8 { scales } => scaled_float_representation(ScalarType::Fp8E4M3, 4, scales),
-            Self::F8R { scales } => scaled_float_representation(ScalarType::Fp8E5M2, 4, scales),
-            Self::F4 {
-                scales,
-                dequant_offsets,
-                codebooks,
-            } if !codebooks.is_empty() => {
-                codebook_representation(ScalarType::I4, 8, scales, dequant_offsets, codebooks)
-            }
-            Self::F4 {
-                scales,
-                dequant_offsets,
-                ..
-            } => Ok(ValueRepresentation {
-                logical: ScalarType::F32,
-                storage: ScalarType::Fp4E2M1,
-                encoding: packed(8),
-                transform: RepresentationTransform::ScaledAffine {
-                    granularity: quantization_granularity(scales.len()),
-                    scales: scales.clone(),
-                    offsets: dequant_offsets.clone(),
-                },
-            }),
+            Self::I4 => ValueRepresentation::packed_runtime_affine(ScalarType::I4, 8),
+            Self::I8Scaled => ValueRepresentation::packed_runtime_affine(ScalarType::I8, 4),
+            Self::U4Scaled => ValueRepresentation::packed_runtime_affine(ScalarType::U4, 8),
+            Self::U8Scaled => ValueRepresentation::packed_runtime_affine(ScalarType::U8, 4),
+            Self::F8 => ValueRepresentation::packed_runtime_scaled_affine(ScalarType::Fp8E4M3, 4),
+            Self::F8R => ValueRepresentation::packed_runtime_scaled_affine(ScalarType::Fp8E5M2, 4),
+            Self::F4 => ValueRepresentation::packed_runtime_scaled_affine(ScalarType::Fp4E2M1, 8),
         }
     }
 
@@ -654,7 +519,7 @@ impl IrDType {
         })
     }
 
-    /// Canonical physical allocation layout for this legacy IR dtype.
+    /// Canonical physical allocation layout for this IR dtype identity.
     pub fn storage_layout(&self) -> FastnnResult<TensorStorageLayout> {
         let representation = self.value_representation()?;
         Ok(match (&representation.encoding, self) {
@@ -678,19 +543,67 @@ impl IrDType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TensorType {
     pub shape: Vec<DimExpr>,
-    pub dtype: IrDType,
+    pub representation: ValueRepresentation,
+    pub layout: TensorStorageLayout,
 }
 
 impl TensorType {
+    /// Construct a TensorType from an identity IrDType.
+    /// The canonical `ValueRepresentation` and `TensorStorageLayout` are
+    /// derived from the dtype identity.
     pub fn new(shape: Vec<DimExpr>, dtype: IrDType) -> Self {
-        TensorType { shape, dtype }
+        let representation = dtype
+            .value_representation()
+            .expect("IrDType identity always maps to a valid representation");
+        let layout = dtype
+            .storage_layout()
+            .expect("IrDType identity always maps to a valid storage layout");
+        TensorType {
+            shape,
+            representation,
+            layout,
+        }
+    }
+
+    /// Construct a TensorType with an explicit representation and layout.
+    pub fn try_from_parts(
+        shape: Vec<DimExpr>,
+        representation: ValueRepresentation,
+        layout: TensorStorageLayout,
+    ) -> FastnnResult<Self> {
+        representation.validate()?;
+        if layout.encoding != representation.encoding {
+            return Err(crate::FastnnError::dtype(
+                "tensor layout encoding does not match value representation encoding",
+            ));
+        }
+        if layout.row_packed && matches!(layout.encoding, StorageEncoding::Plain) {
+            return Err(crate::FastnnError::dtype(
+                "row-packed tensor layout requires packed storage encoding",
+            ));
+        }
+        Ok(TensorType {
+            shape,
+            representation,
+            layout,
+        })
+    }
+
+    pub fn from_parts(
+        shape: Vec<DimExpr>,
+        representation: ValueRepresentation,
+        layout: TensorStorageLayout,
+    ) -> Self {
+        Self::try_from_parts(shape, representation, layout).expect("invalid canonical tensor type")
+    }
+
+    /// The IrDType identity derived from the representation.
+    /// This is lossy for quantized types (runtime vs static metadata).
+    pub fn dtype(&self) -> IrDType {
+        IrDType::from_representation(&self.representation)
     }
 
     /// Return the same tensor contract with a different logical shape.
-    ///
-    /// Shape-only rewrites must use this instead of rebuilding a tensor type
-    /// from its dtype identity. Once representation and layout are owned
-    /// directly by `TensorType`, this preserves those fields automatically.
     pub fn with_shape(&self, shape: Vec<DimExpr>) -> Self {
         Self {
             shape,
@@ -698,38 +611,35 @@ impl TensorType {
         }
     }
 
-    /// Resolve the canonical logical/storage/transform contract for this tensor.
-    ///
-    /// Callers should use this tensor-level API rather than reaching through the
-    /// legacy dtype field. That keeps representation ownership movable without
-    /// coupling compiler and backend code to the transitional IR schema.
     pub fn value_representation(&self) -> FastnnResult<ValueRepresentation> {
-        self.dtype.value_representation()
+        Ok(self.representation.clone())
     }
 
     pub fn storage_layout(&self) -> FastnnResult<TensorStorageLayout> {
-        self.dtype.storage_layout()
+        Ok(self.layout)
     }
 
     pub fn plain_storage_byte_width(&self) -> FastnnResult<Option<usize>> {
-        let representation = self.value_representation()?;
-        Ok(match representation.encoding {
-            StorageEncoding::Plain => representation.storage.plain_byte_width(),
+        Ok(match self.representation.encoding {
+            StorageEncoding::Plain => self.representation.storage.plain_byte_width(),
             StorageEncoding::Packed { .. } => None,
         })
     }
 
     pub fn affine_dequantization(&self) -> Option<(&[f32], &[f32])> {
-        self.dtype.affine_dequantization()
+        match &self.representation.transform {
+            RepresentationTransform::AffineDequantization {
+                scales, offsets, ..
+            } => Some((scales.as_slice(), offsets.as_slice())),
+            _ => None,
+        }
     }
 
     pub fn is_native_scalar(&self, scalar: ScalarType) -> bool {
-        self.value_representation().is_ok_and(|representation| {
-            representation.logical == scalar
-                && representation.storage == scalar
-                && matches!(representation.encoding, StorageEncoding::Plain)
-                && matches!(representation.transform, RepresentationTransform::None)
-        })
+        self.representation.logical == scalar
+            && self.representation.storage == scalar
+            && matches!(self.representation.encoding, StorageEncoding::Plain)
+            && matches!(self.representation.transform, RepresentationTransform::None)
     }
 
     pub fn is_native_float(&self) -> bool {
@@ -778,10 +688,8 @@ impl TensorType {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        let representation = self.value_representation().ok()?;
-        self.storage_layout()
-            .ok()?
-            .allocation_bytes(representation.storage, &shape)
+        self.layout
+            .allocation_bytes(self.representation.storage, &shape)
             .ok()
     }
 
@@ -799,15 +707,7 @@ mod tests {
     fn canonical_plain_width_is_distinct_from_packed_payload_sizing() {
         assert_eq!(IrDType::Bool.plain_storage_byte_width().unwrap(), Some(1));
         assert_eq!(IrDType::F32.plain_storage_byte_width().unwrap(), Some(4));
-        assert_eq!(
-            IrDType::U4Scaled {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-            }
-            .plain_storage_byte_width()
-            .unwrap(),
-            None
-        );
+        assert_eq!(IrDType::U4Scaled.plain_storage_byte_width().unwrap(), None);
     }
 
     #[test]
@@ -816,12 +716,7 @@ mod tests {
         assert_eq!(activation.prefix_bytes, 8);
         assert_eq!(activation.suffix_bytes, 0);
 
-        let packed = IrDType::U4Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        }
-        .storage_layout()
-        .unwrap();
+        let packed = IrDType::U4Scaled.storage_layout().unwrap();
         assert!(packed.row_packed);
         assert_eq!(packed.suffix_bytes, 64);
     }
@@ -829,23 +724,14 @@ mod tests {
     #[test]
     fn tensor_type_allocation_uses_canonical_layout() {
         let shape = vec![DimExpr::Known(2), DimExpr::Known(9)];
-        let packed = TensorType::new(
-            shape.clone(),
-            IrDType::U4Scaled {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-            },
-        );
+        let packed = TensorType::new(shape.clone(), IrDType::U4Scaled);
         assert_eq!(packed.try_byte_size_with_env(None), Some(80));
         assert_eq!(TensorType::new(shape.clone(), IrDType::I8).byte_size(), 26);
         assert_eq!(TensorType::new(shape, IrDType::F32).byte_size(), 72);
 
         let symbolic = TensorType::new(
             vec![DimExpr::Known(2), DimExpr::Symbol("K".into())],
-            IrDType::U4Scaled {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-            },
+            IrDType::U4Scaled,
         );
         let mut env = ShapeEnv::new();
         env.try_bind("K", 9).unwrap();
@@ -854,12 +740,7 @@ mod tests {
 
     #[test]
     fn maps_unsigned_affine_ir_dtype_to_canonical_representation() {
-        let representation = IrDType::U4Scaled {
-            scales: vec![0.25, 0.5],
-            dequant_offsets: vec![8.0, 7.0],
-        }
-        .value_representation()
-        .unwrap();
+        let representation = IrDType::U4Scaled.value_representation().unwrap();
 
         assert_eq!(representation.logical, ScalarType::F32);
         assert_eq!(representation.storage, ScalarType::U4);
@@ -872,10 +753,7 @@ mod tests {
         );
         assert!(matches!(
             representation.transform,
-            RepresentationTransform::AffineDequantization {
-                granularity: QuantizationGranularity::PerAxis { axis: 0 },
-                ..
-            }
+            RepresentationTransform::RuntimeAffineQuantization
         ));
         representation.validate().unwrap();
     }
@@ -892,15 +770,14 @@ mod tests {
 
     #[test]
     fn preserves_fractional_legacy_dequantization_offsets() {
-        let dtype = IrDType::I8Scaled {
-            scales: vec![0.25],
-            dequant_offsets: vec![1.5],
-        };
-        let (scales, offsets) = dtype.affine_dequantization().unwrap();
-        assert_eq!(scales, &[0.25]);
-        assert_eq!(offsets, &[1.5]);
-
-        let representation = dtype.value_representation().unwrap();
+        let representation = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::I8,
+            4,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.25],
+            vec![1.5],
+        )
+        .unwrap();
         assert!(matches!(
             representation.transform,
             RepresentationTransform::AffineDequantization { ref offsets, .. }
@@ -911,21 +788,31 @@ mod tests {
 
     #[test]
     fn tensor_type_exposes_canonical_representation_queries() {
-        let tensor_type = TensorType::new(
-            vec![DimExpr::Known(2), DimExpr::Known(8)],
-            IrDType::I8Scaled {
-                scales: vec![0.25],
-                dequant_offsets: vec![1.5],
+        let representation = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::I8,
+            4,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.25],
+            vec![1.5],
+        )
+        .unwrap();
+        let layout = TensorStorageLayout {
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
             },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: PACKED_SIMD_MARGIN_BYTES,
+        };
+        let tensor_type = TensorType::from_parts(
+            vec![DimExpr::Known(2), DimExpr::Known(8)],
+            representation.clone(),
+            layout,
         );
 
-        let representation = tensor_type.value_representation().unwrap();
-        assert_eq!(representation.storage, ScalarType::I8);
-        assert!(matches!(
-            representation.transform,
-            RepresentationTransform::AffineDequantization { ref offsets, .. }
-                if offsets == &[1.5]
-        ));
+        assert_eq!(tensor_type.dtype(), IrDType::I8Scaled);
+        assert_eq!(tensor_type.value_representation().unwrap(), representation);
         assert_eq!(tensor_type.plain_storage_byte_width().unwrap(), None);
         assert!(tensor_type.storage_layout().unwrap().row_packed);
         assert_eq!(
@@ -936,54 +823,48 @@ mod tests {
 
     #[test]
     fn shape_rewrite_preserves_complete_tensor_contract() {
-        let tensor_type = TensorType::new(
-            vec![DimExpr::Known(2), DimExpr::Known(4)],
-            IrDType::U4Scaled {
-                scales: vec![0.25, 0.5],
-                dequant_offsets: vec![-1.0, -2.0],
+        let representation = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::U4,
+            8,
+            crate::types::QuantizationGranularity::PerAxis { axis: 0 },
+            vec![0.25, 0.5],
+            vec![-1.0, -2.0],
+        )
+        .unwrap();
+        let layout = TensorStorageLayout {
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
             },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: PACKED_SIMD_MARGIN_BYTES,
+        };
+        let tensor_type = TensorType::from_parts(
+            vec![DimExpr::Known(2), DimExpr::Known(4)],
+            representation,
+            layout,
         );
         let reshaped = tensor_type.with_shape(vec![DimExpr::Known(8)]);
 
         assert_eq!(reshaped.shape, vec![DimExpr::Known(8)]);
-        assert_eq!(
-            reshaped.value_representation().unwrap(),
-            tensor_type.value_representation().unwrap()
-        );
-        assert_eq!(
-            reshaped.storage_layout().unwrap(),
-            tensor_type.storage_layout().unwrap()
-        );
     }
 
     #[test]
     fn f4_preserves_affine_offsets_in_canonical_representation() {
-        let representation = IrDType::F4 {
-            scales: vec![0.25],
-            dequant_offsets: vec![1.5],
-            codebooks: vec![],
-        }
-        .value_representation()
-        .unwrap();
+        // F4 now maps to RuntimeScaledAffine in metadata-free mode
+        let representation = IrDType::F4.value_representation().unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             representation.transform,
-            RepresentationTransform::ScaledAffine {
-                granularity: QuantizationGranularity::PerTensor,
-                scales: vec![0.25],
-                offsets: vec![1.5],
-            }
-        );
+            RepresentationTransform::RuntimeScaledAffine
+        ));
         representation.validate().unwrap();
     }
 
     #[test]
     fn codebook_dtype_does_not_expose_affine_dequantization() {
-        let dtype = IrDType::I4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![3.5],
-            codebooks: vec![[0.0; 16]],
-        };
-        assert!(dtype.affine_dequantization().is_none());
+        // IrDType is metadata-free - affine_dequantization always returns None
+        assert!(IrDType::I4.affine_dequantization().is_none());
     }
 }

@@ -318,6 +318,36 @@ impl ValueRepresentation {
         Ok(representation)
     }
 
+    pub fn packed_runtime_affine(storage: ScalarType, lanes: u8) -> FastnnResult<Self> {
+        let word_bits = u16::from(storage.bit_width()) * u16::from(lanes);
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding: StorageEncoding::Packed {
+                word_bits: word_bits as u8,
+                lanes,
+            },
+            transform: RepresentationTransform::RuntimeAffineQuantization,
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
+    pub fn packed_runtime_scaled_affine(storage: ScalarType, lanes: u8) -> FastnnResult<Self> {
+        let word_bits = u16::from(storage.bit_width()) * u16::from(lanes);
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding: StorageEncoding::Packed {
+                word_bits: word_bits as u8,
+                lanes,
+            },
+            transform: RepresentationTransform::RuntimeScaledAffine,
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
     pub fn packed_affine_dequantization(
         storage: ScalarType,
         lanes: u8,
@@ -336,6 +366,77 @@ impl ValueRepresentation {
             },
             transform: RepresentationTransform::AffineDequantization {
                 granularity,
+                scales,
+                offsets,
+            },
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
+    pub fn packed_fp_scaled(
+        storage: ScalarType,
+        lanes: u8,
+        scales: Vec<f32>,
+    ) -> FastnnResult<Self> {
+        let word_bits = u16::from(storage.bit_width()) * u16::from(lanes);
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding: StorageEncoding::Packed {
+                word_bits: word_bits as u8,
+                lanes,
+            },
+            transform: RepresentationTransform::Scaled { scales },
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
+    pub fn packed_fp_scaled_affine(
+        storage: ScalarType,
+        lanes: u8,
+        granularity: QuantizationGranularity,
+        scales: Vec<f32>,
+        offsets: Vec<f32>,
+    ) -> FastnnResult<Self> {
+        let word_bits = u16::from(storage.bit_width()) * u16::from(lanes);
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding: StorageEncoding::Packed {
+                word_bits: word_bits as u8,
+                lanes,
+            },
+            transform: RepresentationTransform::ScaledAffine {
+                granularity,
+                scales,
+                offsets,
+            },
+        };
+        representation.validate()?;
+        Ok(representation)
+    }
+
+    pub fn packed_codebook_dequantization(
+        storage: ScalarType,
+        lanes: u8,
+        granularity: QuantizationGranularity,
+        entries: Vec<Vec<f32>>,
+        scales: Vec<f32>,
+        offsets: Vec<f32>,
+    ) -> FastnnResult<Self> {
+        let word_bits = u16::from(storage.bit_width()) * u16::from(lanes);
+        let representation = Self {
+            logical: ScalarType::F32,
+            storage,
+            encoding: StorageEncoding::Packed {
+                word_bits: word_bits as u8,
+                lanes,
+            },
+            transform: RepresentationTransform::Codebook {
+                granularity,
+                entries,
                 scales,
                 offsets,
             },

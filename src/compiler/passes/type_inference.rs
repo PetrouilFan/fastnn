@@ -80,7 +80,7 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             };
 
             let actual = match graph_ref.get_node(input_id) {
-                Some(n) => n.output_type.dtype.clone(),
+                Some(n) => n.output_type.dtype(),
                 None => continue,
             };
 
@@ -282,7 +282,7 @@ mod tests {
         let inserted_id = dq_node.inputs[0];
         let inserted_node = graph.get_node(inserted_id).unwrap();
         assert_eq!(inserted_node.opcode, Opcode::QuantizeActivations);
-        assert_eq!(inserted_node.output_type.dtype, IrDType::I8);
+        assert_eq!(inserted_node.output_type.dtype(), IrDType::I8);
     }
 
     /// Test that type inference inserts DequantizeActivations before
@@ -314,7 +314,7 @@ mod tests {
         let inserted_id = qa_node.inputs[0];
         let inserted_node = graph.get_node(inserted_id).unwrap();
         assert_eq!(inserted_node.opcode, Opcode::DequantizeActivations);
-        assert_eq!(inserted_node.output_type.dtype, IrDType::F32);
+        assert_eq!(inserted_node.output_type.dtype(), IrDType::F32);
     }
 
     /// Test that type inference inserts ToF16 when a ToF16 node
@@ -388,14 +388,7 @@ mod tests {
         let q_id = graph.add_node(
             Opcode::Quantize,
             vec![input_id],
-            TensorType::new(
-                vec![DimExpr::Known(4)],
-                IrDType::I4 {
-                    scales: vec![],
-                    dequant_offsets: vec![],
-                    codebooks: vec![],
-                },
-            ),
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::I4),
         );
         graph.set_inputs(vec![input_id]);
         graph.set_outputs(vec![q_id]);
@@ -430,9 +423,9 @@ mod tests {
         graph.set_inputs(vec![input_id]);
         graph.set_outputs(vec![add_id]);
 
-        let dtype_before = graph.get_node(const_id).unwrap().output_type.dtype.clone();
+        let dtype_before = graph.get_node(const_id).unwrap().output_type.dtype();
         infer_types(&mut graph).unwrap();
-        let dtype_after = graph.get_node(const_id).unwrap().output_type.dtype.clone();
+        let dtype_after = graph.get_node(const_id).unwrap().output_type.dtype();
         assert_eq!(dtype_before, dtype_after);
     }
 }

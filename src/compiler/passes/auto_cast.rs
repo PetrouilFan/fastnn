@@ -196,30 +196,10 @@ mod tests {
 
     #[test]
     fn canonical_transform_classifies_all_quantized_storage_families() {
-        let u4 = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::U4Scaled {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-            },
-        );
-        let f4 = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::F4 {
-                scales: vec![1.0],
-                dequant_offsets: vec![],
-                codebooks: vec![],
-            },
-        );
+        let u4 = TensorType::new(vec![DimExpr::Known(8)], IrDType::U4Scaled);
+        let f4 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F4);
         let f32 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F32);
-        let i4 = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::I4 {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-                codebooks: vec![],
-            },
-        );
+        let i4 = TensorType::new(vec![DimExpr::Known(8)], IrDType::I4);
         assert!(has_transformed_storage(&u4));
         assert!(has_transformed_storage(&f4));
         assert!(!has_transformed_storage(&f32));
@@ -281,7 +261,7 @@ mod tests {
         // Check that the weight Constant now has U4 dtype
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(weight_node.output_type.dtype(), IrDType::I4),
             "weight should be quantized to U4 after auto_cast"
         );
     }
@@ -336,7 +316,7 @@ mod tests {
         // shared_weight should be quantized
         let shared_weight_node = graph.get_node(shared_weight_id).unwrap();
         assert!(
-            matches!(shared_weight_node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(shared_weight_node.output_type.dtype(), IrDType::I4),
             "shared_weight should be quantized"
         );
 
@@ -445,7 +425,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::I8Scaled { .. }),
+            matches!(weight_node.output_type.dtype(), IrDType::I8Scaled),
             "weight should be quantized to U8 after auto_cast with bit_width=8"
         );
     }
@@ -477,7 +457,7 @@ mod tests {
         // All nodes should remain F32
         for node in &graph.nodes {
             assert_eq!(
-                node.output_type.dtype,
+                node.output_type.dtype(),
                 IrDType::F32,
                 "node {} should remain F32",
                 node.id
@@ -561,7 +541,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(weight_node.output_type.dtype(), IrDType::I4),
             "Conv2d weight should be quantized after auto_cast"
         );
     }

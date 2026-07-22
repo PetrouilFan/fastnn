@@ -1185,13 +1185,7 @@ impl<'a> OnnxConverter<'a> {
                 let c_biased = self.graph.add(&c_rounded, &ins[7]);
                 let y_f32 = self.graph.clamp(&c_biased, 0.0, 255.0);
                 // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
-                let y = self.graph.cast_op(
-                    &y_f32,
-                    IrDType::I8Scaled {
-                        scales: vec![],
-                        dequant_offsets: vec![],
-                    },
-                );
+                let y = self.graph.cast_op(&y_f32, IrDType::I8Scaled);
                 self.out(node, y);
             }
             "QLinearConv" => {
@@ -1747,29 +1741,12 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
         // not in the Tensor-level DType. Use default values here; the actual
         // scales are filled in by the quantization compiler pass.
-        DType::I4 => IrDType::I4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-            codebooks: vec![],
-        },
-        DType::I8Scaled => IrDType::I8Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        },
-        DType::F8 => IrDType::F8 { scales: vec![1.0] },
-        DType::F8R => IrDType::F8R { scales: vec![1.0] },
-        DType::F4 => IrDType::F4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![],
-            codebooks: vec![],
-        },
-        DType::U4Scaled => IrDType::U4Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        },
-        DType::U8Scaled => IrDType::U8Scaled {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-        },
+        DType::I4 => IrDType::I4,
+        DType::I8Scaled => IrDType::I8Scaled,
+        DType::F8 => IrDType::F8,
+        DType::F8R => IrDType::F8R,
+        DType::F4 => IrDType::F4,
+        DType::U4Scaled => IrDType::U4Scaled,
+        DType::U8Scaled => IrDType::U8Scaled,
     }
 }

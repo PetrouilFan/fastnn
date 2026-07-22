@@ -1321,7 +1321,7 @@ pub fn build_backward_graph(
         .get_node(loss_node)
         .ok_or("build_backward_graph: loss node not found")?;
     let loss_shape = loss_node_ref.output_type.shape.clone();
-    let loss_dtype = loss_node_ref.output_type.dtype.clone();
+    let loss_dtype = loss_node_ref.output_type.dtype();
 
     // Create constant gradient for the loss (default 1.0, or user-provided grad_output)
     let loss_grad_tensor = match grad_output {
@@ -1734,14 +1734,13 @@ pub fn build_backward_graph(
                                 unsqueeze_shape.push(DimExpr::Known(1));
                             }
                         }
-                        let unsqueeze_type =
-                            TensorType::new(unsqueeze_shape, input_type.dtype.clone());
+                        let unsqueeze_type = input_type.with_shape(unsqueeze_shape);
                         let unsqueezed =
                             grad_graph.add_node(Opcode::Reshape, vec![grad_id], unsqueeze_type);
                         let ones = create_constant_scalar(
                             1.0,
                             &input_type.shape,
-                            input_type.dtype.clone(),
+                            input_type.dtype(),
                             &mut grad_graph,
                         );
                         let expanded = grad_graph.add_node(
@@ -1755,7 +1754,7 @@ pub fn build_backward_graph(
                         let ones = create_constant_scalar(
                             1.0,
                             &input_type.shape,
-                            input_type.dtype.clone(),
+                            input_type.dtype(),
                             &mut grad_graph,
                         );
                         let scaled = grad_graph.add_node(
@@ -1800,7 +1799,7 @@ pub fn build_backward_graph(
                     let inv_n = create_constant_scalar(
                         1.0 / n,
                         &input_type.shape,
-                        input_type.dtype.clone(),
+                        input_type.dtype(),
                         &mut grad_graph,
                     );
                     if input_numel == grad_numel {
@@ -2971,7 +2970,7 @@ pub fn build_backward_graph(
                             let zero_tensor = create_constant_scalar(
                                 0.0f32,
                                 &input_type.shape,
-                                input_type.dtype.clone(),
+                                input_type.dtype(),
                                 &mut grad_graph,
                             );
 
@@ -2980,8 +2979,7 @@ pub fn build_backward_graph(
                             if start > 0 {
                                 let mut slice_shape = input_type.shape.clone();
                                 slice_shape[axis] = DimExpr::Known(start as u64);
-                                let slice_type =
-                                    TensorType::new(slice_shape, input_type.dtype.clone());
+                                let slice_type = input_type.with_shape(slice_shape);
                                 let mut slice_attrs = HashMap::new();
                                 slice_attrs.insert("axis".to_string(), axis.to_string());
                                 slice_attrs.insert("start".to_string(), 0i64.to_string());
@@ -3001,8 +2999,7 @@ pub fn build_backward_graph(
                                 let remaining = full_dim - end;
                                 let mut slice_shape = input_type.shape.clone();
                                 slice_shape[axis] = DimExpr::Known(remaining as u64);
-                                let slice_type =
-                                    TensorType::new(slice_shape, input_type.dtype.clone());
+                                let slice_type = input_type.with_shape(slice_shape);
                                 let mut slice_attrs = HashMap::new();
                                 slice_attrs.insert("axis".to_string(), axis.to_string());
                                 slice_attrs.insert("start".to_string(), end.to_string());
@@ -3088,8 +3085,7 @@ pub fn build_backward_graph(
                                     .insert("end".to_string(), (left + new_size).to_string());
                                 let mut cropped_shape = grad_type.shape.clone();
                                 cropped_shape[dim] = DimExpr::Known(new_size as u64);
-                                let cropped_type =
-                                    TensorType::new(cropped_shape, input_type.dtype.clone());
+                                let cropped_type = input_type.with_shape(cropped_shape);
                                 let cropped =
                                     grad_graph.add_node(Opcode::Slice, vec![current], cropped_type);
                                 if let Some(n) = grad_graph.get_node_mut(cropped) {
@@ -3115,7 +3111,7 @@ pub fn build_backward_graph(
                         let zero = create_constant_scalar(
                             0.0f32,
                             &input_type.shape,
-                            input_type.dtype.clone(),
+                            input_type.dtype(),
                             &mut grad_graph,
                         );
                         let grad_input = grad_graph.add_node(
@@ -3614,7 +3610,7 @@ fn reduce_broadcast_dims(
         if dim < new_shape.len() {
             new_shape.remove(dim);
         }
-        let new_type = TensorType::new(new_shape, grad_node.output_type.dtype.clone());
+        let new_type = grad_node.output_type.with_shape(new_shape);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
         current = grad_graph.add_node_with_attrs(Opcode::ReduceSum, vec![current], new_type, attrs);

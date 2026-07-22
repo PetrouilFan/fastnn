@@ -213,7 +213,7 @@ fn test_different_dtype_graph() {
 
     shape_inference::infer_shapes(&mut graph).unwrap();
     let c_node = graph.get_node(c.node_id()).unwrap();
-    assert_eq!(c_node.output_type.dtype, IrDType::F32);
+    assert_eq!(c_node.output_type.dtype(), IrDType::F32);
 }
 
 #[test]

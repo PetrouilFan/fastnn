@@ -23,7 +23,7 @@ fn compiler_emits_structured_pass_report() {
     assert_eq!(compiled.report.final_nodes, compiled.graph.nodes.len());
     assert_eq!(
         compiled.report.passes.first().unwrap().name,
-        "shape inference"
+        "graph validation"
     );
     assert_eq!(
         compiled.report.passes.last().unwrap().name,

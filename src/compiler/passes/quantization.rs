@@ -172,7 +172,17 @@ pub fn quantize_weights(
         }
 
         // Quantize using PackedTensor and extract raw bytes + metadata.
-        let (packed_bytes, new_dtype) = if bit_width == 4 {
+        let build_storage_layout = || crate::types::TensorStorageLayout {
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: if bit_width == 4 { 8 } else { 4 },
+            },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+
+        if bit_width == 4 {
             if signed {
                 let pt = if let Some(gs) = group_size {
                     PackedTensor::<I4x8>::from_f32_per_channel_asymmetric_grouped(
@@ -184,14 +194,42 @@ pub fn quantize_weights(
                     PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
                 };
                 let bytes = pt.as_bytes().to_vec();
-                (
+                let granularity = if group_size.is_some() {
+                    crate::types::QuantizationGranularity::PerGroup {
+                        axis: 0,
+                        group_size: group_size.unwrap_or(1),
+                    }
+                } else if pt.scales.len() > 1 {
+                    crate::types::QuantizationGranularity::PerAxis { axis: 0 }
+                } else {
+                    crate::types::QuantizationGranularity::PerTensor
+                };
+                let representation =
+                    crate::types::ValueRepresentation::packed_affine_dequantization(
+                        crate::types::ScalarType::I4,
+                        8,
+                        granularity,
+                        pt.scales.clone(),
+                        pt.zeros.clone(),
+                    )
+                    .expect("valid affine representation");
+                let tt = TensorType::from_parts(
+                    orig_shape
+                        .iter()
+                        .map(|&d| DimExpr::Known(d as u64))
+                        .collect(),
+                    representation,
+                    build_storage_layout(),
+                );
+                let new_value = TensorValue::Data {
                     bytes,
-                    IrDType::I4 {
-                        scales: pt.scales,
-                        dequant_offsets: pt.zeros,
-                        codebooks: vec![],
-                    },
-                )
+                    tensor_type: tt.clone(),
+                };
+                if let Some(node_mut) = graph.get_node_mut(const_id) {
+                    node_mut.opcode = Opcode::Constant(new_value);
+                    node_mut.output_type = tt;
+                }
+                continue;
             } else {
                 let pt = if let Some(gs) = group_size {
                     PackedTensor::<U4x8>::from_f32_per_channel_asymmetric_grouped(
@@ -203,13 +241,42 @@ pub fn quantize_weights(
                     PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
                 };
                 let bytes = pt.as_bytes().to_vec();
-                (
+                let granularity = if group_size.is_some() {
+                    crate::types::QuantizationGranularity::PerGroup {
+                        axis: 0,
+                        group_size: group_size.unwrap_or(1),
+                    }
+                } else if pt.scales.len() > 1 {
+                    crate::types::QuantizationGranularity::PerAxis { axis: 0 }
+                } else {
+                    crate::types::QuantizationGranularity::PerTensor
+                };
+                let representation =
+                    crate::types::ValueRepresentation::packed_affine_dequantization(
+                        crate::types::ScalarType::U4,
+                        8,
+                        granularity,
+                        pt.scales.clone(),
+                        pt.zeros.clone(),
+                    )
+                    .expect("valid affine representation");
+                let tt = TensorType::from_parts(
+                    orig_shape
+                        .iter()
+                        .map(|&d| DimExpr::Known(d as u64))
+                        .collect(),
+                    representation,
+                    build_storage_layout(),
+                );
+                let new_value = TensorValue::Data {
                     bytes,
-                    IrDType::U4Scaled {
-                        scales: pt.scales,
-                        dequant_offsets: pt.zeros,
-                    },
-                )
+                    tensor_type: tt.clone(),
+                };
+                if let Some(node_mut) = graph.get_node_mut(const_id) {
+                    node_mut.opcode = Opcode::Constant(new_value);
+                    node_mut.output_type = tt;
+                }
+                continue;
             }
         } else if signed {
             let pt = if let Some(gs) = group_size {
@@ -222,13 +289,40 @@ pub fn quantize_weights(
                 PackedTensor::<I8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
             };
             let bytes = pt.as_bytes().to_vec();
-            (
-                bytes,
-                IrDType::I8Scaled {
-                    scales: pt.scales,
-                    dequant_offsets: pt.zeros,
-                },
+            let granularity = if group_size.is_some() {
+                crate::types::QuantizationGranularity::PerGroup {
+                    axis: 0,
+                    group_size: group_size.unwrap_or(1),
+                }
+            } else if pt.scales.len() > 1 {
+                crate::types::QuantizationGranularity::PerAxis { axis: 0 }
+            } else {
+                crate::types::QuantizationGranularity::PerTensor
+            };
+            let representation = crate::types::ValueRepresentation::packed_affine_dequantization(
+                crate::types::ScalarType::I8,
+                4,
+                granularity,
+                pt.scales.clone(),
+                pt.zeros.clone(),
             )
+            .expect("valid affine representation");
+            let tt = TensorType::from_parts(
+                orig_shape
+                    .iter()
+                    .map(|&d| DimExpr::Known(d as u64))
+                    .collect(),
+                representation,
+                build_storage_layout(),
+            );
+            let new_value = TensorValue::Data {
+                bytes,
+                tensor_type: tt.clone(),
+            };
+            if let Some(node_mut) = graph.get_node_mut(const_id) {
+                node_mut.opcode = Opcode::Constant(new_value);
+                node_mut.output_type = tt;
+            }
         } else {
             let pt = if let Some(gs) = group_size {
                 PackedTensor::<U8x4>::from_f32_per_channel_asymmetric_grouped(
@@ -240,38 +334,41 @@ pub fn quantize_weights(
                 PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&quant_data, &quant_shape)
             };
             let bytes = pt.as_bytes().to_vec();
-            (
-                bytes,
-                IrDType::U8Scaled {
-                    scales: pt.scales,
-                    dequant_offsets: pt.zeros,
-                },
+            let granularity = if group_size.is_some() {
+                crate::types::QuantizationGranularity::PerGroup {
+                    axis: 0,
+                    group_size: group_size.unwrap_or(1),
+                }
+            } else if pt.scales.len() > 1 {
+                crate::types::QuantizationGranularity::PerAxis { axis: 0 }
+            } else {
+                crate::types::QuantizationGranularity::PerTensor
+            };
+            let representation = crate::types::ValueRepresentation::packed_affine_dequantization(
+                crate::types::ScalarType::U8,
+                4,
+                granularity,
+                pt.scales.clone(),
+                pt.zeros.clone(),
             )
+            .expect("valid affine representation");
+            let tt = TensorType::from_parts(
+                orig_shape
+                    .iter()
+                    .map(|&d| DimExpr::Known(d as u64))
+                    .collect(),
+                representation,
+                build_storage_layout(),
+            );
+            let new_value = TensorValue::Data {
+                bytes,
+                tensor_type: tt.clone(),
+            };
+            if let Some(node_mut) = graph.get_node_mut(const_id) {
+                node_mut.opcode = Opcode::Constant(new_value);
+                node_mut.output_type = tt;
+            }
         };
-
-        // Build the new TensorType with packed dtype.
-        // Keep the logical shape as the original [K, N] — the packed data
-        // layout is [N, K] (transposed in Phase 2 above) but validate_shapes
-        // and memory planning rely on the logical [K, N] convention. The
-        // backend compile step reverses to [N, K] for the gemm meta.
-        let new_tensor_type = TensorType {
-            shape: orig_shape
-                .iter()
-                .map(|&d| DimExpr::Known(d as u64))
-                .collect(),
-            dtype: new_dtype,
-        };
-
-        let new_value = TensorValue::Data {
-            bytes: packed_bytes,
-            tensor_type: new_tensor_type.clone(),
-        };
-
-        // Mutate the node in place.
-        if let Some(node_mut) = graph.get_node_mut(const_id) {
-            node_mut.opcode = Opcode::Constant(new_value);
-            node_mut.output_type = new_tensor_type;
-        }
     }
 
     Ok(())
@@ -458,28 +555,92 @@ pub fn quantize_weights_fp(
             _ => unreachable!("integer targets were rejected before graph traversal"),
         };
 
-        let new_dtype = match fp_dtype {
-            QuantTarget::Fp8E4M3 => IrDType::F8 { scales },
-            QuantTarget::Fp8E5M2 => IrDType::F8R { scales },
-            QuantTarget::Fp4E2M1 => IrDType::F4 {
-                scales,
-                dequant_offsets: zeros,
-                codebooks: vec![],
-            },
-            QuantTarget::I4Codebook => IrDType::I4 {
-                scales,
-                dequant_offsets: vec![],
-                codebooks,
-            },
-            _ => unreachable!("integer targets were rejected before graph traversal"),
-        };
+        let shape_dims: Vec<DimExpr> = orig_shape
+            .iter()
+            .map(|&d| DimExpr::Known(d as u64))
+            .collect();
 
-        let new_tensor_type = TensorType {
-            shape: orig_shape
-                .iter()
-                .map(|&d| DimExpr::Known(d as u64))
-                .collect(),
-            dtype: new_dtype,
+        let new_tensor_type = match fp_dtype {
+            QuantTarget::Fp8E4M3 | QuantTarget::Fp8E5M2 => {
+                let lanes = match fp_dtype {
+                    QuantTarget::Fp8E4M3 => 4u8,
+                    _ => 4u8,
+                };
+                let storage = match fp_dtype {
+                    QuantTarget::Fp8E4M3 => crate::types::ScalarType::Fp8E4M3,
+                    _ => crate::types::ScalarType::Fp8E5M2,
+                };
+                let representation =
+                    crate::types::ValueRepresentation::packed_fp_scaled(storage, lanes, scales)
+                        .expect("valid fp scaled representation");
+                let layout = crate::types::TensorStorageLayout {
+                    encoding: crate::types::StorageEncoding::Packed {
+                        word_bits: 32,
+                        lanes,
+                    },
+                    row_packed: true,
+                    prefix_bytes: 0,
+                    suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+                };
+                TensorType::from_parts(shape_dims, representation, layout)
+            }
+            QuantTarget::Fp4E2M1 => {
+                let granularity = if group_size.is_some() {
+                    crate::types::QuantizationGranularity::PerGroup {
+                        axis: 0,
+                        group_size: group_size.unwrap_or(1),
+                    }
+                } else if scales.len() > 1 {
+                    crate::types::QuantizationGranularity::PerAxis { axis: 0 }
+                } else {
+                    crate::types::QuantizationGranularity::PerTensor
+                };
+                let representation = crate::types::ValueRepresentation::packed_fp_scaled_affine(
+                    crate::types::ScalarType::Fp4E2M1,
+                    8,
+                    granularity,
+                    scales,
+                    zeros,
+                )
+                .expect("valid fp scaled affine representation");
+                let layout = crate::types::TensorStorageLayout {
+                    encoding: crate::types::StorageEncoding::Packed {
+                        word_bits: 32,
+                        lanes: 8,
+                    },
+                    row_packed: true,
+                    prefix_bytes: 0,
+                    suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+                };
+                TensorType::from_parts(shape_dims, representation, layout)
+            }
+            QuantTarget::I4Codebook => {
+                let granularity = crate::types::QuantizationGranularity::PerGroup {
+                    axis: 0,
+                    group_size: f4_block_size,
+                };
+                let representation =
+                    crate::types::ValueRepresentation::packed_codebook_dequantization(
+                        crate::types::ScalarType::I4,
+                        8,
+                        granularity,
+                        codebooks.iter().map(|cb| cb.to_vec()).collect(),
+                        scales,
+                        zeros,
+                    )
+                    .expect("valid codebook representation");
+                let layout = crate::types::TensorStorageLayout {
+                    encoding: crate::types::StorageEncoding::Packed {
+                        word_bits: 32,
+                        lanes: 8,
+                    },
+                    row_packed: true,
+                    prefix_bytes: 0,
+                    suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+                };
+                TensorType::from_parts(shape_dims, representation, layout)
+            }
+            _ => unreachable!("integer targets were rejected before graph traversal"),
         };
 
         let new_value = TensorValue::Data {
@@ -609,7 +770,7 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         // 3. Create Quantize node after the optimizer: updated_f32 → updated_u4
         // Carry through the original calibrated scales/zeros so the runtime
         // can skip the O(N×K) per-channel abs-max scan on every optimizer step.
-        let (orig_scales, orig_zeros) = graph
+        let (_orig_scales, _orig_zeros) = graph
             .get_node(wrap.weight_id)
             .map(|wn| match optimizer_affine_metadata(&wn.output_type) {
                 Some((_, scales, offsets)) => (scales, offsets),
@@ -620,15 +781,8 @@ pub fn wrap_quantized_optimizer(graph: &mut ComputeGraph) -> Result<(), FastnnEr
         let u_type = TensorType::new(
             weight_type.shape.clone(),
             match wrap.bit_width {
-                4 => IrDType::I4 {
-                    scales: orig_scales,
-                    dequant_offsets: orig_zeros,
-                    codebooks: vec![],
-                },
-                8 => IrDType::I8Scaled {
-                    scales: orig_scales,
-                    dequant_offsets: orig_zeros,
-                },
+                4 => IrDType::I4,
+                8 => IrDType::I8Scaled,
                 _ => {
                     return Err(FastnnError::compilation(format!(
                         "unsupported bit_width: {}",
@@ -686,27 +840,32 @@ mod tests {
 
     #[test]
     fn optimizer_metadata_uses_canonical_affine_storage() {
-        let tensor_type = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::I4 {
-                scales: vec![0.5],
-                dequant_offsets: vec![-1.0],
-                codebooks: vec![],
+        // Construct TensorType with explicit AffineDequantization metadata
+        let rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::I4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.5],
+            vec![-1.0],
+        )
+        .unwrap();
+        let layout = crate::types::TensorStorageLayout {
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
             },
-        );
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        let tensor_type = TensorType::from_parts(vec![DimExpr::Known(8)], rep, layout);
         assert_eq!(
             optimizer_affine_metadata(&tensor_type),
             Some((4, vec![0.5], vec![-1.0]))
         );
 
-        let codebook = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::I4 {
-                scales: vec![1.0],
-                dequant_offsets: vec![],
-                codebooks: vec![[0.0; 16]],
-            },
-        );
+        // I4 with RuntimeAffineQuantization (no static metadata) returns None
+        let codebook = TensorType::new(vec![DimExpr::Known(8)], IrDType::I4);
         assert_eq!(optimizer_affine_metadata(&codebook), None);
     }
 
@@ -739,7 +898,7 @@ mod tests {
 
         // Find the f32 constant node before quantization.
         let has_f32_const = graph.nodes.iter().any(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::F32))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if tensor_type.dtype() == IrDType::F32)
         });
         assert!(
             has_f32_const,
@@ -751,7 +910,7 @@ mod tests {
 
         // Verify the weight node dtype is now U4.
         let has_u4_const = graph.nodes.iter().any(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::I4 { .. }))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if tensor_type.dtype() == IrDType::I4)
         });
         assert!(
             has_u4_const,
@@ -762,30 +921,25 @@ mod tests {
         // The [2,8] weight is transposed to [8,2] for the packed GEMM convention,
         // resulting in 8 per-channel scales (one per output channel = N dimension).
         let u4_node = graph.nodes.iter().find(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::I4 { .. }))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if tensor_type.dtype() == IrDType::I4)
         }).unwrap();
 
-        if let IrDType::I4 {
-            scales,
-            dequant_offsets,
-            ..
-        } = &u4_node.output_type.dtype
-        {
-            assert_eq!(
-                scales.len(),
-                8,
-                "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])"
-            );
-            assert_eq!(
-                dequant_offsets.len(),
-                8,
-                "Should have 8 per-channel dequant_offsets"
-            );
-            for &s in scales.iter() {
-                assert!(s > 0.0, "Scale should be positive, got {}", s);
-            }
-        } else {
-            panic!("Expected U4 dtype after quantization");
+        let (scales, dequant_offsets) = u4_node
+            .output_type
+            .affine_dequantization()
+            .expect("quantized type should expose affine dequantization");
+        assert_eq!(
+            scales.len(),
+            8,
+            "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])"
+        );
+        assert_eq!(
+            dequant_offsets.len(),
+            8,
+            "Should have 8 per-channel dequant_offsets"
+        );
+        for &s in scales.iter() {
+            assert!(s > 0.0, "Scale should be positive, got {}", s);
         }
     }
 
@@ -799,28 +953,24 @@ mod tests {
         quantize_weights(&mut graph, 8, true, None).expect("quantization should succeed");
 
         let has_u8_const = graph.nodes.iter().any(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::I8Scaled { .. }))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if tensor_type.dtype() == IrDType::I8Scaled)
         });
         assert!(has_u8_const, "Weight should be quantized to U8");
 
         let u8_node = graph.nodes.iter().find(|n| {
-            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if matches!(tensor_type.dtype, IrDType::I8Scaled { .. }))
+            matches!(&n.opcode, Opcode::Constant(TensorValue::Data { tensor_type, .. }) if tensor_type.dtype() == IrDType::I8Scaled)
         }).unwrap();
 
-        if let IrDType::I8Scaled {
-            scales,
-            dequant_offsets,
-        } = &u8_node.output_type.dtype
-        {
-            assert_eq!(
-                scales.len(),
-                8,
-                "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])"
-            );
-            assert_eq!(dequant_offsets.len(), 8);
-        } else {
-            panic!("Expected U8 dtype after quantization");
-        }
+        let (scales, dequant_offsets) = u8_node
+            .output_type
+            .affine_dequantization()
+            .expect("quantized type should expose affine dequantization");
+        assert_eq!(
+            scales.len(),
+            8,
+            "Should have 8 per-channel scales for a [2,8] weight (transposed to [8,2])"
+        );
+        assert_eq!(dequant_offsets.len(), 8);
     }
 
     #[test]
@@ -829,14 +979,7 @@ mod tests {
         let gb = GraphBuilder::new();
         let input = gb.input_with_dims(&[DimExpr::Known(2), DimExpr::Known(4)], IrDType::F32);
         let weight_data: Vec<u8> = vec![0u8; 4]; // dummy packed data
-        let weight_tt = TensorType::new(
-            vec![DimExpr::Known(2), DimExpr::Known(4)],
-            IrDType::I4 {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-                codebooks: vec![],
-            },
-        );
+        let weight_tt = TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(4)], IrDType::I4);
         let weight = gb.constant(&weight_data, weight_tt);
         let _output = gb.matmul(&input, &weight);
         let mut graph = gb.to_graph();
@@ -851,7 +994,7 @@ mod tests {
             .find(|n| matches!(&n.opcode, Opcode::Constant(TensorValue::Data { .. })))
             .unwrap();
         assert!(
-            matches!(node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(node.output_type.dtype(), IrDType::I4),
             "Should still be U4"
         );
     }
@@ -900,7 +1043,7 @@ mod tests {
         let has_u4_weight = compiled_graph
             .nodes
             .iter()
-            .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
+            .any(|n| matches!(n.output_type.dtype(), IrDType::I4));
         assert!(
             has_u4_weight,
             "Compiled graph should contain a U4 weight node"
@@ -975,7 +1118,7 @@ mod tests {
         let u4_weight = compiled_graph
             .nodes
             .iter()
-            .find(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
+            .find(|n| matches!(n.output_type.dtype(), IrDType::I4));
         assert!(u4_weight.is_some(), "Weight should be quantized to U4");
 
         // 2. Dequantize node should exist (inserted by wrap_quantized_optimizer)
@@ -1091,7 +1234,7 @@ mod tests {
         let has_u4 = compiled_graph
             .nodes
             .iter()
-            .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
+            .any(|n| matches!(n.output_type.dtype(), IrDType::I4));
         assert!(has_u4, "Weight should be quantized to U4");
 
         let has_deq = compiled_graph
@@ -1213,15 +1356,28 @@ mod tests {
     #[test]
     fn test_builder_apply_sgd_quantized_weight() {
         let gb = GraphBuilder::new();
-        // Create weight as U4 parameter
-        let w = gb.parameter(
-            &[4, 2],
-            IrDType::I4 {
-                scales: vec![1.0; 4],
-                dequant_offsets: vec![0.0; 4],
-                codebooks: vec![],
+        // Create weight with explicit AffineDequantization metadata
+        let rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::I4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.5],
+            vec![-1.0],
+        )
+        .unwrap();
+        let layout = crate::types::TensorStorageLayout {
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
             },
-        );
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        let weight_tt =
+            TensorType::from_parts(vec![DimExpr::Known(4), DimExpr::Known(2)], rep, layout);
+        // Dummy packed data for 4x2 I4 weight packed into 4 bytes
+        let w = gb.constant(&[0u8; 4], weight_tt);
         // Gradient is F32
         let d_w = gb.parameter(&[4, 2], IrDType::F32);
         // This should auto-wrap with Dequantize/Quantize
@@ -1244,10 +1400,10 @@ mod tests {
             .any(|n| matches!(n.opcode, Opcode::Quantize));
         assert!(has_q, "Builder should insert Quantize after SGD");
 
-        // The output dtype should be U4
+        // The output dtype should be I4
         assert!(
-            matches!(updated.dtype(), IrDType::I4 { .. }),
-            "Updated weight should have U4 dtype, got {:?}",
+            matches!(updated.dtype(), IrDType::I4),
+            "Updated weight should have I4 dtype, got {:?}",
             updated.dtype()
         );
     }

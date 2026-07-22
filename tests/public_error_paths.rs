@@ -1,6 +1,6 @@
 use fastnn::autograd;
 use fastnn::backend::cpu::CpuBackend;
-use fastnn::backend::executor::GraphExecutor;
+
 use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
@@ -826,25 +826,40 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     let matmul_node = graph.get_node(mm_id).unwrap().clone();
     let weight_id = matmul_node.inputs[1];
     let weight_node = graph.get_node_mut(weight_id).unwrap();
-    weight_node.output_type.dtype = IrDType::I8Scaled {
-        scales: vec![],
-        dequant_offsets: vec![],
+    // Corrupt the metadata by using a representation with RuntimeAffineQuantization
+    // (which the backend's canonical_quantized_weight_metadata rejects because
+    // it lacks static dequantization metadata).
+    let bad_rep = fastnn::types::ValueRepresentation {
+        logical: fastnn::types::ScalarType::F32,
+        storage: fastnn::types::ScalarType::I4,
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
+        },
+        transform: fastnn::types::RepresentationTransform::RuntimeAffineQuantization,
     };
+    let bad_layout = fastnn::types::TensorStorageLayout {
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
+        },
+        row_packed: true,
+        prefix_bytes: 0,
+        suffix_bytes: fastnn::types::PACKED_SIMD_MARGIN_BYTES,
+    };
+    weight_node.output_type = TensorType::from_parts(
+        weight_node.output_type.shape.clone(),
+        bad_rep.clone(),
+        bad_layout,
+    );
     if let Opcode::Constant(TensorValue::Data { tensor_type, .. }) = &mut weight_node.opcode {
-        tensor_type.dtype = IrDType::I8Scaled {
-            scales: vec![],
-            dequant_offsets: vec![],
-        };
+        *tensor_type = TensorType::from_parts(tensor_type.shape.clone(), bad_rep, bad_layout);
     }
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
-    let mut plan = CpuBackend
+    let err = CpuBackend
         .compile(&graph, &mem)
-        .expect("compile should succeed");
-    let mut executor = GraphExecutor::new(CpuBackend);
-    let err = executor
-        .execute(&graph, &mut plan, &mem, &[])
-        .expect_err("malformed quantized metadata should return an error");
+        .expect_err("malformed quantized metadata should return an error during compile");
 
     let message = err.to_string();
     assert!(
@@ -955,14 +970,7 @@ fn rank_zero_quantized_weights_fail_cpu_lowering() {
         vec![],
         TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(1)], IrDType::F32),
     );
-    let quantized_type = TensorType::new(
-        vec![],
-        IrDType::I4 {
-            scales: vec![1.0],
-            dequant_offsets: vec![0.0],
-            codebooks: vec![],
-        },
-    );
+    let quantized_type = TensorType::new(vec![], IrDType::I4);
     let weight = graph.add_node(
         Opcode::Constant(TensorValue::Data {
             bytes: vec![0; 4],

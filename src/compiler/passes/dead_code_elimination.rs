@@ -176,25 +176,40 @@ fn shapes_equal(a: &[DimExpr], b: &[DimExpr]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{ComputeGraph, IrDType, Opcode, TensorType};
+    use crate::ir::{ComputeGraph, Opcode, TensorType};
 
     #[test]
     fn cast_with_different_quantization_metadata_is_not_eliminated() {
         let mut graph = ComputeGraph::new();
-        let input_type = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::U4Scaled {
-                scales: vec![0.25],
-                dequant_offsets: vec![-1.0],
+        // Two U4Scaled types with different quantization metadata should
+        // NOT be considered equal by the DCE pass.
+        let input_rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::U4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.5],
+            vec![-1.0],
+        )
+        .unwrap();
+        let output_rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::U4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![1.0],
+            vec![0.0],
+        )
+        .unwrap();
+        let layout = crate::types::TensorStorageLayout {
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
             },
-        );
-        let output_type = TensorType::new(
-            vec![DimExpr::Known(8)],
-            IrDType::U4Scaled {
-                scales: vec![0.5],
-                dequant_offsets: vec![-1.0],
-            },
-        );
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        let input_type = TensorType::from_parts(vec![DimExpr::Known(8)], input_rep, layout);
+        let output_type = TensorType::from_parts(vec![DimExpr::Known(8)], output_rep, layout);
         let input = graph.add_node(Opcode::Input, vec![], input_type);
         let cast = graph.add_node(Opcode::Cast, vec![input], output_type);
 

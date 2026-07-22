@@ -40,12 +40,7 @@ pub fn quantize_gradients(graph: &mut ComputeGraph) -> FastnnResult<()> {
             .map(|n| n.output_type.clone())
             .unwrap_or(TensorType::new(vec![], IrDType::F32));
 
-        let f8x4r_type = TensorType::new(
-            grad_type.shape.clone(),
-            IrDType::F8R {
-                scales: vec![scale],
-            },
-        );
+        let f8x4r_type = TensorType::new(grad_type.shape.clone(), IrDType::F8R);
 
         let mut attrs = HashMap::new();
         attrs.insert("scale".to_string(), scale.to_string());
@@ -140,7 +135,7 @@ mod tests {
         let q_id = deq.inputs[0];
         let q = graph.get_node(q_id).unwrap();
         assert_eq!(q.opcode, Opcode::QuantizeGradient);
-        assert!(matches!(q.output_type.dtype, IrDType::F8R { .. }));
+        assert!(matches!(q.output_type.dtype(), IrDType::F8R));
     }
 
     #[test]
@@ -152,16 +147,23 @@ mod tests {
             .iter()
             .find(|n| matches!(n.opcode, Opcode::QuantizeGradient))
             .unwrap();
-        match q.output_type.value_representation().unwrap().transform {
-            crate::types::RepresentationTransform::Scaled { scales } => {
-                assert_eq!(scales.len(), 1, "F8R should have one scale");
-                assert!(
-                    (scales[0] - 1.0).abs() < 1e-6,
-                    "Default scale should be 1.0"
-                );
-            }
-            transform => panic!("Expected scaled F8R representation, got {transform:?}"),
-        }
+        // F8R now uses RuntimeScaledAffine (scale is a node attribute, not static in representation)
+        assert!(
+            matches!(
+                q.output_type.value_representation().unwrap().transform,
+                crate::types::RepresentationTransform::RuntimeScaledAffine
+            ),
+            "Expected RuntimeScaledAffine for F8R"
+        );
+        // The scale is stored as a node attribute
+        let scale_attr = q
+            .attrs
+            .get("scale")
+            .expect("QuantizeGradient should have scale attr");
+        assert!(
+            (scale_attr.parse::<f32>().unwrap() - 1.0).abs() < 1e-6,
+            "Default scale should be 1.0"
+        );
     }
 
     #[test]
@@ -173,7 +175,7 @@ mod tests {
             .iter()
             .find(|n| matches!(n.opcode, Opcode::DequantizeGradient))
             .unwrap();
-        assert_eq!(dq.output_type.dtype, IrDType::F32);
+        assert_eq!(dq.output_type.dtype(), IrDType::F32);
     }
 
     #[test]

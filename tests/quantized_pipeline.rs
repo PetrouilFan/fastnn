@@ -399,24 +399,22 @@ fn test_graph_builder_compile_with_quantize() {
     let has_u4 = u4_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I4));
     assert!(has_u4, "U4-compiled graph should contain a U4 weight node");
 
     let (_, _, u8_graph) = result_u8.unwrap();
     let has_u8 = u8_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::I8Scaled { .. }));
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I8Scaled));
     assert!(has_u8, "U8-compiled graph should contain a U8 weight node");
 
     // No-quantize graph should have no U4/U8 nodes
     let (_, _, f32_graph) = result_no_q.unwrap();
-    let has_packed = f32_graph.nodes.iter().any(|n| {
-        matches!(
-            &n.output_type.dtype,
-            IrDType::I4 { .. } | IrDType::I8Scaled { .. }
-        )
-    });
+    let has_packed = f32_graph
+        .nodes
+        .iter()
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I4 | IrDType::I8Scaled));
     assert!(
         !has_packed,
         "f32-compiled graph should not contain packed weight nodes"
@@ -622,12 +620,14 @@ fn test_matmul_u4_i8_dispatch_path() {
 
     let mm_node = graph.get_node(mm_id).unwrap();
     let packed_weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    let (scales, dequant_offsets) = match &packed_weight_node.output_type.dtype {
-        IrDType::I4 {
-            scales,
-            dequant_offsets,
-            ..
-        } => (scales.clone(), dequant_offsets.clone()),
+    let (scales, dequant_offsets) = match packed_weight_node.output_type.dtype() {
+        IrDType::I4 => {
+            let (scales, dequant_offsets) = packed_weight_node
+                .output_type
+                .affine_dequantization()
+                .expect("I4 tensor type should expose affine dequantization");
+            (scales.to_vec(), dequant_offsets.to_vec())
+        }
         other => panic!("expected U4 weight node, got {:?}", other),
     };
     let raw_bytes = match &packed_weight_node.opcode {
@@ -1001,10 +1001,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     let act_node = graph.get_node(mm_node.inputs[0]).unwrap();
     assert_eq!(act_node.opcode, Opcode::QuantizeActivations);
     let weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    assert!(matches!(
-        weight_node.output_type.dtype,
-        IrDType::I8Scaled { .. }
-    ));
+    assert!(matches!(weight_node.output_type.dtype(), IrDType::I8Scaled));
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
     let mut plan = CpuBackend.compile(&graph, &mem).unwrap();

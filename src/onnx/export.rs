@@ -769,21 +769,8 @@ mod tests {
 
     #[test]
     fn packed_param_dtype_uses_canonical_storage_identity() {
-        let i4 = TensorType::new(
-            vec![crate::ir::DimExpr::Known(8)],
-            IrDType::I4 {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-                codebooks: vec![],
-            },
-        );
-        let u4 = TensorType::new(
-            vec![crate::ir::DimExpr::Known(8)],
-            IrDType::U4Scaled {
-                scales: vec![1.0],
-                dequant_offsets: vec![0.0],
-            },
-        );
+        let i4 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::I4);
+        let u4 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::U4Scaled);
         let f32 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::F32);
         assert_eq!(packed_param_dtype(&i4), Some("i4"));
         assert_eq!(packed_param_dtype(&u4), Some("u4"));

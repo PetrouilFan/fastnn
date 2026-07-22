@@ -2256,7 +2256,7 @@ impl AotExecutor {
                 ));
                 out.push_str(&format!(
                     "    output_type: shape={:?}, dtype={:?}\n",
-                    node.output_type.shape, node.output_type.dtype
+                    node.output_type.shape, node.output_type.dtype()
                 ));
                 if !node.attrs.is_empty() {
                     out.push_str(&format!("    attrs: {:?}\n", node.attrs));
