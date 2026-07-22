@@ -281,7 +281,7 @@ macro_rules! impl_binary_op {
     ($method:ident, $opcode:ident) => {
         pub fn $method(&self, a: &GraphTensor, b: &GraphTensor) -> GraphTensor {
             let output_shape = broadcast_shape(&a.tensor_type.shape, &b.tensor_type.shape);
-            let output_type = TensorType::new(output_shape, a.tensor_type.dtype.clone());
+            let output_type = a.tensor_type.with_shape(output_shape);
             let mut inner = self.inner.borrow_mut();
             let node_id = inner.graph.add_node(
                 Opcode::$opcode,

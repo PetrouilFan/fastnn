@@ -686,6 +686,18 @@ impl TensorType {
         TensorType { shape, dtype }
     }
 
+    /// Return the same tensor contract with a different logical shape.
+    ///
+    /// Shape-only rewrites must use this instead of rebuilding a tensor type
+    /// from its dtype identity. Once representation and layout are owned
+    /// directly by `TensorType`, this preserves those fields automatically.
+    pub fn with_shape(&self, shape: Vec<DimExpr>) -> Self {
+        Self {
+            shape,
+            ..self.clone()
+        }
+    }
+
     /// Resolve the canonical logical/storage/transform contract for this tensor.
     ///
     /// Callers should use this tensor-level API rather than reaching through the
@@ -904,6 +916,28 @@ mod tests {
         assert_eq!(
             tensor_type.affine_dequantization(),
             Some((&[0.25][..], &[1.5][..]))
+        );
+    }
+
+    #[test]
+    fn shape_rewrite_preserves_complete_tensor_contract() {
+        let tensor_type = TensorType::new(
+            vec![DimExpr::Known(2), DimExpr::Known(4)],
+            IrDType::U4Scaled {
+                scales: vec![0.25, 0.5],
+                dequant_offsets: vec![-1.0, -2.0],
+            },
+        );
+        let reshaped = tensor_type.with_shape(vec![DimExpr::Known(8)]);
+
+        assert_eq!(reshaped.shape, vec![DimExpr::Known(8)]);
+        assert_eq!(
+            reshaped.value_representation().unwrap(),
+            tensor_type.value_representation().unwrap()
+        );
+        assert_eq!(
+            reshaped.storage_layout().unwrap(),
+            tensor_type.storage_layout().unwrap()
         );
     }
 
