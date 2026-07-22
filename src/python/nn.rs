@@ -2378,9 +2378,8 @@ impl AotExecutor {
                 }
                 _ => (vec![], vec![]),
             };
-            let ir_dtype = output_node.output_type.dtype.clone();
             let dtype: crate::storage::DType =
-                crate::tensor::ir_to_dtype(ir_dtype).map_err(PyErr::from)?;
+                crate::tensor::representation_to_dtype(&representation).map_err(PyErr::from)?;
             let runtime_shape = self.executor.last_output_shapes().get(*idx).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "AotExecutor: runtime output shape {idx} is missing"

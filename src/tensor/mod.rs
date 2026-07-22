@@ -3,9 +3,10 @@ use crate::backend::cpu::CpuBackend;
 use crate::backend::BackendError;
 use crate::error::{FastnnError, FastnnResult};
 use crate::ir::builder::GraphBuilder;
-use crate::ir::{DimExpr, IrDType};
+use crate::ir::{DimExpr, IrDType, TensorType};
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
+use crate::types::{RepresentationTransform, ScalarType, ValueRepresentation};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1282,29 +1283,37 @@ pub fn dtype_to_ir(dt: DType) -> FastnnResult<IrDType> {
     })
 }
 
-pub fn ir_to_dtype(idt: IrDType) -> FastnnResult<DType> {
-    Ok(match idt {
-        IrDType::F32 => DType::F32,
-        IrDType::F16 => DType::F16,
-        IrDType::BF16 => DType::BF16,
-        IrDType::I32 => DType::I32,
-        IrDType::I64 => DType::I64,
-        IrDType::Bool => DType::Bool,
-        IrDType::I8 => {
-            return Err(FastnnError::dtype(
-                "runtime activation I8 is not a Tensor-level dtype",
-            ))
-        }
-        // Packed types round-trip back to simple DType variants. Per-channel metadata
-        // stays in the IR node; Tensor-level storage uses the packed dtype.
-        IrDType::I4 { .. } => DType::I4,
-        IrDType::I8Scaled { .. } => DType::I8Scaled,
-        IrDType::F8 { .. } => DType::F8,
-        IrDType::F8R { .. } => DType::F8R,
-        IrDType::F4 { .. } => DType::F4,
-        IrDType::U4Scaled { .. } => DType::U4Scaled,
-        IrDType::U8Scaled { .. } => DType::U8Scaled,
+pub fn representation_to_dtype(representation: &ValueRepresentation) -> FastnnResult<DType> {
+    representation.validate()?;
+    if matches!(
+        representation.transform,
+        RepresentationTransform::RuntimeAffineQuantization
+            | RepresentationTransform::RuntimeScaledAffine
+    ) {
+        return Err(FastnnError::dtype(
+            "runtime-described quantization is not a Tensor-level dtype",
+        ));
+    }
+    Ok(match representation.storage {
+        ScalarType::F64 => DType::F64,
+        ScalarType::F32 => DType::F32,
+        ScalarType::F16 => DType::F16,
+        ScalarType::BF16 => DType::BF16,
+        ScalarType::I64 => DType::I64,
+        ScalarType::I32 => DType::I32,
+        ScalarType::Bool => DType::Bool,
+        ScalarType::I4 => DType::I4,
+        ScalarType::I8 => DType::I8Scaled,
+        ScalarType::U4 => DType::U4Scaled,
+        ScalarType::U8 => DType::U8Scaled,
+        ScalarType::Fp4E2M1 => DType::F4,
+        ScalarType::Fp8E4M3 => DType::F8,
+        ScalarType::Fp8E5M2 => DType::F8R,
     })
+}
+
+pub fn tensor_type_to_dtype(tensor_type: &TensorType) -> FastnnResult<DType> {
+    representation_to_dtype(&tensor_type.value_representation()?)
 }
 
 impl Tensor {
@@ -1380,7 +1389,7 @@ impl Tensor {
                         _ => unreachable!("AOT bridge: graph op output has concrete shape"),
                     })
                     .collect();
-                let dt = ir_to_dtype(gt.dtype())
+                let dt = tensor_type_to_dtype(gt.tensor_type())
                     .map_err(|error| BackendError::Compilation(error.to_string()))?;
                 let numel: usize = shape.iter().map(|&s| s as usize).product();
                 let expected_bytes = dt.storage_bytes(numel);
@@ -1407,6 +1416,45 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::QuantizationGranularity;
+
+    #[test]
+    fn canonical_representation_maps_to_eager_storage_dtype() {
+        let u4 = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::U4,
+            8,
+            QuantizationGranularity::PerTensor,
+            vec![0.25],
+            vec![-1.0],
+        )
+        .unwrap();
+        assert_eq!(representation_to_dtype(&u4).unwrap(), DType::U4Scaled);
+
+        let f8 = ValueRepresentation {
+            logical: ScalarType::F32,
+            storage: ScalarType::Fp8E4M3,
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+            transform: RepresentationTransform::Scaled { scales: vec![1.0] },
+        };
+        assert_eq!(representation_to_dtype(&f8).unwrap(), DType::F8);
+    }
+
+    #[test]
+    fn runtime_quantization_is_not_an_eager_storage_dtype() {
+        let runtime = ValueRepresentation::runtime_affine(
+            ScalarType::I8,
+            crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+        )
+        .unwrap();
+        let error = representation_to_dtype(&runtime).unwrap_err();
+        assert!(error.to_string().contains("runtime-described quantization"));
+    }
 
     #[test]
     fn test_cat_dim0() {

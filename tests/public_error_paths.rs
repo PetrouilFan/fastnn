@@ -9,7 +9,7 @@ use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::storage::{CpuStorage, DType, Device, Storage};
-use fastnn::tensor::{dtype_to_ir, ir_to_dtype, Tensor, TensorImpl};
+use fastnn::tensor::{dtype_to_ir, tensor_type_to_dtype, Tensor, TensorImpl};
 use std::sync::Arc;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
@@ -188,9 +188,10 @@ fn invalid_graph_quantization_width_returns_error() {
 
 #[test]
 fn runtime_activation_dtype_cannot_escape_to_eager_tensor() {
-    let error = ir_to_dtype(IrDType::I8)
+    let tensor_type = TensorType::new(vec![DimExpr::Known(4)], IrDType::I8);
+    let error = tensor_type_to_dtype(&tensor_type)
         .expect_err("runtime activation dtype must not become an eager tensor dtype");
-    assert!(error.to_string().contains("not a Tensor-level dtype"));
+    assert!(error.to_string().contains("runtime-described quantization"));
 }
 
 #[test]
