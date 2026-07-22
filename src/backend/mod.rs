@@ -54,16 +54,23 @@ pub enum ZeroPointCorrection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequantizationMode {
     None,
+    FixedPoint {
+        multiplier: i32,
+        right_shift: u8,
+        output_zero_point: i32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoundingMode {
     NotApplicable,
+    NearestTiesToEven,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SaturationMode {
     None,
+    Clamp { min: i32, max: i32 },
 }
 
 /// Numerical semantics selected for a quantized kernel invocation.
@@ -81,6 +88,80 @@ pub struct QuantizedExecutionContract {
 }
 
 impl QuantizedExecutionContract {
+    pub fn fixed_point_output(
+        activation_storage: ScalarType,
+        weight_storage: ScalarType,
+        bias_domain: BiasDomain,
+        multiplier: i32,
+        right_shift: u8,
+        output_zero_point: i32,
+        output_storage: ScalarType,
+    ) -> Self {
+        let (min, max) = match output_storage {
+            ScalarType::I8 => (i8::MIN as i32, i8::MAX as i32),
+            ScalarType::U8 => (u8::MIN as i32, u8::MAX as i32),
+            _ => (i32::MIN, i32::MAX),
+        };
+        Self {
+            activation_storage,
+            weight_storage,
+            accumulator: ScalarType::I32,
+            bias_domain,
+            zero_point_correction: ZeroPointCorrection::AffineInputAndWeight,
+            requantization: RequantizationMode::FixedPoint {
+                multiplier,
+                right_shift,
+                output_zero_point,
+            },
+            rounding: RoundingMode::NearestTiesToEven,
+            saturation: SaturationMode::Clamp { min, max },
+            output_storage,
+        }
+    }
+
+    pub fn requantize_i32(&self, accumulator: i32) -> Result<i32, BackendError> {
+        let RequantizationMode::FixedPoint {
+            multiplier,
+            right_shift,
+            output_zero_point,
+        } = self.requantization
+        else {
+            return Err(BackendError::Dispatch(
+                "quantized execution contract has no integer requantization".into(),
+            ));
+        };
+        let SaturationMode::Clamp { min, max } = self.saturation else {
+            return Err(BackendError::Dispatch(
+                "integer requantization requires an explicit saturation range".into(),
+            ));
+        };
+        if !matches!(self.rounding, RoundingMode::NearestTiesToEven) {
+            return Err(BackendError::Dispatch(
+                "integer requantization requires an explicit rounding mode".into(),
+            ));
+        }
+        if multiplier <= 0 || right_shift > 31 || min > max {
+            return Err(BackendError::Dispatch(
+                "integer requantization parameters are invalid".into(),
+            ));
+        }
+
+        let divisor = 1i64 << right_shift;
+        let product = i64::from(accumulator) * i64::from(multiplier);
+        let quotient = product.div_euclid(divisor);
+        let remainder = product.rem_euclid(divisor);
+        let half = divisor / 2;
+        let rounded = if remainder > half || (remainder == half && quotient & 1 != 0) {
+            quotient + 1
+        } else {
+            quotient
+        };
+        let shifted = rounded
+            .checked_add(i64::from(output_zero_point))
+            .ok_or_else(|| BackendError::Dispatch("requantized output overflow".into()))?;
+        Ok(shifted.clamp(i64::from(min), i64::from(max)) as i32)
+    }
+
     pub fn current_for_kernel(kernel_name: &str, bit_width: usize, has_bias: bool) -> Self {
         let activation_storage = if kernel_name.ends_with("_i8") {
             ScalarType::I8
@@ -148,14 +229,46 @@ impl QuantizedExecutionContract {
                 )))
             }
         }
-        if self.output_storage != ScalarType::F32
-            || !matches!(self.requantization, RequantizationMode::None)
-            || !matches!(self.rounding, RoundingMode::NotApplicable)
-            || !matches!(self.saturation, SaturationMode::None)
-        {
-            return Err(BackendError::Dispatch(format!(
+        match self.output_storage {
+            ScalarType::F32
+                if matches!(self.requantization, RequantizationMode::None)
+                    && matches!(self.rounding, RoundingMode::NotApplicable)
+                    && matches!(self.saturation, SaturationMode::None) => {}
+            ScalarType::I8 | ScalarType::U8 if self.accumulator == ScalarType::I32 => {
+                let RequantizationMode::FixedPoint {
+                    multiplier,
+                    right_shift,
+                    output_zero_point,
+                } = self.requantization
+                else {
+                    return Err(BackendError::Dispatch(format!(
+                        "instruction {instruction_index} integer output requires fixed-point requantization"
+                    )));
+                };
+                let expected_range = if self.output_storage == ScalarType::I8 {
+                    (i8::MIN as i32, i8::MAX as i32)
+                } else {
+                    (u8::MIN as i32, u8::MAX as i32)
+                };
+                if multiplier <= 0
+                    || right_shift > 31
+                    || !matches!(self.rounding, RoundingMode::NearestTiesToEven)
+                    || !matches!(
+                        self.saturation,
+                        SaturationMode::Clamp { min, max } if (min, max) == expected_range
+                    )
+                    || !expected_range.0.le(&output_zero_point)
+                    || !output_zero_point.le(&expected_range.1)
+                    || matches!(self.bias_domain, BiasDomain::FloatOutput)
+                {
+                    return Err(BackendError::Dispatch(format!(
+                        "instruction {instruction_index} has invalid integer requantization semantics"
+                    )));
+                }
+            }
+            _ => return Err(BackendError::Dispatch(format!(
                 "instruction {instruction_index} requests an unsupported quantized output contract"
-            )));
+            ))),
         }
         Ok(())
     }
@@ -728,6 +841,43 @@ mod executable_plan_validation_tests {
 
         assert!(integer.validate_for_kernel(0, "matmul_i4_i8").is_ok());
         assert!(integer.validate_for_kernel(0, "matmul_i4").is_err());
+    }
+
+    #[test]
+    fn fixed_point_requantization_rounds_ties_to_even_and_saturates() {
+        let contract = QuantizedExecutionContract::fixed_point_output(
+            ScalarType::I8,
+            ScalarType::U4,
+            BiasDomain::I32Accumulator,
+            1,
+            1,
+            0,
+            ScalarType::I8,
+        );
+        assert!(contract.validate(0).is_ok());
+        assert_eq!(contract.requantize_i32(1).unwrap(), 0);
+        assert_eq!(contract.requantize_i32(3).unwrap(), 2);
+        assert_eq!(contract.requantize_i32(-1).unwrap(), 0);
+        assert_eq!(contract.requantize_i32(-3).unwrap(), -2);
+        assert_eq!(contract.requantize_i32(10_000).unwrap(), i8::MAX as i32);
+        assert_eq!(contract.requantize_i32(-10_000).unwrap(), i8::MIN as i32);
+    }
+
+    #[test]
+    fn fixed_point_requantization_applies_output_zero_point() {
+        let contract = QuantizedExecutionContract::fixed_point_output(
+            ScalarType::I8,
+            ScalarType::U8,
+            BiasDomain::None,
+            1,
+            0,
+            128,
+            ScalarType::U8,
+        );
+        assert!(contract.validate(0).is_ok());
+        assert_eq!(contract.requantize_i32(-200).unwrap(), u8::MIN as i32);
+        assert_eq!(contract.requantize_i32(0).unwrap(), 128);
+        assert_eq!(contract.requantize_i32(200).unwrap(), u8::MAX as i32);
     }
 
     #[test]
