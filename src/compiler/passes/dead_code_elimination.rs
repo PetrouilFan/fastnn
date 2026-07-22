@@ -90,10 +90,10 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
             }
 
             Opcode::Cast => {
-                // Identity cast: input dtype matches output dtype
+                // Identity cast: the complete input/output tensor contracts match.
                 node.inputs.first().copied().and_then(|inp_id| {
                     let input_node = graph_ref.get_node(inp_id)?;
-                    if input_node.output_type.dtype == node.output_type.dtype {
+                    if input_node.output_type == node.output_type {
                         Some(inp_id)
                     } else {
                         None
@@ -171,4 +171,34 @@ fn shapes_equal(a: &[DimExpr], b: &[DimExpr]) -> bool {
             (Some(va), Some(vb)) => va == vb,
             _ => da == db,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{ComputeGraph, IrDType, Opcode, TensorType};
+
+    #[test]
+    fn cast_with_different_quantization_metadata_is_not_eliminated() {
+        let mut graph = ComputeGraph::new();
+        let input_type = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::U4Scaled {
+                scales: vec![0.25],
+                dequant_offsets: vec![-1.0],
+            },
+        );
+        let output_type = TensorType::new(
+            vec![DimExpr::Known(8)],
+            IrDType::U4Scaled {
+                scales: vec![0.5],
+                dequant_offsets: vec![-1.0],
+            },
+        );
+        let input = graph.add_node(Opcode::Input, vec![], input_type);
+        let cast = graph.add_node(Opcode::Cast, vec![input], output_type);
+
+        assert_eq!(eliminate_noops(&mut graph), 0);
+        assert!(graph.get_node(cast).is_some());
+    }
 }

@@ -80,10 +80,26 @@ fn plan_cache_key(
                     v.hash(&mut hasher);
                 }
             }
+            // Hash the complete tensor contract. Quantization transforms and
+            // storage layout affect lowering even when the legacy dtype
+            // discriminant and logical shape are identical.
+            bincode::serialize(&node.output_type)
+                .map_err(|error| {
+                    BackendError::Compilation(format!(
+                        "failed to serialize tensor type for plan cache key: {error}"
+                    ))
+                })?
+                .hash(&mut hasher);
             // Hash constant data bytes to distinguish different weight values
             if let Opcode::Constant(TensorValue::Data { bytes, tensor_type }) = &node.opcode {
                 bytes.hash(&mut hasher);
-                std::mem::discriminant(&tensor_type.dtype).hash(&mut hasher);
+                bincode::serialize(tensor_type)
+                    .map_err(|error| {
+                        BackendError::Compilation(format!(
+                            "failed to serialize constant tensor type for plan cache key: {error}"
+                        ))
+                    })?
+                    .hash(&mut hasher);
             }
         }
     }
@@ -2926,6 +2942,26 @@ mod tests {
             reshaped.tensor_type().storage_layout().unwrap(),
             input.tensor_type().storage_layout().unwrap()
         );
+    }
+
+    #[test]
+    fn plan_cache_key_includes_quantization_metadata() {
+        fn key(scale: f32, offset: f32) -> u64 {
+            let builder = GraphBuilder::new();
+            let tensor_type = TensorType::new(
+                vec![DimExpr::Known(8)],
+                IrDType::U4Scaled {
+                    scales: vec![scale],
+                    dequant_offsets: vec![offset],
+                },
+            );
+            builder.constant(&[0, 0, 0, 0], tensor_type);
+            let key = plan_cache_key(&builder.inner.borrow().graph, &[], None).unwrap();
+            key
+        }
+
+        assert_ne!(key(0.25, -1.0), key(0.5, -1.0));
+        assert_ne!(key(0.25, -1.0), key(0.25, -2.0));
     }
 
     /// Create an f32 input tensor of f32 bytes.
