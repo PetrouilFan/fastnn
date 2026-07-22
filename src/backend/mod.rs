@@ -88,6 +88,50 @@ pub struct QuantizedExecutionContract {
 }
 
 impl QuantizedExecutionContract {
+    pub fn affine_i32_accumulate(
+        activations: &[i8],
+        weights: &[i32],
+        activation_zero_point: i32,
+        weight_zero_point: i32,
+        bias: i32,
+    ) -> Result<i32, BackendError> {
+        if activations.len() != weights.len() {
+            return Err(BackendError::Dispatch(
+                "integer affine accumulation input lengths differ".into(),
+            ));
+        }
+        let mut raw_dot = 0i64;
+        let mut activation_sum = 0i64;
+        let mut weight_sum = 0i64;
+        for (&activation, &weight) in activations.iter().zip(weights) {
+            let activation = i64::from(activation);
+            let weight = i64::from(weight);
+            raw_dot = raw_dot
+                .checked_add(activation.checked_mul(weight).ok_or_else(|| {
+                    BackendError::Dispatch("integer affine dot product overflow".into())
+                })?)
+                .ok_or_else(|| {
+                    BackendError::Dispatch("integer affine dot product overflow".into())
+                })?;
+            activation_sum = activation_sum
+                .checked_add(activation)
+                .ok_or_else(|| BackendError::Dispatch("integer activation sum overflow".into()))?;
+            weight_sum = weight_sum
+                .checked_add(weight)
+                .ok_or_else(|| BackendError::Dispatch("integer weight sum overflow".into()))?;
+        }
+        let activation_zero_point = i64::from(activation_zero_point);
+        let weight_zero_point = i64::from(weight_zero_point);
+        let count = i64::try_from(activations.len())
+            .map_err(|_| BackendError::Dispatch("integer reduction length overflow".into()))?;
+        let corrected =
+            raw_dot - weight_zero_point * activation_sum - activation_zero_point * weight_sum
+                + count * activation_zero_point * weight_zero_point
+                + i64::from(bias);
+        i32::try_from(corrected)
+            .map_err(|_| BackendError::Dispatch("integer accumulator overflow".into()))
+    }
+
     pub fn fixed_point_output(
         activation_storage: ScalarType,
         weight_storage: ScalarType,
@@ -266,9 +310,11 @@ impl QuantizedExecutionContract {
                     )));
                 }
             }
-            _ => return Err(BackendError::Dispatch(format!(
+            _ => {
+                return Err(BackendError::Dispatch(format!(
                 "instruction {instruction_index} requests an unsupported quantized output contract"
-            ))),
+            )))
+            }
         }
         Ok(())
     }
@@ -841,6 +887,69 @@ mod executable_plan_validation_tests {
 
         assert!(integer.validate_for_kernel(0, "matmul_i4_i8").is_ok());
         assert!(integer.validate_for_kernel(0, "matmul_i4").is_err());
+    }
+
+    #[test]
+    fn affine_integer_accumulation_matches_centered_reference_with_bias() {
+        let activations = [-3i8, 4, 7];
+        let weights = [1i32, 9, 4];
+        let activation_zero_point = 2;
+        let weight_zero_point = 5;
+        let bias = 13;
+        let expected = activations
+            .iter()
+            .zip(weights)
+            .map(|(&activation, weight)| {
+                (i32::from(activation) - activation_zero_point) * (weight - weight_zero_point)
+            })
+            .sum::<i32>()
+            + bias;
+        assert_eq!(
+            QuantizedExecutionContract::affine_i32_accumulate(
+                &activations,
+                &weights,
+                activation_zero_point,
+                weight_zero_point,
+                bias,
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn grouped_integer_accumulation_handles_reduction_tail() {
+        let activations = [-4i8, 2, 7, 5, -1, 3, 6];
+        let weights = [0i32, 4, 8, 2, 9, 1, 6];
+        let group_size = 3;
+        let activation_zero_point = -1;
+        let weight_zero_points = [2, 5, 7];
+        let mut actual = 0i32;
+        for (group, weight_zero_point) in weight_zero_points.into_iter().enumerate() {
+            let start = group * group_size;
+            if start >= activations.len() {
+                break;
+            }
+            let end = (start + group_size).min(activations.len());
+            actual += QuantizedExecutionContract::affine_i32_accumulate(
+                &activations[start..end],
+                &weights[start..end],
+                activation_zero_point,
+                weight_zero_point,
+                0,
+            )
+            .unwrap();
+        }
+        let expected = activations
+            .iter()
+            .zip(weights)
+            .enumerate()
+            .map(|(index, (&activation, weight))| {
+                let weight_zero_point = weight_zero_points[index / group_size];
+                (i32::from(activation) - activation_zero_point) * (weight - weight_zero_point)
+            })
+            .sum::<i32>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
