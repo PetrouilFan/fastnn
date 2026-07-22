@@ -437,7 +437,7 @@ impl GraphBuilder {
         output_shape.push(m);
         output_shape.push(n);
 
-        let output_type = TensorType::new(output_shape, a.dtype());
+        let output_type = a.tensor_type.with_shape(output_shape);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::MatMul,
@@ -522,7 +522,9 @@ impl GraphBuilder {
             DimExpr::Known(1)
         };
 
-        let output_type = TensorType::new(vec![batch, out_channels, h_out, w_out], input.dtype());
+        let output_type = input
+            .tensor_type
+            .with_shape(vec![batch, out_channels, h_out, w_out]);
 
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
@@ -646,7 +648,7 @@ impl GraphBuilder {
                 output_shape.remove(axis);
             }
         }
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut inner = self.inner.borrow_mut();
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("axis".to_string(), axis.to_string());
@@ -687,7 +689,7 @@ impl GraphBuilder {
         if (axis as usize) < output_shape.len() {
             output_shape[axis as usize] = DimExpr::Known(k as u64);
         }
-        let val_type = TensorType::new(output_shape.clone(), input.dtype());
+        let val_type = input.tensor_type.with_shape(output_shape.clone());
         let idx_type = TensorType::new(output_shape, IrDType::I64);
         let mut attrs = HashMap::new();
         attrs.insert("k".to_string(), k.to_string());
@@ -709,7 +711,7 @@ impl GraphBuilder {
 
     /// Reshape tensor.
     pub fn reshape(&self, input: &GraphTensor, shape: &[DimExpr]) -> GraphTensor {
-        let output_type = TensorType::new(shape.to_vec(), input.dtype());
+        let output_type = input.tensor_type.with_shape(shape.to_vec());
         let mut attrs = HashMap::new();
         let shape_str: Vec<String> = shape.iter().map(|d| format!("{}", d)).collect();
         attrs.insert("shape".to_string(), shape_str.join(","));
@@ -727,7 +729,7 @@ impl GraphBuilder {
     pub fn transpose(&self, input: &GraphTensor) -> GraphTensor {
         let mut output_shape = input.shape().to_vec();
         output_shape.reverse();
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut inner = self.inner.borrow_mut();
         let node_id =
             inner
@@ -746,7 +748,7 @@ impl GraphBuilder {
             .iter()
             .map(|&i| input_shape.get(i).cloned().unwrap_or(DimExpr::Known(0)))
             .collect();
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = std::collections::HashMap::new();
         let perm_str: Vec<String> = perm.iter().map(|d| d.to_string()).collect();
         attrs.insert("perm".to_string(), perm_str.join(","));
@@ -769,7 +771,7 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![first, rest], input.dtype());
+        let output_type = input.tensor_type.with_shape(vec![first, rest]);
         let mut inner = self.inner.borrow_mut();
         let node_id =
             inner
@@ -788,7 +790,7 @@ impl GraphBuilder {
                 output_shape.remove(dim);
             }
         }
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
         attrs.insert(
@@ -815,7 +817,7 @@ impl GraphBuilder {
                 output_shape.remove(dim);
             }
         }
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = HashMap::new();
         attrs.insert("axis".to_string(), dim.to_string());
         attrs.insert(
@@ -910,7 +912,7 @@ impl GraphBuilder {
         if dim < output_shape.len() {
             output_shape[dim] = DimExpr::Known((end - start) as u64);
         }
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = HashMap::new();
         attrs.insert("dim".to_string(), dim.to_string());
         attrs.insert("start".to_string(), start.to_string());
@@ -931,7 +933,7 @@ impl GraphBuilder {
         if dim < output_shape.len() {
             output_shape.remove(dim);
         }
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = HashMap::new();
         attrs.insert("dim".to_string(), dim.to_string());
         let mut inner = self.inner.borrow_mut();
@@ -948,7 +950,7 @@ impl GraphBuilder {
     pub fn unsqueeze(&self, input: &GraphTensor, dim: usize) -> GraphTensor {
         let mut output_shape = input.shape().to_vec();
         output_shape.insert(dim, DimExpr::Known(1));
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = HashMap::new();
         attrs.insert("dim".to_string(), dim.to_string());
         let mut inner = self.inner.borrow_mut();
@@ -1063,7 +1065,9 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![batch, channels, h_out, w_out], input.dtype());
+        let output_type = input
+            .tensor_type
+            .with_shape(vec![batch, channels, h_out, w_out]);
         let mut attrs = HashMap::new();
         attrs.insert("kernel_size".to_string(), kernel_size.to_string());
         attrs.insert("stride".to_string(), stride.to_string());
@@ -1151,7 +1155,7 @@ impl GraphBuilder {
                 output_shape[i] = dim_add(&dim_add(&output_shape[i], &lo_d), &hi_d);
             }
         }
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = HashMap::new();
         let pads_str: Vec<String> = pads
             .iter()
@@ -1396,7 +1400,7 @@ impl GraphBuilder {
                 .filter_map(|s| s.trim().parse::<u64>().ok())
                 .collect();
             if target.is_empty() {
-                TensorType::new(input.shape().to_vec(), input.dtype())
+                input.tensor_type.with_shape(input.shape().to_vec())
             } else {
                 let data_shape = input.shape();
                 let data_rank = data_shape.len();
@@ -1420,10 +1424,10 @@ impl GraphBuilder {
                     };
                     broadcast_shape.push(DimExpr::Known(data_dim.max(target_dim)));
                 }
-                TensorType::new(broadcast_shape, input.dtype())
+                input.tensor_type.with_shape(broadcast_shape)
             }
         } else {
-            TensorType::new(input.shape().to_vec(), input.dtype())
+            input.tensor_type.with_shape(input.shape().to_vec())
         };
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
@@ -1451,7 +1455,7 @@ impl GraphBuilder {
         // NOTE: repeats are runtime-dynamic (second graph input). We can't
         // know their values at graph-build time, so output shape = input shape.
         // The backward pass infers repeats by comparing input/output shapes.
-        let output_type = TensorType::new(input_shape.to_vec(), input.dtype());
+        let output_type = input.tensor_type.with_shape(input_shape.to_vec());
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Tile,
@@ -1502,7 +1506,9 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![batch, out_channels, w_out], input.dtype());
+        let output_type = input
+            .tensor_type
+            .with_shape(vec![batch, out_channels, w_out]);
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
@@ -1618,7 +1624,9 @@ impl GraphBuilder {
         } else {
             DimExpr::Known(1)
         };
-        let output_type = TensorType::new(vec![batch, out_channels, h_out, w_out], input.dtype());
+        let output_type = input
+            .tensor_type
+            .with_shape(vec![batch, out_channels, h_out, w_out]);
         let mut attrs = HashMap::new();
         attrs.insert("stride".to_string(), stride.to_string());
         attrs.insert("padding".to_string(), padding.to_string());
@@ -1800,7 +1808,7 @@ impl GraphBuilder {
         } else {
             input_shape.to_vec()
         };
-        let tt = TensorType::new(out_shape, input.dtype());
+        let tt = input.tensor_type.with_shape(out_shape);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
@@ -1834,7 +1842,7 @@ impl GraphBuilder {
         } else {
             input_shape.to_vec()
         };
-        let tt = TensorType::new(out_shape, input.dtype());
+        let tt = input.tensor_type.with_shape(out_shape);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
@@ -1868,7 +1876,7 @@ impl GraphBuilder {
         } else {
             input_shape.to_vec()
         };
-        let tt = TensorType::new(out_shape, input.dtype());
+        let tt = input.tensor_type.with_shape(out_shape);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node_with_attrs(
@@ -1892,7 +1900,7 @@ impl GraphBuilder {
             .zip(repeats.iter())
             .map(|(d, &r)| d.mul(&DimExpr::Known(r as u64)))
             .collect();
-        let tt = TensorType::new(out_shape, input.dtype());
+        let tt = input.tensor_type.with_shape(out_shape);
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -1920,7 +1928,7 @@ impl GraphBuilder {
             "reverse".to_string(),
             (if reverse { 1 } else { 0 }).to_string(),
         );
-        let tt = TensorType::new(input.shape().to_vec(), input.dtype());
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -1932,7 +1940,7 @@ impl GraphBuilder {
 
     /// Error function (Gauss error function).
     pub fn erf(&self, input: &GraphTensor) -> GraphTensor {
-        let tt = TensorType::new(input.shape().to_vec(), input.dtype());
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -1947,7 +1955,7 @@ impl GraphBuilder {
         let mut attrs = std::collections::HashMap::new();
         let dims_str: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
         attrs.insert("dims".to_string(), dims_str.join(","));
-        let tt = TensorType::new(input.shape().to_vec(), input.dtype());
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -1983,7 +1991,7 @@ impl GraphBuilder {
     /// Backward: d_input = d_output * scale (correctly scales the gradient).
     pub fn gradient_scale(&self, input: &GraphTensor, scale: f32) -> GraphTensor {
         let output_shape = input.shape().to_vec();
-        let output_type = TensorType::new(output_shape, input.dtype());
+        let output_type = input.tensor_type.with_shape(output_shape);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("scale".to_string(), scale.to_string());
         let mut inner = self.inner.borrow_mut();
@@ -2896,6 +2904,28 @@ mod tests {
         assert_eq!(GraphBuilder::packed_bit_width(&u4), Some(4));
         assert_eq!(GraphBuilder::packed_bit_width(&codebook), None);
         assert_eq!(GraphBuilder::packed_bit_width(&f32), None);
+    }
+
+    #[test]
+    fn reshape_preserves_quantized_tensor_contract() {
+        let builder = GraphBuilder::new();
+        let input = builder.input(
+            &[2, 4],
+            IrDType::U4Scaled {
+                scales: vec![0.25, 0.5],
+                dequant_offsets: vec![-1.0, -2.0],
+            },
+        );
+        let reshaped = builder.reshape(&input, &[DimExpr::Known(8)]);
+
+        assert_eq!(
+            reshaped.tensor_type().value_representation().unwrap(),
+            input.tensor_type().value_representation().unwrap()
+        );
+        assert_eq!(
+            reshaped.tensor_type().storage_layout().unwrap(),
+            input.tensor_type().storage_layout().unwrap()
+        );
     }
 
     /// Create an f32 input tensor of f32 bytes.
