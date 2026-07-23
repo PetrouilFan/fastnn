@@ -663,6 +663,21 @@ fn test_matmul_u4_i8_dispatch_path() {
         8,
         2,
     );
+    let mut scalar_expected = vec![0.0f32; 2];
+    fastnn::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8_scalar(
+        &packed,
+        &expected_payload,
+        &mut scalar_expected,
+        1,
+        8,
+        2,
+    );
+    for (index, (&dispatched, &scalar)) in expected.iter().zip(scalar_expected.iter()).enumerate() {
+        assert!(
+            (dispatched - scalar).abs() <= 1e-6,
+            "scalar/ISA mismatch at {index}: dispatched={dispatched}, scalar={scalar}"
+        );
+    }
 
     let mut executor = GraphExecutor::new(CpuBackend);
     reset_cpu_telemetry();

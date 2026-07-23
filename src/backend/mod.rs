@@ -324,7 +324,8 @@ impl QuantizedExecutionContract {
                 WorkloadPhase::GeneralGemm
             },
             required_isa: CpuIsaRequirement::Portable,
-            preferred_isa: if !convolution
+            preferred_isa: if bit_width == 8
+                && !convolution
                 && activation_storage == ScalarType::I8
                 && cfg!(all(feature = "simd", target_arch = "x86_64"))
             {
@@ -1036,18 +1037,11 @@ mod executable_plan_validation_tests {
             integer.execution.capability.decode,
             DecodeFamily::DirectPackedInteger
         );
-        if cfg!(all(feature = "simd", target_arch = "x86_64")) {
-            assert_eq!(
-                integer.execution.capability.preferred_isa,
-                Some(CpuIsaRequirement::Avx2)
-            );
-            let expected = if CpuIsaRequirement::Avx2.is_available() {
-                CpuIsaRequirement::Avx2
-            } else {
-                CpuIsaRequirement::Portable
-            };
-            assert_eq!(integer.execution.capability.selected_isa(), expected);
-        }
+        assert_eq!(integer.execution.capability.preferred_isa, None);
+        assert_eq!(
+            integer.execution.capability.selected_isa(),
+            CpuIsaRequirement::Portable
+        );
         assert_eq!(integer.execution.activation_storage, ScalarType::I8);
         assert_eq!(integer.execution.accumulator, ScalarType::I32);
         assert!(matches!(

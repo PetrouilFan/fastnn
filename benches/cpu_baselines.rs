@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fastnn::backend::cpu::microkernels::{
-    gemm_cpu, gemm_cpu_flat, gemm_cpu_flat_i8_i4x8, gemv_cpu,
+    gemm_cpu, gemm_cpu_flat, gemm_cpu_flat_i8_i4x8, gemm_cpu_flat_i8_i4x8_scalar, gemv_cpu,
 };
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
@@ -162,6 +162,18 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("w4a8_direct_i32", name), &(), |b, _| {
             b.iter(|| {
                 gemm_cpu_flat_i8_i4x8(
+                    black_box(&packed),
+                    black_box(&activation_payload),
+                    black_box(&mut integer_output),
+                    m,
+                    k,
+                    n,
+                )
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("w4a8_scalar_i32", name), &(), |b, _| {
+            b.iter(|| {
+                gemm_cpu_flat_i8_i4x8_scalar(
                     black_box(&packed),
                     black_box(&activation_payload),
                     black_box(&mut integer_output),

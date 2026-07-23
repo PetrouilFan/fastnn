@@ -1828,6 +1828,70 @@ pub fn gemm_cpu_flat_i8_i8x4(
 /// Semantics mirror `gemm_cpu_flat_i8_i8x4`, but each packed weight word stores
 /// eight signed 4-bit qW lanes (`[-8, 7]`) before the affine `qW * scale_w + zero_w`
 /// dequantization is applied.
+fn gemm_cpu_flat_i8_i4x8_scalar_impl(
+    weights: &PackedTensor<I4x8>,
+    activation_affine: I8ActivationAffine,
+    act_i8: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let k_packed = k.div_ceil(I4x8::ITEMS);
+    for bi in 0..m {
+        let act_base = bi * k;
+        let q_activation_sum: i32 = act_i8[act_base..act_base + k]
+            .iter()
+            .map(|value| *value as i8 as i32)
+            .sum();
+        for row in 0..n {
+            let row_offset = row * k_packed;
+            let mut q_dot = 0i32;
+            let mut q_weight_sum = 0i32;
+            for p in 0..k_packed {
+                let word = weights.as_packed()[row_offset + p].0;
+                for lane in 0..I4x8::ITEMS {
+                    let idx = p * I4x8::ITEMS + lane;
+                    if idx < k {
+                        let nibble = (word >> (lane * 4)) & 0xF;
+                        let q_w = if nibble & 0x8 != 0 {
+                            (nibble | 0xFFFFFFF0) as i32
+                        } else {
+                            nibble as i32
+                        };
+                        let q_a = act_i8[act_base + idx] as i8 as i32;
+                        q_dot += q_w * q_a;
+                        q_weight_sum += q_w;
+                    }
+                }
+            }
+            outputs[bi * n + row] = apply_integer_affine_dot(
+                q_dot,
+                q_weight_sum,
+                q_activation_sum,
+                k,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                activation_affine,
+            );
+        }
+    }
+}
+
+/// Portable scalar reference for parity testing and controlled benchmarks.
+pub fn gemm_cpu_flat_i8_i4x8_scalar(
+    weights: &PackedTensor<I4x8>,
+    activation_payload: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    assert_eq!(weights.shape(), [n, k]);
+    let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
+    gemm_cpu_flat_i8_i4x8_scalar_impl(weights, activation_affine, act_i8, outputs, m, k, n);
+}
+
 #[inline(always)]
 pub fn gemm_cpu_flat_i8_i4x8(
     weights: &PackedTensor<I4x8>,
@@ -1850,54 +1914,21 @@ pub fn gemm_cpu_flat_i8_i4x8(
     );
 
     let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let k_packed = k.div_ceil(I4x8::ITEMS);
 
     if activation_affine.zero != 0.0 {
-        for bi in 0..m {
-            let act_base = bi * k;
-            let q_activation_sum: i32 = act_i8[act_base..act_base + k]
-                .iter()
-                .map(|value| *value as i8 as i32)
-                .sum();
-            for row in 0..oc {
-                let scale_w = weights.scale_for_row(row);
-                let zero_w = weights.zero_for_row(row);
-                let row_offset = row * k_packed;
-                let mut q_dot = 0i32;
-                let mut q_weight_sum = 0i32;
-                for p in 0..k_packed {
-                    let word = weights.as_packed()[row_offset + p].0;
-                    for lane in 0..I4x8::ITEMS {
-                        let idx = p * I4x8::ITEMS + lane;
-                        if idx < k {
-                            let nibble = (word >> (lane * 4)) & 0xF;
-                            let q_w = if nibble & 0x8 != 0 {
-                                (nibble | 0xFFFFFFF0) as i32
-                            } else {
-                                nibble as i32
-                            };
-                            let q_a = act_i8[act_base + idx] as i8 as i32;
-                            q_dot += q_w * q_a;
-                            q_weight_sum += q_w;
-                        }
-                    }
-                }
-                outputs[bi * n + row] = apply_integer_affine_dot(
-                    q_dot,
-                    q_weight_sum,
-                    q_activation_sum,
-                    k,
-                    scale_w,
-                    zero_w,
-                    activation_affine,
-                );
-            }
-        }
+        gemm_cpu_flat_i8_i4x8_scalar_impl(weights, activation_affine, act_i8, outputs, m, k, n);
         return;
     }
 
+    // The current AVX2 nibble-expansion kernel is retained for iteration but is
+    // not selected: controlled Criterion runs show the scalar loop is about 7x
+    // faster at both decode and prefill shapes on Zen 2.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if crate::backend::cpu::microkernels::has_avx2() {
+    let use_avx2 = false;
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if use_avx2 && crate::backend::cpu::microkernels::has_avx2() {
         // SAFETY: AVX2 feature check passed; all slices are valid and correctly
         // sized, and the I4x8 nibble extraction follows the packed layout.
         unsafe {
@@ -1982,39 +2013,7 @@ pub fn gemm_cpu_flat_i8_i4x8(
         return;
     }
 
-    for bi in 0..m {
-        let act_base = bi * k;
-        for row in 0..oc {
-            let scale_w = weights.scale_for_row(row);
-            let zero_w = weights.zero_for_row(row);
-            let row_offset = row * k_packed;
-            let mut acc: i32 = 0;
-            let mut q_activation_sum: i32 = 0;
-            for p in 0..k_packed {
-                let word = weights.as_packed()[row_offset + p].0;
-                for lane in 0..I4x8::ITEMS {
-                    let idx = p * I4x8::ITEMS + lane;
-                    if idx < k {
-                        let nibble = (word >> (lane * 4)) & 0xF;
-                        let signed = if nibble & 0x8 != 0 {
-                            (nibble | 0xFFFFFFF0) as i32
-                        } else {
-                            nibble as i32
-                        };
-                        let q_a = act_i8[act_base + idx] as i8 as i32;
-                        acc += signed * q_a;
-                        q_activation_sum += q_a;
-                    }
-                }
-            }
-            outputs[bi * n + row] = apply_affine_dot(
-                acc as f32 * activation_affine.scale,
-                scale_w,
-                zero_w,
-                activation_affine.sum_from_q_sum(q_activation_sum, k),
-            );
-        }
-    }
+    gemm_cpu_flat_i8_i4x8_scalar_impl(weights, activation_affine, act_i8, outputs, m, k, n);
 }
 
 // ============================================================
