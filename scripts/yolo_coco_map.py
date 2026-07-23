@@ -282,7 +282,12 @@ def _dtype_to_quantize(dtype: str) -> int | str | None:
         return 8  # signed → pass as int for WeightDtype::I8
     return dtype  # "f8", "f8r", "f4" — passed as string
 
-def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
+def _build_fastnn_executor(
+    onnx_path: Path,
+    dtype: str,
+    *,
+    extra_outputs: tuple[str, ...] = (),
+) -> tuple[Any, str, str]:
     """Load ONNX, constant-fold (Shape/Gather/Add/Sub/Mul/Div for DFL paths),
     build AotExecutor. Returns (executor, input_name, output_name)."""
     import onnx
@@ -294,6 +299,8 @@ def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
     initializer_names = {init.name for init in model.graph.initializer}
     input_names = [i.name for i in model.graph.input if i.name not in initializer_names]
     output_names = [o.name for o in model.graph.output]
+    primary_output = output_names[0]
+    output_names.extend(name for name in extra_outputs if name not in output_names)
     input_shapes: dict[str, list[int]] = {}
     for i in model.graph.input:
         if i.name in input_names:
@@ -389,7 +396,7 @@ def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
     quantize = _dtype_to_quantize(dtype)
     executor = fnn.AotExecutor(nodes, params, input_names, output_names,
                                input_shapes=input_shapes, quantize=quantize)
-    return executor, input_names[0], output_names[0]
+    return executor, input_names[0], primary_output
 
 # ---------------------------------------------------------------------------
 # Memory measurement
