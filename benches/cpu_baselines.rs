@@ -122,6 +122,8 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
     for &(name, m, k, n) in &[
         ("decode_1x256x256", 1, 256, 256),
         ("prefill_8x256x256", 8, 256, 256),
+        ("decode_1x512x512", 1, 512, 512),
+        ("prefill_8x512x512", 8, 512, 512),
     ] {
         let weights = weight_data(n, k);
         let f32_weights = PackedTensor::<F32x1>::from_f32_auto(&weights, &[n, k]);
