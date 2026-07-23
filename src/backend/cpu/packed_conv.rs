@@ -157,57 +157,9 @@ unsafe fn im2col_pack_i8x4(
 
         // Pack each row independently for correct row-wise alignment
         let mut packed: Vec<I8x4> = vec![I8x4(0); m * k_packed];
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        {
-            use std::arch::x86_64::*;
-            let zv = _mm256_set1_ps(zero_point);
-            let iv = _mm256_set1_ps(inv_scale);
-            let c_lo = _mm256_set1_ps(-128.0);
-            let c_hi = _mm256_set1_ps(127.0);
-            let mut row_packed = [0u8; 32];
-            for row in 0..m {
-                let row_start = row * k;
-                let mut wp = 0usize;
-                while wp + 7 < k_packed {
-                    let base = row_start + wp * 4;
-                    let v = _mm256_loadu_ps(&col[base]);
-                    let x = _mm256_round_ps(_mm256_mul_ps(_mm256_sub_ps(v, zv), iv), 0);
-                    let clamped = _mm256_min_ps(_mm256_max_ps(x, c_lo), c_hi);
-                    let i32v = _mm256_cvttps_epi32(clamped);
-                    let lo128 = _mm256_castsi256_si128(i32v);
-                    let hi128 = _mm256_extracti128_si256(i32v, 1);
-                    let lo16 = _mm_packs_epi32(lo128, _mm_setzero_si128());
-                    let hi16 = _mm_packs_epi32(hi128, _mm_setzero_si128());
-                    let bytes = _mm_packus_epi16(lo16, hi16);
-                    _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
-                    for j in 0..8 {
-                        packed[row * k_packed + wp + j] = I8x4(u32::from_le_bytes([
-                            row_packed[4 * j],
-                            row_packed[4 * j + 1],
-                            row_packed[4 * j + 2],
-                            row_packed[4 * j + 3],
-                        ]));
-                    }
-                    wp += 8;
-                }
-                while wp < k_packed {
-                    let base = row_start + wp * 4;
-                    let mut w = 0u32;
-                    for i in 0..4 {
-                        let ei = base + i;
-                        if ei < row_start + k {
-                            let q = ((col[ei] - zero_point) * inv_scale)
-                                .round()
-                                .clamp(-128.0, 127.0) as i8;
-                            w |= (q as u8 as u32) << (i * 8);
-                        }
-                    }
-                    packed.push(I8x4(w));
-                    wp += 1;
-                }
-            }
-        }
-        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+        // Keep one correctness path here. The former AVX2 branch wrote tail words
+        // past the pre-sized vector and used unsigned saturation for negative i8
+        // values, corrupting every convolution whose K did not fill its SIMD tile.
         for row in 0..m {
             let row_start = row * k;
             for word in 0..k_packed {
@@ -223,7 +175,7 @@ unsafe fn im2col_pack_i8x4(
                         w |= (q as u8 as u32) << (i * 8);
                     }
                 }
-                packed.push(I8x4(w));
+                packed[row * k_packed + word] = I8x4(w);
             }
         }
 
@@ -1535,6 +1487,102 @@ mod tests {
         }
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_i8x4_matches_its_dequantized_operands() {
+        let (n, c, h, w, oc, kh, kw) = (1, 3, 8, 8, 5, 3, 3);
+        let (stride, padding, dilation, groups) = (2, 1, 1, 1);
+        let input: Vec<f32> = (0..n * c * h * w)
+            .map(|i| ((i * 37 % 211) as f32 - 105.0) / 29.0)
+            .collect();
+        let k = c * kh * kw;
+        let weights: Vec<f32> = (0..oc * k)
+            .map(|i| ((i * 53 % 173) as f32 - 86.0) / 113.0)
+            .collect();
+        let bias: Vec<f32> = (0..oc).map(|i| i as f32 * 0.07 - 0.11).collect();
+        let weight = PackedTensor::<I8x4>::from_f32_per_channel(&weights, &[oc, k]);
+        let h_out = conv_out_size(h, kh, stride, padding, dilation);
+        let w_out = conv_out_size(w, kw, stride, padding, dilation);
+        let pixels = h_out * w_out;
+        let mut actual = vec![0.0; n * oc * pixels];
+
+        unsafe {
+            conv2d_packed_i8x4(
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                Some(&bias),
+                stride,
+                padding,
+                dilation,
+                groups,
+                kh,
+                kw,
+                PreparedActivation::None,
+                &mut actual,
+            );
+        }
+
+        let activations =
+            unsafe { im2col_pack_i8x4(&input, c, h, w, kh, kw, stride, padding, dilation) }
+                .to_f32_vec();
+        let mut reference_im2col = vec![0.0; pixels * k];
+        // SAFETY: `input` contains one complete NCHW image and
+        // `reference_im2col` is sized to the exact output matrix extent.
+        let _ = unsafe {
+            crate::backend::cpu::im2col::im2col_dispatch(
+                &input,
+                c,
+                h,
+                w,
+                kh,
+                kw,
+                stride,
+                padding,
+                dilation,
+                &mut reference_im2col,
+                false,
+            )
+        };
+        let activation_step = (reference_im2col
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - reference_im2col
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min))
+            / 255.0;
+        for (index, (&got, &want)) in activations.iter().zip(&reference_im2col).enumerate() {
+            assert!(
+                (got - want).abs() <= activation_step + 1e-6,
+                "packed activation[{index}] mismatch: got {got}, expected {want}, step {activation_step}"
+            );
+        }
+        let dequantized_weights = weight.to_f32_vec();
+        let mut expected = vec![0.0; actual.len()];
+        for pixel in 0..pixels {
+            for out_channel in 0..oc {
+                let mut sum = bias[out_channel];
+                for depth in 0..k {
+                    sum += activations[pixel * k + depth]
+                        * dequantized_weights[out_channel * k + depth];
+                }
+                expected[out_channel * pixels + pixel] = sum;
+            }
+        }
+
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            let error = (got - want).abs();
+            assert!(
+                error <= 2e-4,
+                "output[{index}] mismatch: got {got}, expected {want}, error {error}"
+            );
+        }
     }
 
     #[test]
