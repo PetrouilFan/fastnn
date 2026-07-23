@@ -727,6 +727,51 @@ mod neon_tests {
     }
 
     #[test]
+    fn grouped_w4a8_per_token_matches_exact_quantized_operand_reference() {
+        let (m, n, k) = (3usize, 4usize, 145usize);
+        let weights: Vec<f32> = (0..n * k)
+            .map(|index| ((index * 31 + 5) % 127) as f32 / 19.0 - 3.0)
+            .collect();
+        let activations: Vec<f32> = (0..m * k)
+            .map(|index| {
+                let row = index / k;
+                let col = index % k;
+                let amplitude = [0.125, 2.0, 17.0][row];
+                (((col * 43 + row * 7) % 97) as f32 / 48.0 - 1.0) * amplitude
+            })
+            .collect();
+
+        for group_size in [32, 64, 128] {
+            let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&weights, &[n, k], group_size);
+            let dequantized_weights = packed.to_f32_vec();
+            let mut quantized = PerTokenI8Activations::default();
+            quantize_i8_per_token_symmetric(&activations, m, k, &mut quantized);
+            assert_eq!(quantized.scales().len(), m);
+            assert_ne!(quantized.scales()[0], quantized.scales()[1]);
+            assert_ne!(quantized.scales()[1], quantized.scales()[2]);
+
+            let mut actual = vec![0.0; m * n];
+            gemm_cpu_flat_i8_i4x8_grouped_per_token(&packed, &quantized, &mut actual, m, k, n);
+            for token in 0..m {
+                for row in 0..n {
+                    let mut expected = 0.0f32;
+                    for col in 0..k {
+                        let qa = quantized.data()[token * k + col] as i8 as f32;
+                        expected +=
+                            dequantized_weights[row * k + col] * qa * quantized.scales()[token];
+                    }
+                    let got = actual[token * n + row];
+                    let tolerance = 1e-4 * expected.abs().max(1.0);
+                    assert!(
+                        (got - expected).abs() <= tolerance,
+                        "group={group_size} token={token} row={row}: got {got}, expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_gemm_cpu_flat_i8_i4x8_nonzero_activation_zp_matches_affine_reference() {
         let n = 1;
         let k = 8;

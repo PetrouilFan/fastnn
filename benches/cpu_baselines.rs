@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use fastnn::backend::cpu::microkernels::{
-    gemm_cpu, gemm_cpu_flat, gemm_cpu_flat_i8_i4x8, gemm_cpu_flat_i8_i4x8_scalar, gemv_cpu,
+    gemm_cpu, gemm_cpu_flat, gemm_cpu_flat_i8_i4x8, gemm_cpu_flat_i8_i4x8_grouped_per_token,
+    gemm_cpu_flat_i8_i4x8_scalar, gemv_cpu, quantize_i8_per_token_symmetric, PerTokenI8Activations,
 };
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
@@ -195,6 +196,8 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
             });
         });
         for (group_size, grouped) in &grouped_w4 {
+            let mut per_token = PerTokenI8Activations::default();
+            quantize_i8_per_token_symmetric(&activations, m, k, &mut per_token);
             group.bench_with_input(
                 BenchmarkId::new(format!("w4a8_grouped_g{group_size}"), name),
                 &(),
@@ -203,6 +206,44 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
                         gemm_cpu_flat_i8_i4x8_scalar(
                             black_box(grouped),
                             black_box(&activation_payload),
+                            black_box(&mut integer_output),
+                            m,
+                            k,
+                            n,
+                        )
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("w4a8_per_token_g{group_size}"), name),
+                &(),
+                |b, _| {
+                    b.iter(|| {
+                        gemm_cpu_flat_i8_i4x8_grouped_per_token(
+                            black_box(grouped),
+                            black_box(&per_token),
+                            black_box(&mut integer_output),
+                            m,
+                            k,
+                            n,
+                        )
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("w4a8_per_token_quantize_g{group_size}"), name),
+                &(),
+                |b, _| {
+                    b.iter(|| {
+                        quantize_i8_per_token_symmetric(
+                            black_box(&activations),
+                            m,
+                            k,
+                            black_box(&mut per_token),
+                        );
+                        gemm_cpu_flat_i8_i4x8_grouped_per_token(
+                            black_box(grouped),
+                            black_box(&per_token),
                             black_box(&mut integer_output),
                             m,
                             k,

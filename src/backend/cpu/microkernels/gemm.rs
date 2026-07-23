@@ -1949,6 +1949,82 @@ fn gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
     }
 }
 
+/// Reusable per-token symmetric I8 activation storage.
+#[derive(Default)]
+pub struct PerTokenI8Activations {
+    scales: Vec<f32>,
+    data: Vec<u8>,
+}
+
+impl PerTokenI8Activations {
+    pub fn scales(&self) -> &[f32] {
+        &self.scales
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Quantize each `[K]` token row independently with a symmetric signed-I8 map.
+/// Existing allocations are reused across calls.
+pub fn quantize_i8_per_token_symmetric(
+    input: &[f32],
+    m: usize,
+    k: usize,
+    output: &mut PerTokenI8Activations,
+) {
+    assert_eq!(input.len(), m * k);
+    output.scales.clear();
+    output.scales.reserve(m);
+    output.data.clear();
+    output.data.reserve(m * k);
+
+    for row in input.chunks_exact(k) {
+        let max_abs = row
+            .iter()
+            .fold(0.0f32, |maximum, value| maximum.max(value.abs()));
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        output.scales.push(scale);
+        output.data.extend(row.iter().map(|value| {
+            (value / scale)
+                .round()
+                .clamp(i8::MIN as f32, i8::MAX as f32) as i8 as u8
+        }));
+    }
+}
+
+/// Grouped W4A8 scalar reference with one symmetric I8 scale per token row.
+pub fn gemm_cpu_flat_i8_i4x8_grouped_per_token(
+    weights: &PackedTensor<I4x8>,
+    activations: &PerTokenI8Activations,
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    assert_eq!(weights.shape(), [n, k]);
+    assert!(weights.blocks_per_row() > 0, "grouped W4 weights required");
+    assert_eq!(activations.scales.len(), m);
+    assert_eq!(activations.data.len(), m * k);
+    assert_eq!(outputs.len(), m * n);
+
+    for row in 0..m {
+        gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
+            weights,
+            I8ActivationAffine {
+                scale: activations.scales[row],
+                zero: 0.0,
+            },
+            &activations.data[row * k..(row + 1) * k],
+            &mut outputs[row * n..(row + 1) * n],
+            1,
+            k,
+            n,
+        );
+    }
+}
+
 /// Portable scalar reference for parity testing and controlled benchmarks.
 pub fn gemm_cpu_flat_i8_i4x8_scalar(
     weights: &PackedTensor<I4x8>,
