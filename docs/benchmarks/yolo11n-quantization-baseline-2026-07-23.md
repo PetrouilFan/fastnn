@@ -29,7 +29,7 @@ The dtype labels do not all represent the same activation contract. Interpret th
 | F8R | WF8RA32-unpack | 0.5642 | 0.3933 | 100.2 ms | 2.7 MB | Inferior to F8 on this gate |
 | I4CB | WI4-codebook-A32-unpack | 0.3395 | 0.2288 | 98.3 ms | 1.4 MB | Significant quality loss |
 | F4 | WF4A32-unpack | 0.0761 | 0.0374 | 93.3 ms | 1.4 MB | Unacceptable quality |
-| I8 | WI8A8-dynamic | 0.0109 | 0.0072 | 613.6 ms | 2.7 MB | Slow and inaccurate |
+| I8 (original, invalid) | WI8A8-dynamic | 0.0109 | 0.0072 | 613.6 ms | 2.7 MB | Corrupt activation packing; superseded |
 | U4 | WU4A32-unpack | 0.0005 | 0.0001 | 93.9 ms | 1.4 MB | Unacceptable quality |
 | I4 | WI4A4-dynamic | 0.00005 | 0.000009 | 762.6 ms | 1.4 MB | Slow and inaccurate |
 
@@ -49,6 +49,25 @@ On 500 images, U8 retains 99.26% of the F32 mAP@0.5:0.95 while reducing recorded
 
 1. Unsigned asymmetric quantization used a signed code origin. U4/U8 offsets now start at the unsigned code origin. This removed full-output non-finite propagation and restored U8 quality.
 2. The process-global packed-weight cache was not cleared between executor instances. Reused arena pointers could make I4CB consume stale I4 payloads. Both packed and dequantized caches are now cleared between executors.
+3. The I8 im2col packer wrote scalar tail words beyond a pre-sized vector and its AVX2 path applied unsigned saturation to signed bytes. Correct scalar packing restores COCO-50 quality to 0.6277 mAP@0.5 and 0.4766 mAP@0.5:0.95. Corrected latency is 732.5 ms/image, so the current W8A8 path is accurate but not performant.
+
+## First-divergent-layer audit
+
+`scripts/yolo_dtype_audit.py` retains all 88 YOLO Conv outputs and compares each dtype with fastnn F32 on the same input. At a normalized-RMSE threshold of 10%:
+
+| Dtype | First divergent Conv | Normalized RMSE |
+|---|---:|---:|
+| U8 | 33 | 10.20% |
+| F8 | 10 | 13.26% |
+| F8R | 1 | 11.63% |
+| I8 before packing fix | 0 | 52.10% |
+| I8 after packing fix | 12 | 12.62% |
+| U4 | 0 | 21.97% |
+| I4/W4A4 | 0 | 22.83% |
+| F4 | 0 | 34.90% |
+| I4CB | 0 | 20.49% |
+
+Model-shaped differential tests now verify that direct I4 and I8 Conv outputs match independent convolution over the exact dequantized activation and weight operands, including K=27 packed tails. I4 remains inaccurate because the current model path dynamically quantizes activations to four bits; this does not evaluate W4A8. I8 is accurate after fixing its packer but remains slow because the corrupt AVX2 branch was removed in favor of scalar correctness.
 
 ## Current promotion decisions
 
