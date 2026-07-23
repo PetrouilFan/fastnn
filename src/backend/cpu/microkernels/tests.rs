@@ -680,6 +680,31 @@ mod neon_tests {
     }
 
     #[test]
+    fn grouped_i8_i4_dot_matches_scalar_at_signed_endpoints_and_tails() {
+        let activation_values = [-128i8, -127, -1, 0, 1, 126, 127];
+        for len in [1usize, 7, 8, 31, 32, 33, 63, 64, 65, 127, 128, 129] {
+            let quantized_weights: Vec<i8> = (0..len).map(|index| (index % 16) as i8 - 8).collect();
+            let activations: Vec<u8> = (0..len)
+                .map(|index| activation_values[(index * 5 + 1) % activation_values.len()] as u8)
+                .collect();
+            let mut packed = vec![I4x8(0); len.div_ceil(8)];
+            for (index, &weight) in quantized_weights.iter().enumerate() {
+                packed[index / 8].0 |= ((weight as u8 as u32) & 0x0f) << ((index % 8) * 4);
+            }
+            let expected: i32 = quantized_weights
+                .iter()
+                .zip(&activations)
+                .map(|(&weight, &activation)| weight as i32 * activation as i8 as i32)
+                .sum();
+            assert_eq!(
+                dot_i8_i4_group(&packed, &activations, len),
+                expected,
+                "len={len}"
+            );
+        }
+    }
+
+    #[test]
     fn grouped_i8_i4x8_matches_independent_dequantized_reference() {
         let (m, n, k) = (3usize, 4usize, 145usize);
         let weights: Vec<f32> = (0..n * k)

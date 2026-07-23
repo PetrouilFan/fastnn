@@ -1890,6 +1890,72 @@ fn gemm_cpu_flat_i8_i4x8_scalar_impl(
     }
 }
 
+pub(crate) fn dot_i8_i4_group(weights: &[I4x8], activations: &[u8], len: usize) -> i32 {
+    debug_assert!(len <= activations.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::backend::cpu::microkernels::has_avx2() {
+        // SAFETY: AVX2 availability is checked above. The helper loads only
+        // complete 32-element blocks and handles the logical tail scalarly.
+        return unsafe { dot_i8_i4_group_avx2(weights, activations, len) };
+    }
+    let mut sum = 0i32;
+    for index in 0..len {
+        let word = weights[index / I4x8::ITEMS].0;
+        let nibble = (word >> ((index % I4x8::ITEMS) * 4)) & 0x0f;
+        let q_weight = if nibble & 0x08 != 0 {
+            (nibble | 0xfffffff0) as i32
+        } else {
+            nibble as i32
+        };
+        sum += q_weight * activations[index] as i8 as i32;
+    }
+    sum
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_i8_i4_group_avx2(weights: &[I4x8], activations: &[u8], len: usize) -> i32 {
+    let mut index = 0usize;
+    let mut sums = _mm256_setzero_si256();
+    let nibble_mask = _mm_set1_epi8(0x0f);
+    let sign_bias = _mm256_set1_epi8(8);
+    let ones = _mm256_set1_epi16(1);
+
+    while index + 32 <= len {
+        // SAFETY: 32 logical I4 values occupy four I4x8 words (16 bytes), and
+        // the loop condition proves 32 activation bytes are available.
+        let packed =
+            unsafe { _mm_loadu_si128(weights.as_ptr().add(index / I4x8::ITEMS).cast::<__m128i>()) };
+        let low = _mm_and_si128(packed, nibble_mask);
+        let high = _mm_and_si128(_mm_srli_epi16(packed, 4), nibble_mask);
+        let first = _mm_unpacklo_epi8(low, high);
+        let second = _mm_unpackhi_epi8(low, high);
+        let unpacked = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(first), second);
+        let signed_weights = _mm256_sub_epi8(_mm256_xor_si256(unpacked, sign_bias), sign_bias);
+        let activation =
+            unsafe { _mm256_loadu_si256(activations.as_ptr().add(index).cast::<__m256i>()) };
+        // abs(qa) is unsigned and sign(qw, qa) remains in [-8, 8], so maddubs
+        // is exact even for qa=-128 and cannot saturate its i16 pair sums.
+        let signed_weights = _mm256_sign_epi8(signed_weights, activation);
+        let pairs = _mm256_maddubs_epi16(_mm256_abs_epi8(activation), signed_weights);
+        sums = _mm256_add_epi32(sums, _mm256_madd_epi16(pairs, ones));
+        index += 32;
+    }
+
+    let mut total = unsafe { hsum256_epi32(sums) };
+    for tail in index..len {
+        let word = weights[tail / I4x8::ITEMS].0;
+        let nibble = (word >> ((tail % I4x8::ITEMS) * 4)) & 0x0f;
+        let q_weight = if nibble & 0x08 != 0 {
+            (nibble | 0xfffffff0) as i32
+        } else {
+            nibble as i32
+        };
+        total += q_weight * activations[tail] as i8 as i32;
+    }
+    total
+}
+
 fn gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
     weights: &PackedTensor<I4x8>,
     activation_affine: I8ActivationAffine,
@@ -1922,18 +1988,12 @@ fn gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
             for (group, &q_activation_sum) in activation_sums.iter().enumerate() {
                 let start = group * group_size;
                 let end = (start + group_size).min(k);
-                let mut q_dot = 0i32;
-                for index in start..end {
-                    let word = weights.as_packed()[row_offset + index / I4x8::ITEMS].0;
-                    let nibble = (word >> ((index % I4x8::ITEMS) * 4)) & 0x0f;
-                    let q_weight = if nibble & 0x08 != 0 {
-                        (nibble | 0xfffffff0) as i32
-                    } else {
-                        nibble as i32
-                    };
-                    let q_activation = act_i8[activation_base + index] as i8 as i32;
-                    q_dot += q_weight * q_activation;
-                }
+                let group_weights = &weights.as_packed()[row_offset + start / I4x8::ITEMS..];
+                let q_dot = dot_i8_i4_group(
+                    group_weights,
+                    &act_i8[activation_base + start..activation_base + end],
+                    end - start,
+                );
                 output += apply_integer_affine_dot(
                     q_dot,
                     weights.quantized_group_sum(row, group),
