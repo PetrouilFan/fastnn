@@ -389,6 +389,52 @@ unsafe fn slice_packed<U: PackedWord>(
 
 // (Tile constants moved to per-GEMM scope below)
 
+#[inline]
+fn dot_i8x4_rows(a: &[I8x4], b: &[I8x4]) -> i32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability is checked above. The helper performs only
+        // unaligned in-bounds loads and uses the scalar reference for its tail.
+        return unsafe { dot_i8x4_rows_avx2(a, b) };
+    }
+    a.iter()
+        .zip(b)
+        .map(|(&lhs, &rhs)| i8x4_dot_packed(lhs.0, rhs.0))
+        .sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_i8x4_rows_avx2(a: &[I8x4], b: &[I8x4]) -> i32 {
+    use std::arch::x86_64::*;
+
+    let mut words = 0;
+    let mut sums = _mm256_setzero_si256();
+    let ones = _mm256_set1_epi16(1);
+    while words + 4 <= a.len() {
+        // SAFETY: The loop condition proves both 16-byte source ranges exist;
+        // loadu has no alignment requirement.
+        let lhs = unsafe { _mm_loadu_si128(a.as_ptr().add(words).cast::<__m128i>()) };
+        let rhs = unsafe { _mm_loadu_si128(b.as_ptr().add(words).cast::<__m128i>()) };
+        let lhs_i16 = _mm256_cvtepi8_epi16(lhs);
+        let rhs_i16 = _mm256_cvtepi8_epi16(rhs);
+        let products = _mm256_mullo_epi16(lhs_i16, rhs_i16);
+        sums = _mm256_add_epi32(sums, _mm256_madd_epi16(products, ones));
+        words += 4;
+    }
+
+    let hi = _mm256_extracti128_si256::<1>(sums);
+    let mut sum128 = _mm_add_epi32(_mm256_castsi256_si128(sums), hi);
+    sum128 = _mm_hadd_epi32(sum128, sum128);
+    sum128 = _mm_hadd_epi32(sum128, sum128);
+    let mut total = _mm_cvtsi128_si32(sum128);
+    for index in words..a.len() {
+        total += i8x4_dot_packed(a[index].0, b[index].0);
+    }
+    total
+}
+
 /// Raw slice-based I8x4 packed GEMM with fused dequantize + bias + activation.
 /// Avoids PackedTensor wrapping overhead — takes slices and scalars directly.
 /// Activation scale/zp are per-tensor (scalar). Weight scales/zps can be
@@ -447,10 +493,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     c_row[col] = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -479,10 +522,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -512,10 +552,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -545,10 +582,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -1300,6 +1334,39 @@ mod tests {
     use super::*;
     use crate::backend::cpu::packed_gemm::quantize_activations_to_i4x8;
     use crate::dtypes::{F8x4, F8x4R};
+
+    #[test]
+    fn test_i8x4_row_dot_matches_scalar_at_signed_endpoints_and_tails() {
+        let values = [-128i8, -127, -65, -1, 0, 1, 63, 126, 127];
+        for words in 1..=33 {
+            let lhs: Vec<I8x4> = (0..words)
+                .map(|word| {
+                    let mut packed = 0u32;
+                    for lane in 0..4 {
+                        let value = values[(word * 4 + lane) % values.len()];
+                        packed |= (value as u8 as u32) << (lane * 8);
+                    }
+                    I8x4(packed)
+                })
+                .collect();
+            let rhs: Vec<I8x4> = (0..words)
+                .map(|word| {
+                    let mut packed = 0u32;
+                    for lane in 0..4 {
+                        let value = values[values.len() - 1 - (word * 3 + lane) % values.len()];
+                        packed |= (value as u8 as u32) << (lane * 8);
+                    }
+                    I8x4(packed)
+                })
+                .collect();
+            let expected: i32 = lhs
+                .iter()
+                .zip(&rhs)
+                .map(|(&a, &b)| i8x4_dot_packed(a.0, b.0))
+                .sum();
+            assert_eq!(dot_i8x4_rows(&lhs, &rhs), expected, "words={words}");
+        }
+    }
 
     #[test]
     fn test_conv2d_packed_i4x8_basic() {
