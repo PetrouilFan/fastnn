@@ -1436,6 +1436,102 @@ mod tests {
     }
 
     #[test]
+    fn test_conv2d_packed_i4x8_matches_its_dequantized_operands() {
+        let (n, c, h, w, oc, kh, kw) = (1, 3, 8, 8, 5, 3, 3);
+        let (stride, padding, dilation, groups) = (2, 1, 1, 1);
+        let input: Vec<f32> = (0..n * c * h * w)
+            .map(|i| ((i * 37 % 211) as f32 - 105.0) / 29.0)
+            .collect();
+        let k = c * kh * kw;
+        let weights: Vec<f32> = (0..oc * k)
+            .map(|i| ((i * 53 % 173) as f32 - 86.0) / 113.0)
+            .collect();
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&weights, &[oc, k]);
+        let h_out = conv_out_size(h, kh, stride, padding, dilation);
+        let w_out = conv_out_size(w, kw, stride, padding, dilation);
+        let pixels = h_out * w_out;
+        let mut actual = vec![0.0; n * oc * pixels];
+
+        unsafe {
+            conv2d_packed_i4x8(
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                None,
+                stride,
+                padding,
+                dilation,
+                groups,
+                kh,
+                kw,
+                PreparedActivation::None,
+                &mut actual,
+            );
+        }
+
+        let activations =
+            unsafe { im2col_pack_i4x8(&input, c, h, w, kh, kw, stride, padding, dilation) }
+                .to_f32_vec();
+        let mut reference_im2col = vec![0.0; pixels * k];
+        // SAFETY: `input` contains one complete NCHW image and
+        // `reference_im2col` is sized to the exact output matrix extent.
+        let _ = unsafe {
+            crate::backend::cpu::im2col::im2col_dispatch(
+                &input,
+                c,
+                h,
+                w,
+                kh,
+                kw,
+                stride,
+                padding,
+                dilation,
+                &mut reference_im2col,
+                false,
+            )
+        };
+        let activation_step = (reference_im2col
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - reference_im2col
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min))
+            / 15.0;
+        for (index, (&got, &want)) in activations.iter().zip(&reference_im2col).enumerate() {
+            assert!(
+                (got - want).abs() <= activation_step + 1e-6,
+                "packed activation[{index}] mismatch: got {got}, expected {want}, step {activation_step}"
+            );
+        }
+
+        let dequantized_weights = weight.to_f32_vec();
+        let mut expected = vec![0.0; actual.len()];
+        for pixel in 0..pixels {
+            for out_channel in 0..oc {
+                let mut sum = 0.0;
+                for depth in 0..k {
+                    sum += activations[pixel * k + depth]
+                        * dequantized_weights[out_channel * k + depth];
+                }
+                expected[out_channel * pixels + pixel] = sum;
+            }
+        }
+
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            let error = (got - want).abs();
+            assert!(
+                error <= 2e-4,
+                "output[{index}] mismatch: got {got}, expected {want}, error {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_conv2d_packed_i8x4_non_multiple_k() {
         let n = 1;
         let c = 3;
