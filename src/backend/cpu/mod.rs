@@ -196,7 +196,11 @@ use matmul::{
     quantized_matmul_dispatch_i8_u8,
 };
 
-/// Global cache for aligned packed weight data, keyed by
+type PackedWeightCacheKey = (usize, usize, usize, TypeId);
+static PACKED_WEIGHT_CACHE: OnceLock<
+    Mutex<HashMap<PackedWeightCacheKey, Arc<dyn std::any::Any + Send + Sync>>>,
+> = OnceLock::new();
+
 /// Per-plan packed weight cache keyed by `(raw_ptr, write_offset, raw_len, TypeId)`.
 /// The raw data pointer acts as a unique compilation-session identifier so that
 /// distinct weight values (even at the same arena offset) never collide.
@@ -211,11 +215,7 @@ fn get_or_cache_packed<T: PackedWord + 'static>(
         write_size,
         TypeId::of::<T>(),
     );
-    type PackedCache = OnceLock<
-        Mutex<HashMap<(usize, usize, usize, TypeId), Arc<dyn std::any::Any + Send + Sync>>>,
-    >;
-    static CACHE: PackedCache = OnceLock::new();
-    let mut cache = CACHE
+    let mut cache = PACKED_WEIGHT_CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -241,10 +241,16 @@ static F32_WEIGHT_CACHE: OnceLock<
     Mutex<HashMap<F32WeightCacheKey, Arc<dyn std::any::Any + Send + Sync>>>,
 > = OnceLock::new();
 
-/// Clear the global f32 weight cache, freeing dequantized weight data.
+/// Clear global packed and f32 weight caches between executor instances.
 /// Call this between executor instances (e.g., when switching quantization dtypes)
 /// to prevent unbounded memory growth.
 pub fn clear_f32_weight_cache() {
+    if let Some(cache) = PACKED_WEIGHT_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
     if let Some(cache) = F32_WEIGHT_CACHE.get() {
         cache
             .lock()
@@ -294,6 +300,24 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
     pt.get_or_init_f32_weights();
     cache.insert(cache_key, pt.clone());
     pt
+}
+
+#[cfg(test)]
+mod packed_weight_cache_tests {
+    use super::{clear_f32_weight_cache, get_or_cache_packed};
+    use crate::dtypes::{PackedWord, U4x8};
+
+    #[test]
+    fn clearing_weight_caches_prevents_reused_arena_pointer_aliases() {
+        let mut raw = vec![0u8; 4];
+        let first = get_or_cache_packed::<U4x8>(0, raw.len(), &raw);
+        assert_eq!(first[0].to_bits(), 0);
+
+        raw.fill(0xff);
+        clear_f32_weight_cache();
+        let second = get_or_cache_packed::<U4x8>(0, raw.len(), &raw);
+        assert_eq!(second[0].to_bits(), u32::MAX);
+    }
 }
 
 #[allow(clippy::cognitive_complexity)]
