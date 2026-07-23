@@ -73,9 +73,83 @@ pub enum SaturationMode {
     Clamp { min: i32, max: i32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuantizedKernelFamily {
+    PackedMatMul,
+    PackedConv2d,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DecodeFamily {
+    DirectPackedInteger,
+    UnpackToFloat,
+    CodebookLookup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkloadPhase {
+    GeneralGemm,
+    Convolution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CpuIsaRequirement {
+    Portable,
+    Avx2,
+    Avx512,
+    Neon,
+}
+
+impl CpuIsaRequirement {
+    pub fn is_available(self) -> bool {
+        match self {
+            Self::Portable => true,
+            Self::Avx2 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    std::is_x86_feature_detected!("avx2")
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    false
+                }
+            }
+            Self::Avx512 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    std::is_x86_feature_detected!("avx512f")
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    false
+                }
+            }
+            Self::Neon => {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    std::arch::is_aarch64_feature_detected!("neon")
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    false
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuantizedKernelCapability {
+    pub family: QuantizedKernelFamily,
+    pub decode: DecodeFamily,
+    pub phase: WorkloadPhase,
+    pub required_isa: CpuIsaRequirement,
+}
+
 /// Numerical semantics selected for a quantized kernel invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizedExecutionContract {
+    pub capability: QuantizedKernelCapability,
     pub activation_storage: ScalarType,
     pub weight_storage: ScalarType,
     pub accumulator: ScalarType,
@@ -133,6 +207,7 @@ impl QuantizedExecutionContract {
     }
 
     pub fn fixed_point_output(
+        capability: QuantizedKernelCapability,
         activation_storage: ScalarType,
         weight_storage: ScalarType,
         bias_domain: BiasDomain,
@@ -147,6 +222,7 @@ impl QuantizedExecutionContract {
             _ => (i32::MIN, i32::MAX),
         };
         Self {
+            capability,
             activation_storage,
             weight_storage,
             accumulator: ScalarType::I32,
@@ -220,16 +296,37 @@ impl QuantizedExecutionContract {
             (8, false) => ScalarType::I8,
             _ => ScalarType::I8,
         };
-        Self::current_f32_output(activation_storage, weight_storage, has_bias)
+        let convolution = kernel_name.starts_with("conv2d_");
+        let capability = QuantizedKernelCapability {
+            family: if convolution {
+                QuantizedKernelFamily::PackedConv2d
+            } else {
+                QuantizedKernelFamily::PackedMatMul
+            },
+            decode: if activation_storage == ScalarType::I8 {
+                DecodeFamily::DirectPackedInteger
+            } else {
+                DecodeFamily::UnpackToFloat
+            },
+            phase: if convolution {
+                WorkloadPhase::Convolution
+            } else {
+                WorkloadPhase::GeneralGemm
+            },
+            required_isa: CpuIsaRequirement::Portable,
+        };
+        Self::current_f32_output(capability, activation_storage, weight_storage, has_bias)
     }
 
     pub fn current_f32_output(
+        capability: QuantizedKernelCapability,
         activation_storage: ScalarType,
         weight_storage: ScalarType,
         has_bias: bool,
     ) -> Self {
         let integer_activation = activation_storage == ScalarType::I8;
         Self {
+            capability,
             activation_storage,
             weight_storage,
             accumulator: if integer_activation {
@@ -262,6 +359,35 @@ impl QuantizedExecutionContract {
             return Err(BackendError::Dispatch(format!(
                 "instruction {instruction_index} has unsupported quantized weight storage {:?}",
                 self.weight_storage
+            )));
+        }
+        let family_phase_matches = matches!(
+            (self.capability.family, self.capability.phase),
+            (
+                QuantizedKernelFamily::PackedMatMul,
+                WorkloadPhase::GeneralGemm
+            ) | (
+                QuantizedKernelFamily::PackedConv2d,
+                WorkloadPhase::Convolution
+            )
+        );
+        let decode_matches = match self.capability.decode {
+            DecodeFamily::DirectPackedInteger => {
+                self.activation_storage == ScalarType::I8 && self.accumulator == ScalarType::I32
+            }
+            DecodeFamily::UnpackToFloat | DecodeFamily::CodebookLookup => {
+                self.activation_storage == ScalarType::F32 && self.accumulator == ScalarType::F32
+            }
+        };
+        if !family_phase_matches || !decode_matches {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} has an incompatible quantized kernel capability"
+            )));
+        }
+        if !self.capability.required_isa.is_available() {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} requires unavailable CPU ISA {:?}",
+                self.capability.required_isa
             )));
         }
         match self.activation_storage {
@@ -430,7 +556,8 @@ impl QuantizedWeightMeta {
         );
         let correction_matches = std::mem::discriminant(&self.execution.zero_point_correction)
             == std::mem::discriminant(&expected.zero_point_correction);
-        if self.execution.activation_storage != expected.activation_storage
+        if self.execution.capability != expected.capability
+            || self.execution.activation_storage != expected.activation_storage
             || self.execution.weight_storage != expected.weight_storage
             || self.execution.accumulator != expected.accumulator
             || !correction_matches
@@ -844,6 +971,15 @@ fn decode_executable_plan(
 mod executable_plan_validation_tests {
     use super::*;
 
+    fn matmul_capability(decode: DecodeFamily) -> QuantizedKernelCapability {
+        QuantizedKernelCapability {
+            family: QuantizedKernelFamily::PackedMatMul,
+            decode,
+            phase: WorkloadPhase::GeneralGemm,
+            required_isa: CpuIsaRequirement::Portable,
+        }
+    }
+
     fn valid_i4_meta(kernel_name: &str) -> QuantizedWeightMeta {
         QuantizedWeightMeta {
             bit_width: 4,
@@ -859,6 +995,16 @@ mod executable_plan_validation_tests {
     #[test]
     fn quantized_execution_contract_distinguishes_float_and_integer_accumulation() {
         let float = valid_i4_meta("matmul_i4");
+        assert_eq!(
+            float.execution.capability.family,
+            QuantizedKernelFamily::PackedMatMul
+        );
+        assert_eq!(
+            float.execution.capability.decode,
+            DecodeFamily::UnpackToFloat
+        );
+        assert_eq!(float.execution.capability.phase, WorkloadPhase::GeneralGemm);
+        assert!(float.execution.capability.required_isa.is_available());
         assert_eq!(float.execution.activation_storage, ScalarType::F32);
         assert_eq!(float.execution.accumulator, ScalarType::F32);
         assert!(matches!(
@@ -867,6 +1013,10 @@ mod executable_plan_validation_tests {
         ));
 
         let integer = valid_i4_meta("matmul_i4_i8");
+        assert_eq!(
+            integer.execution.capability.decode,
+            DecodeFamily::DirectPackedInteger
+        );
         assert_eq!(integer.execution.activation_storage, ScalarType::I8);
         assert_eq!(integer.execution.accumulator, ScalarType::I32);
         assert!(matches!(
@@ -887,6 +1037,18 @@ mod executable_plan_validation_tests {
 
         assert!(integer.validate_for_kernel(0, "matmul_i4_i8").is_ok());
         assert!(integer.validate_for_kernel(0, "matmul_i4").is_err());
+
+        let conv = valid_i4_meta("conv2d_i4_i8");
+        assert_eq!(
+            conv.execution.capability.family,
+            QuantizedKernelFamily::PackedConv2d
+        );
+        assert_eq!(conv.execution.capability.phase, WorkloadPhase::Convolution);
+        assert!(conv.validate_for_kernel(0, "conv2d_i4_i8").is_ok());
+
+        let mut invalid_phase = valid_i4_meta("matmul_i4");
+        invalid_phase.execution.capability.phase = WorkloadPhase::Convolution;
+        assert!(invalid_phase.validate_for_kernel(0, "matmul_i4").is_err());
     }
 
     #[test]
@@ -955,6 +1117,7 @@ mod executable_plan_validation_tests {
     #[test]
     fn fixed_point_requantization_rounds_ties_to_even_and_saturates() {
         let contract = QuantizedExecutionContract::fixed_point_output(
+            matmul_capability(DecodeFamily::DirectPackedInteger),
             ScalarType::I8,
             ScalarType::U4,
             BiasDomain::I32Accumulator,
@@ -975,6 +1138,7 @@ mod executable_plan_validation_tests {
     #[test]
     fn fixed_point_requantization_applies_output_zero_point() {
         let contract = QuantizedExecutionContract::fixed_point_output(
+            matmul_capability(DecodeFamily::DirectPackedInteger),
             ScalarType::I8,
             ScalarType::U8,
             BiasDomain::None,
