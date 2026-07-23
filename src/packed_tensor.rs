@@ -977,6 +977,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
         let is_fp4 = T::IS_FLOAT && T::MAX_REPRESENTABLE < signed_bias;
+        let is_unsigned = matches!(T::SCALAR_TYPE, ScalarType::U4 | ScalarType::U8);
 
         let num_groups = if group_size > 1 {
             m.div_ceil(group_size)
@@ -1033,7 +1034,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let lo = grp_min - init_scale;
                     let hi = grp_max + init_scale;
                     let scale = (hi - lo) / unsigned_max;
-                    let zp = lo + signed_bias * scale;
+                    let zp = if is_unsigned {
+                        lo
+                    } else {
+                        lo + signed_bias * scale
+                    };
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -1065,7 +1070,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let lo = mins[row] - init_scale;
                     let hi = maxs[row] + init_scale;
                     let scale = (hi - lo) / unsigned_max;
-                    let zp = lo + signed_bias * scale;
+                    let zp = if is_unsigned {
+                        lo
+                    } else {
+                        lo + signed_bias * scale
+                    };
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -1167,6 +1176,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let blocks_per_row = inner / qblock;
         let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
+        let is_unsigned = matches!(T::SCALAR_TYPE, ScalarType::U4 | ScalarType::U8);
         let num_blocks = m * blocks_per_row;
 
         let mut scales = Vec::with_capacity(num_blocks);
@@ -1220,7 +1230,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let lo = bmin - init_scale;
                     let hi = bmax + init_scale;
                     let scale = (hi - lo) / unsigned_max;
-                    let zp = lo + signed_bias * scale;
+                    let zp = if is_unsigned {
+                        lo
+                    } else {
+                        lo + signed_bias * scale
+                    };
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -1561,8 +1575,25 @@ mod tests {
     use super::*;
     use crate::dtypes::F16x2;
     use crate::dtypes::F32x1;
-    use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4};
+    use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4};
     use crate::types::{ScalarType, StorageEncoding, TensorStorageLayout};
+
+    #[test]
+    fn unsigned_asymmetric_quantization_uses_unsigned_code_origin() {
+        let data = [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        for recovered in [
+            PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&data, &[1, 8]).to_f32_vec(),
+            PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&data, &[1, 8]).to_f32_vec(),
+        ] {
+            assert_eq!(recovered.len(), data.len());
+            for (actual, expected) in recovered.iter().zip(data) {
+                assert!(
+                    (actual - expected).abs() <= 0.6,
+                    "unsigned affine roundtrip produced {actual} for {expected}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn packed_tensor_capacity_matches_canonical_layout() {
