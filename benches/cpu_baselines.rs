@@ -96,11 +96,18 @@ fn batch_inputs(batch: usize, cols: usize) -> Vec<Vec<f32>> {
 }
 
 fn i8_activation_payload(values: &[f32]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + values.len());
+    write_i8_activation_payload(values, &mut payload);
+    payload
+}
+
+fn write_i8_activation_payload(values: &[f32], payload: &mut Vec<u8>) {
     let max_abs = values
         .iter()
         .fold(0.0f32, |max, value| max.max(value.abs()));
     let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
-    let mut payload = Vec::with_capacity(8 + values.len());
+    payload.clear();
+    payload.reserve(8 + values.len());
     payload.extend_from_slice(&scale.to_le_bytes());
     payload.extend_from_slice(&0.0f32.to_le_bytes());
     payload.extend(values.iter().map(|value| {
@@ -108,7 +115,6 @@ fn i8_activation_payload(values: &[f32]) -> Vec<u8> {
             .round()
             .clamp(i8::MIN as f32, i8::MAX as f32) as i8 as u8
     }));
-    payload
 }
 
 fn bench_w4_activation_paths(c: &mut Criterion) {
@@ -123,6 +129,7 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
             .flat_map(|batch| vector_data(k, batch * 13))
             .collect();
         let activation_payload = i8_activation_payload(&activations);
+        let mut quantized_payload = Vec::with_capacity(activation_payload.len());
         let mut float_output = vec![0.0f32; m * n];
         let mut integer_output = vec![0.0f32; m * n];
         group.throughput(Throughput::Elements((m * k * n) as u64));
@@ -150,6 +157,26 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
                 )
             });
         });
+        group.bench_with_input(
+            BenchmarkId::new("w4a8_quantize_and_i32", name),
+            &(),
+            |b, _| {
+                b.iter(|| {
+                    write_i8_activation_payload(
+                        black_box(&activations),
+                        black_box(&mut quantized_payload),
+                    );
+                    gemm_cpu_flat_i8_i4x8(
+                        black_box(&packed),
+                        black_box(&quantized_payload),
+                        black_box(&mut integer_output),
+                        m,
+                        k,
+                        n,
+                    )
+                });
+            },
+        );
     }
     group.finish();
 }

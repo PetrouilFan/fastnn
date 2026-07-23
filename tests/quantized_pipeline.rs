@@ -3,6 +3,7 @@
 //! Tests the full flow: GraphBuilder → compile_with_quantize → execute → verify output.
 //! Covers MatMul and Conv2d with both U4 and U8 quantization.
 
+use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 
@@ -664,7 +665,11 @@ fn test_matmul_u4_i8_dispatch_path() {
     );
 
     let mut executor = GraphExecutor::new(CpuBackend);
+    reset_cpu_telemetry();
     let result = executor.execute(&graph, &mut plan, &mem, &[]).unwrap();
+    let telemetry = cpu_telemetry_snapshot();
+    assert_eq!(telemetry.arena_temp_copies, 0, "snapshot={telemetry:?}");
+    assert_eq!(telemetry.arena_temp_copy_bytes, 0);
     let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
 
     assert_eq!(result_f32.len(), expected.len());
