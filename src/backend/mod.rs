@@ -144,6 +144,16 @@ pub struct QuantizedKernelCapability {
     pub decode: DecodeFamily,
     pub phase: WorkloadPhase,
     pub required_isa: CpuIsaRequirement,
+    /// Optional accelerated implementation used by runtime dispatch when available.
+    pub preferred_isa: Option<CpuIsaRequirement>,
+}
+
+impl QuantizedKernelCapability {
+    pub fn selected_isa(&self) -> CpuIsaRequirement {
+        self.preferred_isa
+            .filter(|isa| isa.is_available())
+            .unwrap_or(self.required_isa)
+    }
 }
 
 /// Numerical semantics selected for a quantized kernel invocation.
@@ -314,6 +324,14 @@ impl QuantizedExecutionContract {
                 WorkloadPhase::GeneralGemm
             },
             required_isa: CpuIsaRequirement::Portable,
+            preferred_isa: if !convolution
+                && activation_storage == ScalarType::I8
+                && cfg!(all(feature = "simd", target_arch = "x86_64"))
+            {
+                Some(CpuIsaRequirement::Avx2)
+            } else {
+                None
+            },
         };
         Self::current_f32_output(capability, activation_storage, weight_storage, has_bias)
     }
@@ -977,6 +995,7 @@ mod executable_plan_validation_tests {
             decode,
             phase: WorkloadPhase::GeneralGemm,
             required_isa: CpuIsaRequirement::Portable,
+            preferred_isa: None,
         }
     }
 
@@ -1017,6 +1036,18 @@ mod executable_plan_validation_tests {
             integer.execution.capability.decode,
             DecodeFamily::DirectPackedInteger
         );
+        if cfg!(all(feature = "simd", target_arch = "x86_64")) {
+            assert_eq!(
+                integer.execution.capability.preferred_isa,
+                Some(CpuIsaRequirement::Avx2)
+            );
+            let expected = if CpuIsaRequirement::Avx2.is_available() {
+                CpuIsaRequirement::Avx2
+            } else {
+                CpuIsaRequirement::Portable
+            };
+            assert_eq!(integer.execution.capability.selected_isa(), expected);
+        }
         assert_eq!(integer.execution.activation_storage, ScalarType::I8);
         assert_eq!(integer.execution.accumulator, ScalarType::I32);
         assert!(matches!(

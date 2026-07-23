@@ -124,6 +124,7 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
         ("prefill_8x256x256", 8, 256, 256),
     ] {
         let weights = weight_data(n, k);
+        let f32_weights = PackedTensor::<F32x1>::from_f32_auto(&weights, &[n, k]);
         let packed = PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&weights, &[n, k]);
         let activations: Vec<f32> = (0..m)
             .flat_map(|batch| vector_data(k, batch * 13))
@@ -131,8 +132,21 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
         let activation_payload = i8_activation_payload(&activations);
         let mut quantized_payload = Vec::with_capacity(activation_payload.len());
         let mut float_output = vec![0.0f32; m * n];
+        let mut f32_output = vec![0.0f32; m * n];
         let mut integer_output = vec![0.0f32; m * n];
         group.throughput(Throughput::Elements((m * k * n) as u64));
+        group.bench_with_input(BenchmarkId::new("f32_native", name), &(), |b, _| {
+            b.iter(|| {
+                gemm_cpu_flat(
+                    black_box(&f32_weights),
+                    black_box(&activations),
+                    black_box(&mut f32_output),
+                    m,
+                    k,
+                    n,
+                )
+            });
+        });
         group.bench_with_input(BenchmarkId::new("w4a32_unpack_float", name), &(), |b, _| {
             b.iter(|| {
                 gemm_cpu_flat(
