@@ -36,6 +36,17 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 VALID_DTYPES = ("f32", "u4", "u8", "i4", "i8", "f8", "f8r", "f4", "i4cb")
+EXECUTION_CONTRACTS = {
+    "f32": "W32A32",
+    "u4": "WU4A32-unpack",
+    "u8": "WU8A32-unpack",
+    "i4": "WI4A4-dynamic",
+    "i8": "WI8A8-dynamic",
+    "f8": "WF8A32-unpack",
+    "f8r": "WF8RA32-unpack",
+    "f4": "WF4A32-unpack",
+    "i4cb": "WI4-codebook-A32-unpack",
+}
 DEFAULT_COCO_DIR = "/home/petrouil/Projects/YOLO_Validation/coco"
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "yolo11n": {"pt_name": "yolo11n.pt"},
@@ -704,7 +715,8 @@ def main() -> int:
                           f"weights={fastnn_mem['weights_mb']:.1f}MB  "
                           f"workspace={fastnn_mem['workspace_mb']:.1f}MB")
 
-                entry: dict[str, Any] = {"metrics": metrics, "speed": speed,
+                entry: dict[str, Any] = {"execution_contract": EXECUTION_CONTRACTS[dtype],
+                    "metrics": metrics, "speed": speed,
                     "delta_vs_pytorch": {"mAP@0.5": delta5, "mAP@0.5:0.95": delta595},
                     "speedup": speedup, "num_predictions": len(coco_results)}
                 if fastnn_mem:
@@ -732,7 +744,8 @@ def main() -> int:
                 print(f"    {dtype:6s}: ERROR {fr['error']}")
             else:
                 m, s, d, mem = fr["metrics"], fr["speed"], fr["delta_vs_pytorch"], fr.get("memory_stats", {})
-                line = (f"    {dtype:6s}: mAP@0.5={m['mAP@0.5']:.4f}  "
+                contract = fr["execution_contract"]
+                line = (f"    {dtype:6s} [{contract}]: mAP@0.5={m['mAP@0.5']:.4f}  "
                         f"mAP@0.5:0.95={m['mAP@0.5:0.95']:.4f}  "
                         f"{s['mean_ms']:.1f}ms/img ({fr['speedup']:.2f}x)  "
                         f"Δ={d['mAP@0.5']:+.4f}/{d['mAP@0.5:0.95']:+.4f}")
