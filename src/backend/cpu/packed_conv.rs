@@ -1161,8 +1161,10 @@ pub unsafe fn conv2d_packed_i8x4(
             });
             with_col_buf(num_pixels * local_oc, |temp| {
                 gemm_packed_i8x4_fused(&act_packed, &w_slice, b, activation, temp);
-                for pixel in 0..num_pixels {
-                    for f in 0..local_oc {
+                // Write each NCHW output channel contiguously. The former
+                // pixel-major transpose scattered stores across every channel.
+                for f in 0..local_oc {
+                    for pixel in 0..num_pixels {
                         output[out_base + (g_oc_off + f) * num_pixels + pixel] =
                             temp[pixel * local_oc + f];
                     }
