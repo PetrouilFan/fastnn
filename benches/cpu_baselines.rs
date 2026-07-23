@@ -128,6 +128,15 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
         let weights = weight_data(n, k);
         let f32_weights = PackedTensor::<F32x1>::from_f32_auto(&weights, &[n, k]);
         let packed = PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&weights, &[n, k]);
+        let grouped_w4: Vec<(usize, PackedTensor<I4x8>)> = [32, 64, 128]
+            .into_iter()
+            .map(|group_size| {
+                (
+                    group_size,
+                    PackedTensor::<I4x8>::from_f32_k_grouped_i4(&weights, &[n, k], group_size),
+                )
+            })
+            .collect();
         let activations: Vec<f32> = (0..m)
             .flat_map(|batch| vector_data(k, batch * 13))
             .collect();
@@ -185,6 +194,24 @@ fn bench_w4_activation_paths(c: &mut Criterion) {
                 )
             });
         });
+        for (group_size, grouped) in &grouped_w4 {
+            group.bench_with_input(
+                BenchmarkId::new(format!("w4a8_grouped_g{group_size}"), name),
+                &(),
+                |b, _| {
+                    b.iter(|| {
+                        gemm_cpu_flat_i8_i4x8_scalar(
+                            black_box(grouped),
+                            black_box(&activation_payload),
+                            black_box(&mut integer_output),
+                            m,
+                            k,
+                            n,
+                        )
+                    });
+                },
+            );
+        }
         group.bench_with_input(
             BenchmarkId::new("w4a8_quantize_and_i32", name),
             &(),

@@ -1837,6 +1837,18 @@ fn gemm_cpu_flat_i8_i4x8_scalar_impl(
     k: usize,
     n: usize,
 ) {
+    if weights.blocks_per_row() > 0 && !weights.quantized_group_sums().is_empty() {
+        gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
+            weights,
+            activation_affine,
+            act_i8,
+            outputs,
+            m,
+            k,
+            n,
+        );
+        return;
+    }
     let k_packed = k.div_ceil(I4x8::ITEMS);
     for bi in 0..m {
         let act_base = bi * k;
@@ -1874,6 +1886,65 @@ fn gemm_cpu_flat_i8_i4x8_scalar_impl(
                 weights.zero_for_row(row),
                 activation_affine,
             );
+        }
+    }
+}
+
+fn gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
+    weights: &PackedTensor<I4x8>,
+    activation_affine: I8ActivationAffine,
+    act_i8: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let group_size = weights.quant_block_size;
+    let groups = weights.blocks_per_row();
+    let k_packed = k.div_ceil(I4x8::ITEMS);
+    debug_assert!(group_size > 0);
+
+    let mut activation_sums = vec![0i32; groups];
+    for batch in 0..m {
+        let activation_base = batch * k;
+        for (group, sum) in activation_sums.iter_mut().enumerate() {
+            let start = group * group_size;
+            let end = (start + group_size).min(k);
+            *sum = act_i8[activation_base + start..activation_base + end]
+                .iter()
+                .map(|value| *value as i8 as i32)
+                .sum();
+        }
+
+        for row in 0..n {
+            let row_offset = row * k_packed;
+            let mut output = 0.0f32;
+            for (group, &q_activation_sum) in activation_sums.iter().enumerate() {
+                let start = group * group_size;
+                let end = (start + group_size).min(k);
+                let mut q_dot = 0i32;
+                for index in start..end {
+                    let word = weights.as_packed()[row_offset + index / I4x8::ITEMS].0;
+                    let nibble = (word >> ((index % I4x8::ITEMS) * 4)) & 0x0f;
+                    let q_weight = if nibble & 0x08 != 0 {
+                        (nibble | 0xfffffff0) as i32
+                    } else {
+                        nibble as i32
+                    };
+                    let q_activation = act_i8[activation_base + index] as i8 as i32;
+                    q_dot += q_weight * q_activation;
+                }
+                output += apply_integer_affine_dot(
+                    q_dot,
+                    weights.quantized_group_sum(row, group),
+                    q_activation_sum,
+                    end - start,
+                    weights.scale_for_elem(row, start),
+                    weights.zero_for_elem(row, start),
+                    activation_affine,
+                );
+            }
+            outputs[batch * n + row] = output;
         }
     }
 }

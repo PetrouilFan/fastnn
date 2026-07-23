@@ -680,6 +680,53 @@ mod neon_tests {
     }
 
     #[test]
+    fn grouped_i8_i4x8_matches_independent_dequantized_reference() {
+        let (m, n, k) = (3usize, 4usize, 145usize);
+        let weights: Vec<f32> = (0..n * k)
+            .map(|index| {
+                let row = index / k;
+                let col = index % k;
+                ((row * 19 + col * 23) % 113) as f32 / 17.0 - 3.0
+            })
+            .collect();
+        let quantized_activations: Vec<i8> = (0..m * k)
+            .map(|index| ((index * 29 + 7) % 255) as i16 - 127)
+            .map(|value| value as i8)
+            .collect();
+        let activation_scale = 0.03125f32;
+        let activation_offset = -0.375f32;
+        let mut payload = Vec::with_capacity(8 + quantized_activations.len());
+        payload.extend_from_slice(&activation_scale.to_le_bytes());
+        payload.extend_from_slice(&activation_offset.to_le_bytes());
+        payload.extend(quantized_activations.iter().map(|value| *value as u8));
+
+        for group_size in [32, 64, 128] {
+            let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&weights, &[n, k], group_size);
+            let dequantized_weights = packed.to_f32_vec();
+            let mut actual = vec![0.0f32; m * n];
+            gemm_cpu_flat_i8_i4x8(&packed, &payload, &mut actual, m, k, n);
+
+            for batch in 0..m {
+                for row in 0..n {
+                    let mut expected = 0.0f32;
+                    for col in 0..k {
+                        let activation = quantized_activations[batch * k + col] as f32
+                            * activation_scale
+                            + activation_offset;
+                        expected += dequantized_weights[row * k + col] * activation;
+                    }
+                    let got = actual[batch * n + row];
+                    let tolerance = 1e-4 * expected.abs().max(1.0);
+                    assert!(
+                        (got - expected).abs() <= tolerance,
+                        "group={group_size} batch={batch} row={row}: got {got}, expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_gemm_cpu_flat_i8_i4x8_nonzero_activation_zp_matches_affine_reference() {
         let n = 1;
         let k = 8;
