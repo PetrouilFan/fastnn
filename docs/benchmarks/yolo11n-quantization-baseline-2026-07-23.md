@@ -45,6 +45,16 @@ The signed I4 result is W4A4, not the W4A8 MatMul path. It must not be cited as 
 
 On 500 images, U8 retains 99.26% of the F32 mAP@0.5:0.95 while reducing recorded weight storage by 73.4%. It is 1.10× faster than PyTorch but 2.6% slower than fastnn F32. The current U8 execution unpacks/dequantizes weights into a cached F32 view, so the storage reduction is real but this is not an integer U8 compute-speed result.
 
+## COCO-500 corrected I8 validation
+
+| Runtime | Contract | mAP@0.5 | mAP@0.5:0.95 | Delta mAP@0.5:0.95 | Mean latency | Weight storage |
+|---|---|---:|---:|---:|---:|---:|
+| PyTorch | W32A32 | 0.5804 | 0.4211 | — | 109.7 ms | 10.0 MB |
+| fastnn F32 | W32A32 | 0.5804 | 0.4211 | +0.0000 | 97.1 ms | 10.1 MB |
+| fastnn I8 | WI8A8-dynamic | 0.5740 | 0.4162 | -0.0050 | 719.7 ms | 2.7 MB |
+
+Corrected I8 retains 98.84% of F32 mAP@0.5:0.95 on 500 images. Its quality is therefore valid, but the scalar dynamic-quantization path is 7.41× slower than fastnn F32 and is not a performance candidate until a numerically equivalent SIMD implementation wins.
+
 ## Correctness fixes discovered by the gate
 
 1. Unsigned asymmetric quantization used a signed code origin. U4/U8 offsets now start at the unsigned code origin. This removed full-output non-finite propagation and restored U8 quality.
