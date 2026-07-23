@@ -15,8 +15,26 @@
 //! }
 //! ```
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorValue};
+use crate::ir::{ComputeGraph, NodeId, Opcode, TensorType, TensorValue};
+use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
 use std::collections::{HashMap, HashSet};
+
+fn packed_param_dtype(tensor_type: &TensorType) -> Option<&'static str> {
+    let representation = tensor_type.value_representation().ok()?;
+    if !matches!(representation.encoding, StorageEncoding::Packed { .. }) {
+        return None;
+    }
+    match representation.storage {
+        ScalarType::I4 => Some("i4"),
+        ScalarType::U4 => Some("u4"),
+        ScalarType::I8 => Some("i8"),
+        ScalarType::U8 => Some("u8"),
+        ScalarType::Fp4E2M1 => Some("f4"),
+        ScalarType::Fp8E4M3 => Some("f8"),
+        ScalarType::Fp8E5M2 => Some("f8r"),
+        _ => None,
+    }
+}
 
 /// Configuration for ONNX export behavior.
 pub struct ExportConfig {
@@ -68,8 +86,10 @@ const TRAINING_ONLY_OPCODES: &[fn(&Opcode) -> bool] = &[
 /// training (optimizer updates, gradient scaling).
 ///
 /// An empty return value means the graph is safe for ONNX inference export.
-pub fn detect_training_ops(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
-    let order = graph.topological_sort();
+pub fn detect_training_ops(graph: &ComputeGraph) -> Result<Vec<(NodeId, String)>, String> {
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
     let mut found = Vec::new();
 
     for &node_id in &order {
@@ -85,7 +105,7 @@ pub fn detect_training_ops(graph: &ComputeGraph) -> Vec<(NodeId, String)> {
         }
     }
 
-    found
+    Ok(found)
 }
 
 /// ONNX node representation for export JSON.
@@ -120,7 +140,7 @@ struct QLinearPattern {
     /// Weight per-channel scales (from packed dtype).
     weight_scales: Vec<f32>,
     /// Weight per-channel zero points.
-    weight_zero_points: Vec<f32>,
+    weight_dequant_offsets: Vec<f32>,
     /// Activation scale from DequantizeActivations (None if unquantized).
     activation_scale: Option<f32>,
 }
@@ -174,26 +194,29 @@ fn detect_qlinear_patterns(
             None => continue,
         };
 
-        // Extract scales/zero_points from the packed weight's dtype.
-        let (weight_scales, weight_zero_points) = match &packed_node.output_type.dtype {
-            IrDType::I4 {
+        // Extract affine metadata from the canonical representation rather
+        // than maintaining another list of packed IR dtype variants.
+        let representation = match packed_node.output_type.value_representation() {
+            Ok(representation) => representation,
+            Err(_) => continue,
+        };
+        let (weight_scales, weight_dequant_offsets) = match representation.transform {
+            RepresentationTransform::AffineDequantization {
+                scales, offsets, ..
+            }
+            | RepresentationTransform::ScaledAffine {
+                scales, offsets, ..
+            }
+            | RepresentationTransform::Codebook {
+                scales, offsets, ..
+            } => (
                 scales,
-                zero_points,
-                ..
-            } => (scales.clone(), zero_points.clone()),
-            IrDType::I8Scaled {
-                scales,
-                zero_points,
-            } => (scales.clone(), zero_points.clone()),
-            IrDType::F4 { scales, zeros, .. } => (
-                scales.clone(),
-                if zeros.is_empty() {
-                    vec![0.0f32]
+                if offsets.is_empty() {
+                    vec![0.0]
                 } else {
-                    zeros.clone()
+                    offsets
                 },
             ),
-            IrDType::F8 { scales } | IrDType::F8R { scales } => (scales.clone(), vec![0.0f32]),
             _ => continue,
         };
 
@@ -245,7 +268,7 @@ fn detect_qlinear_patterns(
                 },
                 q_output_id,
                 weight_scales,
-                weight_zero_points,
+                weight_dequant_offsets,
                 activation_scale,
             },
         );
@@ -260,9 +283,17 @@ fn per_tensor_scale(scales: &[f32]) -> f32 {
     scales.first().copied().unwrap_or(1.0)
 }
 
-/// Extract a per-tensor zero_point from per-channel zero_points.
-fn per_tensor_zero_point(zero_points: &[f32]) -> i32 {
-    zero_points.first().copied().unwrap_or(0.0) as i32
+/// Convert `real = q * scale + offset` metadata to ONNX's
+/// `real = (q - zero_point) * scale` convention.
+fn per_tensor_zero_point(scales: &[f32], dequant_offsets: &[f32]) -> i32 {
+    let scale = scales.first().copied().unwrap_or(1.0);
+    let offset = dequant_offsets.first().copied().unwrap_or(0.0);
+    if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+        return 0;
+    }
+    (-offset / scale)
+        .round()
+        .clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 /// Generate unique param entry names for the scale/zero_point scalars
@@ -285,40 +316,26 @@ fn extract_output_scale_zp(graph: &ComputeGraph, q_node_id: NodeId) -> (f32, i32
         Some(n) => n,
         None => return (1.0, 0),
     };
-    match &q_node.output_type.dtype {
-        IrDType::I4 {
-            scales,
-            zero_points,
-            ..
-        } => {
-            let s = scales.first().copied().unwrap_or(1.0);
-            let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
-            if scales.is_empty() {
-                (1.0, 0)
-            } else {
-                (s, zp)
-            }
+    let representation = match q_node.output_type.value_representation() {
+        Ok(representation) => representation,
+        Err(_) => return (1.0, 0),
+    };
+    match representation.transform {
+        RepresentationTransform::AffineDequantization {
+            scales, offsets, ..
         }
-        IrDType::I8Scaled {
-            scales,
-            zero_points,
-        } => {
-            let s = scales.first().copied().unwrap_or(1.0);
-            let zp = zero_points.first().copied().unwrap_or(0.0) as i32;
-            if scales.is_empty() {
-                (1.0, 0)
-            } else {
-                (s, zp)
-            }
+        | RepresentationTransform::ScaledAffine {
+            scales, offsets, ..
         }
-        IrDType::F8 { .. } | IrDType::F8R { .. } => (1.0, 0),
-        IrDType::F4 { scales, .. } => {
-            let s = scales.first().copied().unwrap_or(1.0);
-            if scales.is_empty() {
-                (1.0, 0)
-            } else {
-                (s, 0)
-            }
+        | RepresentationTransform::Codebook {
+            scales, offsets, ..
+        } if !scales.is_empty() => {
+            let scale = scales[0];
+            (scale, per_tensor_zero_point(&scales, &offsets))
+        }
+        RepresentationTransform::AffineQuantization(spec) if !spec.scales.is_empty() => {
+            let zero_point = spec.zero_points.first().copied().unwrap_or(0);
+            (spec.scales[0], zero_point)
         }
         _ => (1.0, 0),
     }
@@ -350,7 +367,7 @@ pub fn export_to_onnx_json_with_config(
     config: &ExportConfig,
 ) -> Result<String, String> {
     // ── Phase 0: Training safety check ──────────────────────────────
-    let training_ops = detect_training_ops(graph);
+    let training_ops = detect_training_ops(graph)?;
     if config.fail_on_training_ops && !training_ops.is_empty() {
         let opcodes: Vec<String> = training_ops
             .iter()
@@ -373,7 +390,9 @@ pub fn export_to_onnx_json_with_config(
         ));
     }
 
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
 
     // Phase 1: detect quantized patterns
     let (skip_nodes, qlinear_patterns) = detect_qlinear_patterns(graph, &order);
@@ -422,7 +441,8 @@ pub fn export_to_onnx_json_with_config(
             let b_src = node_output_names[&node.inputs[1]].clone();
 
             let b_scale = per_tensor_scale(&pattern.weight_scales);
-            let b_zp = per_tensor_zero_point(&pattern.weight_zero_points);
+            let b_zp =
+                per_tensor_zero_point(&pattern.weight_scales, &pattern.weight_dequant_offsets);
             let a_scale = pattern.activation_scale.unwrap_or(1.0);
             let a_zp = 0;
             let (y_scale, y_zp) = extract_output_scale_zp(graph, pattern.q_output_id);
@@ -548,15 +568,7 @@ pub fn export_to_onnx_json_with_config(
                 // Constant nodes become weight params, not ONNX ops
                 match val {
                     TensorValue::Data { bytes, tensor_type } => {
-                        let is_packed = matches!(
-                            &tensor_type.dtype,
-                            IrDType::I4 { .. }
-                                | IrDType::I8Scaled { .. }
-                                | IrDType::F4 { .. }
-                                | IrDType::F8 { .. }
-                                | IrDType::F8R { .. }
-                        );
-                        if is_packed {
+                        if let Some(dtype) = packed_param_dtype(tensor_type) {
                             // Export quantized packed weights as raw byte params.
                             let shape: Vec<u64> = tensor_type
                                 .shape
@@ -570,17 +582,10 @@ pub fn export_to_onnx_json_with_config(
                                 OnnxExportParam {
                                     data: serde_json::json!(data),
                                     shape,
-                                    dtype: match &tensor_type.dtype {
-                                        IrDType::I4 { .. } => "u4".to_string(),
-                                        IrDType::I8Scaled { .. } => "i8".to_string(),
-                                        IrDType::F4 { .. } => "f4".to_string(),
-                                        IrDType::F8 { .. } => "f8".to_string(),
-                                        IrDType::F8R { .. } => "f8r".to_string(),
-                                        _ => unreachable!(),
-                                    },
+                                    dtype: dtype.to_string(),
                                 },
                             );
-                        } else if tensor_type.dtype.byte_size() == 4 {
+                        } else if tensor_type.is_native_scalar(ScalarType::F32) {
                             // Only export F32 weights; skip Float(0) fill constants
                             let f32_data: Vec<f32> = bytes
                                 .chunks_exact(4)
@@ -755,4 +760,28 @@ pub fn export_to_onnx_file_with_config(
 ) -> Result<(), String> {
     let json = export_to_onnx_json_with_config(graph, config)?;
     std::fs::write(path, &json).map_err(|e| format!("ONNX export file write: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::IrDType;
+
+    #[test]
+    fn packed_param_dtype_uses_canonical_storage_identity() {
+        let i4 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::I4);
+        let u4 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::U4Scaled);
+        let f32 = TensorType::new(vec![crate::ir::DimExpr::Known(8)], IrDType::F32);
+        assert_eq!(packed_param_dtype(&i4), Some("i4"));
+        assert_eq!(packed_param_dtype(&u4), Some("u4"));
+        assert_eq!(packed_param_dtype(&f32), None);
+    }
+
+    #[test]
+    fn dequantization_offsets_are_converted_to_onnx_zero_points() {
+        assert_eq!(per_tensor_zero_point(&[0.5], &[-1.0]), 2);
+        assert_eq!(per_tensor_zero_point(&[0.25], &[1.0]), -4);
+        assert_eq!(per_tensor_zero_point(&[], &[]), 0);
+        assert_eq!(per_tensor_zero_point(&[0.0], &[1.0]), 0);
+    }
 }

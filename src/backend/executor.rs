@@ -15,40 +15,19 @@
 //! ```
 
 use crate::autograd::build_backward_graph;
+use crate::backend::prepared::PreparedPlanResourceLimits;
 use crate::backend::{
-    Backend, BackendError, ExecutablePlan, Instruction, MemoryPlan, ProfileEntry,
+    Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, PlanResourceLimits,
+    ProfileEntry,
 };
+use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
-use crate::compiler::passes::{
-    activation_quantization, calibration, dead_code_elimination, memory_planning, operator_fusion,
-    quantization, shape_inference,
-};
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv};
+use crate::compiler::{MemoryPlan, MemoryPlanResourceLimits};
+#[cfg(test)]
+use crate::ir::IrDType;
+use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-
-/// Target weight dtype for compilation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum WeightDtype {
-    /// No quantization — keep f32 weights as-is.
-    F32,
-    /// Integer 4-bit symmetric quantization (I4x8).
-    I4,
-    /// Integer 8-bit symmetric quantization (I8x4/U8).
-    I8,
-    /// Unsigned integer 4-bit quantization (U4x8).
-    U4,
-    /// Unsigned integer 8-bit quantization (U8x4).
-    U8,
-    /// Float 8-bit E4M3 (F8x4).
-    F8x4,
-    /// Float 8-bit E5M2 (F8x4R).
-    F8x4R,
-    /// Float 4-bit E2M1 (F4x8).
-    F4x8,
-    /// Integer 4-bit codebook quantization (I4x8).
-    I4Codebook,
-}
 
 /// Cached state for an all-Known-shape model so that every forward call
 /// after the first can skip ShapeEnv resolution, shape validation, and
@@ -59,16 +38,242 @@ struct StaticShapeCache {
     filtered_plan: ExecutablePlan,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutionResourceLimits {
+    pub executable: PlanResourceLimits,
+    pub memory: MemoryPlanResourceLimits,
+    pub prepared: PreparedPlanResourceLimits,
+}
+
+pub(crate) fn validate_instruction_slice_ownership(
+    plan: &ExecutablePlan,
+    memory_plan: &MemoryPlan,
+) -> Result<(), BackendError> {
+    let validate_slice = |slice: BufferSlice, label: &str| {
+        let belongs_to_slot = memory_plan
+            .slots
+            .values()
+            .chain(memory_plan.secondary_slots.values())
+            .any(|slot| {
+                let (Some(slice_end), Some(slot_end)) = (
+                    slice.offset.checked_add(slice.size),
+                    slot.offset.checked_add(slot.size),
+                ) else {
+                    return false;
+                };
+                slice.offset >= slot.offset && slice_end <= slot_end
+            });
+        if !belongs_to_slot {
+            return Err(BackendError::Dispatch(format!(
+                "{label} slice {}..{} is not backed by a memory-plan slot",
+                slice.offset,
+                slice.offset.saturating_add(slice.size)
+            )));
+        }
+        Ok(())
+    };
+
+    for (instruction_index, instruction) in plan.instructions.iter().enumerate() {
+        match instruction {
+            Instruction::MemCopy { src, dst } => {
+                validate_slice(
+                    *src,
+                    &format!("instruction {instruction_index} copy source"),
+                )?;
+                validate_slice(
+                    *dst,
+                    &format!("instruction {instruction_index} copy destination"),
+                )?;
+            }
+            Instruction::Fill { dst, .. } => validate_slice(
+                *dst,
+                &format!("instruction {instruction_index} fill destination"),
+            )?,
+            Instruction::WriteConst { dst, .. } => validate_slice(
+                *dst,
+                &format!("instruction {instruction_index} constant destination"),
+            )?,
+            Instruction::CallKernel { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_compiled_artifacts(
+    graph: &ComputeGraph,
+    plan: &ExecutablePlan,
+    memory_plan: &MemoryPlan,
+    limits: &ExecutionResourceLimits,
+) -> Result<(), BackendError> {
+    plan.validate_with_limits(&limits.executable)?;
+    memory_plan
+        .validate_with_limits(&limits.memory)
+        .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+    if memory_plan.inputs != graph.inputs {
+        return Err(BackendError::Dispatch(
+            "memory plan inputs do not match graph input order".into(),
+        ));
+    }
+    if memory_plan.outputs != graph.outputs {
+        return Err(BackendError::Dispatch(
+            "memory plan outputs do not match graph output order".into(),
+        ));
+    }
+
+    let validate_slice_in_slot =
+        |slice: BufferSlice, slot: &crate::compiler::AllocSlot, label: &str| {
+            let slice_end = slice
+                .offset
+                .checked_add(slice.size)
+                .ok_or_else(|| BackendError::Dispatch(format!("{label} slice range overflows")))?;
+            let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+                BackendError::Dispatch(format!("{label} memory slot range overflows"))
+            })?;
+            if slice.offset < slot.offset || slice_end > slot_end {
+                return Err(BackendError::Dispatch(format!(
+                    "{label} slice {}..{slice_end} is outside memory slot {}..{slot_end}",
+                    slice.offset, slot.offset
+                )));
+            }
+            Ok(())
+        };
+
+    let validate_slice_in_any_slot = |slice: BufferSlice, label: &str| {
+        let belongs_to_slot = memory_plan
+            .slots
+            .values()
+            .chain(memory_plan.secondary_slots.values())
+            .any(|slot| {
+                let (Some(slice_end), Some(slot_end)) = (
+                    slice.offset.checked_add(slice.size),
+                    slot.offset.checked_add(slot.size),
+                ) else {
+                    return false;
+                };
+                slice.offset >= slot.offset && slice_end <= slot_end
+            });
+        if !belongs_to_slot {
+            return Err(BackendError::Dispatch(format!(
+                "{label} slice {}..{} is not backed by a memory-plan slot",
+                slice.offset,
+                slice.offset.saturating_add(slice.size)
+            )));
+        }
+        Ok(())
+    };
+
+    for (instruction_index, instruction) in plan.instructions.iter().enumerate() {
+        match instruction {
+            Instruction::CallKernel { node_id: None, .. } => {
+                return Err(BackendError::Dispatch(format!(
+                    "instruction {instruction_index} kernel is not associated with a graph node"
+                )));
+            }
+            Instruction::MemCopy { src, dst } => {
+                validate_slice_in_any_slot(
+                    *src,
+                    &format!("instruction {instruction_index} copy source"),
+                )?;
+                validate_slice_in_any_slot(
+                    *dst,
+                    &format!("instruction {instruction_index} copy destination"),
+                )?;
+            }
+            Instruction::Fill { dst, .. } => validate_slice_in_any_slot(
+                *dst,
+                &format!("instruction {instruction_index} fill destination"),
+            )?,
+            Instruction::WriteConst { dst, .. } => validate_slice_in_any_slot(
+                *dst,
+                &format!("instruction {instruction_index} constant destination"),
+            )?,
+            Instruction::CallKernel { .. } => {}
+        }
+    }
+
+    for (instruction_index, instruction) in plan.instructions.iter().enumerate() {
+        let Instruction::CallKernel {
+            input_slices,
+            output_slice,
+            secondary_output_slice,
+            node_id: Some(node_id),
+            ..
+        } = instruction
+        else {
+            continue;
+        };
+        let node = graph.get_node(*node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "instruction {instruction_index} references missing graph node {node_id}"
+            ))
+        })?;
+        let output_slot = memory_plan.slots.get(node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "instruction {instruction_index} node {node_id} has no output slot"
+            ))
+        })?;
+        validate_slice_in_slot(
+            *output_slice,
+            output_slot,
+            &format!("instruction {instruction_index} output"),
+        )?;
+        if input_slices.len() != node.inputs.len() {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} node {node_id} has {} input slices for {} graph inputs",
+                input_slices.len(),
+                node.inputs.len()
+            )));
+        }
+        for (input_index, (&input_node_id, &input_slice)) in
+            node.inputs.iter().zip(input_slices).enumerate()
+        {
+            let input_slot = memory_plan.slots.get(&input_node_id).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "instruction {instruction_index} input {input_index} node {input_node_id} has no slot"
+                ))
+            })?;
+            validate_slice_in_slot(
+                input_slice,
+                input_slot,
+                &format!("instruction {instruction_index} input {input_index}"),
+            )?;
+        }
+        if let Some(secondary_slice) = secondary_output_slice {
+            let secondary_slot = memory_plan
+                .secondary_slots
+                .get(&(*node_id, 1))
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "instruction {instruction_index} node {node_id} has no secondary output slot"
+                    ))
+                })?;
+            validate_slice_in_slot(
+                *secondary_slice,
+                secondary_slot,
+                &format!("instruction {instruction_index} secondary output"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
 /// Generic over the backend type `B` (e.g. `CpuBackend`).
 pub struct GraphExecutor<B: Backend> {
     backend: B,
+    resource_limits: ExecutionResourceLimits,
     cached_arena: Option<(usize, B::Buffer)>, // (capacity, buffer)
     /// Populated after the first inference when `graph.has_static_shapes()`
     /// is true. Subsequent calls skip ShapeEnv/tighten/tighten_slices.
     static_shape_cache: Option<StaticShapeCache>,
+    last_output_shapes: Vec<Vec<usize>>,
+}
+
+struct RuntimeOutputs {
+    data: Vec<Vec<u8>>,
+    shapes: Vec<Vec<usize>>,
 }
 
 /// Read output tensors from the arena using the tightened memory plan
@@ -79,8 +284,9 @@ fn read_execution_outputs<B: Backend>(
     shape_env: &ShapeEnv,
     backend: &B,
     arena: &B::Buffer,
-) -> Result<Vec<Vec<u8>>, BackendError> {
+) -> Result<RuntimeOutputs, BackendError> {
     let mut outputs = Vec::with_capacity(graph.outputs.len());
+    let mut shapes = Vec::with_capacity(graph.outputs.len());
     for &output_node_id in graph.outputs.iter() {
         let slot = tightened_memory_plan
             .slots
@@ -88,44 +294,102 @@ fn read_execution_outputs<B: Backend>(
             .ok_or_else(|| {
                 BackendError::Dispatch(format!("no memory slot for output node {}", output_node_id))
             })?;
-        let (actual_size, _resolved_shape) = if let Some(node) = graph.get_node(output_node_id) {
-            let resolved_shape =
-                resolve_shape(&node.output_type.shape, shape_env).map_err(|e| {
-                    BackendError::Dispatch(format!("output node {}: {e}", output_node_id))
+        let node = graph.get_node(output_node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!("output node {output_node_id} is missing"))
+        })?;
+        let shape = node
+            .output_type
+            .shape
+            .iter()
+            .map(|dimension| {
+                let value = match dimension {
+                    crate::ir::DimExpr::Known(value) => Some(*value),
+                    crate::ir::DimExpr::Symbol(name) => shape_env.resolve(name),
+                    crate::ir::DimExpr::Bounded { sym, .. } => shape_env.resolve(sym),
+                }
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "output node {output_node_id} has an unresolved dimension"
+                    ))
                 })?;
-            let actual_numel: usize = resolved_shape.iter().map(|&v| v as usize).product();
-            let computed = match &node.output_type.dtype {
-                IrDType::I4 { .. }
-                | IrDType::I8Scaled { .. }
-                | IrDType::F8 { .. }
-                | IrDType::F8R { .. }
-                | IrDType::F4 { .. } => node.output_type.dtype.packed_byte_size(actual_numel),
-                IrDType::I8 => actual_numel + 8,
-                _ => actual_numel * node.output_type.dtype.byte_size(),
-            };
-            (computed, resolved_shape)
-        } else {
-            (slot.size, vec![])
-        };
-        let data = backend.read_arena(arena, slot.offset, actual_size);
+                usize::try_from(value).map_err(|_| {
+                    BackendError::Dispatch(format!(
+                        "output node {output_node_id} dimension exceeds usize"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let actual_size = crate::compiler::plan::node_output_byte_size(node, Some(shape_env))
+            .map_err(BackendError::Dispatch)?;
+        if actual_size > slot.size {
+            return Err(BackendError::Dispatch(format!(
+                "output node {output_node_id} requires {actual_size} bytes but its slot holds {}",
+                slot.size
+            )));
+        }
+        let output_end = slot.offset.checked_add(actual_size).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "output node {output_node_id} arena range overflows"
+            ))
+        })?;
+        if output_end > tightened_memory_plan.total_size {
+            return Err(BackendError::Dispatch(format!(
+                "output node {output_node_id} range {}..{output_end} exceeds arena size {}",
+                slot.offset, tightened_memory_plan.total_size
+            )));
+        }
+        let data = backend.try_read_arena(arena, slot.offset, actual_size)?;
         outputs.push(data);
+        shapes.push(shape);
     }
-    Ok(outputs)
+    Ok(RuntimeOutputs {
+        data: outputs,
+        shapes,
+    })
+}
+
+#[cfg(test)]
+fn checked_execution_storage_size(dtype: &IrDType, numel: usize) -> Result<usize, BackendError> {
+    let representation = dtype
+        .value_representation()
+        .map_err(|error| BackendError::Dispatch(error.to_string()))?;
+    dtype
+        .storage_layout()
+        .and_then(|layout| layout.allocation_bytes(representation.storage, &[numel]))
+        .map_err(|error| BackendError::Dispatch(error.to_string()))
 }
 
 impl<B: Backend> GraphExecutor<B> {
     /// Create a new executor backed by the given backend.
     pub fn new(backend: B) -> Self {
+        Self::with_resource_limits(backend, ExecutionResourceLimits::default())
+    }
+
+    pub fn with_resource_limits(backend: B, resource_limits: ExecutionResourceLimits) -> Self {
         GraphExecutor {
             backend,
+            resource_limits,
             cached_arena: None,
             static_shape_cache: None,
+            last_output_shapes: Vec::new(),
         }
+    }
+
+    pub fn last_output_shapes(&self) -> &[Vec<usize>] {
+        &self.last_output_shapes
     }
 
     /// Return a reference to the backend.
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    /// Discard all execution state derived from a previous graph or plan.
+    /// Call this after a successful model-level recompilation before executing
+    /// the replacement artifacts.
+    pub fn invalidate_runtime_cache(&mut self) {
+        self.cached_arena = None;
+        self.static_shape_cache = None;
     }
 
     /// Run the full compilation pipeline:
@@ -165,7 +429,7 @@ impl<B: Backend> GraphExecutor<B> {
     /// be used to compute per-tensor/per-channel activation scales for optimal
     /// quantization accuracy.
     ///
-    /// For FP packed types (F8/F8R/F4), use [`compile_with_weight_dtype`]
+    /// For FP packed types (F8/F8R/F4), use [`compile_with_target`]
     /// instead. This method only supports integer quantization (I4/I8).
     pub fn compile_with_plan_and_quantize(
         &self,
@@ -173,10 +437,10 @@ impl<B: Backend> GraphExecutor<B> {
         quantize: Option<u8>,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let weight_dtype = match quantize {
-            Some(4) => WeightDtype::I4,
-            Some(8) => WeightDtype::I8,
-            None => WeightDtype::F32,
+        let target = match quantize {
+            Some(4) => CompileTarget::WeightOnly(QuantTarget::I4),
+            Some(8) => CompileTarget::WeightOnly(QuantTarget::I8),
+            None => CompileTarget::Native,
             Some(other) => {
                 return Err(BackendError::Compilation(format!(
                     "Unsupported quantization bit width: {}. Supported values: 4, 8",
@@ -184,209 +448,29 @@ impl<B: Backend> GraphExecutor<B> {
                 )))
             }
         };
-        self.compile_with_weight_dtype(graph, weight_dtype, calib_data)
+        self.compile_with_target(graph, target, calib_data)
     }
 
-    /// Compile a graph with an explicit [`WeightDtype`] target, including FP
-    /// packed types (F8x4, F8x4R, F4x8).
-    ///
-    /// Supports all variants of `WeightDtype`:
-    /// - `F32`: no weight quantization
-    /// - `I4` / `I8`: integer symmetric quantization (backed by
-    ///   [`quantize_weights`])
-    /// - `F8x4` / `F8x4R` / `F4x8`: FP packed quantization (backed by
-    ///   [`quantize_weights_fp`])
+    /// Compile a graph with an explicit representation target.
     ///
     /// If `calib_data` is provided, per-tensor/per-channel activation scales
     /// will be applied after weight quantization (weight-only quant only uses
     /// the weight quant step; activations remain f32).
     ///
     /// Takes ownership of `graph` to avoid an unnecessary deep clone.
-    pub fn compile_with_weight_dtype(
+    pub fn compile_with_target(
         &self,
-        mut graph: ComputeGraph,
-        weight_dtype: WeightDtype,
+        graph: ComputeGraph,
+        target: CompileTarget,
         calib_data: Option<calibration::CalibrationData>,
     ) -> Result<(ExecutablePlan, MemoryPlan, ComputeGraph), BackendError> {
-        let do_weight_quant = weight_dtype != WeightDtype::F32;
-
-        // ── Phase 1: Shape inference ──────────────────────────────────────
-        shape_inference::infer_shapes(&mut graph)
-            .map_err(|e| BackendError::Compilation(format!("shape inference: {e}")))?;
-
-        // ── Phase 1.5: Constant folding + arithmetic simplification ──────
-        // Evaluate fully-constant nodes (Shape, broadcast constants, etc.)
-        // and simplify trivial arithmetic (x*1.0, x+0.0, Neg(Neg(x)), etc.)
-        // before fusion to reduce the number of nodes the fusion pass sees.
-        {
-            use crate::compiler::passes::{arithmetic_simplify, constant_folding};
-            let folded = constant_folding::constant_fold(&mut graph);
-            let simplified = arithmetic_simplify::arithmetic_simplify(&mut graph);
-            if folded + simplified > 0 {
-                eprintln!(
-                    "[fastnn] pre-fusion optimization: folded {folded} constant nodes, simplified {simplified} arithmetic"
-                );
-            }
-        }
-
-        // ── Phase 2: Operator fusion ──────────────────────────────────────
-        operator_fusion::fuse_operators(&mut graph)
-            .map_err(|e| BackendError::Compilation(format!("operator fusion: {e}")))?;
-
-        // ── Phase 2.5: Dead code elimination after fusion ────────────────
-        // Fusion creates dead intermediate nodes (e.g. the original Add and
-        // Relu when fusing MatMul+Add+Relu). Eliminate them before
-        // quantization to avoid quantizing dead nodes.
-        dead_code_elimination::eliminate_dead_code(&mut graph);
-
-        // ── Phase 2.5: Quantization (optional) ───────────────────────────
-        // Handle three cases:
-        // 1. weight_dtype != F32: quantize weights.
-        //    Activation quantization is only applied when calibration data is provided.
-        // 2. weight_dtype == F32, calib_data=Some(_): re-quantize activations only (weights already quantized)
-        // 3. weight_dtype == F32, calib_data=None: no quantization
-        let do_quantize = do_weight_quant || calib_data.is_some();
-        if do_quantize {
-            // Quantize weights if requested
-            if do_weight_quant {
-                use quantization::FpDtype;
-                match weight_dtype {
-                    WeightDtype::I4 => {
-                        quantization::quantize_weights(&mut graph, 4, true, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    WeightDtype::I8 => {
-                        quantization::quantize_weights(&mut graph, 8, true, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    WeightDtype::U4 => {
-                        quantization::quantize_weights(&mut graph, 4, false, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    WeightDtype::U8 => {
-                        quantization::quantize_weights(&mut graph, 8, false, None)
-                            .map_err(|e| BackendError::Compilation(format!("quantization: {e}")))?;
-                    }
-                    WeightDtype::F8x4 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    WeightDtype::F8x4R => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F8x4R, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    WeightDtype::F4x8 => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::F4x8, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    WeightDtype::I4Codebook => {
-                        quantization::quantize_weights_fp(&mut graph, &FpDtype::I4Codebook, None)
-                            .map_err(|e| BackendError::Compilation(format!("fp quant: {e}")))?;
-                    }
-                    WeightDtype::F32 => {}
-                }
-            }
-
-            // After quantizing weights, wrap any optimizer ops that now have
-            // quantized weight inputs with Dequantize/Quantize.
-            quantization::wrap_quantized_optimizer(&mut graph)
-                .map_err(|e| BackendError::Compilation(format!("optimizer wrapping: {e}")))?;
-
-            // Insert QuantizeActivations before MatMul/Conv2d activation inputs only
-            // when explicit calibration data is provided. Without calibrated scales,
-            // activation quantization produces garbage outputs and adds unnecessary
-            // Q/DQ overhead that makes weight-only quantized inference slower than FP32.
-            if let Some(calib) = calib_data {
-                activation_quantization::quantize_activations_with_calibration(&mut graph, &calib)
-                    .map_err(|e| {
-                        BackendError::Compilation(format!("activation quantization: {e}"))
-                    })?;
-            }
-
-            // Remove redundant QuantizeActivations → DequantizeActivations round-trips
-            // that were inserted by activation quantization or the optimizer wrapper.
-            // This pass is dead-code in auto_cast.rs; wire it into the main pipeline.
-            crate::compiler::passes::prune_qdq_pairs::prune_qdq_pairs(&mut graph)
-                .map_err(|e| BackendError::Compilation(format!("prune qdq pairs: {e}")))?;
-        }
-
-        // ── Phase 3: Dead code elimination ────────────────────────────────
-        let _removed = dead_code_elimination::eliminate_dead_code(&mut graph);
-
-        // ── Phase 4: Memory planning ──────────────────────────────────────
-        let memory_plan = memory_planning::plan_memory(&graph)
-            .map_err(|e| BackendError::Compilation(format!("memory planning: {e}")))?;
-
-        // ── Phase 5: Backend compilation ──────────────────────────────────
+        let compiled = crate::compiler::pipeline::CompilerPipeline::new(target, calib_data)
+            .run(graph)
+            .map_err(|error| BackendError::Compilation(error.to_string()))?;
+        let graph = compiled.graph;
+        let memory_plan = compiled.memory_plan;
         let plan = self.backend.compile(&graph, &memory_plan)?;
-
-        if std::env::var("FASTNN_DUMP_INSTRS").is_ok() {
-            eprintln!(
-                "FASTNN_DUMP_INSTRS: total instructions={}",
-                plan.instructions.len()
-            );
-            let mut conv2d_quant_u4 = 0usize;
-            let mut conv2d_quant_u8 = 0usize;
-            let mut conv2d_fp32 = 0usize;
-            let mut other_kernels: Vec<(String, Option<String>)> = Vec::new();
-            for (i, instr) in plan.instructions.iter().enumerate() {
-                if let Instruction::CallKernel {
-                    kernel_name,
-                    weight_meta,
-                    ..
-                } = instr
-                {
-                    let meta_info = weight_meta
-                        .as_ref()
-                        .map(|m| format!("bw={} scales={}", m.bit_width, m.scales.len()))
-                        .unwrap_or_default();
-                    eprintln!("  INSTR[{}] kernel={} {}", i, kernel_name, meta_info);
-                    if kernel_name.starts_with("conv2d_i4") {
-                        conv2d_quant_u4 += 1;
-                    } else if kernel_name.starts_with("conv2d_i8") {
-                        conv2d_quant_u8 += 1;
-                    } else if kernel_name.starts_with("conv2d") {
-                        conv2d_fp32 += 1;
-                    } else {
-                        other_kernels.push((kernel_name.clone(), Some(meta_info)));
-                    }
-                }
-            }
-            eprintln!(
-                "  SUMMARY: conv2d_u4={} conv2d_u8={} conv2d_fp32={} other={}",
-                conv2d_quant_u4,
-                conv2d_quant_u8,
-                conv2d_fp32,
-                other_kernels.len()
-            );
-            for (name, meta) in &other_kernels {
-                eprintln!("    OTHER: {} {}", name, meta.as_deref().unwrap_or(""));
-            }
-        }
-
-        if std::env::var("FASTNN_DUMP_GRAPH").is_ok() {
-            use std::collections::BTreeMap;
-            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            let mut dtypes: BTreeMap<String, usize> = BTreeMap::new();
-            for n in &graph.nodes {
-                counts.entry(format!("{:?}", n.opcode)).or_default(); // just trigger
-                *counts.entry(format!("{:?}", n.opcode)).or_default() += 1;
-                *dtypes
-                    .entry(format!("{:?}", n.output_type.dtype))
-                    .or_default() += 1;
-            }
-            eprintln!("FASTNN_DUMP: nodes={}", graph.nodes.len());
-            for (k, v) in &counts {
-                if v > &0 {
-                    eprintln!("  OP {k}: {v}");
-                }
-            }
-            for (k, v) in &dtypes {
-                if v > &0 {
-                    eprintln!("  DT {k}: {v}");
-                }
-            }
-        }
+        validate_compiled_artifacts(&graph, &plan, &memory_plan, &self.resource_limits)?;
 
         Ok((plan, memory_plan, graph))
     }
@@ -438,7 +522,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared), None)
     }
 
@@ -480,7 +568,11 @@ impl<B: Backend> GraphExecutor<B> {
         // mismatch detected here would silently desynchronise prepared
         // metadata from the live plan and must be reported loudly
         // instead.
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         // Delegate to the existing execution path so we inherit every
         // tightening / shape-env / arena-reuse behaviour of the
         // default forward().
@@ -505,7 +597,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         self.execute_internal(
             graph,
             plan,
@@ -558,7 +654,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
         self.execute_internal_with_persistent_view(
             graph,
@@ -584,7 +684,11 @@ impl<B: Backend> GraphExecutor<B> {
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        crate::backend::prepared::validate_prepared_against_plan(prepared, plan)?;
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
         let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
         self.execute_internal_with_persistent_view(
             graph,
@@ -608,6 +712,7 @@ impl<B: Backend> GraphExecutor<B> {
         #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        validate_compiled_artifacts(graph, plan, memory_plan, &self.resource_limits)?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
         let (tightened_memory_plan, shape_env, cached_filtered_plan) =
             if let Some(StaticShapeCache {
@@ -631,27 +736,39 @@ impl<B: Backend> GraphExecutor<B> {
                 validate_shapes(graph, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
-                let tightened_memory_plan = memory_plan.tighten(graph, &shape_env);
+                let tightened_memory_plan = memory_plan
+                    .try_tighten(graph, &shape_env)
+                    .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
+                tightened_memory_plan
+                    .validate_with_limits(&self.resource_limits.memory)
+                    .map_err(|error| {
+                        BackendError::Dispatch(format!("tightened memory plan: {error}"))
+                    })?;
                 tighten_slices(plan, memory_plan, &tightened_memory_plan, graph)?;
+                plan.validate_with_limits(&self.resource_limits.executable)
+                    .map_err(|error| {
+                        BackendError::Dispatch(format!("tightened executable plan: {error}"))
+                    })?;
 
                 // Cache for static-shape models so subsequent calls
                 // skip the entire preamble.
                 if graph.has_static_shapes() {
-                    let filtered_instructions: Vec<Instruction> = plan
+                    let (filtered_instructions, filtered_levels): (Vec<_>, Vec<_>) = plan
                         .instructions
                         .iter()
-                        .filter(|instr| {
+                        .zip(&plan.levels)
+                        .filter(|(instruction, _)| {
                             !matches!(
-                                instr,
+                                instruction,
                                 Instruction::WriteConst { .. } | Instruction::Fill { .. }
                             )
                         })
-                        .cloned()
-                        .collect();
+                        .map(|(instruction, level)| (instruction.clone(), *level))
+                        .unzip();
                     let filtered_plan = ExecutablePlan {
                         instructions: filtered_instructions,
                         arena_size: plan.arena_size,
-                        levels: plan.levels.clone(),
+                        levels: filtered_levels,
                     };
                     self.static_shape_cache = Some(StaticShapeCache {
                         tightened_memory_plan: tightened_memory_plan.clone(),
@@ -673,25 +790,27 @@ impl<B: Backend> GraphExecutor<B> {
         // already validated.
         if cached_filtered_plan.is_none() {
             for (&node_id, slot) in &tightened_memory_plan.slots {
+                let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "node {node_id}: tightened memory slot range overflows"
+                    ))
+                })?;
+                if slot_end > tightened_memory_plan.total_size {
+                    return Err(BackendError::Dispatch(format!(
+                        "node {node_id}: tightened memory slot range {}..{slot_end} exceeds arena size {}",
+                        slot.offset, tightened_memory_plan.total_size
+                    )));
+                }
                 if let Some(node) = graph.get_node(node_id) {
-                    let needed =
-                        if let Ok(shape) = resolve_shape(&node.output_type.shape, &shape_env) {
-                            let numel: u64 = shape.iter().product();
-                            let raw = numel as usize * node.output_type.dtype.byte_size();
-                            match &node.output_type.dtype {
-                                IrDType::I4 { .. }
-                                | IrDType::I8Scaled { .. }
-                                | IrDType::F8 { .. }
-                                | IrDType::F8R { .. }
-                                | IrDType::F4 { .. } => {
-                                    node.output_type.dtype.packed_byte_size(numel as usize)
-                                }
-                                IrDType::I8 => numel as usize + 8,
-                                _ => raw,
-                            }
-                        } else {
-                            continue;
-                        };
+                    let needed = match &node.opcode {
+                        crate::ir::Opcode::Constant(crate::ir::TensorValue::Data {
+                            bytes, ..
+                        }) => crate::compiler::plan::node_output_byte_size(node, Some(&shape_env))
+                            .map_err(BackendError::Dispatch)?
+                            .max(bytes.len()),
+                        _ => crate::compiler::plan::node_output_byte_size(node, Some(&shape_env))
+                            .map_err(BackendError::Dispatch)?,
+                    };
                     if needed > slot.size {
                         return Err(BackendError::Dispatch(format!(
                             "node {}: resolved size {} exceeds tightened slot size {} (shape {:?})",
@@ -707,29 +826,63 @@ impl<B: Backend> GraphExecutor<B> {
         // SYMBOL_DIM_MAX=8192 for symbolic dimensions — for batch=1
         // this can be ~50MB vs ~400MB.
         let arena_size = tightened_memory_plan.total_size;
+        if inputs.len() != graph.inputs.len() {
+            return Err(BackendError::Dispatch(format!(
+                "expected {} graph inputs, received {}",
+                graph.inputs.len(),
+                inputs.len()
+            )));
+        }
+        for (i, (&input_node_id, input_bytes)) in graph.inputs.iter().zip(inputs.iter()).enumerate()
+        {
+            let slot = tightened_memory_plan
+                .slots
+                .get(&input_node_id)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!("no memory slot for input node {input_node_id}"))
+                })?;
+            if input_bytes.len() != slot.size {
+                return Err(BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}",
+                    input_bytes.len(), slot.size
+                )));
+            }
+            let input_end = slot.offset.checked_add(input_bytes.len()).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} arena range overflows"
+                ))
+            })?;
+            if input_end > arena_size {
+                return Err(BackendError::Dispatch(format!(
+                    "input {i} for node {input_node_id} range {}..{input_end} exceeds arena size {arena_size}",
+                    slot.offset
+                )));
+            }
+        }
         let enough_capacity = self
             .cached_arena
             .as_ref()
             .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
-            self.cached_arena = Some((arena_size, self.backend.allocate_arena(arena_size)));
+            self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
         }
-        let arena = &self.cached_arena.as_ref().unwrap().1;
+        let arena = &self
+            .cached_arena
+            .as_ref()
+            .ok_or_else(|| {
+                BackendError::Dispatch("backend arena allocation returned no buffer".into())
+            })?
+            .1;
 
-        for (i, &input_node_id) in graph.inputs.iter().enumerate() {
-            let input_bytes = inputs.get(i).ok_or_else(|| {
-                BackendError::Dispatch(format!("missing input {} for node {}", i, input_node_id))
-            })?;
+        for (&input_node_id, input_bytes) in graph.inputs.iter().zip(inputs.iter()) {
             let slot = tightened_memory_plan
                 .slots
                 .get(&input_node_id)
                 .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "no memory slot for input node {}",
-                        input_node_id
-                    ))
+                    BackendError::Dispatch(format!("no memory slot for input node {input_node_id}"))
                 })?;
-            self.backend.write_arena(arena, slot.offset, input_bytes);
+            self.backend
+                .try_write_arena(arena, slot.offset, input_bytes)?;
         }
 
         // ── Dispatch: no-copy persistent view path vs standard path ──
@@ -739,7 +892,8 @@ impl<B: Backend> GraphExecutor<B> {
                 plan.clone()
             } else {
                 let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
-                for instr in &plan.instructions {
+                let mut filtered_levels = Vec::with_capacity(plan.levels.len());
+                for (instruction, level) in plan.instructions.iter().zip(&plan.levels) {
                     // Only skip WriteConst for fp32 weight slots — the
                     // persistent-view dispatch path (`dispatch_with_persistent_view`)
                     // knows how to satisfy fp32 Conv2d/MatMul weights from the
@@ -747,18 +901,19 @@ impl<B: Backend> GraphExecutor<B> {
                     // the dispatch plan because the kernel dispatch reads them
                     // from the arena, not from the persistent view.
                     let drop = matches!(
-                        instr,
+                        instruction,
                         Instruction::WriteConst { dst, .. }
                             if view.get(&(dst.offset, dst.size)).is_some()
                     );
                     if !drop {
-                        filtered.push(instr.clone());
+                        filtered.push(instruction.clone());
+                        filtered_levels.push(*level);
                     }
                 }
                 ExecutablePlan {
                     instructions: filtered,
                     arena_size: plan.arena_size,
-                    levels: plan.levels.clone(),
+                    levels: filtered_levels,
                 }
             };
 
@@ -807,14 +962,15 @@ impl<B: Backend> GraphExecutor<B> {
                 Vec::new()
             };
 
-            let outputs = read_execution_outputs(
+            let runtime_outputs = read_execution_outputs(
                 graph,
                 &tightened_memory_plan,
                 &shape_env,
                 &self.backend,
                 arena,
             )?;
-            return Ok((outputs, profile_entries));
+            self.last_output_shapes = runtime_outputs.shapes;
+            return Ok((runtime_outputs.data, profile_entries));
         }
 
         // ── Standard / prepared-preload path ──
@@ -847,14 +1003,15 @@ impl<B: Backend> GraphExecutor<B> {
             Vec::new()
         };
 
-        read_execution_outputs(
+        let runtime_outputs = read_execution_outputs(
             graph,
             &tightened_memory_plan,
             &shape_env,
             &self.backend,
             arena,
-        )
-        .map(|outputs| (outputs, profile_entries))
+        )?;
+        self.last_output_shapes = runtime_outputs.shapes;
+        Ok((runtime_outputs.data, profile_entries))
     }
 
     #[cfg(feature = "prepared-plan")]
@@ -943,7 +1100,8 @@ impl<B: Backend> GraphExecutor<B> {
 
         // 4b. Insert F8x4R gradient quantization around optimizer gradient inputs
         use crate::compiler::passes::gradient_quantization;
-        gradient_quantization::quantize_gradients(&mut combined_graph);
+        gradient_quantization::quantize_gradients(&mut combined_graph)
+            .map_err(|error| BackendError::Compilation(error.to_string()))?;
 
         // 5. Set graph inputs and outputs
         combined_graph.outputs = vec![loss_node];
@@ -979,10 +1137,21 @@ impl<B: Backend> GraphExecutor<B> {
         // 6b. Optionally tighten memory plan using concrete batch shapes.
         //     This shrinks slots from SYMBOL_DIM_MAX worst-case to actual sizes.
         let (plan, memory_plan) = if let Some(shape_env) = batch_shape_env {
-            let tightened_mp = memory_plan.tighten(&final_graph, shape_env);
+            let tightened_mp = memory_plan
+                .try_tighten(&final_graph, shape_env)
+                .map_err(|error| BackendError::Dispatch(format!("memory plan: {error}")))?;
             let mut plan = plan;
             tighten_slices(&mut plan, &memory_plan, &tightened_mp, &final_graph)
                 .map_err(|e| BackendError::Compilation(format!("tighten: {e}")))?;
+            plan.validate_with_limits(&self.resource_limits.executable)
+                .map_err(|error| {
+                    BackendError::Compilation(format!("tightened executable plan: {error}"))
+                })?;
+            tightened_mp
+                .validate_with_limits(&self.resource_limits.memory)
+                .map_err(|error| {
+                    BackendError::Compilation(format!("tightened memory plan: {error}"))
+                })?;
             (plan, tightened_mp)
         } else {
             (plan, memory_plan)
@@ -1006,14 +1175,14 @@ impl<B: Backend> GraphExecutor<B> {
         let model_shape_env = batch_shape_env.cloned().unwrap_or_default();
 
         // 9. Allocate arena and write initial values
-        let arena = self.backend.allocate_arena(plan.arena_size);
+        let arena = self.backend.try_allocate_arena(plan.arena_size)?;
 
         // Write param data
         for (i, data) in param_data.iter().enumerate() {
             let slot = memory_plan.slots.get(&params[i]).ok_or_else(|| {
                 BackendError::Compilation(format!("param {} slot not found", params[i]))
             })?;
-            self.backend.write_arena(&arena, slot.offset, data);
+            self.backend.try_write_arena(&arena, slot.offset, data)?;
         }
 
         // Write zero-initialized optimizer state (m, v for AdamW),
@@ -1032,7 +1201,8 @@ impl<B: Backend> GraphExecutor<B> {
                 } else {
                     vec![0u8; slot.size]
                 };
-                self.backend.write_arena(&arena, slot.offset, &init_data);
+                self.backend
+                    .try_write_arena(&arena, slot.offset, &init_data)?;
             }
         }
 
@@ -1097,7 +1267,7 @@ impl<B: Backend> CompiledTrainingModel<B> {
                     data.len()
                 )));
             }
-            self.backend.write_arena(&self.arena, off, data);
+            self.backend.try_write_arena(&self.arena, off, data)?;
         }
 
         // 3. Dispatch the full train-step graph
@@ -1106,10 +1276,10 @@ impl<B: Backend> CompiledTrainingModel<B> {
             .map_err(|e| BackendError::Dispatch(format!("train_step dispatch: {e}")))?;
 
         // 4. Read loss immediately (before any post-dispatch writes)
-        let loss_raw = self
+        let loss_bytes = self
             .backend
-            .read_arena(&self.arena, self.loss_slot_offset, 4);
-        let loss_arr: [u8; 4] = loss_raw
+            .try_read_arena(&self.arena, self.loss_slot_offset, 4)?;
+        let loss_arr: [u8; 4] = loss_bytes
             .get(..4)
             .ok_or_else(|| BackendError::Dispatch("train_step: loss buffer too small".into()))?
             .try_into()
@@ -1159,7 +1329,9 @@ impl<B: Backend> CompiledTrainingModel<B> {
                             )));
                         }
                         let t_slice = &input_slices[4];
-                        let t_bytes = self.backend.read_arena(&self.arena, t_slice.offset, 8);
+                        let t_bytes =
+                            self.backend
+                                .try_read_arena(&self.arena, t_slice.offset, 8)?;
                         let t_arr: [u8; 8] = t_bytes[..8]
                             .try_into()
                             .map_err(|_| BackendError::Dispatch("invalid t step value".into()))?;
@@ -1169,8 +1341,11 @@ impl<B: Backend> CompiledTrainingModel<B> {
                                 "train_step: AdamW step overflow (t > u64::MAX)".into(),
                             )
                         })?;
-                        self.backend
-                            .write_arena(&self.arena, t_slice.offset, &new_t.to_le_bytes());
+                        self.backend.try_write_arena(
+                            &self.arena,
+                            t_slice.offset,
+                            &new_t.to_le_bytes(),
+                        )?;
                     }
                     _ => {}
                 }
@@ -1222,16 +1397,25 @@ pub fn tighten_slices(
             } => {
                 if let Some(nid) = node_id {
                     // ── Update output_slice from tightened memory plan ──
-                    if let Some(slot) = tightened_memory_plan.slots.get(nid) {
-                        output_slice.offset = slot.offset;
-                        output_slice.size = slot.size;
-                    }
+                    let slot = tightened_memory_plan.slots.get(nid).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "cannot tighten instruction for node {nid}: output slot is missing"
+                        ))
+                    })?;
+                    output_slice.offset = slot.offset;
+                    output_slice.size = slot.size;
                     // ── Update secondary_output_slice ──
                     if let Some(sec_slice) = secondary_output_slice.as_mut() {
-                        if let Some(slot) = tightened_memory_plan.secondary_slots.get(&(*nid, 1)) {
-                            sec_slice.offset = slot.offset;
-                            sec_slice.size = slot.size;
-                        }
+                        let slot = tightened_memory_plan
+                            .secondary_slots
+                            .get(&(*nid, 1))
+                            .ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "cannot tighten instruction for node {nid}: secondary output slot is missing"
+                                ))
+                            })?;
+                        sec_slice.offset = slot.offset;
+                        sec_slice.size = slot.size;
                     }
                     // ── Update input slices from the graph ──
                     // IMPORTANT: Must use the same filter_map logic as compilation
@@ -1242,17 +1426,36 @@ pub fn tighten_slices(
                     // enumerate() would map input_slices[0]→A (skipped) and
                     // input_slices[1]→B, so C never gets updated and B's offset
                     // is written to C's slice, causing buffer aliasing.
-                    if let Some(node) = graph.get_node(*nid) {
-                        let mut slice_iter = input_slices.iter_mut();
-                        for &input_nid in &node.inputs {
-                            if tightened_memory_plan.slots.contains_key(&input_nid) {
-                                if let Some(slice) = slice_iter.next() {
-                                    if let Some(slot) = tightened_memory_plan.slots.get(&input_nid)
-                                    {
-                                        slice.offset = slot.offset;
-                                        slice.size = slot.size;
-                                    }
-                                }
+                    let node = graph.get_node(*nid).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "cannot tighten instruction for missing node {nid}"
+                        ))
+                    })?;
+                    let expected_inputs = node
+                        .inputs
+                        .iter()
+                        .filter(|input_nid| tightened_memory_plan.slots.contains_key(input_nid))
+                        .count();
+                    if input_slices.len() != expected_inputs {
+                        return Err(BackendError::Dispatch(format!(
+                            "cannot tighten instruction for node {nid}: expected {expected_inputs} input slices, found {}",
+                            input_slices.len()
+                        )));
+                    }
+                    let mut slice_iter = input_slices.iter_mut();
+                    for &input_nid in &node.inputs {
+                        if let Some(slot) = tightened_memory_plan.slots.get(&input_nid) {
+                            if let Some(slice) = slice_iter.next() {
+                                slice.offset = slot.offset;
+                                slice.size = graph
+                                    .get_node(input_nid)
+                                    .and_then(|input| match &input.opcode {
+                                        Opcode::Constant(TensorValue::Data { bytes, .. }) => {
+                                            Some(bytes.len())
+                                        }
+                                        _ => None,
+                                    })
+                                    .unwrap_or(slot.size);
                             }
                         }
                     }
@@ -1288,38 +1491,12 @@ pub fn tighten_slices(
     Ok(())
 }
 
-/// Compute the byte size of a tensor described by shape dims and element size.
-/// Uses [`TensorType::byte_size`] under the hood.
-pub fn tensor_byte_size(shape: &[DimExpr], elem_byte_size: usize) -> usize {
-    let numel: usize = shape
-        .iter()
-        .map(|d| match d {
-            DimExpr::Known(v) => *v as usize,
-            DimExpr::Bounded { max, .. } => *max as usize,
-            DimExpr::Symbol(_) => crate::ir::node::SYMBOL_DIM_MAX.load(Ordering::Relaxed) as usize,
-        })
-        .product();
-    numel * elem_byte_size
-}
-
-/// Resolve a shape to concrete values using a runtime ShapeEnv.
-/// Returns an error if any symbolic dimension cannot be resolved.
-fn resolve_shape(shape: &[DimExpr], env: &ShapeEnv) -> Result<Vec<u64>, String> {
-    shape
-        .iter()
-        .map(|d| {
-            d.evaluate_with_env(env)
-                .map_err(|e| format!("resolve_shape: {e}"))
-        })
-        .collect()
-}
-
 /// Lenient shape resolution: unbound Symbol dims are replaced with
 /// [`SYMBOL_DIM_MAX`] instead of failing, so that validation checks
 /// can still run in the presence of symbols that will be resolved at
 /// runtime (e.g. the -1 dimension of a Reshape).
 fn resolve_shape_lenient(shape: &[DimExpr], env: &ShapeEnv) -> Vec<u64> {
-    let symbol_max = crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+    let symbol_max = crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
     shape
         .iter()
         .map(|d| d.evaluate_with_env(env).unwrap_or(symbol_max))
@@ -1352,7 +1529,9 @@ fn resolve_axis(
 /// Validate shape constraints for all ops in the graph at runtime.
 /// Called after ShapeEnv is built, before dispatch.
 fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), String> {
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
     for &node_id in &order {
         let node = graph
             .get_node(node_id)
@@ -1419,7 +1598,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 // Skip dim compatibility checks if any input contains
                 // unresolved Symbol dims (resolved to SYMBOL_DIM_MAX).
                 let symbol_max =
-                    crate::ir::node::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed);
                 let has_unresolved = input_shapes.iter().any(|s| s.contains(&symbol_max));
                 if !has_unresolved {
                     for (i, s) in input_shapes.iter().enumerate().skip(1) {
@@ -1788,6 +1967,7 @@ fn preload_prepared_fp32_slot<B: Backend>(
     label: &str,
     preloaded_slots: &mut std::collections::HashSet<(usize, usize)>,
     plan_len: usize,
+    arena_size: usize,
 ) -> Result<(), BackendError> {
     use crate::backend::prepared::PackedWeightKind;
 
@@ -1798,7 +1978,10 @@ fn preload_prepared_fp32_slot<B: Backend>(
         return Ok(());
     }
     let Some(values) = constant_arena.get(id) else {
-        return Ok(());
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} references missing fp32 constant slot {} at instruction {instruction_index}",
+            id.index
+        )));
     };
     let bytes = bytemuck::cast_slice(values);
     if bytes.len() != slot.size {
@@ -1813,7 +1996,18 @@ fn preload_prepared_fp32_slot<B: Backend>(
             "prepared arena {label} instruction index {instruction_index} out of bounds for plan length {plan_len}"
         )));
     }
-    backend.write_arena(arena, slot.offset, bytes);
+    let slot_end = slot.offset.checked_add(slot.size).ok_or_else(|| {
+        BackendError::Dispatch(format!(
+            "prepared arena {label} slot range overflows at instruction {instruction_index}"
+        ))
+    })?;
+    if slot_end > arena_size {
+        return Err(BackendError::Dispatch(format!(
+            "prepared arena {label} slot range {}..{} exceeds plan arena size {arena_size} at instruction {instruction_index}",
+            slot.offset, slot_end
+        )));
+    }
+    backend.try_write_arena(arena, slot.offset, bytes)?;
     preloaded_slots.insert((slot.offset, slot.size));
     Ok(())
 }
@@ -1846,6 +2040,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                     "conv weight",
                     &mut preloaded_slots,
                     plan.instructions.len(),
+                    plan.arena_size,
                 )?;
                 if let Some(bias) = conv.bias {
                     preload_prepared_fp32_slot(
@@ -1858,6 +2053,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                         "conv bias",
                         &mut preloaded_slots,
                         plan.instructions.len(),
+                        plan.arena_size,
                     )?;
                 }
             }
@@ -1872,6 +2068,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                     "matmul weight",
                     &mut preloaded_slots,
                     plan.instructions.len(),
+                    plan.arena_size,
                 )?;
                 if let Some(bias) = matmul.bias {
                     preload_prepared_fp32_slot(
@@ -1884,6 +2081,7 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
                         "matmul bias",
                         &mut preloaded_slots,
                         plan.instructions.len(),
+                        plan.arena_size,
                     )?;
                 }
             }
@@ -1895,22 +2093,23 @@ fn preload_prepared_constants_and_skip_redundant_writes<B: Backend>(
         return Ok(plan.clone());
     }
 
-    let instructions = plan
+    let (instructions, levels): (Vec<_>, Vec<_>) = plan
         .instructions
         .iter()
-        .filter(|instruction| match instruction {
+        .zip(&plan.levels)
+        .filter(|(instruction, _)| match instruction {
             Instruction::WriteConst { dst, .. } => {
                 !preloaded_slots.contains(&(dst.offset, dst.size))
             }
             _ => true,
         })
-        .cloned()
-        .collect();
+        .map(|(instruction, level)| (instruction.clone(), *level))
+        .unzip();
 
     Ok(ExecutablePlan {
         instructions,
         arena_size: plan.arena_size,
-        levels: plan.levels.clone(),
+        levels,
     })
 }
 
@@ -1931,7 +2130,7 @@ mod prepared_fallback_tests {
     use crate::backend::cpu::CpuBackend;
     use crate::backend::prepared::{prepare_executable_plan, validate_prepared_against_plan};
     use crate::ir::builder::GraphBuilder;
-    use crate::ir::node::{DimExpr, IrDType};
+    use crate::ir::{DimExpr, IrDType};
 
     fn f32_data(values: &[f32]) -> Vec<u8> {
         bytemuck::cast_slice(values).to_vec()
@@ -1939,6 +2138,70 @@ mod prepared_fallback_tests {
 
     fn read_f32(bytes: &[u8]) -> Vec<f32> {
         bytemuck::cast_slice(bytes).to_vec()
+    }
+
+    #[test]
+    fn execute_rejects_extra_and_oversized_inputs() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1, 4], IrDType::F32);
+        let y = g.relu(&x);
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let input = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let extra = f32_data(&[5.0]);
+        assert!(executor
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&input, &extra],)
+            .is_err());
+        assert!(
+            executor.cached_arena.is_none(),
+            "invalid inputs must be rejected before arena allocation"
+        );
+
+        let oversized = f32_data(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert!(executor
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&oversized])
+            .is_err());
+    }
+
+    #[test]
+    fn prepared_constant_preload_rejects_invalid_slots() {
+        use crate::backend::prepared::{PackedWeightId, PreparedConstantArena};
+        use crate::backend::BufferSlice;
+        use std::collections::HashSet;
+
+        let backend = CpuBackend;
+        let arena_buffer = backend.allocate_arena(4);
+        let empty_arena = PreparedConstantArena::new();
+        let missing = preload_prepared_fp32_slot(
+            &backend,
+            &arena_buffer,
+            &empty_arena,
+            0,
+            Some(PackedWeightId::new(9)),
+            BufferSlice { offset: 0, size: 4 },
+            "test constant",
+            &mut HashSet::new(),
+            1,
+            4,
+        );
+        assert!(matches!(missing, Err(BackendError::Dispatch(_))));
+
+        let mut constant_arena = PreparedConstantArena::new();
+        let id = constant_arena.insert("weight", vec![1.0]);
+        let out_of_bounds = preload_prepared_fp32_slot(
+            &backend,
+            &arena_buffer,
+            &constant_arena,
+            0,
+            Some(id),
+            BufferSlice { offset: 4, size: 4 },
+            "test constant",
+            &mut HashSet::new(),
+            1,
+            4,
+        );
+        assert!(matches!(out_of_bounds, Err(BackendError::Dispatch(_))));
     }
 
     /// `execute_prepared_fallback` returns **byte-identical** output to
@@ -1953,10 +2216,8 @@ mod prepared_fallback_tests {
         // a real WriteConst instruction.
         let g = GraphBuilder::new();
         let a = g.input(&[1, 4], IrDType::F32);
-        let b_tt = crate::ir::node::TensorType::new(
-            vec![DimExpr::Known(1), DimExpr::Known(4)],
-            IrDType::F32,
-        );
+        let b_tt =
+            crate::ir::TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
         let b_bytes = f32_data(&[0.5, -0.5, 0.25, -0.25]);
         let b = g.constant(&b_bytes, b_tt);
         let s = g.add(&a, &b);
@@ -1964,7 +2225,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&y], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // The prepared plan must validate against the live plan before
         // the executor will accept it.
         validate_prepared_against_plan(&prepared, &plan)
@@ -2015,7 +2277,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&y], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let input = f32_data(&[-2.0, -1.0, 0.5, 1.5]);
         let mut executor = GraphExecutor::new(CpuBackend);
@@ -2086,7 +2349,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&c], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let a_data = f32_data(&[1.0, 2.0, 3.0, 4.0]);
         let b_data = f32_data(&[10.0, 20.0, 30.0, 40.0]);
@@ -2113,7 +2377,8 @@ mod prepared_fallback_tests {
 
         let (mut plan, memory_plan, compiled_graph) =
             g.compile(&[&y], CpuBackend).expect("compile must succeed");
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // N = 2 → input bytes = 2*4*4 = 32
         let input = f32_data(&[-1.0, -2.0, -3.0, -4.0, 5.0, 6.0, 7.0, 8.0]);
@@ -2226,13 +2491,124 @@ mod prepared_fallback_tests {
         );
     }
 
+    #[test]
+    fn execute_rejects_memory_plan_graph_interface_mismatch() {
+        let g = GraphBuilder::new();
+        let a = g.input(&[4], IrDType::F32);
+        let b = g.input(&[4], IrDType::F32);
+        let output = g.add(&a, &b);
+        let (mut plan, mut memory_plan, compiled_graph) = g
+            .compile(&[&output], CpuBackend)
+            .expect("compile must succeed");
+        memory_plan.inputs.reverse();
+
+        let input = f32_data(&[1.0, 2.0, 3.0, 4.0]);
+        let mut executor = GraphExecutor::new(CpuBackend);
+        let error = executor
+            .execute(&compiled_graph, &mut plan, &memory_plan, &[&input, &input])
+            .expect_err("mismatched graph and memory-plan inputs must be rejected");
+        assert!(matches!(error, BackendError::Dispatch(_)));
+    }
+
+    #[test]
+    fn executor_enforces_configured_resource_limits() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[4], IrDType::F32);
+        let output = g.relu(&input);
+        let limits = ExecutionResourceLimits {
+            executable: PlanResourceLimits {
+                max_instructions: 0,
+                ..PlanResourceLimits::default()
+            },
+            ..ExecutionResourceLimits::default()
+        };
+        let executor = GraphExecutor::with_resource_limits(CpuBackend, limits);
+        let mut graph = g.to_graph();
+        graph.outputs = vec![output.node_id];
+        let error = executor
+            .compile_with_plan(graph)
+            .expect_err("configured instruction limit must reject the compiled plan");
+        assert!(matches!(error, BackendError::Dispatch(_)));
+    }
+
+    #[test]
+    fn cast_lowering_uses_semantic_kernel_names() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[2], IrDType::F32);
+        let output = g.cast_op(&input, IrDType::I64);
+        let (plan, _, _) = g
+            .compile(&[&output], CpuBackend)
+            .expect("supported typed cast must compile");
+        assert!(plan.instructions.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::CallKernel { kernel_name, params, .. }
+                if kernel_name == "cast_f32_i64" && params.is_empty()
+        )));
+    }
+
+    #[test]
+    fn equal_width_semantic_cast_is_not_lowered_as_memcopy() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[2], IrDType::F32);
+        let output = g.cast_op(&input, IrDType::I32);
+        assert!(g.compile(&[&output], CpuBackend).is_err());
+    }
+
+    #[test]
+    fn tightened_executable_plan_is_rechecked_against_resource_limits() {
+        let g = GraphBuilder::new();
+        let input = g.input(&[4], IrDType::F32);
+        let output = g.relu(&input);
+        let (mut plan, memory_plan, graph) = g
+            .compile(&[&output], CpuBackend)
+            .expect("compile must succeed");
+        let mut tightened_memory_plan = memory_plan.clone();
+        tightened_memory_plan
+            .tightened_params
+            .insert(output.node_id, vec![1, 2]);
+        tighten_slices(&mut plan, &memory_plan, &tightened_memory_plan, &graph)
+            .expect("tightening must succeed");
+        let limits = PlanResourceLimits {
+            max_total_params: 1,
+            ..PlanResourceLimits::default()
+        };
+        assert!(plan.validate_with_limits(&limits).is_err());
+    }
+
+    #[test]
+    fn compiled_artifact_validation_rejects_unowned_instruction_slices() {
+        let g = GraphBuilder::new();
+        let x = g.input(&[1], IrDType::F32);
+        let y = g.relu(&x);
+        let (mut plan, memory_plan, compiled_graph) =
+            g.compile(&[&y], CpuBackend).expect("compile must succeed");
+        let unowned_offset = plan.arena_size;
+        plan.arena_size = plan
+            .arena_size
+            .checked_add(4)
+            .expect("small test arena must not overflow");
+        plan.instructions.push(Instruction::WriteConst {
+            dst: BufferSlice::new(unowned_offset, 4),
+            data: vec![0; 4],
+        });
+        plan.levels.push(plan.levels.last().copied().unwrap_or(0));
+
+        assert!(validate_compiled_artifacts(
+            &compiled_graph,
+            &plan,
+            &memory_plan,
+            &ExecutionResourceLimits::default(),
+        )
+        .is_err());
+    }
+
     // ── helpers ────────────────────────────────────────────────
 
     fn executor_run(
         executor: &mut GraphExecutor<CpuBackend>,
-        graph: &crate::ir::node::ComputeGraph,
+        graph: &crate::ir::ComputeGraph,
         plan: &mut crate::backend::ExecutablePlan,
-        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        memory_plan: &crate::compiler::plan::MemoryPlan,
         inputs: &[&[u8]],
     ) -> Vec<Vec<u8>> {
         executor
@@ -2242,14 +2618,1977 @@ mod prepared_fallback_tests {
 
     fn executor_fallback(
         executor: &mut GraphExecutor<CpuBackend>,
-        graph: &crate::ir::node::ComputeGraph,
+        graph: &crate::ir::ComputeGraph,
         plan: &mut crate::backend::ExecutablePlan,
-        memory_plan: &crate::compiler::passes::memory_planning::MemoryPlan,
+        memory_plan: &crate::compiler::plan::MemoryPlan,
         inputs: &[&[u8]],
         prepared: &crate::backend::prepared::PreparedExecutablePlan,
     ) -> Vec<Vec<u8>> {
         executor
             .execute_prepared_fallback(graph, plan, memory_plan, inputs, prepared)
             .expect("prepared fallback execute must succeed")
+    }
+}
+
+#[cfg(test)]
+mod execution_storage_size_tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_packed_types_use_exact_packed_storage_size() {
+        let u4 = IrDType::U4Scaled;
+        let u8 = IrDType::U8Scaled;
+
+        for numel in [1, 7, 8, 9, 17, 64] {
+            assert_eq!(
+                checked_execution_storage_size(&u4, numel).unwrap(),
+                numel.div_ceil(8) * 4 + 64
+            );
+            assert_eq!(
+                checked_execution_storage_size(&u8, numel).unwrap(),
+                numel.div_ceil(4) * 4 + 64
+            );
+        }
+    }
+
+    #[cfg(feature = "prepared-plan")]
+    #[test]
+    fn persistent_dispatch_validates_arena_before_view_execution() {
+        use crate::backend::prepared::PersistentPreparedWeights;
+        use std::sync::Arc;
+
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 4,
+            levels: vec![],
+        };
+        let arena = backend.try_allocate_arena(0).unwrap();
+        let mut view = PersistentPreparedWeights::new();
+        assert!(view.insert((0, 4), Arc::new(vec![1.0])));
+        assert!(backend
+            .dispatch_with_persistent_view(&plan, &arena, &ShapeEnv::new(), Some(&view))
+            .is_err());
+
+        let malformed_conv = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv2d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![0; 15],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(12).unwrap();
+        let mut view = PersistentPreparedWeights::new();
+        assert!(view.insert((4, 4), Arc::new(vec![1.0])));
+        assert!(backend
+            .dispatch_with_persistent_view(&malformed_conv, &arena, &ShapeEnv::new(), Some(&view),)
+            .is_err());
+
+        let malformed_matmul = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "matmul".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        assert!(
+            backend
+                .dispatch_with_persistent_view(
+                    &malformed_matmul,
+                    &arena,
+                    &ShapeEnv::new(),
+                    Some(&view),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fused_topk_respects_nontrailing_axis() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "topk_fused".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(24, 12),
+                secondary_output_slice: Some(crate::backend::BufferSlice::new(40, 24)),
+                params: vec![1, 2, 2, 3, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 64,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(64).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let values = backend.try_read_arena(&arena, 24, 12).unwrap();
+        let indices = backend.try_read_arena(&arena, 40, 24).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&values), &[4.0, 5.0, 6.0]);
+        assert_eq!(bytemuck::cast_slice::<_, u64>(&indices), &[1, 1, 1]);
+    }
+
+    #[test]
+    fn packed_dequantization_rejects_trailing_payload() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "dequantize_kernel".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 5)],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    1,
+                    1,
+                    4,
+                    1,
+                    1.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn packed_quantization_rejects_incomplete_metadata() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "quantize_f32_u4".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 20),
+                secondary_output_slice: None,
+                params: vec![1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn range_dispatch_writes_complete_validated_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "range_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(12, 12),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 4.0, 1.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 12, 12).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&bytes), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn permutation_transpose_respects_axis_order_in_place() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "transpose_perm_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(0, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 1, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 0, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 3.0, 2.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn transpose_rejects_truncated_matrix_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "transpose_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 12)],
+                output_slice: crate::backend::BufferSlice::new(12, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 28,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(28).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn reduction_respects_nontrailing_axis_in_place() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "reduce_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 0, 0, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 0, 8).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&bytes), &[4.0, 6.0]);
+    }
+
+    #[test]
+    fn concat_rejects_truncated_output_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "concat".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![0, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn pool_dispatch_rejects_zero_stride() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pool_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 0, 0, 1, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn conv3d_rejects_zero_dilation() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv3d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn conv1d_rejects_zero_stride() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv1d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![0, 0, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn scatter_nd_updates_complete_indexed_slice() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "scatter_nd".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 16),
+                    crate::backend::BufferSlice::new(16, 4),
+                    crate::backend::BufferSlice::new(20, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(28, 16),
+                secondary_output_slice: None,
+                params: vec![1, 2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 44,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(44).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 16, bytemuck::cast_slice(&[1.0f32]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 20, bytemuck::cast_slice(&[9.0f32, 8.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 28, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 2.0, 9.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn slice_respects_selected_dimension() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "slice_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(24, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 3, 1, 1, 3],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 40,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(40).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 24, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[2.0, 3.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn gather_respects_nonzero_axis_geometry() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "gather".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 24),
+                    crate::backend::BufferSlice::new(24, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(32, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 3, 2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 48,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(48).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            )
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 24, bytemuck::cast_slice(&[2.0f32, 0.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 32, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[3.0, 1.0, 6.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn pad_places_input_at_low_padding_offset_in_place() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pad_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 8)],
+                output_slice: crate::backend::BufferSlice::new(0, 20),
+                secondary_output_slice: None,
+                params: vec![1, 2, 1, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 20,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(20).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[3.0f32, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 0, 20).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[0.0, 3.0, 4.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn typed_cast_dispatch_rejects_legacy_width_metadata() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "cast_f32_i64".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 8),
+                secondary_output_slice: None,
+                params: vec![4, 8],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn to_f16_rejects_partial_output_scalar() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "to_f16".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 1),
+                secondary_output_slice: None,
+                params: vec![1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 5,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(5).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn erf_dispatch_rejects_partial_output_contract() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "erf_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 8),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn rmsprop_dispatch_rejects_nonpositive_epsilon() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "rmsprop_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(12, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    0.1f32.to_bits() as usize,
+                    0.9f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn lion_dispatch_rejects_missing_beta() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "lion_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(12, 4),
+                secondary_output_slice: None,
+                params: vec![0.1f32.to_bits() as usize, 0.9f32.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn muon_dispatch_rejects_invalid_beta() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "muon_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(12, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    0.1f32.to_bits() as usize,
+                    1.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn gradient_scale_rejects_nonfinite_scale() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "gradient_scale".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, f32::NAN.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn gradient_f8_dequantization_rejects_truncated_words() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "dequantize_gradient_f8x4r_to_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 20),
+                secondary_output_slice: None,
+                params: vec![5],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn sgd_dispatch_rejects_missing_learning_rate() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "sgd_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn where_rejects_empty_condition_for_nonempty_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "where_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 0),
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn flip_respects_selected_dimensions() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "flip".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 16),
+                secondary_output_slice: None,
+                params: vec![1, 0, 2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 32,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(32).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 16, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[3.0, 4.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn cumsum_respects_selected_dimension() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "cumsum".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 1, 0, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 32,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(32).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 16, 16).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 3.0, 3.0, 7.0]
+        );
+    }
+
+    #[test]
+    fn repeat_uses_dimension_aware_tiling() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "repeat".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 32),
+                secondary_output_slice: None,
+                params: vec![2, 2, 2, 2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 48,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(48).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 16, 32).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&bytes),
+            &[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn adaptive_pool_supports_larger_in_place_output_geometry() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adaptive_avg_pool2d".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(0, 36),
+                secondary_output_slice: None,
+                params: vec![3, 3, 2, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 36,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(36).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 36).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&output),
+            &[1.0, 1.5, 2.0, 2.0, 2.5, 3.0, 3.0, 3.5, 4.0]
+        );
+    }
+
+    #[test]
+    fn adaptive_pool_rejects_zero_input_height() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adaptive_avg_pool2d".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 1, 0, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn bilinear_upsample_rejects_zero_input_height() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "upsample_bilinear2d".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 16),
+                secondary_output_slice: None,
+                params: vec![2, 2, 0, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 20,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(20).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn nearest_upsample_rejects_zero_scale() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "upsample_nearest2d".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 0),
+                secondary_output_slice: None,
+                params: vec![0, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(4).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn layer_norm_applies_affine_parameters_in_place() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "norm_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 8),
+                    crate::backend::BufferSlice::new(16, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![1e-5f32.to_bits() as usize, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 3.0]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 8, bytemuck::cast_slice(&[2.0f32, 3.0]))
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 16, bytemuck::cast_slice(&[1.0f32, -1.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let bytes = backend.try_read_arena(&arena, 0, 8).unwrap();
+        let output = bytemuck::cast_slice::<_, f32>(&bytes);
+        assert!((output[0] + 1.0).abs() < 1e-4, "output={output:?}");
+        assert!((output[1] - 2.0).abs() < 1e-4, "output={output:?}");
+    }
+
+    #[test]
+    fn batch_norm_supports_valid_in_place_output() {
+        let eps = 1e-5f32;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "norm_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 4),
+                    crate::backend::BufferSlice::new(12, 4),
+                    crate::backend::BufferSlice::new(16, 4),
+                    crate::backend::BufferSlice::new(20, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![eps.to_bits() as usize, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 24,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(24).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 3.0, 2.0, 1.0, 1.0, 4.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        let values = bytemuck::cast_slice::<_, f32>(&output);
+        let scale = 2.0 / (4.0 + eps).sqrt();
+        assert!((values[0] - 1.0).abs() < 1e-6);
+        assert!((values[1] - (2.0 * scale + 1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn batch_norm_rejects_nonpositive_epsilon() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "norm_f32".into(),
+                input_slices: vec![],
+                output_slice: crate::backend::BufferSlice::new(0, 0),
+                secondary_output_slice: None,
+                params: vec![0.0f32.to_bits() as usize, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 0,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(0).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn biasadd_rejects_zero_channel_stride() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "biasadd".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn softmax_supports_valid_in_place_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "softmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 8)],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![2, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        let values = bytemuck::cast_slice::<_, f32>(&output);
+        let expected_first = 1.0 / (1.0 + 1.0f32.exp());
+        assert!((values[0] - expected_first).abs() < 1e-6);
+        assert!((values[1] - (1.0 - expected_first)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn softmax_rejects_zero_stride() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "softmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn pow_supports_valid_in_place_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pow_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[2.0f32, 3.0, 2.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&output), &[4.0, 9.0]);
+    }
+
+    #[test]
+    fn pow_rejects_empty_exponent_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "pow_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn embedding_rejects_out_of_range_indices() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "embedding".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(12, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        backend
+            .try_write_arena(&arena, 8, &2.0f32.to_le_bytes())
+            .unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn fused_topk_requires_indices_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "topk_fused".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 1, 1, 0],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn argmax_returns_indices_within_each_reduction_axis() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "argmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 24)],
+                output_slice: crate::backend::BufferSlice::new(24, 16),
+                secondary_output_slice: None,
+                params: vec![1, 3, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 40,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(40).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[1.0f32, 5.0, 3.0, 9.0, 2.0, 4.0]),
+            )
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 24, 16).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, u64>(&output), &[1, 0]);
+    }
+
+    #[test]
+    fn argmax_rejects_zero_reduction_dimension() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "argmax".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(8, 8),
+                secondary_output_slice: None,
+                params: vec![0, 0, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn scalar_f32_dispatch_rejects_empty_scalar_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "add_scalar_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn binary_f32_dispatch_rejects_empty_operand_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "add_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 0),
+                    crate::backend::BufferSlice::new(0, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn unary_f32_dispatch_rejects_missing_input() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "relu_f32".into(),
+                input_slices: vec![],
+                output_slice: crate::backend::BufferSlice::new(0, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(4).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn rms_norm_supports_valid_in_place_output() {
+        let eps = 1e-5f32;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "rms_norm".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(8, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 8),
+                secondary_output_slice: None,
+                params: vec![eps.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 16,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(16).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[3.0f32, 4.0, 1.0, 1.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 8).unwrap();
+        let values = bytemuck::cast_slice::<_, f32>(&output);
+        let denominator = (12.5f32 + eps).sqrt();
+        assert!((values[0] - 3.0 / denominator).abs() < 1e-6);
+        assert!((values[1] - 4.0 / denominator).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rms_norm_rejects_empty_weight_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "rms_norm".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1e-5f32.to_bits() as usize],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn prelu_preserves_batched_channel_geometry_in_place() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "prelu".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 32),
+                    crate::backend::BufferSlice::new(32, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 32),
+                secondary_output_slice: None,
+                params: vec![4, 2, 2, 1, 2],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 40,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(40).unwrap();
+        backend
+            .try_write_arena(
+                &arena,
+                0,
+                bytemuck::cast_slice(&[-1.0f32, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0]),
+            )
+            .unwrap();
+        backend
+            .try_write_arena(&arena, 32, bytemuck::cast_slice(&[0.1f32, 0.2]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 32).unwrap();
+        assert_eq!(
+            bytemuck::cast_slice::<_, f32>(&output),
+            &[-0.1, -0.2, -0.6, -0.8, -0.5, -0.6, -1.4, -1.6]
+        );
+    }
+
+    #[test]
+    fn prelu_rejects_empty_weight_storage() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "prelu".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn transposed_convolution_supports_valid_in_place_output() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv_transpose2d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(0, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 1, 1, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[2.0f32, 3.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        let output = backend.try_read_arena(&arena, 0, 4).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_, f32>(&output), &[6.0]);
+    }
+
+    #[test]
+    fn transposed_convolution_rejects_invalid_geometry() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv_transpose2d".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 1, 0, 1, 1, 1],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(12).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn fused_residual_norm_rejects_invalid_metadata() {
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "fused_residual_add_layer_norm".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 16),
+                    crate::backend::BufferSlice::new(16, 16),
+                ],
+                output_slice: crate::backend::BufferSlice::new(32, 16),
+                secondary_output_slice: None,
+                params: vec![0.0f32.to_bits() as usize, 4],
+                param_dims: None,
+                node_id: Some(0),
+                weight_meta: None,
+            }],
+            arena_size: 48,
+            levels: vec![0],
+        };
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(48).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn activation_quantization_validates_and_populates_each_channel() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "quantize_activations".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 16)],
+                output_slice: crate::backend::BufferSlice::new(16, 28),
+                secondary_output_slice: None,
+                params: vec![
+                    4,
+                    1,
+                    2,
+                    1.0f32.to_bits() as usize,
+                    1.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                    0.0f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 44,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        backend
+            .try_write_arena(&arena, 0, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]))
+            .unwrap();
+        backend.dispatch(&plan, &arena, &ShapeEnv::new()).unwrap();
+        assert_eq!(
+            backend.try_read_arena(&arena, 40, 4).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+
+        let mut malformed = plan;
+        if let Instruction::CallKernel { output_slice, .. } = &mut malformed.instructions[0] {
+            output_slice.size = 27;
+        }
+        assert!(backend
+            .dispatch(&malformed, &arena, &ShapeEnv::new())
+            .is_err());
+    }
+
+    #[test]
+    fn f16_to_f32_rejects_partial_scalars() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "to_f32".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 3)],
+                output_slice: crate::backend::BufferSlice::new(4, 8),
+                secondary_output_slice: None,
+                params: vec![],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn adam_dispatch_rejects_malformed_storage_contracts() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adam_update_f32".into(),
+                input_slices: vec![],
+                output_slice: crate::backend::BufferSlice::new(0, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    0.001f32.to_bits() as usize,
+                    0.9f32.to_bits() as usize,
+                    0.999f32.to_bits() as usize,
+                    1e-8f32.to_bits() as usize,
+                    1,
+                ],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+
+        let runtime_step_plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "adamw_update_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                    crate::backend::BufferSlice::new(8, 4),
+                    crate::backend::BufferSlice::new(12, 4),
+                    crate::backend::BufferSlice::new(16, 8),
+                ],
+                output_slice: crate::backend::BufferSlice::new(24, 4),
+                secondary_output_slice: None,
+                params: vec![
+                    0.001f32.to_bits() as usize,
+                    0.9f32.to_bits() as usize,
+                    0.999f32.to_bits() as usize,
+                    1e-8f32.to_bits() as usize,
+                    0.01f32.to_bits() as usize,
+                ],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 28,
+            levels: vec![0],
+        };
+        let arena = backend
+            .try_allocate_arena(runtime_step_plan.arena_size)
+            .unwrap();
+        assert!(backend
+            .dispatch(&runtime_step_plan, &arena, &ShapeEnv::new())
+            .is_err());
+    }
+
+    #[test]
+    fn packed_dequantization_rejects_implicit_storage_width() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "dequantize_kernel".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 1, 3, 1, 1.0f32.to_bits() as usize, 0],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn quantized_matmul_rejects_truncated_activation_metadata() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "matmul_i4_i8".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 1, 1],
+                param_dims: None,
+                node_id: None,
+                weight_meta: Some(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                    bit_width: 4,
+                    scales: vec![1.0],
+                    dequant_offsets: vec![0.0],
+                    shape: vec![1, 1],
+                    quant_block_size: 0,
+                    codebooks: vec![],
+                    execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                        "matmul_i4",
+                        4,
+                        false,
+                    ),
+                })),
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn expand_rejects_invalid_broadcast_metadata() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "expand_f32".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 8),
+                    crate::backend::BufferSlice::new(20, 0),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 12),
+                secondary_output_slice: None,
+                params: vec![1, 2, 3],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 20,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn write_const_initializes_destination_padding() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(8).unwrap();
+        backend.try_write_arena(&arena, 0, &[0xff; 8]).unwrap();
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(0, 8),
+                data: vec![1, 2, 3, 4],
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        backend
+            .dispatch(&plan, &arena, &ShapeEnv::new())
+            .expect("valid constant write must dispatch");
+        assert_eq!(
+            backend.try_read_arena(&arena, 0, 8).unwrap(),
+            vec![1, 2, 3, 4, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn cpu_arena_transfers_reject_invalid_ranges() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let arena = backend.try_allocate_arena(4).unwrap();
+        assert!(backend.try_write_arena(&arena, 5, &[1]).is_err());
+        assert!(backend.try_write_arena(&arena, usize::MAX, &[1]).is_err());
+        assert!(backend.try_read_arena(&arena, 5, 1).is_err());
+        assert!(backend.try_read_arena(&arena, usize::MAX, 1).is_err());
+
+        let malformed_fill = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: crate::backend::BufferSlice::new(0, 3),
+                value: 0.0,
+            }],
+            arena_size: 3,
+            levels: vec![0],
+        };
+        assert!(malformed_fill.validate().is_err());
+
+        let undersized_plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 4,
+            levels: vec![],
+        };
+        let undersized_arena = backend.try_allocate_arena(3).unwrap();
+        assert!(backend
+            .dispatch(&undersized_plan, &undersized_arena, &ShapeEnv::new())
+            .is_err());
+    }
+
+    #[test]
+    fn activation_dequantization_rejects_truncated_metadata() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "dequantize_activations".into(),
+                input_slices: vec![crate::backend::BufferSlice::new(0, 4)],
+                output_slice: crate::backend::BufferSlice::new(4, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0],
+                param_dims: None,
+                node_id: None,
+                weight_meta: None,
+            }],
+            arena_size: 8,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn quantized_conv_rejects_truncated_activation_metadata() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv2d_i4_i8".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 4),
+                    crate::backend::BufferSlice::new(4, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(8, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 1, 1, 1, 1, 1, 1, 1],
+                param_dims: None,
+                node_id: None,
+                weight_meta: Some(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                    bit_width: 4,
+                    scales: vec![1.0],
+                    dequant_offsets: vec![0.0],
+                    shape: vec![1, 1, 1, 1],
+                    quant_block_size: 0,
+                    codebooks: vec![],
+                    execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                        "matmul_i4",
+                        4,
+                        false,
+                    ),
+                })),
+            }],
+            arena_size: 12,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn quantized_conv_rejects_invalid_geometry_before_typed_views() {
+        let backend = crate::backend::cpu::CpuBackend;
+        for (activation_offset, stride) in [(0, 0), (1, 1)] {
+            let plan = ExecutablePlan {
+                instructions: vec![Instruction::CallKernel {
+                    kernel_name: "conv2d_i4".into(),
+                    input_slices: vec![
+                        crate::backend::BufferSlice::new(activation_offset, 4),
+                        crate::backend::BufferSlice::new(8, 4),
+                    ],
+                    output_slice: crate::backend::BufferSlice::new(12, 4),
+                    secondary_output_slice: None,
+                    params: vec![stride, 0, 1, 1, 1, 1, 1, 1, 1],
+                    param_dims: None,
+                    node_id: None,
+                    weight_meta: Some(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                        bit_width: 4,
+                        scales: vec![1.0],
+                        dequant_offsets: vec![0.0],
+                        shape: vec![1, 1, 1, 1],
+                        quant_block_size: 0,
+                        codebooks: vec![],
+                        execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                            "conv2d_i4",
+                            4,
+                            false,
+                        ),
+                    })),
+                }],
+                arena_size: 16,
+                levels: vec![0],
+            };
+            let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+            assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+        }
+    }
+
+    #[test]
+    fn quantized_i8_activation_conv_rejects_invalid_group_geometry() {
+        let backend = crate::backend::cpu::CpuBackend;
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::CallKernel {
+                kernel_name: "conv2d_i4_i8".into(),
+                input_slices: vec![
+                    crate::backend::BufferSlice::new(0, 9),
+                    crate::backend::BufferSlice::new(12, 4),
+                ],
+                output_slice: crate::backend::BufferSlice::new(16, 4),
+                secondary_output_slice: None,
+                params: vec![1, 0, 1, 2, 2, 1, 1, 1, 1],
+                param_dims: None,
+                node_id: None,
+                weight_meta: Some(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
+                    bit_width: 4,
+                    scales: vec![1.0],
+                    dequant_offsets: vec![0.0],
+                    shape: vec![1, 1],
+                    quant_block_size: 0,
+                    codebooks: vec![],
+                    execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                        "matmul_i4",
+                        4,
+                        false,
+                    ),
+                })),
+            }],
+            arena_size: 20,
+            levels: vec![0],
+        };
+        let arena = backend.try_allocate_arena(plan.arena_size).unwrap();
+        arena.data_mut()[..4].copy_from_slice(&1.0f32.to_le_bytes());
+        assert!(backend.dispatch(&plan, &arena, &ShapeEnv::new()).is_err());
+    }
+
+    #[test]
+    fn checked_storage_sizes_reject_overflow() {
+        assert!(checked_execution_storage_size(&IrDType::F32, usize::MAX).is_err());
+        assert!(checked_execution_storage_size(&IrDType::I8, usize::MAX).is_err());
+        assert!(crate::backend::cpu::CpuBackend
+            .try_allocate_arena(usize::MAX)
+            .is_err());
+    }
+
+    #[test]
+    fn native_types_use_logical_element_size() {
+        assert_eq!(
+            checked_execution_storage_size(&IrDType::F32, 17).unwrap(),
+            68
+        );
+        assert_eq!(
+            checked_execution_storage_size(&IrDType::I64, 17).unwrap(),
+            136
+        );
+    }
+
+    #[test]
+    fn integer_inference_requires_calibration() {
+        let executor = GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let error = executor
+            .compile_with_target(
+                ComputeGraph::new(),
+                CompileTarget::IntegerInference(QuantTarget::U8),
+                None,
+            )
+            .expect_err("integer inference without calibration must fail");
+        assert!(error
+            .to_string()
+            .contains("requires activation calibration"));
+    }
+
+    #[test]
+    fn unsupported_mixed_precision_target_is_reported() {
+        let executor = GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let error = executor
+            .compile_with_target(
+                ComputeGraph::new(),
+                CompileTarget::TrainingMixedPrecision {
+                    compute: crate::types::ScalarType::F16,
+                    accumulator: crate::types::ScalarType::F32,
+                },
+                None,
+            )
+            .expect_err("unsupported target must fail explicitly");
+        assert!(error.to_string().contains("not implemented"));
     }
 }

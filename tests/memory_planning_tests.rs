@@ -1,6 +1,197 @@
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::Backend;
 use fastnn::compiler::passes::memory_planning;
 use fastnn::compiler::passes::shape_inference;
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+use fastnn::compiler::{AllocSlot, MemoryPlan, MemoryPlanResourceLimits};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, ShapeEnv, TensorType};
+use std::collections::HashMap;
+
+#[test]
+fn cpu_lowering_rejects_malformed_list_attributes() {
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(2)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let pad = graph.add_node(Opcode::Pad, vec![input], tensor_type);
+    graph
+        .get_node_mut(pad)
+        .unwrap()
+        .attrs
+        .insert("pads".into(), "0,not-a-number,0,0".into());
+    graph.set_inputs(vec![input]);
+    graph.set_outputs(vec![pad]);
+
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("Pad node"), "{message}");
+    assert!(message.contains("item 1"), "{message}");
+
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32),
+    );
+    let transpose = graph.add_node(
+        Opcode::Transpose,
+        vec![input],
+        TensorType::new(vec![DimExpr::Known(3), DimExpr::Known(2)], IrDType::F32),
+    );
+    graph
+        .get_node_mut(transpose)
+        .unwrap()
+        .attrs
+        .insert("perm".into(), "1,bad".into());
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("item 1"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let repeat = graph.add_node(Opcode::Repeat, vec![input], tensor_type);
+    graph
+        .get_node_mut(repeat)
+        .unwrap()
+        .attrs
+        .insert("repeats".into(), "2,bad".into());
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    assert!(error.to_string().contains("item 1"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let weight = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let norm = graph.add_node(Opcode::RMSNorm, vec![input, weight], tensor_type);
+    graph
+        .get_node_mut(norm)
+        .unwrap()
+        .attrs
+        .insert("eps".into(), "not-a-number".into());
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    assert!(error.to_string().contains("eps"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2)], IrDType::F32);
+    let weight = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let grad = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let update = graph.add_node(Opcode::SgdUpdate, vec![weight, grad], tensor_type);
+    graph
+        .get_node_mut(update)
+        .unwrap()
+        .attrs
+        .insert("lr".into(), "invalid".into());
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    assert!(error.to_string().contains("lr"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2)], IrDType::F32);
+    let residual = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let main = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let weight = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let fused = graph.add_node(
+        Opcode::FusedResidualAddNorm,
+        vec![residual, main, weight],
+        tensor_type,
+    );
+    graph
+        .get_node_mut(fused)
+        .unwrap()
+        .attrs
+        .insert("normalized_ndims".into(), "invalid".into());
+    let memory_plan = memory_planning::plan_memory(&graph).unwrap();
+    let error = CpuBackend.compile(&graph, &memory_plan).unwrap_err();
+    assert!(error.to_string().contains("normalized_ndims"), "{error}");
+}
+
+#[test]
+fn shape_inference_rejects_invalid_pool_geometry() {
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(
+        vec![
+            DimExpr::Known(1),
+            DimExpr::Known(1),
+            DimExpr::Known(4),
+            DimExpr::Known(4),
+        ],
+        IrDType::F32,
+    );
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let pool = graph.add_node(Opcode::MaxPool, vec![input], tensor_type);
+    graph
+        .get_node_mut(pool)
+        .unwrap()
+        .attrs
+        .insert("stride".into(), "0".into());
+
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("positive"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let reduce = graph.add_node(Opcode::ReduceSum, vec![input], tensor_type);
+    graph
+        .get_node_mut(reduce)
+        .unwrap()
+        .attrs
+        .insert("axis".into(), "-3".into());
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("out of range"), "{error}");
+
+    let mut graph = ComputeGraph::new();
+    let tensor_type = TensorType::new(vec![DimExpr::Known(4)], IrDType::F32);
+    let input = graph.add_node(Opcode::Input, vec![], tensor_type.clone());
+    let slice = graph.add_node(Opcode::Slice, vec![input], tensor_type);
+    let attrs = &mut graph.get_node_mut(slice).unwrap().attrs;
+    attrs.insert("dim".into(), "0".into());
+    attrs.insert("start".into(), "bad".into());
+    attrs.insert("end".into(), "2".into());
+    let error = shape_inference::infer_shapes(&mut graph).unwrap_err();
+    assert!(error.to_string().contains("start"), "{error}");
+}
+
+#[test]
+fn memory_plan_validation_enforces_resource_limits() {
+    let mut slots = HashMap::new();
+    slots.insert(
+        0,
+        AllocSlot {
+            offset: 0,
+            size: 4,
+            node_id: 0,
+            output_index: 0,
+        },
+    );
+    let plan = MemoryPlan {
+        total_size: 4,
+        slots,
+        inputs: vec![0],
+        secondary_slots: HashMap::new(),
+        outputs: vec![0],
+        tightened_params: HashMap::from([(0, vec![1, 2])]),
+    };
+
+    let limits = MemoryPlanResourceLimits {
+        max_total_tightened_params: 1,
+        ..MemoryPlanResourceLimits::default()
+    };
+    assert!(plan.validate_with_limits(&limits).is_err());
+
+    let limits = MemoryPlanResourceLimits {
+        max_primary_slots: 0,
+        ..MemoryPlanResourceLimits::default()
+    };
+    assert!(plan.validate_with_limits(&limits).is_err());
+
+    let limits = MemoryPlanResourceLimits {
+        max_arena_bytes: 3,
+        ..MemoryPlanResourceLimits::default()
+    };
+    assert!(plan.validate_with_limits(&limits).is_err());
+}
 
 #[test]
 fn test_memory_plan_basic_reuse() {
@@ -531,13 +722,15 @@ fn test_memory_plan_zero_sized_tensor() {
 
     shape_inference::infer_shapes(&mut graph).unwrap();
     let plan = memory_planning::plan_memory(&graph).unwrap();
-    // Zero-sized tensors may be skipped, but the plan should still be valid
+    // Zero-sized interfaces retain explicit slots for persisted runtimes.
     assert_eq!(plan.total_size, 0);
+    assert_eq!(plan.slots.get(&input_id).map(|slot| slot.size), Some(0));
+    assert!(plan.validate().is_ok());
 }
 
 #[test]
 fn test_memory_plan_tighten() {
-    use fastnn::ir::node::ShapeEnv;
+    use fastnn::ir::ShapeEnv;
 
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
@@ -559,8 +752,8 @@ fn test_memory_plan_tighten() {
 
     // Tighten with a ShapeEnv that resolves N to a small value
     let mut shape_env = ShapeEnv::new();
-    shape_env.bind("N", 10);
-    let tightened = plan.tighten(&graph, &shape_env);
+    shape_env.try_bind("N", 10).unwrap();
+    let tightened = plan.try_tighten(&graph, &shape_env).unwrap();
 
     // The tightened size should be <= the original (10*4 = 40 bytes)
     assert!(
@@ -588,4 +781,142 @@ fn test_memory_plan_single_node() {
     // Single node should have exactly one slot
     assert_eq!(plan.slots.len(), 1);
     assert!(plan.slots.contains_key(&input_id));
+}
+#[test]
+fn test_memory_plan_tighten_rejects_slot_range_overflow() {
+    let mut slots = HashMap::new();
+    slots.insert(
+        0,
+        AllocSlot {
+            offset: usize::MAX,
+            size: 2,
+            node_id: 0,
+            output_index: 0,
+        },
+    );
+    let plan = MemoryPlan {
+        total_size: usize::MAX,
+        slots,
+        secondary_slots: HashMap::new(),
+        inputs: vec![],
+        outputs: vec![],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan
+        .try_tighten(&ComputeGraph::new(), &ShapeEnv::new())
+        .is_err());
+}
+
+#[test]
+fn test_memory_plan_tighten_rejects_malformed_conv_parameters() {
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![
+                DimExpr::Known(1),
+                DimExpr::Known(4),
+                DimExpr::Known(8),
+                DimExpr::Known(8),
+            ],
+            IrDType::F32,
+        ),
+    );
+    let weight = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![
+                DimExpr::Known(8),
+                DimExpr::Known(4),
+                DimExpr::Known(3),
+                DimExpr::Known(3),
+            ],
+            IrDType::F32,
+        ),
+    );
+    graph.add_node(
+        Opcode::Conv2d,
+        vec![input, weight],
+        TensorType::new(
+            vec![
+                DimExpr::Known(1),
+                DimExpr::Known(8),
+                DimExpr::Known(6),
+                DimExpr::Known(6),
+            ],
+            IrDType::F32,
+        ),
+    );
+    let plan = MemoryPlan {
+        total_size: 0,
+        slots: HashMap::new(),
+        secondary_slots: HashMap::new(),
+        inputs: vec![],
+        outputs: vec![],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
+}
+
+#[test]
+fn test_memory_planning_rejects_arena_alignment_overflow() {
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(u64::MAX)], IrDType::F32),
+    );
+    graph.set_outputs(vec![input]);
+    assert!(memory_planning::plan_memory(&graph).is_err());
+
+    let mut slots = HashMap::new();
+    slots.insert(
+        input,
+        AllocSlot {
+            offset: 0,
+            size: usize::MAX,
+            node_id: input,
+            output_index: 0,
+        },
+    );
+    let plan = MemoryPlan {
+        total_size: usize::MAX,
+        slots,
+        secondary_slots: HashMap::new(),
+        inputs: vec![],
+        outputs: vec![input],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
+}
+
+#[test]
+fn test_memory_plan_tighten_rejects_malformed_shape_parameters() {
+    let mut graph = ComputeGraph::new();
+    let input = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32),
+    );
+    let softmax = graph.add_node(
+        Opcode::Softmax,
+        vec![input],
+        TensorType::new(vec![DimExpr::Known(2), DimExpr::Known(3)], IrDType::F32),
+    );
+    graph
+        .get_node_mut(softmax)
+        .unwrap()
+        .attrs
+        .insert("axis".into(), "9".into());
+    let plan = MemoryPlan {
+        total_size: 0,
+        slots: HashMap::new(),
+        secondary_slots: HashMap::new(),
+        inputs: vec![],
+        outputs: vec![],
+        tightened_params: HashMap::new(),
+    };
+    assert!(plan.try_tighten(&graph, &ShapeEnv::new()).is_err());
 }

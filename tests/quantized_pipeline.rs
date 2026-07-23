@@ -3,9 +3,10 @@
 //! Tests the full flow: GraphBuilder → compile_with_quantize → execute → verify output.
 //! Covers MatMul and Conv2d with both U4 and U8 quantization.
 
+use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::backend::executor::WeightDtype;
+
 use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
@@ -13,9 +14,10 @@ use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::dtypes::I4x8;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::ComputeGraph;
-use fastnn::ir::node::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::ir::ComputeGraph;
+use fastnn::ir::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::packed_tensor::PackedTensor;
+use fastnn::types::{CompileTarget, QuantTarget};
 
 /// Helper: build a MatMul graph and run through the full pipeline.
 /// Returns output as Vec<f32>.
@@ -398,24 +400,22 @@ fn test_graph_builder_compile_with_quantize() {
     let has_u4 = u4_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I4));
     assert!(has_u4, "U4-compiled graph should contain a U4 weight node");
 
     let (_, _, u8_graph) = result_u8.unwrap();
     let has_u8 = u8_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::I8Scaled { .. }));
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I8Scaled));
     assert!(has_u8, "U8-compiled graph should contain a U8 weight node");
 
     // No-quantize graph should have no U4/U8 nodes
     let (_, _, f32_graph) = result_no_q.unwrap();
-    let has_packed = f32_graph.nodes.iter().any(|n| {
-        matches!(
-            &n.output_type.dtype,
-            IrDType::I4 { .. } | IrDType::I8Scaled { .. }
-        )
-    });
+    let has_packed = f32_graph
+        .nodes
+        .iter()
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I4 | IrDType::I8Scaled));
     assert!(
         !has_packed,
         "f32-compiled graph should not contain packed weight nodes"
@@ -621,12 +621,14 @@ fn test_matmul_u4_i8_dispatch_path() {
 
     let mm_node = graph.get_node(mm_id).unwrap();
     let packed_weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    let (scales, zero_points) = match &packed_weight_node.output_type.dtype {
-        IrDType::I4 {
-            scales,
-            zero_points,
-            ..
-        } => (scales.clone(), zero_points.clone()),
+    let (scales, dequant_offsets) = match packed_weight_node.output_type.dtype() {
+        IrDType::I4 => {
+            let (scales, dequant_offsets) = packed_weight_node
+                .output_type
+                .affine_dequantization()
+                .expect("I4 tensor type should expose affine dequantization");
+            (scales.to_vec(), dequant_offsets.to_vec())
+        }
         other => panic!("expected U4 weight node, got {:?}", other),
     };
     let raw_bytes = match &packed_weight_node.opcode {
@@ -647,7 +649,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     if packed_shape.len() == 2 {
         packed_shape.reverse();
     }
-    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, zero_points);
+    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, dequant_offsets);
     let mut expected_payload = Vec::new();
     expected_payload.extend_from_slice(&act_scale.to_le_bytes());
     expected_payload.extend_from_slice(&act_zp.to_le_bytes());
@@ -661,9 +663,28 @@ fn test_matmul_u4_i8_dispatch_path() {
         8,
         2,
     );
+    let mut scalar_expected = vec![0.0f32; 2];
+    fastnn::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8_scalar(
+        &packed,
+        &expected_payload,
+        &mut scalar_expected,
+        1,
+        8,
+        2,
+    );
+    for (index, (&dispatched, &scalar)) in expected.iter().zip(scalar_expected.iter()).enumerate() {
+        assert!(
+            (dispatched - scalar).abs() <= 1e-6,
+            "scalar/ISA mismatch at {index}: dispatched={dispatched}, scalar={scalar}"
+        );
+    }
 
     let mut executor = GraphExecutor::new(CpuBackend);
+    reset_cpu_telemetry();
     let result = executor.execute(&graph, &mut plan, &mem, &[]).unwrap();
+    let telemetry = cpu_telemetry_snapshot();
+    assert_eq!(telemetry.arena_temp_copies, 0, "snapshot={telemetry:?}");
+    assert_eq!(telemetry.arena_temp_copy_bytes, 0);
     let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
 
     assert_eq!(result_f32.len(), expected.len());
@@ -835,7 +856,7 @@ fn test_matmul_i4codebook_roundtrip() {
         4,
         &weight_data,
         &input_data,
-        Some(WeightDtype::I4Codebook),
+        Some(QuantTarget::I4Codebook),
     );
     assert_eq!(result.len(), 4, "output shape mismatch");
     let expected = [1.0f32, 2.0, 3.0, 4.0];
@@ -856,7 +877,14 @@ fn test_matmul_f4x8_roundtrip() {
     ];
     let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
-    let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::F4x8));
+    let result = run_matmul_fp(
+        1,
+        4,
+        4,
+        &weight_data,
+        &input_data,
+        Some(QuantTarget::Fp4E2M1),
+    );
     assert_eq!(result.len(), 4, "output shape mismatch");
     let expected = [1.0f32, 2.0, 3.0, 4.0];
     for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
@@ -868,7 +896,7 @@ fn test_matmul_f4x8_roundtrip() {
     }
 }
 
-/// Helper: build a MatMul graph and run with compile_with_weight_dtype.
+/// Helper: build a MatMul graph and run with an explicit compile target.
 /// Returns output as Vec<f32>.
 fn run_matmul_fp(
     batch: usize,
@@ -876,7 +904,7 @@ fn run_matmul_fp(
     n: usize,
     weight_data: &[f32],
     input_data: &[f32],
-    weight_dtype: Option<WeightDtype>,
+    quant_target: Option<QuantTarget>,
 ) -> Vec<f32> {
     let mut graph = ComputeGraph::new();
 
@@ -915,10 +943,12 @@ fn run_matmul_fp(
     let input_bytes: Vec<u8> = bytemuck::cast_slice(input_data).to_vec();
 
     let mut executor = GraphExecutor::new(CpuBackend);
-    let weight_dt = weight_dtype.unwrap_or(WeightDtype::F32);
+    let target = quant_target
+        .map(CompileTarget::WeightOnly)
+        .unwrap_or(CompileTarget::Native);
     let (mut plan, mem, compiled_graph) = executor
-        .compile_with_weight_dtype(graph, weight_dt, None)
-        .expect("compile_with_weight_dtype should succeed");
+        .compile_with_target(graph, target, None)
+        .expect("compile_with_target should succeed");
 
     let result = executor
         .execute(&compiled_graph, &mut plan, &mem, &[&input_bytes])
@@ -991,10 +1021,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     let act_node = graph.get_node(mm_node.inputs[0]).unwrap();
     assert_eq!(act_node.opcode, Opcode::QuantizeActivations);
     let weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    assert!(matches!(
-        weight_node.output_type.dtype,
-        IrDType::I8Scaled { .. }
-    ));
+    assert!(matches!(weight_node.output_type.dtype(), IrDType::I8Scaled));
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
     let mut plan = CpuBackend.compile(&graph, &mem).unwrap();

@@ -1,18 +1,12 @@
 use crate::dtypes::PackedWord;
+use crate::types::{
+    QuantizationGranularity, RepresentationTransform, ScalarType, StorageEncoding,
+    ValueRepresentation, PACKED_SIMD_MARGIN_WORDS,
+};
 use std::sync::{Arc, OnceLock};
 
 fn zeroed_vec<T: bytemuck::Pod>(len: usize) -> Vec<T> {
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut v = Vec::with_capacity(len);
-
-    // SAFETY: All preconditions for this unsafe operation are verified by the caller. The invariants required by this unsafe block are satisfied.
-    unsafe {
-        std::ptr::write_bytes(v.as_mut_ptr() as *mut u8, 0, len * std::mem::size_of::<T>());
-        v.set_len(len);
-    }
-    v
+    vec![<T as bytemuck::Zeroable>::zeroed(); len]
 }
 
 fn kmeans_16(values: &[f32], max_iter: usize) -> [f32; 16] {
@@ -88,7 +82,7 @@ fn nearest_codebook_index(v: f32, codebook: &[f32; 16]) -> usize {
 }
 
 fn extract_nibble<T: PackedWord>(word: &T, elem: usize) -> usize {
-    let word_u32: u32 = unsafe { std::mem::transmute_copy(word) };
+    let word_u32 = word.to_bits();
     ((word_u32 >> (elem * 4)) & 0xF) as usize
 }
 
@@ -119,6 +113,10 @@ pub struct PackedTensor<T: PackedWord> {
     /// Replaces scales/zeros when present (they are ignored).
     /// Indexed as `codebooks[row * blocks_per_row + col / quant_block_size]`.
     pub(crate) codebooks: Vec<[f32; 16]>,
+    /// Sum of signed quantized codes for every K-axis quantization group.
+    /// Layout matches `scales`/`zeros`: row-major `[row, k_group]`.
+    /// Prepared W4A8 kernels consume this directly instead of rescanning weights.
+    pub(crate) quantized_group_sums: Vec<i32>,
     /// Lazily-computed dequantized f32 weights. Populated on first access,
     /// then reused for all subsequent forward passes. Eliminates per-call
     /// unpack_weight_f32 overhead for packed float types (F8x4, F8x4R, F4x8).
@@ -126,6 +124,68 @@ pub struct PackedTensor<T: PackedWord> {
 }
 
 impl<T: PackedWord> PackedTensor<T> {
+    /// Canonical quantization granularity owned by this runtime tensor descriptor.
+    pub fn quantization_granularity(&self) -> QuantizationGranularity {
+        if self.quant_block_size > 0 {
+            QuantizationGranularity::PerGroup {
+                axis: self.shape.len().saturating_sub(1),
+                group_size: self.quant_block_size,
+            }
+        } else if self.group_size > 1 {
+            QuantizationGranularity::PerGroup {
+                axis: 0,
+                group_size: self.group_size,
+            }
+        } else if self.scales.len() > 1 {
+            QuantizationGranularity::PerAxis { axis: 0 }
+        } else {
+            QuantizationGranularity::PerTensor
+        }
+    }
+
+    /// Resolve the runtime-owned scale, offset, codebook, and granularity metadata.
+    pub fn representation_transform(&self) -> RepresentationTransform {
+        let granularity = self.quantization_granularity();
+        if !self.codebooks.is_empty() {
+            return RepresentationTransform::Codebook {
+                granularity,
+                entries: self
+                    .codebooks
+                    .iter()
+                    .map(|codebook| codebook.to_vec())
+                    .collect(),
+                scales: self.scales.clone(),
+                offsets: self.zeros.clone(),
+            };
+        }
+        if T::IS_FLOAT {
+            RepresentationTransform::ScaledAffine {
+                granularity,
+                scales: self.scales.clone(),
+                offsets: self.zeros.clone(),
+            }
+        } else {
+            RepresentationTransform::AffineDequantization {
+                granularity,
+                scales: self.scales.clone(),
+                offsets: self.zeros.clone(),
+            }
+        }
+    }
+
+    /// Full canonical representation resolved from the word format and runtime metadata.
+    pub fn value_representation(&self) -> ValueRepresentation {
+        ValueRepresentation {
+            logical: ScalarType::F32,
+            storage: T::SCALAR_TYPE,
+            encoding: StorageEncoding::Packed {
+                word_bits: (std::mem::size_of::<T>() * 8) as u8,
+                lanes: T::ITEMS as u8,
+            },
+            transform: self.representation_transform(),
+        }
+    }
+
     pub fn zeros(shape: &[usize]) -> Self {
         let numel: usize = shape.iter().product();
         let packed_len = if shape.len() >= 2 {
@@ -145,6 +205,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -159,6 +220,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -178,6 +240,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -198,6 +261,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -223,8 +287,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         if scale != 1.0 || zero != 0.0 {
             let inv_scale = 1.0 / scale;
@@ -268,6 +331,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -405,6 +469,50 @@ impl<T: PackedWord> PackedTensor<T> {
     #[inline]
     pub fn packed_len(&self) -> usize {
         self.data.len()
+    }
+
+    /// Validate the storage and row-wise affine metadata required by packed
+    /// matrix kernels. This intentionally does not infer or repair malformed
+    /// caller-provided tensors.
+    pub(crate) fn validate_matrix_storage(&self) -> Result<(), String> {
+        self.value_representation()
+            .validate()
+            .map_err(|error| format!("invalid packed value representation: {error}"))?;
+        if self.shape.len() != 2 {
+            return Err(format!(
+                "packed matrix must have rank 2, got rank {}",
+                self.shape.len()
+            ));
+        }
+        let rows = self.shape[0];
+        let columns = self.shape[1];
+        let words_per_row = columns.div_ceil(T::ITEMS);
+        let expected_words = rows
+            .checked_mul(words_per_row)
+            .ok_or_else(|| "packed matrix storage size overflows usize".to_string())?;
+        if self.data.len() < expected_words {
+            return Err(format!(
+                "packed matrix storage has {} words, requires at least {expected_words}",
+                self.data.len()
+            ));
+        }
+        let required_metadata = if self.group_size > 1 {
+            rows.div_ceil(self.group_size)
+        } else {
+            rows
+        };
+        for (name, values) in [("scales", &self.scales), ("zero points", &self.zeros)] {
+            if values.len() > 1 && values.len() < required_metadata {
+                return Err(format!(
+                    "packed matrix has {} {name}, requires at least {required_metadata}",
+                    values.len()
+                ));
+            }
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(format!("packed matrix {name} must be finite"));
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -700,8 +808,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             let row_scale = if scales.len() == 1 {
@@ -737,6 +844,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -793,8 +901,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             let gi = row / group_size;
@@ -827,6 +934,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -880,6 +988,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
         let is_fp4 = T::IS_FLOAT && T::MAX_REPRESENTABLE < signed_bias;
+        let is_unsigned = matches!(T::SCALAR_TYPE, ScalarType::U4 | ScalarType::U8);
 
         let num_groups = if group_size > 1 {
             m.div_ceil(group_size)
@@ -936,7 +1045,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let lo = grp_min - init_scale;
                     let hi = grp_max + init_scale;
                     let scale = (hi - lo) / unsigned_max;
-                    let zp = lo + signed_bias * scale;
+                    let zp = if is_unsigned {
+                        lo
+                    } else {
+                        lo + signed_bias * scale
+                    };
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -968,7 +1081,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let lo = mins[row] - init_scale;
                     let hi = maxs[row] + init_scale;
                     let scale = (hi - lo) / unsigned_max;
-                    let zp = lo + signed_bias * scale;
+                    let zp = if is_unsigned {
+                        lo
+                    } else {
+                        lo + signed_bias * scale
+                    };
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -978,8 +1095,7 @@ impl<T: PackedWord> PackedTensor<T> {
         let k_packed = inner_stride.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
         // Safety margin for SIMD kernels that may read beyond the logical word boundary
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             let (_scale_idx, inv_scale, zp) = if group_size > 1 {
@@ -1044,8 +1160,26 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size,
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
+    }
+
+    /// TorchAO-style K-axis grouped signed-I4 quantization.
+    ///
+    /// Groups 32, 64, and 128 are the supported prepared W4A8 contracts. The
+    /// final K group may be partial; packed tail lanes are zero and excluded
+    /// from the stored group compensation sum.
+    pub fn from_f32_k_grouped_i4(data: &[f32], shape: &[usize], group_size: usize) -> Self {
+        assert!(
+            matches!(T::SCALAR_TYPE, ScalarType::I4),
+            "K-grouped W4 requires signed I4 storage"
+        );
+        assert!(
+            matches!(group_size, 32 | 64 | 128),
+            "K-grouped W4 group size must be 32, 64, or 128"
+        );
+        Self::from_f32_per_block_asymmetric(data, shape, group_size)
     }
 
     /// Per-block asymmetric quantization: each contiguous block of `qblock`
@@ -1063,14 +1197,10 @@ impl<T: PackedWord> PackedTensor<T> {
         } else {
             numel
         };
-        assert!(
-            inner % qblock == 0,
-            "inner dimension {inner} must be divisible by quantization block size {qblock}"
-        );
-
-        let blocks_per_row = inner / qblock;
+        let blocks_per_row = inner.div_ceil(qblock);
         let unsigned_max = ((1u32 << T::BIT_WIDTH) - 1) as f32;
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
+        let is_unsigned = matches!(T::SCALAR_TYPE, ScalarType::U4 | ScalarType::U8);
         let num_blocks = m * blocks_per_row;
 
         let mut scales = Vec::with_capacity(num_blocks);
@@ -1079,7 +1209,7 @@ impl<T: PackedWord> PackedTensor<T> {
         for row in 0..m {
             for blk in 0..blocks_per_row {
                 let start = row * inner + blk * qblock;
-                let end = start + qblock;
+                let end = (start + qblock).min((row + 1) * inner);
                 let block_data = &data[start..end];
                 let mut bmin = f32::MAX;
                 let mut bmax = f32::MIN;
@@ -1090,7 +1220,7 @@ impl<T: PackedWord> PackedTensor<T> {
                 let range = bmax - bmin;
                 if range == 0.0 || unsigned_max == 0.0 {
                     scales.push(1.0);
-                    zeros.push(0.0);
+                    zeros.push(bmin);
                 } else if T::IS_FLOAT && T::MAX_REPRESENTABLE < signed_bias {
                     // FP4 non-uniform types: use non-linear clipping to avoid the
                     // worst FP4 magnitude gap (4.0→6.0 = 2.0). We clamp the effective
@@ -1107,7 +1237,7 @@ impl<T: PackedWord> PackedTensor<T> {
                     // non-uniform code space where most values actually lie,
                     // reducing average quantization error.
                     let effective_magnitude = 4.0; // clip to ±4, drop ±6
-                    let zp = block_data.iter().sum::<f32>() / qblock as f32;
+                    let zp = block_data.iter().sum::<f32>() / block_data.len() as f32;
                     let dev_from_zp = (zp - bmin).abs().max((bmax - zp).abs());
                     let max_dev = if dev_from_zp == 0.0 {
                         1e-10
@@ -1124,7 +1254,11 @@ impl<T: PackedWord> PackedTensor<T> {
                     let lo = bmin - init_scale;
                     let hi = bmax + init_scale;
                     let scale = (hi - lo) / unsigned_max;
-                    let zp = lo + signed_bias * scale;
+                    let zp = if is_unsigned {
+                        lo
+                    } else {
+                        lo + signed_bias * scale
+                    };
                     scales.push(scale);
                     zeros.push(zp);
                 }
@@ -1133,37 +1267,23 @@ impl<T: PackedWord> PackedTensor<T> {
 
         let k_packed = inner.div_ceil(T::ITEMS);
         let packed_len = m * k_packed;
-        const SIMD_MARGIN: usize = 16;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
-            for blk in 0..blocks_per_row {
-                let si = row * blocks_per_row + blk;
-                let s = scales[si];
-                let z = zeros[si];
-                let inv_s = if s != 0.0 { 1.0 / s } else { 0.0 };
-                let blk_start = blk * qblock;
-                let blk_end = blk_start + qblock;
-
-                for word_off in 0..(qblock.div_ceil(T::ITEMS)) {
-                    let global_word = blk_start / T::ITEMS + word_off;
-                    let mut arr = T::Array::default();
-                    let arr_ref = arr.as_mut();
-                    for i in 0..T::ITEMS {
-                        let elem_in_blk = word_off * T::ITEMS + i;
-                        let elem_in_row = blk_start + elem_in_blk;
-                        if elem_in_row < blk_end && elem_in_row < inner {
-                            let flat_idx = row * inner + elem_in_row;
-                            if flat_idx < numel {
-                                arr_ref[i] = (data[flat_idx] - z) * inv_s;
-                            }
-                        }
-                    }
-                    let chunk_idx = row * k_packed + global_word;
-                    if chunk_idx < packed.len() {
-                        packed[chunk_idx] = T::pack_from_f32(arr);
+            for word in 0..k_packed {
+                let mut arr = T::Array::default();
+                for lane in 0..T::ITEMS {
+                    let col = word * T::ITEMS + lane;
+                    if col < inner {
+                        let block = col / qblock;
+                        let metadata_index = row * blocks_per_row + block;
+                        let scale = scales[metadata_index];
+                        let inverse_scale = if scale != 0.0 { 1.0 / scale } else { 0.0 };
+                        arr.as_mut()[lane] =
+                            (data[row * inner + col] - zeros[metadata_index]) * inverse_scale;
                     }
                 }
+                packed[row * k_packed + word] = T::pack_from_f32(arr);
             }
         }
 
@@ -1174,7 +1294,7 @@ impl<T: PackedWord> PackedTensor<T> {
                     let si = row * blocks_per_row + blk;
                     let (s, z) = (scales[si], zeros[si]);
                     let blk_start = blk * qblock;
-                    let blk_end = blk_start + qblock;
+                    let blk_end = (blk_start + qblock).min(inner);
                     for elem_in_row in blk_start..blk_end {
                         let flat_idx = row * inner + elem_in_row;
                         if flat_idx < numel {
@@ -1193,6 +1313,26 @@ impl<T: PackedWord> PackedTensor<T> {
             }
         }
 
+        let quantized_group_sums = if matches!(T::SCALAR_TYPE, ScalarType::I4) {
+            let mut sums = vec![0i32; num_blocks];
+            for row in 0..m {
+                for blk in 0..blocks_per_row {
+                    let start = blk * qblock;
+                    let end = (start + qblock).min(inner);
+                    let mut sum = 0i32;
+                    for col in start..end {
+                        let word = row * k_packed + col / T::ITEMS;
+                        let lane = col % T::ITEMS;
+                        sum += packed[word].unpack_to_f32().as_ref()[lane] as i32;
+                    }
+                    sums[row * blocks_per_row + blk] = sum;
+                }
+            }
+            sums
+        } else {
+            vec![]
+        };
+
         PackedTensor {
             data: Arc::new(packed),
             shape: shape.to_vec(),
@@ -1202,6 +1342,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: qblock,
             codebooks: vec![],
+            quantized_group_sums,
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -1261,9 +1402,8 @@ impl<T: PackedWord> PackedTensor<T> {
 
         // Step 3: Packing — nibble = nearest(v / blk_scale, codebook).
         let k_packed = inner.div_ceil(items);
-        const SIMD_MARGIN: usize = 16;
         let packed_len = m * k_packed;
-        let mut packed = vec![T::default(); packed_len + SIMD_MARGIN];
+        let mut packed = vec![T::default(); packed_len + PACKED_SIMD_MARGIN_WORDS];
 
         for row in 0..m {
             for blk in 0..blocks_per_row {
@@ -1291,10 +1431,7 @@ impl<T: PackedWord> PackedTensor<T> {
                             w |= (idx as u32) << (i * 4);
                         }
                     }
-                    packed[chunk_idx] = T::default();
-                    let word_ref: &mut T = &mut packed[chunk_idx];
-                    let word_u32: &mut u32 = unsafe { std::mem::transmute(word_ref) };
-                    *word_u32 = w;
+                    packed[chunk_idx] = T::from_bits(w);
                 }
             }
         }
@@ -1308,6 +1445,7 @@ impl<T: PackedWord> PackedTensor<T> {
             group_size: 0,
             quant_block_size: qblock,
             codebooks: vec![codebook],
+            quantized_group_sums: vec![],
             cached_f32_weights: OnceLock::new(),
         }
     }
@@ -1324,6 +1462,25 @@ impl<T: PackedWord> PackedTensor<T> {
             };
             inner.div_ceil(self.quant_block_size)
         }
+    }
+
+    /// Precomputed signed-code sum for one K-axis quantization group.
+    #[inline]
+    pub fn quantized_group_sum(&self, row: usize, group: usize) -> i32 {
+        assert!(row < self.shape[0], "row out of bounds");
+        let blocks_per_row = self.blocks_per_row();
+        assert!(group < blocks_per_row, "K group out of bounds");
+        assert_eq!(
+            self.quantized_group_sums.len(),
+            self.shape[0] * blocks_per_row,
+            "quantized group compensation is unavailable"
+        );
+        self.quantized_group_sums[row * blocks_per_row + group]
+    }
+
+    #[inline]
+    pub fn quantized_group_sums(&self) -> &[i32] {
+        &self.quantized_group_sums
     }
 
     #[inline]
@@ -1420,6 +1577,7 @@ impl<T: PackedWord> PackedTensor<T> {
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
             codebooks: self.codebooks.clone(),
+            quantized_group_sums: self.quantized_group_sums.clone(),
             block_size,
             group_size: self.group_size,
             quant_block_size: self.quant_block_size,
@@ -1446,6 +1604,7 @@ impl<T: PackedWord> Clone for PackedTensor<T> {
             scales: self.scales.clone(),
             zeros: self.zeros.clone(),
             codebooks: self.codebooks.clone(),
+            quantized_group_sums: self.quantized_group_sums.clone(),
             block_size: self.block_size,
             group_size: self.group_size,
             quant_block_size: self.quant_block_size,
@@ -1470,7 +1629,171 @@ mod tests {
     use super::*;
     use crate::dtypes::F16x2;
     use crate::dtypes::F32x1;
-    use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4};
+    use crate::dtypes::{F4x8, F8x4, F8x4R, I4x8, I8x4, U4x8, U8x4};
+    use crate::types::{ScalarType, StorageEncoding, TensorStorageLayout};
+
+    #[test]
+    fn k_grouped_i4_preserves_partial_groups_and_precomputes_exact_sums() {
+        let rows = 3;
+        let k = 145;
+        for group_size in [32, 64, 128] {
+            let mut values: Vec<f32> = (0..rows * k)
+                .map(|index| {
+                    let row = index / k;
+                    let col = index % k;
+                    ((col * 37 + row * 11) % 101) as f32 / 13.0 - 3.5
+                })
+                .collect();
+            values[k + 128..2 * k].fill(3.25);
+
+            let packed =
+                PackedTensor::<I4x8>::from_f32_k_grouped_i4(&values, &[rows, k], group_size);
+            let groups = k.div_ceil(group_size);
+            assert_eq!(packed.blocks_per_row(), groups);
+            assert_eq!(packed.quantized_group_sums().len(), rows * groups);
+            assert_eq!(
+                packed.quantization_granularity(),
+                QuantizationGranularity::PerGroup {
+                    axis: 1,
+                    group_size,
+                }
+            );
+
+            let words_per_row = k.div_ceil(8);
+            for row in 0..rows {
+                for group in 0..groups {
+                    let start = group * group_size;
+                    let end = (start + group_size).min(k);
+                    let mut independent_sum = 0i32;
+                    for col in start..end {
+                        let bits = packed.as_packed()[row * words_per_row + col / 8].to_bits();
+                        let nibble = ((bits >> ((col % 8) * 4)) & 0x0f) as i32;
+                        let code = if nibble >= 8 { nibble - 16 } else { nibble };
+                        independent_sum += code;
+
+                        let scale = packed.scale_for_elem(row, col);
+                        let offset = packed.zero_for_elem(row, col);
+                        let expected = code as f32 * scale + offset;
+                        assert_eq!(packed.get(row * k + col), expected);
+                        assert!(
+                            (values[row * k + col] - expected).abs() <= scale + f32::EPSILON,
+                            "row={row} group={group} col={col}"
+                        );
+                    }
+                    assert_eq!(
+                        packed.quantized_group_sum(row, group),
+                        independent_sum,
+                        "row={row} group={group}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "group size must be 32, 64, or 128")]
+    fn k_grouped_i4_rejects_unsupported_group_size() {
+        let _ = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&[0.0; 96], &[1, 96], 96);
+    }
+
+    #[test]
+    fn unsigned_asymmetric_quantization_uses_unsigned_code_origin() {
+        let data = [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        for recovered in [
+            PackedTensor::<U4x8>::from_f32_per_channel_asymmetric(&data, &[1, 8]).to_f32_vec(),
+            PackedTensor::<U8x4>::from_f32_per_channel_asymmetric(&data, &[1, 8]).to_f32_vec(),
+        ] {
+            assert_eq!(recovered.len(), data.len());
+            for (actual, expected) in recovered.iter().zip(data) {
+                assert!(
+                    (actual - expected).abs() <= 0.6,
+                    "unsigned affine roundtrip produced {actual} for {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_tensor_capacity_matches_canonical_layout() {
+        let shape = [2, 9];
+        let tensor = PackedTensor::<I4x8>::from_f32_slice(&[0.0; 18], &shape, 1.0, 0.0);
+        let layout = TensorStorageLayout {
+            encoding: StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        assert_eq!(
+            tensor.data.len() * std::mem::size_of::<I4x8>(),
+            layout.allocation_bytes(ScalarType::I4, &shape).unwrap()
+        );
+    }
+
+    #[test]
+    fn packed_tensor_resolves_runtime_quantization_metadata() {
+        let data = [0.0; 32];
+        let per_tensor = PackedTensor::<I4x8>::from_f32_slice(&data, &[4, 8], 1.0, 0.0);
+        assert_eq!(
+            per_tensor.quantization_granularity(),
+            QuantizationGranularity::PerTensor
+        );
+        assert!(matches!(
+            per_tensor.representation_transform(),
+            RepresentationTransform::AffineDequantization {
+                granularity: QuantizationGranularity::PerTensor,
+                ..
+            }
+        ));
+        let representation = per_tensor.value_representation();
+        assert_eq!(representation.storage, ScalarType::I4);
+        assert_eq!(
+            representation.encoding,
+            StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            }
+        );
+        representation.validate().unwrap();
+
+        let per_channel = PackedTensor::<I4x8>::from_f32_per_channel(&data, &[4, 8]);
+        assert_eq!(
+            per_channel.quantization_granularity(),
+            QuantizationGranularity::PerAxis { axis: 0 }
+        );
+
+        let per_block = PackedTensor::<I4x8>::from_f32_per_block_asymmetric(&data, &[4, 8], 4);
+        assert_eq!(
+            per_block.quantization_granularity(),
+            QuantizationGranularity::PerGroup {
+                axis: 1,
+                group_size: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn packed_matrix_validation_uses_canonical_representation_rules() {
+        let negative_scale = PackedTensor::<I4x8>::from_raw(
+            vec![I4x8::default(); 2],
+            vec![2, 8],
+            vec![-1.0],
+            vec![0.0],
+        );
+        assert!(negative_scale
+            .validate_matrix_storage()
+            .unwrap_err()
+            .contains("finite positive scales"));
+
+        let missing_offsets =
+            PackedTensor::<I4x8>::from_raw(vec![I4x8::default(); 2], vec![2, 8], vec![1.0], vec![]);
+        assert!(missing_offsets
+            .validate_matrix_storage()
+            .unwrap_err()
+            .contains("finite offsets are required"));
+    }
 
     #[test]
     fn test_packed_tensor_zeros() {

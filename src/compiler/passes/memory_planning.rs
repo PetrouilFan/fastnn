@@ -1,240 +1,8 @@
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType};
-use serde::{Deserialize, Serialize};
+use crate::ir::{ComputeGraph, NodeId, Opcode, ShapeEnv, TensorType, TensorValue};
 use std::collections::{BTreeMap, HashMap};
 
-/// A single allocation slot in the arena
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AllocSlot {
-    pub offset: usize,
-    pub size: usize,
-    pub node_id: NodeId,
-    pub output_index: usize,
-}
-
-/// The complete memory plan
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryPlan {
-    pub total_size: usize,
-    pub slots: HashMap<NodeId, AllocSlot>,
-    /// Secondary output slots for multi-output nodes (e.g. MaxPool argmax indices).
-    /// Key is (node_id, output_index).
-    pub secondary_slots: HashMap<(NodeId, usize), AllocSlot>,
-    /// Graph output node IDs, in order.  Populated by [`plan_memory_with_env`].
-    pub outputs: Vec<NodeId>,
-    /// Runtime-resolved kernel parameter values (e.g. [M, K, N] for matmul)
-    /// computed by [`tighten`] using the runtime [`ShapeEnv`].  Populated only
-    /// after a call to [`tighten`]; empty at plan-creation time.
-    pub tightened_params: HashMap<NodeId, Vec<usize>>,
-}
-
-impl MemoryPlan {
-    /// Tighten slot sizes using runtime-resolved shape information.
-    ///
-    /// Slots whose symbolic dims resolved to smaller concrete values are
-    /// shrunk, and `total_size` is recomputed.  Offsets are not changed
-    /// (the slot layout is preserved), so this is safe to call after the
-    /// plan was compiled with max-estimate sizes.
-    ///
-    /// Also computes `tightened_params` — the runtime-resolved kernel
-    /// parameters (e.g. [M, K, N] for matmul) for every node whose kernel
-    /// depends on shape information.  These are stored so that
-    /// [`tighten_slices`](crate::backend::executor::tighten_slices) can
-    /// update [`Instruction::CallKernel`] params without a full recompile.
-    pub fn tighten(&self, graph: &ComputeGraph, shape_env: &ShapeEnv) -> MemoryPlan {
-        let mut mp = self.clone();
-        let mut max_end = 0usize;
-        for (_, slot) in mp.slots.iter_mut() {
-            let tight_size = graph
-                .get_node(slot.node_id)
-                .map(|n| n.output_type.byte_size_with_env(Some(shape_env)))
-                .unwrap_or(slot.size);
-            slot.size = tight_size.min(slot.size);
-            max_end = max_end.max(slot.offset + slot.size);
-        }
-        for (_, slot) in mp.secondary_slots.iter_mut() {
-            let tight_size = graph
-                .get_node(slot.node_id)
-                .and_then(|n| n.secondary_output_type.as_ref())
-                .map(|t| t.byte_size_with_env(Some(shape_env)))
-                .unwrap_or(slot.size);
-            slot.size = tight_size.min(slot.size);
-            max_end = max_end.max(slot.offset + slot.size);
-        }
-        mp.total_size = max_end;
-
-        // ── Compute tightened kernel params ──────────────────────────
-        // Iterate over every node in topological order and re-derive
-        // shape-dependent kernel parameters using the concrete ShapeEnv.
-        crate::utils::traverse_graph(graph, |node_id, node| {
-            let resolved_input_shapes: Vec<Vec<u64>> = node
-                .inputs
-                .iter()
-                .filter_map(|&id| graph.get_node(id))
-                .map(|n| {
-                    n.output_type
-                        .shape
-                        .iter()
-                        .map(|d| d.evaluate_with_env(shape_env).unwrap_or(0))
-                        .collect()
-                })
-                .collect();
-
-            let tightened = match node.opcode {
-                Opcode::MatMul => {
-                    if resolved_input_shapes.len() < 2 {
-                        return Ok(());
-                    }
-                    let m = resolved_input_shapes[0]
-                        .get(resolved_input_shapes[0].len().saturating_sub(2))
-                        .copied()
-                        .unwrap_or(1) as usize;
-                    let k = resolved_input_shapes[0].last().copied().unwrap_or(1) as usize;
-                    let n = resolved_input_shapes[1].last().copied().unwrap_or(1) as usize;
-                    vec![m, k, n]
-                }
-                Opcode::Transpose => {
-                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
-                    let rank = input_shape.len();
-                    if rank == 2 {
-                        // 2D transpose: params = [M, N]
-                        let m = input_shape[0] as usize;
-                        let n = input_shape[1] as usize;
-                        vec![m, n]
-                    } else {
-                        // N-D permute transpose: params = [rank, d0..dN, p0..pN]
-                        // The perm comes from node attrs (e.g. "0,3,1,2")
-                        let perm_str = node.attrs.get("perm").cloned().unwrap_or_default();
-                        let mut params: Vec<usize> = Vec::with_capacity(1 + 2 * rank);
-                        params.push(rank);
-                        params.extend(input_shape.iter().map(|&d| d as usize));
-                        if perm_str.is_empty() {
-                            // Default: reverse
-                            for i in (0..rank).rev() {
-                                params.push(i);
-                            }
-                        } else {
-                            let perm: Vec<usize> =
-                                perm_str.split(',').filter_map(|s| s.parse().ok()).collect();
-                            for i in 0..rank {
-                                params.push(perm.get(i).copied().unwrap_or(i));
-                            }
-                        }
-                        params
-                    }
-                }
-                Opcode::Softmax => {
-                    let axis: i64 = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
-                    let rank = resolved_input_shapes.first().map(|s| s.len()).unwrap_or(1);
-                    let normalized_axis = if axis < 0 {
-                        (rank as i64 + axis) as usize
-                    } else {
-                        axis as usize
-                    };
-                    let axis_dim = resolved_input_shapes
-                        .first()
-                        .and_then(|s| s.get(normalized_axis).copied())
-                        .unwrap_or(1) as usize;
-                    let stride = resolved_input_shapes
-                        .first()
-                        .map(|s| {
-                            s[normalized_axis + 1..]
-                                .iter()
-                                .copied()
-                                .map(|x| x as usize)
-                                .product::<usize>()
-                                .max(1)
-                        })
-                        .unwrap_or(1);
-                    vec![axis_dim, stride]
-                }
-                Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax => {
-                    let axis: usize = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
-                    let group_size = resolved_input_shapes
-                        .first()
-                        .and_then(|s| s.get(axis).copied())
-                        .unwrap_or(1) as usize;
-                    let (is_mean, is_max) = match node.opcode {
-                        Opcode::ReduceMean => (1, 0),
-                        Opcode::ReduceMax => (0, 1),
-                        _ => (0, 0), // ReduceSum
-                    };
-                    vec![group_size, is_mean, is_max]
-                }
-                Opcode::Conv2d => {
-                    let get_attr_usize = |name: &str| -> usize {
-                        node.attrs
-                            .get(name)
-                            .and_then(|a| a.parse().ok())
-                            .unwrap_or(0)
-                    };
-                    let stride = get_attr_usize("stride");
-                    let padding = get_attr_usize("padding");
-                    let dilation = get_attr_usize("dilation");
-                    let groups = get_attr_usize("groups").max(1);
-
-                    let input_shape = resolved_input_shapes.first().cloned().unwrap_or_default();
-                    let weight_shape = resolved_input_shapes.get(1).cloned().unwrap_or_default();
-
-                    let n_in = input_shape.first().copied().unwrap_or(1) as usize;
-                    let c = input_shape.get(1).copied().unwrap_or(1) as usize;
-                    let h = input_shape.get(2).copied().unwrap_or(1) as usize;
-                    let w = input_shape.get(3).copied().unwrap_or(1) as usize;
-                    // kernel_h/kw come from weight shape, not attrs (matches compile-time code)
-                    let kh = weight_shape.get(2).copied().unwrap_or(0) as usize;
-                    let kw = weight_shape.get(3).copied().unwrap_or(0) as usize;
-                    let c_per_group = c / groups;
-                    let f_out = weight_shape.first().copied().unwrap_or(1) as usize;
-                    let h_out = (h + 2 * padding)
-                        .saturating_sub(dilation * (kh.saturating_sub(1)) + 1)
-                        .checked_div(stride)
-                        .map(|v| v + 1)
-                        .unwrap_or(1);
-                    let w_out = (w + 2 * padding)
-                        .saturating_sub(dilation * (kw.saturating_sub(1)) + 1)
-                        .checked_div(stride)
-                        .map(|v| v + 1)
-                        .unwrap_or(1);
-                    let spatial_size = h_out * w_out;
-                    let col_w = c_per_group * kh * kw;
-                    // Layout: [stride, padding, dilation, groups, c, h, w, kh, kw,
-                    //          n_in, f_out, h_out, w_out, spatial_size, col_w]
-                    vec![
-                        stride,
-                        padding,
-                        dilation,
-                        groups,
-                        c,
-                        h,
-                        w,
-                        kh,
-                        kw,
-                        n_in,
-                        f_out,
-                        h_out,
-                        w_out,
-                        spatial_size,
-                        col_w,
-                    ]
-                }
-                _ => return Ok(()),
-            };
-            mp.tightened_params.insert(node_id, tightened);
-            Ok(())
-        })
-        .unwrap_or(());
-
-        mp
-    }
-}
+use crate::compiler::plan::{AllocSlot, MemoryPlan};
 
 /// Live range of a value: (first_use_index, last_use_index)
 /// Where use_index is the position in topological order
@@ -258,8 +26,10 @@ struct FreeBlock {
 }
 
 /// Align a value up to the next multiple of `alignment` (must be power of 2).
-fn align_up(val: usize, alignment: usize) -> usize {
-    (val + alignment - 1) & !(alignment - 1)
+fn align_up(val: usize, alignment: usize) -> Result<usize, FastnnError> {
+    val.checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| FastnnError::Internal("memory allocation alignment overflows".into()))
 }
 
 /// Size-segregated free list allocator backed by a `BTreeMap`.
@@ -279,21 +49,22 @@ impl SegFreeList {
         }
     }
 
-    fn add(&mut self, offset: usize, size: usize) {
+    fn add(&mut self, offset: usize, size: usize) -> Result<(), FastnnError> {
         if size == 0 {
-            return;
+            return Ok(());
         }
-        let aligned = align_up(size, 8);
+        let aligned = align_up(size, 8)?;
         self.buckets.entry(aligned).or_default().push(FreeBlock {
             offset,
             size: aligned,
         });
+        Ok(())
     }
 
-    fn alloc(&mut self, size: usize) -> Option<usize> {
-        let aligned = align_up(size, 8);
+    fn alloc(&mut self, size: usize) -> Result<Option<usize>, FastnnError> {
+        let aligned = align_up(size, 8)?;
         if aligned == 0 {
-            return None;
+            return Ok(None);
         }
 
         let target_key = self.buckets.range(aligned..).next().map(|(&k, _)| k);
@@ -307,9 +78,12 @@ impl SegFreeList {
                     self.buckets.remove(&key);
                 }
                 if extra > 0 {
-                    self.add(off + aligned, extra);
+                    let split_offset = off.checked_add(aligned).ok_or_else(|| {
+                        FastnnError::Internal("free-list split offset overflows".into())
+                    })?;
+                    self.add(split_offset, extra)?;
                 }
-                return Some(off);
+                return Ok(Some(off));
             }
         }
 
@@ -323,19 +97,30 @@ impl SegFreeList {
             let off = block.offset;
             let extra = block.size - aligned;
             if extra > 0 {
-                self.add(off + aligned, extra);
+                let split_offset = off.checked_add(aligned).ok_or_else(|| {
+                    FastnnError::Internal("large free-list split offset overflows".into())
+                })?;
+                self.add(split_offset, extra)?;
             }
-            return Some(off);
+            return Ok(Some(off));
         }
 
-        None
+        Ok(None)
     }
 }
 
 /// Compute the byte size of a tensor's storage, optionally using a ShapeEnv
 /// to resolve symbolic dims to tighter bounds.
-fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> usize {
-    t.byte_size_with_env(shape_env)
+fn tensor_byte_size(t: &TensorType, shape_env: Option<&ShapeEnv>) -> Result<usize, FastnnError> {
+    t.try_byte_size_with_env(shape_env)
+        .ok_or_else(|| FastnnError::Internal("tensor storage size overflows".into()))
+}
+
+fn node_byte_size(
+    node: &crate::ir::IRNode,
+    shape_env: Option<&ShapeEnv>,
+) -> Result<usize, FastnnError> {
+    crate::compiler::plan::node_output_byte_size(node, shape_env).map_err(FastnnError::Internal)
 }
 
 /// Plan memory using max estimates (no ShapeEnv).  Equivalent to
@@ -357,13 +142,14 @@ pub fn plan_memory_with_env(
         return Ok(MemoryPlan {
             total_size: 0,
             slots: HashMap::new(),
+            inputs: graph.inputs.clone(),
             secondary_slots: HashMap::new(),
             outputs: graph.outputs.clone(),
             tightened_params: HashMap::new(),
         });
     }
 
-    let order = graph.topological_sort();
+    let order = graph.try_topological_sort()?;
 
     let position: HashMap<NodeId, usize> =
         order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
@@ -400,7 +186,13 @@ pub fn plan_memory_with_env(
 
     crate::utils::traverse_graph(graph, |node_id, node| {
         // Primary output
-        let size = tensor_byte_size(&node.output_type, shape_env);
+        let logical_size = node_byte_size(node, shape_env).map_err(|e| e.to_string())?;
+        let size = match &node.opcode {
+            Opcode::Constant(TensorValue::Data { bytes, .. }) => logical_size.max(bytes.len()),
+            Opcode::Constant(TensorValue::Float(_)) => logical_size.max(std::mem::size_of::<f32>()),
+            Opcode::Constant(TensorValue::Int(_)) => logical_size.max(std::mem::size_of::<i64>()),
+            _ => logical_size,
+        };
         if size > 0 {
             // Input nodes have their data written by the executor before any
             // instruction runs, so their lifetime starts at position 0 — not
@@ -433,7 +225,7 @@ pub fn plan_memory_with_env(
 
         // Secondary output (if any)
         if let Some(sec_type) = &node.secondary_output_type {
-            let sec_size = tensor_byte_size(sec_type, shape_env);
+            let sec_size = tensor_byte_size(sec_type, shape_env).map_err(|e| e.to_string())?;
             if sec_size > 0 {
                 let first_use = position.get(&node_id).copied().unwrap_or(0);
                 // Use transitive consumer analysis for secondary output too
@@ -451,7 +243,7 @@ pub fn plan_memory_with_env(
         }
         Ok(())
     })
-    .unwrap_or(());
+    .map_err(FastnnError::Internal)?;
 
     // Sort by (start_time, primary-first, size-desc).
     // The primary-first tiebreaker ensures that a node's primary output
@@ -476,9 +268,9 @@ pub fn plan_memory_with_env(
     // operand is otherwise dead; the shared operand lifetime is extended to
     // cover the output lifetime below.
     //
-    // We do NOT reuse buffers of Input nodes -- the autograd backward pass
-    // reads forward inputs directly, and sharing an input's buffer with an
-    // elementwise output can cause subtle data-race-like issues.
+    // We do NOT reuse buffers of Input or Constant nodes. Inputs may be read by
+    // autograd after forward execution, while constants must remain intact
+    // across repeated executions that reuse the same arena.
     //
     // IMPORTANT: This analysis MUST run before the allocation loop below.
     // The original code ran it after allocation, which caused a double-free
@@ -548,8 +340,8 @@ pub fn plan_memory_with_env(
         let node_pos = position.get(&info.node_id).copied().unwrap_or(0);
         let mut reusable_input_id = None;
         for input_id in candidate_input_ids {
-            // Skip Input nodes -- their buffer is used directly by the executor
-            // and sharing it can interfere with autograd backward reads.
+            // Skip Input and Constant nodes. Their storage is persistent across
+            // an execution boundary and cannot become an in-place output.
             // Also never reuse graph outputs or required nodes: callers may
             // read those values after this node writes its output, so sharing
             // their storage would corrupt externally-visible tensors.
@@ -557,7 +349,7 @@ pub fn plan_memory_with_env(
                 continue;
             }
             if let Some(input_node) = graph.get_node(input_id) {
-                if matches!(input_node.opcode, Opcode::Input) {
+                if matches!(input_node.opcode, Opcode::Input | Opcode::Constant(_)) {
                     continue;
                 }
             }
@@ -568,7 +360,7 @@ pub fn plan_memory_with_env(
             if input_type != &node.output_type {
                 continue;
             }
-            let input_size = tensor_byte_size(input_type, shape_env);
+            let input_size = tensor_byte_size(input_type, shape_env)?;
             if input_size != info.size || input_size == 0 {
                 continue;
             }
@@ -639,10 +431,10 @@ pub fn plan_memory_with_env(
                 // live ranges.
                 if was_secondary {
                     if let Some(slot) = secondary_slots.get(&(expired_id, 1)) {
-                        free_list.add(slot.offset, align_up(slot.size, 8));
+                        free_list.add(slot.offset, align_up(slot.size, 8)?)?;
                     }
                 } else if let Some(slot) = slots.get(&expired_id) {
-                    free_list.add(slot.offset, align_up(slot.size, 8));
+                    free_list.add(slot.offset, align_up(slot.size, 8)?)?;
                 }
             } else {
                 i += 1;
@@ -651,13 +443,15 @@ pub fn plan_memory_with_env(
 
         // Round up to 64 bytes (cache line alignment) so all allocations
         // satisfy both SIMD (32-byte) alignment and cache line boundaries.
-        let size_aligned = align_up(info.size, 64);
+        let size_aligned = align_up(info.size, 64)?;
 
-        let offset = match free_list.alloc(size_aligned) {
+        let offset = match free_list.alloc(size_aligned)? {
             Some(off) => off,
             None => {
-                let off = align_up(arena_top, 64);
-                arena_top = off + size_aligned;
+                let off = align_up(arena_top, 64)?;
+                arena_top = off
+                    .checked_add(size_aligned)
+                    .ok_or_else(|| FastnnError::Internal("memory arena size overflows".into()))?;
                 off
             }
         };
@@ -718,9 +512,21 @@ pub fn plan_memory_with_env(
         }
     }
 
+    // Keep zero-sized graph interfaces explicit so persisted runtimes can map
+    // inputs and outputs by node ID without relying on slot ordering.
+    for &node_id in graph.inputs.iter().chain(graph.outputs.iter()) {
+        slots.entry(node_id).or_insert(AllocSlot {
+            offset: 0,
+            size: 0,
+            node_id,
+            output_index: 0,
+        });
+    }
+
     Ok(MemoryPlan {
         total_size: arena_top,
         slots,
+        inputs: graph.inputs.clone(),
         secondary_slots,
         outputs: graph.outputs.clone(),
         tightened_params: HashMap::new(),

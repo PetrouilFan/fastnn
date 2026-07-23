@@ -1,11 +1,14 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use fastnn::backend::cpu::microkernels::{gemm_cpu, gemv_cpu};
+use fastnn::backend::cpu::microkernels::{
+    gemm_cpu, gemm_cpu_flat, gemm_cpu_flat_i8_i4x8, gemm_cpu_flat_i8_i4x8_grouped_per_token,
+    gemm_cpu_flat_i8_i4x8_scalar, gemv_cpu, quantize_i8_per_token_symmetric, PerTokenI8Activations,
+};
 use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, TensorType};
 use fastnn::packed_tensor::PackedTensor;
 
 #[derive(Clone, Copy)]
@@ -91,6 +94,187 @@ fn batch_inputs(batch: usize, cols: usize) -> Vec<Vec<f32>> {
                 .collect()
         })
         .collect()
+}
+
+fn i8_activation_payload(values: &[f32]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + values.len());
+    write_i8_activation_payload(values, &mut payload);
+    payload
+}
+
+fn write_i8_activation_payload(values: &[f32], payload: &mut Vec<u8>) {
+    let max_abs = values
+        .iter()
+        .fold(0.0f32, |max, value| max.max(value.abs()));
+    let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
+    payload.clear();
+    payload.reserve(8 + values.len());
+    payload.extend_from_slice(&scale.to_le_bytes());
+    payload.extend_from_slice(&0.0f32.to_le_bytes());
+    payload.extend(values.iter().map(|value| {
+        (value / scale)
+            .round()
+            .clamp(i8::MIN as f32, i8::MAX as f32) as i8 as u8
+    }));
+}
+
+fn bench_w4_activation_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("w4_activation_paths");
+    for &(name, m, k, n) in &[
+        ("decode_1x256x256", 1, 256, 256),
+        ("prefill_8x256x256", 8, 256, 256),
+        ("decode_1x512x512", 1, 512, 512),
+        ("prefill_8x512x512", 8, 512, 512),
+    ] {
+        let weights = weight_data(n, k);
+        let f32_weights = PackedTensor::<F32x1>::from_f32_auto(&weights, &[n, k]);
+        let packed = PackedTensor::<I4x8>::from_f32_per_channel_asymmetric(&weights, &[n, k]);
+        let grouped_w4: Vec<(usize, PackedTensor<I4x8>)> = [32, 64, 128]
+            .into_iter()
+            .map(|group_size| {
+                (
+                    group_size,
+                    PackedTensor::<I4x8>::from_f32_k_grouped_i4(&weights, &[n, k], group_size),
+                )
+            })
+            .collect();
+        let activations: Vec<f32> = (0..m)
+            .flat_map(|batch| vector_data(k, batch * 13))
+            .collect();
+        let activation_payload = i8_activation_payload(&activations);
+        let mut quantized_payload = Vec::with_capacity(activation_payload.len());
+        let mut float_output = vec![0.0f32; m * n];
+        let mut f32_output = vec![0.0f32; m * n];
+        let mut integer_output = vec![0.0f32; m * n];
+        group.throughput(Throughput::Elements((m * k * n) as u64));
+        group.bench_with_input(BenchmarkId::new("f32_native", name), &(), |b, _| {
+            b.iter(|| {
+                gemm_cpu_flat(
+                    black_box(&f32_weights),
+                    black_box(&activations),
+                    black_box(&mut f32_output),
+                    m,
+                    k,
+                    n,
+                )
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("w4a32_unpack_float", name), &(), |b, _| {
+            b.iter(|| {
+                gemm_cpu_flat(
+                    black_box(&packed),
+                    black_box(&activations),
+                    black_box(&mut float_output),
+                    m,
+                    k,
+                    n,
+                )
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("w4a8_direct_i32", name), &(), |b, _| {
+            b.iter(|| {
+                gemm_cpu_flat_i8_i4x8(
+                    black_box(&packed),
+                    black_box(&activation_payload),
+                    black_box(&mut integer_output),
+                    m,
+                    k,
+                    n,
+                )
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("w4a8_scalar_i32", name), &(), |b, _| {
+            b.iter(|| {
+                gemm_cpu_flat_i8_i4x8_scalar(
+                    black_box(&packed),
+                    black_box(&activation_payload),
+                    black_box(&mut integer_output),
+                    m,
+                    k,
+                    n,
+                )
+            });
+        });
+        for (group_size, grouped) in &grouped_w4 {
+            let mut per_token = PerTokenI8Activations::default();
+            quantize_i8_per_token_symmetric(&activations, m, k, &mut per_token);
+            group.bench_with_input(
+                BenchmarkId::new(format!("w4a8_grouped_g{group_size}"), name),
+                &(),
+                |b, _| {
+                    b.iter(|| {
+                        gemm_cpu_flat_i8_i4x8_scalar(
+                            black_box(grouped),
+                            black_box(&activation_payload),
+                            black_box(&mut integer_output),
+                            m,
+                            k,
+                            n,
+                        )
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("w4a8_per_token_g{group_size}"), name),
+                &(),
+                |b, _| {
+                    b.iter(|| {
+                        gemm_cpu_flat_i8_i4x8_grouped_per_token(
+                            black_box(grouped),
+                            black_box(&per_token),
+                            black_box(&mut integer_output),
+                            m,
+                            k,
+                            n,
+                        )
+                    });
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("w4a8_per_token_quantize_g{group_size}"), name),
+                &(),
+                |b, _| {
+                    b.iter(|| {
+                        quantize_i8_per_token_symmetric(
+                            black_box(&activations),
+                            m,
+                            k,
+                            black_box(&mut per_token),
+                        );
+                        gemm_cpu_flat_i8_i4x8_grouped_per_token(
+                            black_box(grouped),
+                            black_box(&per_token),
+                            black_box(&mut integer_output),
+                            m,
+                            k,
+                            n,
+                        )
+                    });
+                },
+            );
+        }
+        group.bench_with_input(
+            BenchmarkId::new("w4a8_quantize_and_i32", name),
+            &(),
+            |b, _| {
+                b.iter(|| {
+                    write_i8_activation_payload(
+                        black_box(&activations),
+                        black_box(&mut quantized_payload),
+                    );
+                    gemm_cpu_flat_i8_i4x8(
+                        black_box(&packed),
+                        black_box(&quantized_payload),
+                        black_box(&mut integer_output),
+                        m,
+                        k,
+                        n,
+                    )
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 fn naive_gemv(weights: &[f32], activation: &[f32], output: &mut [f32], rows: usize, cols: usize) {
@@ -1022,6 +1206,7 @@ criterion_group!(
     cpu_benchmarks,
     bench_gemv,
     bench_gemm,
+    bench_w4_activation_paths,
     bench_elementwise,
     bench_reductions,
     bench_fusions,

@@ -22,7 +22,7 @@ fn test_matmul_cross_arch_consistency() {
     let c = a.matmul(&b);
 
     assert_eq!(c.shape(), vec![2, 2]);
-    let data = c.to_numpy();
+    let data = c.to_numpy().unwrap();
     assert!((data[0] - 58.0).abs() < 1e-5);
     assert!((data[1] - 64.0).abs() < 1e-5);
     assert!((data[2] - 139.0).abs() < 1e-5);
@@ -36,7 +36,7 @@ fn test_matmul_broadcast_consistency() {
     let c = a.matmul(&b);
 
     assert_eq!(c.shape(), vec![3, 3]);
-    let data = c.to_numpy();
+    let data = c.to_numpy().unwrap();
     assert!((data[0] - 27.0).abs() < 1e-5);
     assert!((data[1] - 30.0).abs() < 1e-5);
     assert!((data[2] - 33.0).abs() < 1e-5);
@@ -55,7 +55,7 @@ fn test_elementwise_add_consistency() {
     let c = &a + &b;
 
     assert_eq!(c.shape(), a.shape());
-    let data = c.to_numpy();
+    let data = c.to_numpy().unwrap();
     assert!((data[0] - 6.0).abs() < 1e-6);
     assert!((data[1] - 8.0).abs() < 1e-6);
     assert!((data[2] - 10.0).abs() < 1e-6);
@@ -69,7 +69,7 @@ fn test_elementwise_mul_consistency() {
     let c = &a * &b;
 
     assert_eq!(c.shape(), a.shape());
-    let data = c.to_numpy();
+    let data = c.to_numpy().unwrap();
     assert!((data[0] - 5.0).abs() < 1e-6);
     assert!((data[1] - 12.0).abs() < 1e-6);
     assert!((data[2] - 21.0).abs() < 1e-6);
@@ -80,7 +80,7 @@ fn test_elementwise_mul_consistency() {
 fn test_relu_consistency() {
     let a = Tensor::from_vec(vec![-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0], vec![8]);
     let b = a.relu();
-    let data = b.to_numpy();
+    let data = b.to_numpy().unwrap();
 
     let expected = [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 2.0, 3.0];
     for (i, (&got, &exp)) in data.iter().zip(expected.iter()).enumerate() {
@@ -100,7 +100,7 @@ fn test_softmax_consistency() {
     let b = a.softmax(-1);
 
     assert_eq!(b.shape(), vec![2, 4]);
-    let data = b.to_numpy();
+    let data = b.to_numpy().unwrap();
     for row in 0..2 {
         let start = row * 4;
         let end = start + 4;
@@ -116,7 +116,7 @@ fn test_reduce_sum_consistency() {
     let b = a.sum(1, false);
 
     assert_eq!(b.shape(), vec![2]);
-    let data = b.to_numpy();
+    let data = b.to_numpy().unwrap();
     assert!((data[0] - 6.0).abs() < 1e-5);
     assert!((data[1] - 15.0).abs() < 1e-5);
 }
@@ -127,7 +127,7 @@ fn test_transpose_consistency() {
     let b = a.transpose(0, 1);
 
     assert_eq!(b.shape(), vec![3, 2]);
-    let data = b.to_numpy();
+    let data = b.to_numpy().unwrap();
     assert!((data[0] - 1.0).abs() < 1e-6);
     assert!((data[1] - 4.0).abs() < 1e-6);
     assert!((data[2] - 2.0).abs() < 1e-6);

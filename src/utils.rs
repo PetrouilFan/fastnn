@@ -1,5 +1,5 @@
 use crate::autograd::{make_node_info, AutogradMeta};
-use crate::ir::node::{ComputeGraph, DimExpr, IRNode, NodeId};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, NodeId};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,7 +48,9 @@ pub fn traverse_graph<F>(graph: &ComputeGraph, mut f: F) -> Result<(), String>
 where
     F: FnMut(NodeId, &IRNode) -> Result<(), String>,
 {
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
     for &node_id in &order {
         let node = match graph.get_node(node_id) {
             Some(n) => n,
@@ -64,7 +66,9 @@ pub fn traverse_graph_mut<F>(graph: &mut ComputeGraph, mut f: F) -> Result<(), S
 where
     F: FnMut(NodeId, &mut IRNode) -> Result<(), String>,
 {
-    let order = graph.topological_sort();
+    let order = graph
+        .try_topological_sort()
+        .map_err(|error| error.to_string())?;
     for &node_id in &order {
         let has_node = graph.get_node(node_id).is_some();
         if !has_node {

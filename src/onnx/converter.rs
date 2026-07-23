@@ -20,9 +20,18 @@
 use std::collections::HashMap;
 
 use crate::ir::builder::{GraphBuilder, GraphTensor};
-use crate::ir::node::*;
+use crate::ir::*;
 use crate::storage::DType;
 use crate::tensor::Tensor;
+
+fn try_zeroed_bytes(size: usize, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|error| format!("{label}: failed to allocate {size} bytes: {error}"))?;
+    bytes.resize(size, 0);
+    Ok(bytes)
+}
 
 /// Parsed ONNX node.
 #[derive(Debug, Clone)]
@@ -168,6 +177,24 @@ impl<'a> OnnxConverter<'a> {
 
     fn process_node(&mut self, node: &OnnxNode) -> Result<(), String> {
         let ins = self.resolve_inputs(&node.inputs)?;
+        let minimum_inputs = match node.op_type.as_str() {
+            "Constant" | "Range" | "Input" | "Parameter" => 0,
+            "QLinearMatMul" | "QLinearConv" => 8,
+            "BatchNormalization" => 5,
+            "ScatterND" | "Where" | "QuantizeLinear" | "DequantizeLinear" | "LSTM" | "GRU" => 3,
+            "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Max" | "Min" | "Greater" | "Less"
+            | "Equal" | "MatMul" | "Gemm" | "Conv" | "PRelu" | "Embedding" | "Gather"
+            | "GatherElements" => 2,
+            _ => 1,
+        };
+        if ins.len() < minimum_inputs {
+            return Err(format!(
+                "node '{}' ({}) requires at least {minimum_inputs} input(s), received {}",
+                node.name,
+                node.op_type,
+                ins.len()
+            ));
+        }
 
         match node.op_type.as_str() {
             // ── Element-wise unary ──────────────────────────────────
@@ -497,7 +524,8 @@ impl<'a> OnnxConverter<'a> {
                     // Try to resolve it from params first (compile-time constant).
                     let shape_name = &node.inputs[1];
                     if let Some(shape_tensor) = self.params.get(shape_name) {
-                        let shape_data: Vec<f32> = shape_tensor.to_numpy();
+                        let shape_data: Vec<f32> =
+                            shape_tensor.to_numpy().map_err(|error| error.to_string())?;
                         let shape_i64: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
                         let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
                         self.out(node, self.graph.reshape(&ins[0], &dims));
@@ -727,16 +755,70 @@ impl<'a> OnnxConverter<'a> {
                 // Creates a tensor with the given shape filled with value.
                 // shape input (ins[0]) is 1D int64 from params; value attr is optional.
                 if let Some(shape_tensor) = self.params.get(&node.inputs[0]) {
-                    let shape_data: Vec<f32> = shape_tensor.to_numpy();
-                    let output_shape: Vec<u64> = shape_data.iter().map(|&v| v as u64).collect();
+                    let shape_data: Vec<f32> =
+                        shape_tensor.to_numpy().map_err(|error| error.to_string())?;
+                    let mut output_shape = Vec::with_capacity(shape_data.len());
+                    for &dimension in &shape_data {
+                        if !dimension.is_finite()
+                            || dimension < 0.0
+                            || dimension.fract() != 0.0
+                            || dimension > u64::MAX as f32
+                        {
+                            return Err(format!(
+                                "ConstantOfShape node '{}' has invalid dimension {dimension}",
+                                node.name
+                            ));
+                        }
+                        output_shape.push(dimension as u64);
+                    }
                     let fill_value: f32 = node
                         .attrs
                         .get("value")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0.0);
-                    let data = fill_value.to_le_bytes().to_vec();
-                    let numel: usize = output_shape.iter().map(|&d| d as usize).product();
-                    let mut full_data = Vec::with_capacity(numel * 4);
+                    if !fill_value.is_finite() {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' has non-finite fill value",
+                            node.name
+                        ));
+                    }
+                    let numel = output_shape
+                        .iter()
+                        .try_fold(1usize, |product, &dimension| {
+                            let dimension = usize::try_from(dimension).map_err(|_| {
+                                format!(
+                                    "ConstantOfShape node '{}' dimension does not fit usize",
+                                    node.name
+                                )
+                            })?;
+                            product.checked_mul(dimension).ok_or_else(|| {
+                                format!(
+                                    "ConstantOfShape node '{}' element count overflows",
+                                    node.name
+                                )
+                            })
+                        })?;
+                    let byte_count =
+                        numel
+                            .checked_mul(std::mem::size_of::<f32>())
+                            .ok_or_else(|| {
+                                format!("ConstantOfShape node '{}' byte count overflows", node.name)
+                            })?;
+                    const MAX_CONSTANT_OF_SHAPE_BYTES: usize = 256 * 1024 * 1024;
+                    if byte_count > MAX_CONSTANT_OF_SHAPE_BYTES {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' requests {byte_count} bytes, exceeding the {MAX_CONSTANT_OF_SHAPE_BYTES}-byte import budget",
+                            node.name
+                        ));
+                    }
+                    let data = fill_value.to_le_bytes();
+                    let mut full_data = Vec::new();
+                    full_data.try_reserve_exact(byte_count).map_err(|error| {
+                        format!(
+                            "ConstantOfShape node '{}' cannot allocate {byte_count} bytes: {error}",
+                            node.name
+                        )
+                    })?;
                     for _ in 0..numel {
                         full_data.extend_from_slice(&data);
                     }
@@ -1012,7 +1094,8 @@ impl<'a> OnnxConverter<'a> {
                 } else if node.inputs.len() > 2 {
                     let scales_name = &node.inputs[2];
                     if let Some(scale_tensor) = self.params.get(scales_name.as_str()) {
-                        let data: Vec<f32> = scale_tensor.to_numpy();
+                        let data: Vec<f32> =
+                            scale_tensor.to_numpy().map_err(|error| error.to_string())?;
                         if data.len() >= 4 {
                             (
                                 data[2].round().max(1.0) as usize,
@@ -1102,13 +1185,7 @@ impl<'a> OnnxConverter<'a> {
                 let c_biased = self.graph.add(&c_rounded, &ins[7]);
                 let y_f32 = self.graph.clamp(&c_biased, 0.0, 255.0);
                 // Cast output back to U8 (the output type of QLinearMatMul is UINT8)
-                let y = self.graph.cast_op(
-                    &y_f32,
-                    IrDType::I8Scaled {
-                        scales: vec![],
-                        zero_points: vec![],
-                    },
-                );
+                let y = self.graph.cast_op(&y_f32, IrDType::I8Scaled);
                 self.out(node, y);
             }
             "QLinearConv" => {
@@ -1229,10 +1306,12 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_c_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
 
-                // Create zero initial states if not provided.
-                // Use byte_size() which handles symbolic dims via SYMBOL_DIM_MAX fallback.
+                // Create zero initial states if not provided using checked sizing and allocation.
                 let zero_tt = TensorType::new(h_c_shape.clone(), IrDType::F32);
-                let zero_bytes = vec![0u8; zero_tt.byte_size()];
+                let zero_size = zero_tt
+                    .try_byte_size_with_env(None)
+                    .ok_or_else(|| "LSTM initial-state storage size overflows".to_string())?;
+                let zero_bytes = try_zeroed_bytes(zero_size, "LSTM initial state")?;
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
                 } else {
@@ -1377,7 +1456,10 @@ impl<'a> OnnxConverter<'a> {
                 let batch_dim = x.shape().get(1).cloned().unwrap_or(DimExpr::Known(1));
                 let h_shape = vec![batch_dim, DimExpr::Known(hidden_size as u64)];
                 let zero_tt = TensorType::new(h_shape.clone(), IrDType::F32);
-                let zero_bytes = vec![0u8; zero_tt.byte_size()];
+                let zero_size = zero_tt
+                    .try_byte_size_with_env(None)
+                    .ok_or_else(|| "GRU initial-state storage size overflows".to_string())?;
+                let zero_bytes = try_zeroed_bytes(zero_size, "GRU initial state")?;
                 let h_prev = if ins.len() > 5 {
                     self.graph.squeeze(&ins[5], 0)
                 } else {
@@ -1593,7 +1675,7 @@ fn reduce_axes_from_attr_or_input(
     // "reduce over all dims" semantics.
     let axes_name = node.inputs.get(1)?;
     let axes_tensor = params.get(axes_name)?;
-    let raw = axes_tensor.to_numpy();
+    let raw = axes_tensor.to_numpy().ok()?;
     let parsed: Vec<i64> = raw.iter().map(|&v| v as i64).collect();
     if parsed.is_empty() {
         return None;
@@ -1659,29 +1741,12 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         // U4/U8 need per-channel scale/zp metadata that lives in the IR node,
         // not in the Tensor-level DType. Use default values here; the actual
         // scales are filled in by the quantization compiler pass.
-        DType::I4 => IrDType::I4 {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-            codebooks: vec![],
-        },
-        DType::I8Scaled => IrDType::I8Scaled {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-        DType::F8 => IrDType::F8 { scales: vec![1.0] },
-        DType::F8R => IrDType::F8R { scales: vec![1.0] },
-        DType::F4 => IrDType::F4 {
-            scales: vec![1.0],
-            zeros: vec![],
-            codebooks: vec![],
-        },
-        DType::U4Scaled => IrDType::U4Scaled {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-        DType::U8Scaled => IrDType::U8Scaled {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
+        DType::I4 => IrDType::I4,
+        DType::I8Scaled => IrDType::I8Scaled,
+        DType::F8 => IrDType::F8,
+        DType::F8R => IrDType::F8R,
+        DType::F4 => IrDType::F4,
+        DType::U4Scaled => IrDType::U4Scaled,
+        DType::U8Scaled => IrDType::U8Scaled,
     }
 }

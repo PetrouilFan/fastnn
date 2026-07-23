@@ -564,6 +564,47 @@ mod neon_tests {
     }
 
     #[test]
+    fn test_gemm_cpu_flat_i8_i8x4_nonzero_offsets_match_affine_reference() {
+        let n = 1;
+        let k = 4;
+        let m = 1;
+        let weight_scale = 0.5f32;
+        let weight_offset = -1.25f32;
+        let quantized_weights = [-4i8, -1, 2, 7];
+        let weights: Vec<f32> = quantized_weights
+            .iter()
+            .map(|value| *value as f32 * weight_scale + weight_offset)
+            .collect();
+        let packed =
+            PackedTensor::<I8x4>::from_f32_slice(&weights, &[n, k], weight_scale, weight_offset);
+
+        let activation_scale = 0.25f32;
+        let activation_offset = 1.5f32;
+        let quantized_activations = [-8i8, -2, 3, 11];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&activation_scale.to_le_bytes());
+        payload.extend_from_slice(&activation_offset.to_le_bytes());
+        payload.extend(quantized_activations.iter().map(|value| *value as u8));
+
+        let mut output = vec![0.0f32; m * n];
+        gemm_cpu_flat_i8_i8x4(&packed, &payload, &mut output, m, k, n);
+
+        let expected: f32 = weights
+            .iter()
+            .zip(quantized_activations)
+            .map(|(weight, activation)| {
+                weight * (activation as f32 * activation_scale + activation_offset)
+            })
+            .sum();
+        assert!(
+            (output[0] - expected).abs() < 1e-4,
+            "got {}, expected {}",
+            output[0],
+            expected
+        );
+    }
+
+    #[test]
     fn test_gemm_cpu_flat_i8_i4x8_signed_nibbles_match_f32_reference() {
         let n = 2;
         let k = 8;
@@ -636,6 +677,98 @@ mod neon_tests {
             output[0],
             expected
         );
+    }
+
+    #[test]
+    fn grouped_i8_i4x8_matches_independent_dequantized_reference() {
+        let (m, n, k) = (3usize, 4usize, 145usize);
+        let weights: Vec<f32> = (0..n * k)
+            .map(|index| {
+                let row = index / k;
+                let col = index % k;
+                ((row * 19 + col * 23) % 113) as f32 / 17.0 - 3.0
+            })
+            .collect();
+        let quantized_activations: Vec<i8> = (0..m * k)
+            .map(|index| ((index * 29 + 7) % 255) as i16 - 127)
+            .map(|value| value as i8)
+            .collect();
+        let activation_scale = 0.03125f32;
+        let activation_offset = -0.375f32;
+        let mut payload = Vec::with_capacity(8 + quantized_activations.len());
+        payload.extend_from_slice(&activation_scale.to_le_bytes());
+        payload.extend_from_slice(&activation_offset.to_le_bytes());
+        payload.extend(quantized_activations.iter().map(|value| *value as u8));
+
+        for group_size in [32, 64, 128] {
+            let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&weights, &[n, k], group_size);
+            let dequantized_weights = packed.to_f32_vec();
+            let mut actual = vec![0.0f32; m * n];
+            gemm_cpu_flat_i8_i4x8(&packed, &payload, &mut actual, m, k, n);
+
+            for batch in 0..m {
+                for row in 0..n {
+                    let mut expected = 0.0f32;
+                    for col in 0..k {
+                        let activation = quantized_activations[batch * k + col] as f32
+                            * activation_scale
+                            + activation_offset;
+                        expected += dequantized_weights[row * k + col] * activation;
+                    }
+                    let got = actual[batch * n + row];
+                    let tolerance = 1e-4 * expected.abs().max(1.0);
+                    assert!(
+                        (got - expected).abs() <= tolerance,
+                        "group={group_size} batch={batch} row={row}: got {got}, expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_w4a8_per_token_matches_exact_quantized_operand_reference() {
+        let (m, n, k) = (3usize, 4usize, 145usize);
+        let weights: Vec<f32> = (0..n * k)
+            .map(|index| ((index * 31 + 5) % 127) as f32 / 19.0 - 3.0)
+            .collect();
+        let activations: Vec<f32> = (0..m * k)
+            .map(|index| {
+                let row = index / k;
+                let col = index % k;
+                let amplitude = [0.125, 2.0, 17.0][row];
+                (((col * 43 + row * 7) % 97) as f32 / 48.0 - 1.0) * amplitude
+            })
+            .collect();
+
+        for group_size in [32, 64, 128] {
+            let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&weights, &[n, k], group_size);
+            let dequantized_weights = packed.to_f32_vec();
+            let mut quantized = PerTokenI8Activations::default();
+            quantize_i8_per_token_symmetric(&activations, m, k, &mut quantized);
+            assert_eq!(quantized.scales().len(), m);
+            assert_ne!(quantized.scales()[0], quantized.scales()[1]);
+            assert_ne!(quantized.scales()[1], quantized.scales()[2]);
+
+            let mut actual = vec![0.0; m * n];
+            gemm_cpu_flat_i8_i4x8_grouped_per_token(&packed, &quantized, &mut actual, m, k, n);
+            for token in 0..m {
+                for row in 0..n {
+                    let mut expected = 0.0f32;
+                    for col in 0..k {
+                        let qa = quantized.data()[token * k + col] as i8 as f32;
+                        expected +=
+                            dequantized_weights[row * k + col] * qa * quantized.scales()[token];
+                    }
+                    let got = actual[token * n + row];
+                    let tolerance = 1e-4 * expected.abs().max(1.0);
+                    assert!(
+                        (got - expected).abs() <= tolerance,
+                        "group={group_size} token={token} row={row}: got {got}, expected {expected}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

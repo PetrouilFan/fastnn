@@ -1,11 +1,12 @@
 use crate::autograd::{self, AutogradMeta};
 use crate::backend::cpu::CpuBackend;
 use crate::backend::BackendError;
+use crate::error::{FastnnError, FastnnResult};
 use crate::ir::builder::GraphBuilder;
-use crate::ir::node::{DimExpr, IrDType};
+use crate::ir::{DimExpr, IrDType, TensorType};
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
-use smallvec::smallvec;
+use crate::types::{RepresentationTransform, ScalarType, ValueRepresentation};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,6 +23,27 @@ mod indexing;
 mod ops;
 mod reductions;
 mod shape;
+
+pub(crate) fn validate_tensor_shape(sizes: &[i64], dtype: DType) -> FastnnResult<(usize, usize)> {
+    let mut numel = 1_usize;
+    for (dimension, &size) in sizes.iter().enumerate() {
+        if size < 0 {
+            return Err(FastnnError::shape(format!(
+                "tensor dimension {dimension} has negative size {size}"
+            )));
+        }
+        numel = numel
+            .checked_mul(size as usize)
+            .ok_or_else(|| FastnnError::Overflow("tensor element count overflow".into()))?;
+    }
+    if numel > i64::MAX as usize {
+        return Err(FastnnError::Overflow(
+            "tensor element count exceeds i64::MAX".into(),
+        ));
+    }
+    let nbytes = dtype.try_storage_bytes(numel)?;
+    Ok((numel, nbytes))
+}
 
 pub struct TensorImpl {
     pub storage: Arc<Storage>,
@@ -41,30 +63,26 @@ pub struct TensorImpl {
 
 impl TensorImpl {
     pub fn new(storage: Arc<Storage>, sizes: SmallVec<[i64; 8]>, dtype: DType) -> Self {
-        let device = storage.device(); // Get device from storage
-        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
-        if numel > i64::MAX as i128 {
-            panic!("Tensor too large");
-        }
-        let numel = numel as i64;
-        let nbytes = (numel * dtype.size() as i64) as usize;
-        // Validate storage is large enough for the declared shape.
-        // This catches mismatches between shape inference and actual data size.
+        Self::try_new(storage, sizes, dtype).expect("TensorImpl::new failed")
+    }
+
+    pub fn try_new(
+        storage: Arc<Storage>,
+        sizes: SmallVec<[i64; 8]>,
+        dtype: DType,
+    ) -> FastnnResult<Self> {
+        let device = storage.device();
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
         let storage_nbytes = storage.nbytes();
-        assert!(
-            nbytes <= storage_nbytes,
-            "TensorImpl::new: shape {:?} requires {} bytes for {} elements of {:?}, \
-             but storage only has {} bytes. This is a shape-inference or data-pipeline bug.",
-            sizes,
-            nbytes,
-            numel,
-            dtype,
-            storage_nbytes
-        );
+        if nbytes > storage_nbytes {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {nbytes} bytes of {dtype:?} storage, but only {storage_nbytes} bytes are available"
+            )));
+        }
 
         let strides = compute_strides(&sizes);
 
-        TensorImpl {
+        Ok(TensorImpl {
             storage,
             sizes,
             strides,
@@ -74,8 +92,8 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
-            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
-        }
+            contiguous_cache: AtomicI8::new(1),
+        })
     }
 
     /// Create TensorImpl with specific device (ignoring storage device)
@@ -85,16 +103,27 @@ impl TensorImpl {
         device: Device,
         dtype: DType,
     ) -> Self {
-        let numel: i128 = sizes.iter().map(|&s| s as i128).product();
-        if numel > i64::MAX as i128 {
-            panic!("Tensor too large");
+        Self::try_new_with_device(storage, sizes, device, dtype)
+            .expect("TensorImpl::new_with_device failed")
+    }
+
+    pub fn try_new_with_device(
+        storage: Arc<Storage>,
+        sizes: SmallVec<[i64; 8]>,
+        device: Device,
+        dtype: DType,
+    ) -> FastnnResult<Self> {
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
+        let storage_nbytes = storage.nbytes();
+        if nbytes > storage_nbytes {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {nbytes} bytes of {dtype:?} storage, but only {storage_nbytes} bytes are available"
+            )));
         }
-        let numel = numel as i64;
-        let _nbytes = (numel * dtype.size() as i64) as usize;
 
         let strides = compute_strides(&sizes);
 
-        TensorImpl {
+        Ok(TensorImpl {
             storage,
             sizes,
             strides,
@@ -104,17 +133,8 @@ impl TensorImpl {
             version_counter: Arc::new(AtomicU64::new(0)),
             autograd_meta: None,
             requires_grad: false,
-            contiguous_cache: AtomicI8::new(1), // compute_strides always produces contiguous strides
-        }
-    }
-
-    pub fn from_data(data: &[f32], dtype: DType, device: Device) -> Self {
-        let sizes: SmallVec<[i64; 8]> = smallvec![data.len() as i64];
-        let storage = match dtype {
-            DType::F32 => Arc::new(Storage::from_vec(data.to_vec(), DType::F32, device)),
-            _ => panic!("Unsupported dtype for from_data"),
-        };
-        TensorImpl::new(storage, sizes, dtype)
+            contiguous_cache: AtomicI8::new(1),
+        })
     }
 
     pub fn id(&self) -> usize {
@@ -247,132 +267,237 @@ impl TensorImpl {
 
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
-        match &self.storage.as_ref() {
+        self.try_data_ptr().expect("TensorImpl::data_ptr failed")
+    }
+
+    pub fn try_data_ptr(&self) -> FastnnResult<*const u8> {
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot produce a data pointer",
+                self.storage_offset
+            )));
+        }
+        let element_size = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("raw pointer access requires plain scalar storage")
+        })?;
+        let byte_offset = (self.storage_offset as usize)
+            .checked_mul(element_size)
+            .ok_or_else(|| FastnnError::Overflow("data pointer byte offset overflow".into()))?;
+        match self.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr();
-                let elem_size = self.dtype.size();
-                // SAFETY: storage_offset * elem_size is within bounds of the storage allocation.
-                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
+                if byte_offset > cpu.data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "data pointer byte offset {byte_offset} exceeds storage length {}",
+                        cpu.data.len()
+                    )));
+                }
+                // SAFETY: the checked offset is within or one past the CPU allocation,
+                // and the pointer lifetime remains tied to the borrowed tensor storage.
+                Ok(unsafe { cpu.data.as_ref().as_ptr().add(byte_offset) })
             }
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                let location = std::panic::Location::caller();
-                panic!(
-                    "Cannot get CPU pointer from GPU storage. Use .to_cpu() first.\nCalled from: {}:{}",
-                    location.file(),
-                    location.line()
-                );
-            }
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot get a CPU pointer from GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
     #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
-        match &self.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                let ptr = cpu.data.as_ref().as_ptr();
-                let byte_offset = self.storage_offset as usize * self.dtype.size();
-                unsafe { ptr.add(byte_offset) as *const f32 }
-            }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                let location = std::panic::Location::caller();
-                panic!(
-                    "Cannot get CPU pointer from GPU storage. Device: {:?}, Storage: {:?}\nLocation: {}:{}",
-                    self.device,
-                    self.storage.as_ref(),
-                    location.file(),
-                    location.line()
-                );
-            }
+        self.try_data_ptr_f32()
+            .expect("TensorImpl::data_ptr_f32 failed")
+    }
+
+    pub fn try_data_ptr_f32(&self) -> FastnnResult<*const f32> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "F32 pointer access requires F32 storage, got {:?}",
+                self.dtype
+            )));
         }
+        let ptr = self.try_data_ptr()? as *const f32;
+        if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+            return Err(FastnnError::Internal(
+                "CPU storage is not aligned for F32 pointer access".into(),
+            ));
+        }
+        Ok(ptr)
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        let storage = Arc::make_mut(&mut self.storage);
-        match storage {
-            Storage::Cpu(cpu) => {
-                let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr();
-                let byte_offset = self.storage_offset as usize * self.dtype.size();
-                unsafe { ptr.add(byte_offset) as *mut f32 }
-            }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
+        self.try_data_ptr_f32_mut()
+            .expect("TensorImpl::data_ptr_f32_mut failed")
+    }
+
+    pub fn try_data_ptr_f32_mut(&mut self) -> FastnnResult<*mut f32> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "mutable F32 pointer access requires F32 storage, got {:?}",
+                self.dtype
+            )));
         }
+        let ptr = self.try_data_ptr_mut()? as *mut f32;
+        if ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+            return Err(FastnnError::Internal(
+                "CPU storage is not aligned for mutable F32 pointer access".into(),
+            ));
+        }
+        Ok(ptr)
     }
 
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
+        self.try_data_ptr_mut()
+            .expect("TensorImpl::data_ptr_mut failed")
+    }
+
+    pub fn try_data_ptr_mut(&mut self) -> FastnnResult<*mut u8> {
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot produce a mutable data pointer",
+                self.storage_offset
+            )));
+        }
+        let element_size = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("mutable raw pointer access requires plain scalar storage")
+        })?;
+        let byte_offset = (self.storage_offset as usize)
+            .checked_mul(element_size)
+            .ok_or_else(|| FastnnError::Overflow("mutable pointer byte offset overflow".into()))?;
         let storage = Arc::make_mut(&mut self.storage);
         match storage {
             Storage::Cpu(cpu) => {
                 let data = Arc::make_mut(&mut cpu.data);
-                let ptr = data.as_mut_ptr();
-                let elem_size = self.dtype.size();
-                unsafe { ptr.add(self.storage_offset as usize * elem_size) }
+                if byte_offset > data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "mutable pointer byte offset {byte_offset} exceeds storage length {}",
+                        data.len()
+                    )));
+                }
+                // SAFETY: the checked offset is within or one past the allocation;
+                // `&mut self` and `Arc::make_mut` establish exclusive backing access.
+                Ok(unsafe { data.as_mut_ptr().add(byte_offset) })
             }
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot get CPU pointer from GPU storage. Use .to_cpu() first.");
-            }
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot get a mutable CPU pointer from GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        match &self.storage.as_ref() {
-            // SAFETY: We validate bounds below before creating the slice. The pointer
-            // is derived from the CPU storage's backing `Vec<u8>` and is valid for
-            // the lifetime of `self`.
-            Storage::Cpu(cpu) => unsafe {
-                let ptr = cpu.data.as_ref().as_ptr();
-                let byte_offset = self.storage_offset as usize * self.dtype.size();
-                let ptr = ptr.add(byte_offset) as *const f32;
+        self.try_as_f32_slice()
+            .expect("TensorImpl::as_f32_slice failed")
+    }
+
+    pub fn try_as_f32_slice(&self) -> FastnnResult<&[f32]> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "F32 slice access requires F32 storage, got {:?}",
+                self.dtype
+            )));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "F32 slice access requires a contiguous tensor",
+            ));
+        }
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot be sliced",
+                self.storage_offset
+            )));
+        }
+        match self.storage.as_ref() {
+            Storage::Cpu(cpu) => {
+                let offset = self.storage_offset as usize;
                 let numel = self.numel() as usize;
-                // Unconditional bounds validation to prevent UB in release builds
-                let elem_size = self.dtype.size();
-                let storage_len = cpu.data.len() / elem_size;
-                assert!(
-                    self.storage_offset as usize + numel <= storage_len,
-                    "as_f32_slice: offset + numel exceeds storage bounds. \
-                     offset={}, numel={}, storage_len={}, shape={:?}, dtype={:?}",
-                    self.storage_offset,
-                    numel,
-                    storage_len,
-                    self.sizes,
-                    self.dtype
-                );
-                std::slice::from_raw_parts(ptr, numel)
-            },
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("Cannot slice GPU storage. Use .to_cpu() first.");
+                let scalar_bytes = self.dtype.scalar_byte_width().ok_or_else(|| {
+                    FastnnError::dtype("F32 slice access requires plain scalar storage")
+                })?;
+                let byte_offset = offset.checked_mul(scalar_bytes).ok_or_else(|| {
+                    FastnnError::Overflow("F32 slice byte offset overflow".into())
+                })?;
+                let byte_len = numel.checked_mul(scalar_bytes).ok_or_else(|| {
+                    FastnnError::Overflow("F32 slice byte length overflow".into())
+                })?;
+                let byte_end = byte_offset
+                    .checked_add(byte_len)
+                    .ok_or_else(|| FastnnError::Overflow("F32 slice byte range overflow".into()))?;
+                if byte_end > cpu.data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "F32 slice byte range {byte_offset}..{byte_end} exceeds storage length {}",
+                        cpu.data.len()
+                    )));
+                }
+                bytemuck::try_cast_slice(&cpu.data[byte_offset..byte_end]).map_err(|error| {
+                    FastnnError::Internal(format!("CPU storage cannot be viewed as F32: {error}"))
+                })
             }
+            #[cfg(feature = "gpu")]
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot slice GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        let ptr = self.data_ptr_f32_mut();
+        self.try_as_f32_slice_mut()
+            .expect("TensorImpl::as_f32_slice_mut failed")
+    }
+
+    pub fn try_as_f32_slice_mut(&mut self) -> FastnnResult<&mut [f32]> {
+        if self.dtype != DType::F32 {
+            return Err(FastnnError::dtype(format!(
+                "mutable F32 slice access requires F32 storage, got {:?}",
+                self.dtype
+            )));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "mutable F32 slice access requires a contiguous tensor",
+            ));
+        }
+        if self.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot be sliced",
+                self.storage_offset
+            )));
+        }
+        let offset = self.storage_offset as usize;
         let numel = self.numel() as usize;
-        // SAFETY: We validate bounds below before creating the slice. The pointer
-        // is derived from `data_ptr_f32_mut()` which ensures exclusive ownership.
-        unsafe {
-            // Unconditional bounds validation to prevent UB in release builds
-            #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-            if let Storage::Cpu(cpu) = self.storage.as_ref() {
-                let elem_size = self.dtype.size();
-                let storage_len = cpu.data.len() / elem_size;
-                assert!(
-                    self.storage_offset as usize + numel <= storage_len,
-                    "as_f32_slice_mut: offset + numel exceeds storage bounds. \
-                     offset={}, numel={}, storage_len={}",
-                    self.storage_offset,
-                    numel,
-                    storage_len
-                );
+        let scalar_bytes = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("mutable F32 slice access requires plain scalar storage")
+        })?;
+        let byte_offset = offset
+            .checked_mul(scalar_bytes)
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 byte offset overflow".into()))?;
+        let byte_len = numel
+            .checked_mul(scalar_bytes)
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 byte length overflow".into()))?;
+        let byte_end = byte_offset
+            .checked_add(byte_len)
+            .ok_or_else(|| FastnnError::Overflow("mutable F32 byte range overflow".into()))?;
+
+        let storage = Arc::make_mut(&mut self.storage);
+        match storage {
+            Storage::Cpu(cpu) => {
+                let data = Arc::make_mut(&mut cpu.data);
+                if byte_end > data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "mutable F32 byte range {byte_offset}..{byte_end} exceeds storage length {}",
+                        data.len()
+                    )));
+                }
+                bytemuck::try_cast_slice_mut(&mut data[byte_offset..byte_end]).map_err(|error| {
+                    FastnnError::Internal(format!(
+                        "CPU storage cannot be mutably viewed as F32: {error}"
+                    ))
+                })
             }
-            std::slice::from_raw_parts_mut(ptr, numel)
+            #[cfg(feature = "gpu")]
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot mutably slice GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 }
@@ -472,19 +597,24 @@ impl Tensor {
         self.inner.detach()
     }
 
-    pub fn item(&self) -> f32 {
+    pub fn item(&self) -> FastnnResult<f32> {
         if self.inner.numel() != 1 {
-            panic!("item() can only be called on tensors with one element");
+            return Err(FastnnError::shape(format!(
+                "item() requires one element, got {}",
+                self.inner.numel()
+            )));
         }
 
         let ptr = match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
-                panic!("Cannot call item() on GPU tensor. Use .cpu() first.");
+                return Err(FastnnError::device(
+                    "item() requires CPU storage; transfer the tensor to CPU first",
+                ));
             }
         };
-        match self.inner.dtype {
+        Ok(match self.inner.dtype {
             DType::F32 => {
                 let f32_ptr = ptr as *const f32;
                 // SAFETY: `self.inner.numel() == 1` was validated above. The pointer
@@ -517,12 +647,16 @@ impl Tensor {
                 // SAFETY: Same as F32 case -- single element read from valid storage.
                 unsafe { f32::from(*f16_ptr.add(self.inner.storage_offset as usize)) }
             }
-            _ => panic!("Unsupported dtype for item()"),
-        }
+            dtype => {
+                return Err(FastnnError::dtype(format!(
+                    "item() does not support {dtype:?}"
+                )))
+            }
+        })
     }
 
-    pub fn to_numpy(&self) -> Vec<f32> {
-        match &self.inner.storage.as_ref() {
+    pub fn to_numpy(&self) -> FastnnResult<Vec<f32>> {
+        Ok(match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 // Fast path: contiguous F32 tensor - SIMD-accelerated copy
                 if self.inner.dtype == DType::F32 && self.inner.is_contiguous() {
@@ -539,7 +673,7 @@ impl Tensor {
                     {
                         memcpy_f32(src, dst, len);
                     }
-                    return result;
+                    return Ok(result);
                 }
 
                 match self.inner.dtype {
@@ -679,112 +813,125 @@ impl Tensor {
                         }
                         result
                     }
-                    _ => panic!("Unsupported dtype for to_numpy"),
+                    dtype => {
+                        return Err(FastnnError::dtype(format!(
+                            "to_numpy() does not support {dtype:?}"
+                        )))
+                    }
                 }
             }
             #[cfg(feature = "gpu")]
             Storage::Wgpu(_) => {
-                panic!("Cannot convert GPU tensor to numpy directly. Use .cpu() first.");
+                return Err(FastnnError::device(
+                    "to_numpy() requires CPU storage; transfer the tensor to CPU first",
+                ));
             }
-        }
+        })
     }
 
     #[track_caller]
     pub fn data_ptr(&self) -> *const u8 {
-        self.inner.data_ptr()
+        self.try_data_ptr().expect("Tensor::data_ptr failed")
+    }
+
+    pub fn try_data_ptr(&self) -> FastnnResult<*const u8> {
+        self.inner.try_data_ptr()
     }
 
     #[track_caller]
     pub fn data_ptr_f32(&self) -> *const f32 {
-        self.inner.data_ptr_f32()
+        self.try_data_ptr_f32()
+            .expect("Tensor::data_ptr_f32 failed")
+    }
+
+    pub fn try_data_ptr_f32(&self) -> FastnnResult<*const f32> {
+        self.inner.try_data_ptr_f32()
     }
 
     pub fn data_ptr_f32_mut(&mut self) -> *mut f32 {
-        let inner = Arc::make_mut(&mut self.inner);
-        inner.data_ptr_f32_mut()
+        self.try_data_ptr_f32_mut()
+            .expect("Tensor::data_ptr_f32_mut failed")
     }
 
-    /// Get a raw byte pointer to the tensor data (for arbitrary dtypes)
-    /// Note: storage_offset is in elements, so we need to multiply by element size
+    pub fn try_data_ptr_f32_mut(&mut self) -> FastnnResult<*mut f32> {
+        Arc::make_mut(&mut self.inner).try_data_ptr_f32_mut()
+    }
+
     pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        let inner = Arc::make_mut(&mut self.inner);
-        inner.data_ptr_mut()
+        self.try_data_ptr_mut()
+            .expect("Tensor::data_ptr_mut failed")
+    }
+
+    pub fn try_data_ptr_mut(&mut self) -> FastnnResult<*mut u8> {
+        Arc::make_mut(&mut self.inner).try_data_ptr_mut()
     }
 
     pub fn as_f32_slice(&self) -> &[f32] {
-        match self.inner.dtype {
-            DType::F32 => self.inner.as_f32_slice(),
-            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                panic!("as_f32_slice: use dtype-specific access methods instead of f32 reinterpretation. \
-                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
-            }
-            DType::BF16 | DType::F16 => {
-                panic!("BF16/F16 to f32 slice conversion not yet implemented. Use dtype-specific operations instead.");
-            }
-            DType::I4
-            | DType::I8Scaled
-            | DType::U4Scaled
-            | DType::U8Scaled
-            | DType::F8
-            | DType::F8R
-            | DType::F4 => {
-                panic!("as_f32_slice: packed/FP tensors cannot be viewed as f32.");
-            }
-        }
+        self.try_as_f32_slice()
+            .expect("Tensor::as_f32_slice failed")
     }
 
-    /// Get a direct byte slice view of the tensor data for efficient serialization.
-    /// Only works for contiguous CPU tensors.
-    /// Returns None for GPU tensors or non-contiguous tensors.
+    pub fn try_as_f32_slice(&self) -> FastnnResult<&[f32]> {
+        self.inner.try_as_f32_slice()
+    }
+
+    /// Get a direct byte slice view of contiguous CPU tensor data.
     pub fn as_byte_slice(&self) -> Option<&[u8]> {
-        match &self.inner.storage.as_ref() {
+        self.try_as_bytes().ok()
+    }
+
+    pub fn try_as_bytes(&self) -> FastnnResult<&[u8]> {
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "byte slice access requires a contiguous tensor",
+            ));
+        }
+        if self.inner.storage_offset < 0 {
+            return Err(FastnnError::shape(format!(
+                "negative storage offset {} cannot be sliced",
+                self.inner.storage_offset
+            )));
+        }
+        match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
-                if !self.is_contiguous() {
-                    return None;
-                }
-                let data = cpu.data.as_ref();
                 let numel = self.inner.numel() as usize;
-                let elem_size = self.inner.dtype.size();
-                let byte_len = numel * elem_size;
-                let start = self.inner.storage_offset as usize * elem_size;
-                // Ensure we don't read past the storage
-                if start + byte_len > data.len() {
-                    return None;
+                let byte_len = self.inner.dtype.try_storage_bytes(numel)?;
+                let start = if let Some(element_size) = self.inner.dtype.scalar_byte_width() {
+                    (self.inner.storage_offset as usize)
+                        .checked_mul(element_size)
+                        .ok_or_else(|| FastnnError::Overflow("byte slice offset overflow".into()))?
+                } else if self.inner.storage_offset == 0 {
+                    0
+                } else {
+                    return Err(FastnnError::dtype(
+                        "nonzero storage offsets are unsupported for packed byte slices",
+                    ));
+                };
+                let end = start
+                    .checked_add(byte_len)
+                    .ok_or_else(|| FastnnError::Overflow("byte slice range overflow".into()))?;
+                if end > cpu.data.len() {
+                    return Err(FastnnError::OutOfBounds(format!(
+                        "byte slice range {start}..{end} exceeds storage length {}",
+                        cpu.data.len()
+                    )));
                 }
-                Some(&data[start..][..byte_len])
+                Ok(&cpu.data[start..end])
             }
             #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => None,
+            Storage::Wgpu(_) => Err(FastnnError::device(
+                "cannot slice GPU storage; move the tensor to CPU first",
+            )),
         }
     }
 
     pub fn as_f32_slice_mut(&mut self) -> &mut [f32] {
-        match self.inner.dtype {
-            DType::F32 => {
-                let inner = if Arc::strong_count(&self.inner) == 1 {
-                    Arc::get_mut(&mut self.inner).unwrap()
-                } else {
-                    Arc::make_mut(&mut self.inner)
-                };
-                inner.as_f32_slice_mut()
-            }
-            DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                panic!("as_f32_slice_mut: use dtype-specific access methods instead of f32 reinterpretation. \
-                        For I32/I64/F64/Bool tensors, use to_cpu() + iterate via dtype-specific methods.")
-            }
-            DType::BF16 | DType::F16 => {
-                panic!("Cannot get mutable f32 slice for BF16/F16 tensor. Use dtype-specific operations.");
-            }
-            DType::I4
-            | DType::I8Scaled
-            | DType::U4Scaled
-            | DType::U8Scaled
-            | DType::F8
-            | DType::F8R
-            | DType::F4 => {
-                panic!("as_f32_slice_mut: packed/FP tensors cannot be viewed as f32.");
-            }
-        }
+        self.try_as_f32_slice_mut()
+            .expect("Tensor::as_f32_slice_mut failed")
+    }
+
+    pub fn try_as_f32_slice_mut(&mut self) -> FastnnResult<&mut [f32]> {
+        Arc::make_mut(&mut self.inner).try_as_f32_slice_mut()
     }
 
     pub fn increment_version(&self) {
@@ -815,6 +962,84 @@ impl std::fmt::Debug for Tensor {
 }
 
 pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
+    try_einsum(equation, tensors).expect("einsum received invalid inputs")
+}
+
+pub fn try_einsum(equation: &str, tensors: &[Tensor]) -> FastnnResult<Tensor> {
+    let (inputs, output) = equation
+        .split_once("->")
+        .ok_or_else(|| FastnnError::shape("einsum equation must contain exactly one '->'"))?;
+    if output.contains("->") {
+        return Err(FastnnError::shape(
+            "einsum equation must contain exactly one '->'",
+        ));
+    }
+    let labels: Vec<&str> = inputs.split(',').map(str::trim).collect();
+    if tensors.len() != 2 || labels.len() != 2 {
+        return Err(FastnnError::shape(
+            "einsum currently requires exactly two tensors and two input terms",
+        ));
+    }
+    for (index, (term, tensor)) in labels.iter().zip(tensors).enumerate() {
+        if term.len() != tensor.ndim() {
+            return Err(FastnnError::shape(format!(
+                "einsum input {index} has {} labels but tensor rank {}",
+                term.len(),
+                tensor.ndim()
+            )));
+        }
+        let mut seen = [false; 26];
+        for byte in term.bytes() {
+            if !byte.is_ascii_lowercase() {
+                return Err(FastnnError::shape(
+                    "einsum labels must be lowercase ASCII letters",
+                ));
+            }
+            let position = usize::from(byte - b'a');
+            if std::mem::replace(&mut seen[position], true) {
+                return Err(FastnnError::shape(
+                    "repeated labels within one einsum input are not supported",
+                ));
+            }
+        }
+    }
+    let mut output_seen = [false; 26];
+    for byte in output.bytes() {
+        if !byte.is_ascii_lowercase() {
+            return Err(FastnnError::shape(
+                "einsum labels must be lowercase ASCII letters",
+            ));
+        }
+        let position = usize::from(byte - b'a');
+        if std::mem::replace(&mut output_seen[position], true)
+            || !labels.iter().any(|term| term.as_bytes().contains(&byte))
+        {
+            return Err(FastnnError::shape(
+                "einsum output labels must be unique and present in an input",
+            ));
+        }
+    }
+    if tensors[0].dtype() != tensors[1].dtype() || tensors[0].device() != tensors[1].device() {
+        return Err(FastnnError::dtype(
+            "einsum input tensors must have matching dtypes and devices",
+        ));
+    }
+    for (left, byte) in labels[0].bytes().enumerate() {
+        if let Some(right) = labels[1].bytes().position(|candidate| candidate == byte) {
+            if tensors[0].shape()[left] != tensors[1].shape()[right] {
+                return Err(FastnnError::shape(format!(
+                    "einsum label '{}' has mismatched dimensions {} and {}",
+                    char::from(byte),
+                    tensors[0].shape()[left],
+                    tensors[1].shape()[right]
+                )));
+            }
+        }
+    }
+    Ok(einsum_validated(equation, tensors))
+}
+
+fn einsum_validated(equation: &str, tensors: &[Tensor]) -> Tensor {
     let parts: Vec<&str> = equation.split("->").collect();
     let (input_str, output_str) = if parts.len() == 2 {
         (parts[0], parts[1])
@@ -944,10 +1169,24 @@ pub fn einsum(equation: &str, tensors: &[Tensor]) -> Tensor {
 }
 
 pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32 {
+    try_clip_grad_norm_(tensors, max_norm, norm_type).expect("clip_grad_norm_ failed")
+}
+
+pub fn try_clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> FastnnResult<f32> {
+    if !max_norm.is_finite() || max_norm < 0.0 {
+        return Err(FastnnError::shape(
+            "gradient maximum norm must be finite and non-negative",
+        ));
+    }
+    if !norm_type.is_finite() || norm_type <= 0.0 {
+        return Err(FastnnError::shape(
+            "gradient norm type must be finite and positive",
+        ));
+    }
     let mut total_norm = 0.0f32;
     for t in tensors {
         if let Some(g) = t.grad() {
-            let g_data = g.as_f32_slice();
+            let g_data = g.try_as_f32_slice()?;
             if norm_type == 2.0 {
                 let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
                 total_norm += param_norm * param_norm;
@@ -961,108 +1200,110 @@ pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32
     } else {
         total_norm = total_norm.powf(1.0 / norm_type);
     }
-    let clip_coef = max_norm / (total_norm.max(1e-6));
+    if !total_norm.is_finite() {
+        return Err(FastnnError::Computation(
+            "gradient norm is not finite".into(),
+        ));
+    }
+    let clip_coef = max_norm / total_norm.max(1e-6);
     if clip_coef < 1.0 {
         for t in tensors {
             if let Some(mut g) = t.grad() {
-                for x in g.as_f32_slice_mut().iter_mut() {
+                for x in g.try_as_f32_slice_mut()?.iter_mut() {
                     *x *= clip_coef;
                 }
                 t.set_grad(Some(g));
             }
         }
     }
-    total_norm
+    Ok(total_norm)
 }
 
 pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
+    try_clip_grad_value_(tensors, clip_value).expect("clip_grad_value_ failed")
+}
+
+pub fn try_clip_grad_value_(tensors: &[Tensor], clip_value: f32) -> FastnnResult<()> {
+    if !clip_value.is_finite() || clip_value < 0.0 {
+        return Err(FastnnError::shape(
+            "gradient clip value must be finite and non-negative",
+        ));
+    }
     for t in tensors {
         if let Some(mut g) = t.grad() {
-            for x in g.as_f32_slice_mut().iter_mut() {
+            for x in g.try_as_f32_slice_mut()?.iter_mut() {
                 *x = x.max(-clip_value).min(clip_value);
             }
             t.set_grad(Some(g));
         }
     }
+    Ok(())
 }
 
 // =============================================================================
 // AOT pipeline bridge — replace eager dispatcher calls with graph lowering
 // =============================================================================
 
-pub fn dtype_to_ir(dt: DType) -> IrDType {
-    match dt {
+pub fn dtype_to_ir(dt: DType) -> FastnnResult<IrDType> {
+    Ok(match dt {
         DType::F32 => IrDType::F32,
-        DType::F64 => panic!("dtype_to_ir: F64 not supported in IR"),
+        DType::F64 => return Err(FastnnError::dtype("F64 is not supported in executable IR")),
         DType::I32 => IrDType::I32,
         DType::I64 => IrDType::I64,
         DType::Bool => IrDType::Bool,
         DType::F16 => IrDType::F16,
         DType::BF16 => IrDType::BF16,
-        // I4/I8/F4/F8/F8R need per-channel scale/zp metadata that lives in the IR node,
-        // not in the Tensor-level DType.  Use default values here; the actual
-        // scales are filled in by the quantization compiler pass.
-        DType::I4 => IrDType::I4 {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-            codebooks: vec![],
-        },
-        DType::I8Scaled => IrDType::I8Scaled {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-        DType::F8 => IrDType::F8 { scales: vec![1.0] },
-        DType::F8R => IrDType::F8R { scales: vec![1.0] },
-        DType::F4 => IrDType::F4 {
-            scales: vec![1.0],
-            zeros: vec![],
-            codebooks: vec![],
-        },
-        DType::U4Scaled => IrDType::U4Scaled {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-        DType::U8Scaled => IrDType::U8Scaled {
-            scales: vec![1.0],
-            zero_points: vec![0.0],
-        },
-    }
+        DType::I4
+        | DType::I8Scaled
+        | DType::F8
+        | DType::F8R
+        | DType::F4
+        | DType::U4Scaled
+        | DType::U8Scaled => {
+            return Err(FastnnError::dtype(
+                "packed eager dtype cannot enter executable IR without representation metadata",
+            ))
+        }
+    })
 }
 
-pub fn ir_to_dtype(idt: IrDType) -> DType {
-    match idt {
-        IrDType::F32 => DType::F32,
-        IrDType::F16 => DType::F16,
-        IrDType::BF16 => DType::BF16,
-        IrDType::I32 => DType::I32,
-        IrDType::I64 => DType::I64,
-        IrDType::Bool => DType::Bool,
-        IrDType::I8 => panic!("ir_to_dtype: I8 is IR-only, not a Tensor-level DType"),
-        // Packed types round-trip back to simple DType variants. Per-channel metadata
-        // stays in the IR node; Tensor-level storage uses the packed dtype.
-        IrDType::I4 { .. } => DType::I4,
-        IrDType::I8Scaled { .. } => DType::I8Scaled,
-        IrDType::F8 { .. } => DType::F8,
-        IrDType::F8R { .. } => DType::F8R,
-        IrDType::F4 { .. } => DType::F4,
-        IrDType::U4Scaled { .. } => DType::U4Scaled,
-        IrDType::U8Scaled { .. } => DType::U8Scaled,
+pub fn representation_to_dtype(representation: &ValueRepresentation) -> FastnnResult<DType> {
+    representation.validate()?;
+    if matches!(
+        representation.transform,
+        RepresentationTransform::RuntimeAffineQuantization
+            | RepresentationTransform::RuntimeScaledAffine
+    ) {
+        return Err(FastnnError::dtype(
+            "runtime-described quantization is not a Tensor-level dtype",
+        ));
     }
+    Ok(match representation.storage {
+        ScalarType::F64 => DType::F64,
+        ScalarType::F32 => DType::F32,
+        ScalarType::F16 => DType::F16,
+        ScalarType::BF16 => DType::BF16,
+        ScalarType::I64 => DType::I64,
+        ScalarType::I32 => DType::I32,
+        ScalarType::Bool => DType::Bool,
+        ScalarType::I4 => DType::I4,
+        ScalarType::I8 => DType::I8Scaled,
+        ScalarType::U4 => DType::U4Scaled,
+        ScalarType::U8 => DType::U8Scaled,
+        ScalarType::Fp4E2M1 => DType::F4,
+        ScalarType::Fp8E4M3 => DType::F8,
+        ScalarType::Fp8E5M2 => DType::F8R,
+    })
+}
+
+pub fn tensor_type_to_dtype(tensor_type: &TensorType) -> FastnnResult<DType> {
+    representation_to_dtype(&tensor_type.value_representation()?)
 }
 
 impl Tensor {
-    /// Expose the tensor's data as a raw byte slice (CPU only).
+    /// Expose the tensor's contiguous CPU data as raw bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        match self.inner.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                let elem_size = self.inner.dtype.size();
-                let offset = self.inner.storage_offset as usize * elem_size;
-                let num_bytes = self.inner.numel() as usize * elem_size;
-                &cpu.data[offset..offset + num_bytes]
-            }
-            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
-            _ => panic!("as_bytes: GPU tensors not supported; call .to_cpu() first"),
-        }
+        self.try_as_bytes().expect("Tensor::as_bytes failed")
     }
 
     /// Build a single-op graph, compile it with the AOT pipeline, execute,
@@ -1086,23 +1327,44 @@ impl Tensor {
                     .iter()
                     .map(|&s| DimExpr::Known(s as u64))
                     .collect();
-                g.input_with_dims(&dims, dtype_to_ir(t.dtype()))
+                let dtype = dtype_to_ir(t.dtype())
+                    .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                Ok(g.input_with_dims(&dims, dtype))
             })
-            .collect();
+            .collect::<Result<Vec<_>, BackendError>>()?;
 
         let graph_outputs = build_graph(&g, &graph_inputs);
 
-        let input_bytes: Vec<&[u8]> = inputs.iter().map(|t| t.as_bytes()).collect();
+        let materialized_inputs: Vec<Tensor> = inputs
+            .iter()
+            .map(|tensor| {
+                if tensor.is_contiguous() {
+                    Ok((*tensor).clone())
+                } else {
+                    tensor
+                        .try_contiguous()
+                        .map_err(|error| BackendError::Dispatch(error.to_string()))
+                }
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        let input_bytes: Vec<&[u8]> = materialized_inputs
+            .iter()
+            .map(|tensor| {
+                tensor
+                    .try_as_bytes()
+                    .map_err(|error| BackendError::Dispatch(error.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
         let result_bytes = g.compile_and_execute::<CpuBackend>(
             &graph_outputs.iter().collect::<Vec<_>>(),
             CpuBackend,
             &input_bytes,
         )?;
 
-        Ok(graph_outputs
+        graph_outputs
             .into_iter()
             .zip(result_bytes)
-            .map(|(gt, bytes)| {
+            .map(|(gt, bytes)| -> Result<Tensor, BackendError> {
                 let shape: SmallVec<[i64; 8]> = gt
                     .shape()
                     .iter()
@@ -1111,38 +1373,72 @@ impl Tensor {
                         _ => unreachable!("AOT bridge: graph op output has concrete shape"),
                     })
                     .collect();
-                let dt = ir_to_dtype(gt.dtype());
+                let dt = tensor_type_to_dtype(gt.tensor_type())
+                    .map_err(|error| BackendError::Compilation(error.to_string()))?;
                 let numel: usize = shape.iter().map(|&s| s as usize).product();
-                let expected_bytes = numel * dt.size();
+                let expected_bytes = dt.storage_bytes(numel);
                 let num_bytes = bytes.len();
                 // Validate that the AOT pipeline produced the right number of
                 // bytes for the shape inferred during graph construction.
                 // A mismatch here indicates a shape-inference or memory-planning
                 // bug in the compiler pipeline.
                 assert_eq!(
-                    num_bytes,
-                    expected_bytes,
+                    num_bytes, expected_bytes,
                     "AOT bridge: output byte size mismatch for shape {:?}, dtype {:?}: \
-                     got {} bytes but expected {} ({} elements × {} bytes/elem). \
+                     got {} bytes but expected {} for {} logical elements. \
                      This is likely a shape-inference bug in the compiler pass.",
-                    shape,
-                    dt,
-                    num_bytes,
-                    expected_bytes,
-                    numel,
-                    dt.size()
+                    shape, dt, num_bytes, expected_bytes, numel
                 );
                 let data = bytes.to_vec();
                 let storage = Storage::Cpu(crate::storage::CpuStorage::from_vec(data, num_bytes));
-                Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt))
+                Ok(Tensor::new(TensorImpl::new(Arc::new(storage), shape, dt)))
             })
-            .collect())
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::QuantizationGranularity;
+
+    #[test]
+    fn canonical_representation_maps_to_eager_storage_dtype() {
+        let u4 = ValueRepresentation::packed_affine_dequantization(
+            ScalarType::U4,
+            8,
+            QuantizationGranularity::PerTensor,
+            vec![0.25],
+            vec![-1.0],
+        )
+        .unwrap();
+        assert_eq!(representation_to_dtype(&u4).unwrap(), DType::U4Scaled);
+
+        let f8 = ValueRepresentation {
+            logical: ScalarType::F32,
+            storage: ScalarType::Fp8E4M3,
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+            transform: RepresentationTransform::Scaled { scales: vec![1.0] },
+        };
+        assert_eq!(representation_to_dtype(&f8).unwrap(), DType::F8);
+    }
+
+    #[test]
+    fn runtime_quantization_is_not_an_eager_storage_dtype() {
+        let runtime = ValueRepresentation::runtime_affine(
+            ScalarType::I8,
+            crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+        )
+        .unwrap();
+        let error = representation_to_dtype(&runtime).unwrap_err();
+        assert!(error.to_string().contains("runtime-described quantization"));
+    }
 
     #[test]
     fn test_cat_dim0() {
@@ -1188,7 +1484,7 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], vec![3]);
         let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], vec![3]);
         let result = einsum("i,i->", &[x, y]);
-        assert!((result.item() - 32.0).abs() < 1e-5);
+        assert!((result.item().unwrap() - 32.0).abs() < 1e-5);
     }
 
     #[test]

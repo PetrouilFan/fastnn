@@ -6,7 +6,7 @@
 //! inference-only without the user's knowledge.
 
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::*;
+use fastnn::ir::*;
 use fastnn::onnx::export::{
     detect_training_ops, export_to_onnx_json, export_to_onnx_json_with_config, ExportConfig,
 };
@@ -34,10 +34,11 @@ fn build_training_graph_sgd() -> ComputeGraph {
     let gb = GraphBuilder::new();
     let x = gb.input(&[1, 4], IrDType::F32);
     let w = gb.input(&[4, 4], IrDType::F32);
+    let grad = gb.input(&[4, 4], IrDType::F32);
     let mm = gb.matmul(&x, &w);
-    let loss = gb.reduce_mean(&mm, 0, false);
+    let _loss = gb.reduce_mean(&mm, 0, false);
     // SGD update: w -= lr * grad
-    let _updated = gb.apply_sgd(&w, &loss, 0.01, 0.0);
+    let _updated = gb.apply_sgd(&w, &grad, 0.01, 0.0);
     gb.to_graph()
 }
 
@@ -49,10 +50,11 @@ fn build_training_graph_adam() -> ComputeGraph {
     let w = gb.input(&[4, 4], IrDType::F32);
     let m = gb.input(&[4, 4], IrDType::F32);
     let v = gb.input(&[4, 4], IrDType::F32);
+    let grad = gb.input(&[4, 4], IrDType::F32);
     let mm = gb.matmul(&x, &w);
-    let loss = gb.reduce_mean(&mm, 0, false);
+    let _loss = gb.reduce_mean(&mm, 0, false);
     // Adam update
-    let _updated = gb.apply_adam(&w, &loss, &m, &v, 0.001, 0.9, 0.999, 1e-8, 1);
+    let _updated = gb.apply_adam(&w, &grad, &m, &v, 0.001, 0.9, 0.999, 1e-8, 1);
     gb.to_graph()
 }
 
@@ -156,7 +158,7 @@ fn test_gradient_scale_fails_export() {
 #[test]
 fn test_detect_training_ops_inference_clean() {
     let graph = build_inference_graph();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(
         ops.is_empty(),
         "Inference graph should have no training ops"
@@ -166,7 +168,7 @@ fn test_detect_training_ops_inference_clean() {
 #[test]
 fn test_detect_training_ops_sgd() {
     let graph = build_training_graph_sgd();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(!ops.is_empty(), "SGD graph should detect training ops");
     assert!(
         ops.iter().any(|(_, name)| name.contains("SgdUpdate")),
@@ -178,7 +180,7 @@ fn test_detect_training_ops_sgd() {
 #[test]
 fn test_detect_training_ops_adam() {
     let graph = build_training_graph_adam();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(!ops.is_empty(), "Adam graph should detect training ops");
     assert!(
         ops.iter().any(|(_, name)| name.contains("AdamUpdate")),
@@ -190,7 +192,7 @@ fn test_detect_training_ops_adam() {
 #[test]
 fn test_detect_training_ops_gradient_scale() {
     let graph = build_training_graph_gradient_scale();
-    let ops = detect_training_ops(&graph);
+    let ops = detect_training_ops(&graph).unwrap();
     assert!(
         !ops.is_empty(),
         "GradientScale graph should detect training ops"
@@ -251,19 +253,29 @@ fn test_quantized_matmul_export_still_works() {
     let gb = GraphBuilder::new();
     let input = gb.input(&[1, 2], IrDType::F32);
     let weight_shape = vec![DimExpr::Known(2), DimExpr::Known(4)];
-    let weight_tt = TensorType::new(
-        weight_shape,
-        IrDType::I4 {
-            scales: vec![0.1, 0.2, 0.3, 0.4],
-            zero_points: vec![0.0, 0.0, 0.0, 0.0],
-            codebooks: vec![],
+    let rep = fastnn::types::ValueRepresentation::packed_affine_dequantization(
+        fastnn::types::ScalarType::I4,
+        8,
+        fastnn::types::QuantizationGranularity::PerTensor,
+        vec![1.0],
+        vec![-1.0],
+    )
+    .expect("valid affine representation");
+    let layout = fastnn::types::TensorStorageLayout {
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
         },
-    );
+        row_packed: true,
+        prefix_bytes: 0,
+        suffix_bytes: fastnn::types::PACKED_SIMD_MARGIN_BYTES,
+    };
+    let weight_tt = TensorType::from_parts(weight_shape, rep, layout);
     let weight_data = vec![0u8; 80];
     let weight = gb.constant(&weight_data, weight_tt);
     let deq_weight = gb.dequantize(&weight);
     let mm = gb.matmul(&input, &deq_weight);
-    let _q_out = gb.quantize(&mm, 4);
+    let _q_out = gb.quantize(&mm, 4).unwrap();
     let graph = gb.to_graph();
 
     let result = export_to_onnx_json(&graph);

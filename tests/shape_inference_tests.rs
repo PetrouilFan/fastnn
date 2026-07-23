@@ -1,6 +1,6 @@
 use fastnn::compiler::passes::shape_inference;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType};
+use fastnn::ir::{DimExpr, IrDType};
 
 #[test]
 fn test_matmul_shape_inference() {

@@ -227,6 +227,19 @@ def test_dropout():
     assert_shape_equal(y_eval, [10, 10])
 
 
+def test_dropout_respects_process_seed():
+    dropout = fnn.Dropout(0.5)
+    dropout.train()
+    x = fnn.ones([10, 10])
+
+    fnn.set_seed(17)
+    first = dropout(x).numpy()
+    fnn.set_seed(17)
+    second = dropout(x).numpy()
+
+    assert np.array_equal(first, second)
+
+
 @pytest.mark.parametrize("dtype", ["bf16", "f16"])
 @pytest.mark.skipif(
     sys.platform == "win32", reason="half precision has heap corruption issues on Windows CI"

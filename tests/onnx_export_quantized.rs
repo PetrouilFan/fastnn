@@ -5,7 +5,7 @@
 //! QLinearMatMul / QLinearConv nodes appear in the JSON output.
 
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::*;
+use fastnn::ir::*;
 use fastnn::onnx::export::export_to_onnx_json;
 
 /// Helper: build a graph with a Dequantize → MatMul → Quantize pattern.
@@ -16,15 +16,27 @@ fn build_qmatmul_graph() -> ComputeGraph {
     let input = gb.input(&[1, 2], IrDType::F32);
 
     // Quantized weight: [2, 4] (inner K=2, outer N=4)
+    // Must use explicit AffineDequantization metadata so ONNX export
+    // detects the quantized pattern.
     let weight_shape = vec![DimExpr::Known(2), DimExpr::Known(4)];
-    let weight_tt = TensorType::new(
-        weight_shape,
-        IrDType::I4 {
-            scales: vec![0.1, 0.2, 0.3, 0.4],
-            zero_points: vec![0.0, 0.0, 0.0, 0.0],
-            codebooks: vec![],
+    let rep = fastnn::types::ValueRepresentation::packed_affine_dequantization(
+        fastnn::types::ScalarType::I4,
+        8,
+        fastnn::types::QuantizationGranularity::PerTensor,
+        vec![1.0],
+        vec![-1.0],
+    )
+    .expect("valid affine representation");
+    let layout = fastnn::types::TensorStorageLayout {
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
         },
-    );
+        row_packed: true,
+        prefix_bytes: 0,
+        suffix_bytes: fastnn::types::PACKED_SIMD_MARGIN_BYTES,
+    };
+    let weight_tt = TensorType::from_parts(weight_shape, rep, layout);
     let weight_data = vec![0u8; 80]; // enough for packed U4
     let weight = gb.constant(&weight_data, weight_tt);
 
@@ -35,7 +47,7 @@ fn build_qmatmul_graph() -> ComputeGraph {
     let mm = gb.matmul(&input, &deq_weight);
 
     // Quantize output F32 → U4
-    let _q_out = gb.quantize(&mm, 4);
+    let _q_out = gb.quantize(&mm, 4).unwrap();
 
     gb.to_graph()
 }
@@ -173,20 +185,31 @@ fn test_export_qlinear_conv_detected() {
     let input = gb.input(&[1, 1, 4, 4], IrDType::F32);
 
     // Weight: [1, 1, 3, 3] (out_channels, in_channels, KH, KW)
+    // Must use explicit AffineDequantization metadata for ONNX export to detect.
     let weight_shape = vec![
         DimExpr::Known(1),
         DimExpr::Known(1),
         DimExpr::Known(3),
         DimExpr::Known(3),
     ];
-    let weight_tt = TensorType::new(
-        weight_shape,
-        IrDType::I4 {
-            scales: vec![0.1],
-            zero_points: vec![0.0],
-            codebooks: vec![],
+    let rep = fastnn::types::ValueRepresentation::packed_affine_dequantization(
+        fastnn::types::ScalarType::I4,
+        8,
+        fastnn::types::QuantizationGranularity::PerTensor,
+        vec![1.0],
+        vec![-1.0],
+    )
+    .expect("valid affine representation");
+    let layout = fastnn::types::TensorStorageLayout {
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
         },
-    );
+        row_packed: true,
+        prefix_bytes: 0,
+        suffix_bytes: fastnn::types::PACKED_SIMD_MARGIN_BYTES,
+    };
+    let weight_tt = TensorType::from_parts(weight_shape, rep, layout);
     let weight_data = vec![0u8; 80]; // enough for packed U4
     let weight = gb.constant(&weight_data, weight_tt);
 
@@ -197,7 +220,7 @@ fn test_export_qlinear_conv_detected() {
     let conv = gb.conv2d_with_params(&input, &deq_weight, 1, 0, 1, 1);
 
     // Quantize output
-    let _q_out = gb.quantize(&conv, 4);
+    let _q_out = gb.quantize(&conv, 4).unwrap();
 
     let graph = gb.to_graph();
 

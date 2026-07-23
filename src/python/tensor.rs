@@ -101,16 +101,16 @@ impl PyTensor {
         self.inner.is_contiguous()
     }
 
-    fn item(&self) -> f32 {
+    fn item(&self) -> PyResult<f32> {
         #[cfg(feature = "gpu")]
         if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return self.inner.to_cpu().item();
+            return self.inner.try_to_cpu()?.item().map_err(Into::into);
         }
-        self.inner.item()
+        self.inner.item().map_err(Into::into)
     }
 
-    fn numpy(&self) -> Vec<f32> {
-        self.inner.to_numpy()
+    fn numpy(&self) -> PyResult<Vec<f32>> {
+        self.inner.to_numpy().map_err(Into::into)
     }
 
     /// DLPack protocol for zero-copy array exchange with NumPy, PyTorch, etc.
@@ -228,11 +228,11 @@ impl PyTensor {
         let grad_tensor = grad.map(|g| g.inner);
         let result = py.detach(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                crate::autograd::backward(&inner, grad_tensor);
+                crate::autograd::backward(&inner, grad_tensor)
             }))
         });
         match result {
-            Ok(()) => Ok(()),
+            Ok(result) => result.map_err(PyErr::from),
             Err(panic_err) => {
                 let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
                     s.to_string()
@@ -257,99 +257,181 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
-    fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        match dim {
-            Some(d) => PyTensor::from_tensor(self.inner.sum(d, keepdim)),
+    fn sum(&self, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+        Ok(match dim {
+            Some(dimension) => PyTensor::from_tensor(self.inner.try_sum(dimension, keepdim)?),
             None => PyTensor::from_tensor(reduce_sum_all(&self.inner)),
-        }
+        })
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
-    fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyTensor {
-        match dim {
-            Some(d) => PyTensor::from_tensor(self.inner.mean(d, keepdim)),
+    fn mean(&self, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+        Ok(match dim {
+            Some(dimension) => PyTensor::from_tensor(self.inner.try_mean(dimension, keepdim)?),
             None => PyTensor::from_tensor(reduce_mean_all(&self.inner)),
+        })
+    }
+
+    fn view(&self, shape: Vec<i64>) -> PyResult<PyTensor> {
+        let tensor: Tensor = self.inner.try_view(shape)?;
+        Ok(PyTensor::from_tensor(tensor))
+    }
+
+    fn reshape(&self, shape: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_reshape(shape)?))
+    }
+
+    fn transpose(&self, dim0: i64, dim1: i64) -> PyResult<PyTensor> {
+        if dim0 < 0 || dim1 < 0 {
+            return Err(crate::error::FastnnError::shape(
+                "transpose dimensions must be non-negative",
+            )
+            .into());
         }
+        Ok(PyTensor::from_tensor(
+            self.inner.try_transpose(dim0 as usize, dim1 as usize)?,
+        ))
     }
 
-    fn view(&self, shape: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.view(shape))
+    fn permute(&self, dims: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_permute(dims)?))
     }
 
-    fn reshape(&self, shape: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.reshape(shape))
+    fn unsqueeze(&self, dim: i64) -> PyResult<PyTensor> {
+        if dim < 0 {
+            return Err(
+                crate::error::FastnnError::shape("unsqueeze dimension must be non-negative").into(),
+            );
+        }
+        Ok(PyTensor::from_tensor(
+            self.inner.try_unsqueeze(dim as usize)?,
+        ))
     }
 
-    fn transpose(&self, dim0: i64, dim1: i64) -> PyTensor {
-        PyTensor::from_tensor(self.inner.transpose(dim0 as usize, dim1 as usize))
+    fn squeeze(&self, dim: Option<i64>) -> PyResult<PyTensor> {
+        let normalized = if let Some(dim) = dim {
+            let rank = self.inner.ndim() as i64;
+            let normalized = if dim < 0 { dim + rank } else { dim };
+            if normalized < 0 || normalized >= rank {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "squeeze dimension {dim} is out of range for rank {rank}"
+                )));
+            }
+            Some(normalized as usize)
+        } else {
+            None
+        };
+        Ok(PyTensor::from_tensor(self.inner.try_squeeze(normalized)?))
     }
 
-    fn permute(&self, dims: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.permute(dims))
+    fn flip(&self, dim: i32) -> PyResult<PyTensor> {
+        let rank = self.inner.ndim() as i64;
+        let requested = i64::from(dim);
+        let normalized = if requested < 0 {
+            requested + rank
+        } else {
+            requested
+        };
+        if normalized < 0 || normalized >= rank {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "flip dimension {dim} is out of range for rank {rank}"
+            )));
+        }
+        Ok(PyTensor::from_tensor(
+            self.inner.try_flip(&[normalized as usize])?,
+        ))
     }
 
-    fn unsqueeze(&self, dim: i64) -> PyTensor {
-        PyTensor::from_tensor(self.inner.unsqueeze(dim as usize))
+    fn maximum(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.try_maximum(&other.inner)?,
+        ))
     }
 
-    fn squeeze(&self, dim: Option<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.squeeze(dim.map(|d| d as usize)))
+    fn minimum(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.try_minimum(&other.inner)?,
+        ))
     }
 
-    fn flip(&self, dim: i32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.flip(&[dim as usize]))
+    fn log_softmax(&self, dim: i32) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_log_softmax(dim).map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?))
     }
 
-    fn maximum(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.maximum(&other.inner))
+    fn repeat(&self, repeats: Vec<i64>) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_repeat(&repeats)?))
     }
 
-    fn minimum(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.minimum(&other.inner))
+    fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner.try_where_tensor(&condition.inner, &other.inner)?,
+        ))
     }
 
-    fn log_softmax(&self, dim: i32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.log_softmax(dim))
+    fn __add__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_add(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn repeat(&self, repeats: Vec<i64>) -> PyTensor {
-        PyTensor::from_tensor(self.inner.repeat(&repeats))
+    fn __sub__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_sub(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn where_tensor(&self, condition: &PyTensor, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.where_tensor(&condition.inner, &other.inner))
+    fn __mul__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_mul(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __add__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.add(&other.inner))
+    fn __rmul__(&self, other: f32) -> PyResult<PyTensor> {
+        self.mul_scalar(other)
     }
 
-    fn __sub__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.sub(&other.inner))
+    fn mul_scalar(&self, other: f32) -> PyResult<PyTensor> {
+        let scalar = Tensor::try_full(
+            vec![],
+            other,
+            self.inner.dtype(),
+            self.inner.device(),
+        )?;
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_mul(&scalar)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __mul__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&other.inner))
+    fn __truediv__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_div(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn __rmul__(&self, other: f32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
+    fn __matmul__(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_matmul(&other.inner)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+        ))
     }
 
-    fn mul_scalar(&self, other: f32) -> PyTensor {
-        PyTensor::from_tensor(self.inner.mul(&Tensor::from_scalar(other)))
-    }
-
-    fn __truediv__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.div(&other.inner))
-    }
-
-    fn __matmul__(&self, other: &PyTensor) -> PyTensor {
-        PyTensor::from_tensor(self.inner.matmul(&other.inner))
-    }
-
-    fn __neg__(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.neg())
+    fn __neg__(&self) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(
+            self.inner
+                .try_neg()
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?,
+        ))
     }
 
     fn __repr__(&self) -> String {
@@ -372,7 +454,7 @@ impl PyTensor {
             let start = indices.start as i64;
             let stop = indices.stop as i64;
             let step = indices.step as i64;
-            let sliced = self.inner.slice(0, start, stop, step);
+            let sliced = self.inner.try_slice(0, start, stop, step)?;
             Ok(PyTensor::from_tensor(sliced))
         } else {
             // Assume it's an integer index
@@ -393,29 +475,28 @@ impl PyTensor {
             // For 2D tensor [N, D], t[idx] returns [D] (the row)
             // For 1D tensor [N], t[idx] returns scalar (0-dim)
             // Implementation: slice(0, idx, idx+1, 1).squeeze(0)
-            let sliced = self.inner.slice(0, idx_val as i64, (idx_val + 1) as i64, 1);
-            Ok(PyTensor::from_tensor(sliced.squeeze(Some(0))))
+            let sliced = self
+                .inner
+                .try_slice(0, idx_val as i64, (idx_val + 1) as i64, 1)?;
+            Ok(PyTensor::from_tensor(sliced.try_squeeze(Some(0))?))
         }
     }
 
     /// Basic index assignment: supports t[idx] = value for integer indices
     /// along dimension 0. The value can be a scalar (f32) or a tensor.
     /// GPU tensors are automatically copied to CPU before modification.
-    fn __setitem__(&self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn __setitem__(&mut self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         use pyo3::types::PySlice;
 
         // Ensure the tensor is on CPU
-        let mut inner = {
-            #[cfg(feature = "gpu")]
-            if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "__setitem__ does not support GPU tensors; call .cpu() first",
-                ));
-            }
-            self.inner.clone()
-        };
+        #[cfg(feature = "gpu")]
+        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "__setitem__ does not support GPU tensors; call .cpu() first",
+            ));
+        }
 
-        let shape = inner.shape();
+        let shape = self.inner.shape();
         if shape.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot index into a scalar tensor",
@@ -423,12 +504,14 @@ impl PyTensor {
         }
 
         // Compute row size (number of elements per index)
-        let row_size: usize = shape
-            .iter()
-            .skip(1)
-            .map(|&d| d as usize)
-            .product::<usize>()
-            .max(1);
+        let row_size = shape.iter().skip(1).try_fold(1usize, |count, &dim| {
+            let dim = usize::try_from(dim).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("tensor shape contains a negative dimension")
+            })?;
+            count.checked_mul(dim).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("indexed row size overflow")
+            })
+        })?;
         let dim0 = shape[0] as isize;
 
         let (start, stop, step) = if let Ok(slice) = idx.cast::<PySlice>() {
@@ -453,8 +536,8 @@ impl PyTensor {
         let val_data: Vec<f32> = if let Ok(scalar) = value.extract::<f32>() {
             vec![scalar]
         } else if let Ok(t) = value.extract::<PyTensor>() {
-            let tv = t.inner.to_cpu();
-            tv.to_numpy()
+            let tv = t.inner.try_to_cpu()?;
+            tv.to_numpy().map_err(PyErr::from)?
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
                 "Unsupported value type; expected float or Tensor",
@@ -462,11 +545,7 @@ impl PyTensor {
         };
 
         // Get mutable access to the tensor's data
-        let total_elems: usize = shape.iter().map(|&d| d as usize).product();
-        let data_slice = unsafe {
-            let ptr = inner.data_ptr_f32_mut();
-            std::slice::from_raw_parts_mut(ptr, total_elems)
-        };
+        let data_slice = self.inner.try_as_f32_slice_mut()?;
 
         let mut i = start;
         while (step > 0 && i < stop) || (step < 0 && i > stop) {
@@ -495,16 +574,16 @@ impl PyTensor {
         Ok(())
     }
 
-    fn cpu(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.to_cpu())
+    fn cpu(&self) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_to_cpu()?))
     }
 
     #[cfg(feature = "gpu")]
-    fn to_gpu(&self, device_id: usize) -> PyTensor {
-        PyTensor::from_tensor(self.inner.to_gpu(device_id))
+    fn to_gpu(&self, device_id: usize) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_to_gpu(device_id)?))
     }
 
-    fn contiguous(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.contiguous())
+    fn contiguous(&self) -> PyResult<PyTensor> {
+        Ok(PyTensor::from_tensor(self.inner.try_contiguous()?))
     }
 }

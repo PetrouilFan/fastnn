@@ -28,6 +28,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --check
+      - name: AGENTS.md freshness
+        run: python3 scripts/ci/check-agents-freshness.py
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Rust unit tests
@@ -36,6 +38,29 @@ jobs:
         run: cargo test --test quantized_pipeline
       - name: Optimizer tests
         run: cargo test --test optim_test
+      - name: Full Rust integration tests
+        run: cargo test --tests -- --test-threads=1
+      - name: Release malformed-input subprocess tests
+        run: cargo test --release --test release_error_paths -- --test-threads=1
+
+  feature-profiles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            features: simd,parallel,fusion-forward
+          - name: runtime
+            features: simd,parallel,fusion-forward,prepared-plan,cli
+          - name: gpu
+            features: simd,parallel,fusion-forward,gpu
+    name: feature profile (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --no-default-features --features "${{ matrix.features }}"
 
   python:
     needs: quality
@@ -78,17 +103,7 @@ jobs:
       - name: Install test deps
         run: uv pip install pytest numpy
       - name: Run Python tests
-        shell: bash
-        run: |
-          set +e
-          uv run python -m pytest tests/ -x -q --ignore=tests/test_transformer.py
-          EXIT_CODE=$?
-          set -e
-          if [ $EXIT_CODE -eq 139 ] || [ $EXIT_CODE -eq 134 ] || [ $EXIT_CODE -eq 127 ]; then
-            echo "::warning::Process cleanup crash (exit $EXIT_CODE)"
-            exit 0
-          fi
-          exit $EXIT_CODE
+        run: uv run python -m pytest tests/ -x -q --ignore=tests/test_transformer.py
 
   aarch64:
     needs: quality

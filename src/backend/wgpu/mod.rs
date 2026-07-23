@@ -45,8 +45,9 @@ mod softmax;
 mod transpose;
 
 use crate::backend::cpu::CpuBackend;
-use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction, MemoryPlan};
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
+use crate::backend::{Backend, BackendError, BufferSlice, ExecutablePlan, Instruction};
+use crate::compiler::MemoryPlan;
+use crate::ir::{ComputeGraph, DimExpr, NodeId, ShapeEnv};
 use bytemuck;
 use context::{with_wgpu_context, WgpuContext};
 use std::cell::UnsafeCell;
@@ -135,6 +136,14 @@ impl Backend for WgpuBackend {
         arena: &WgpuBuffer,
         shape_env: &ShapeEnv,
     ) -> Result<(), BackendError> {
+        plan.validate()?;
+        let arena_size = arena.data_mut().len();
+        if arena_size < plan.arena_size {
+            return Err(BackendError::Dispatch(format!(
+                "WGPU arena has {arena_size} bytes but plan requires {}",
+                plan.arena_size
+            )));
+        }
         with_wgpu_context(|ctx| {
             let mut encoder = ctx
                 .device
@@ -157,7 +166,6 @@ impl Backend for WgpuBackend {
                         ..
                     } => {
                         let out_start = output_slice.offset;
-                        let _out_end = output_slice.offset + output_slice.size;
 
                         // Try GPU dispatch first; fall back to CPU if unsupported.
                         if let Err(_err) = try_gpu_dispatch(
@@ -178,31 +186,67 @@ impl Backend for WgpuBackend {
                             // by this instruction to a temporary buffer, run
                             // CPU dispatch, then copy output back.
                             let arena_len = arena.data_mut().len();
-                            let o_end = (out_start + output_slice.size).min(arena_len);
+                            let o_end =
+                                out_start.checked_add(output_slice.size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "WGPU fallback output range overflows".into(),
+                                    )
+                                })?;
 
                             let mut min_offset = out_start;
                             let mut max_end = o_end;
                             for s in input_slices {
-                                let end = (s.offset + s.size).min(arena_len);
+                                let end = s.offset.checked_add(s.size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "WGPU fallback input range overflows".into(),
+                                    )
+                                })?;
                                 min_offset = min_offset.min(s.offset);
                                 max_end = max_end.max(end);
                             }
+                            if let Some(secondary) = secondary_output_slice {
+                                let end = secondary.offset.checked_add(secondary.size).ok_or_else(
+                                    || {
+                                        BackendError::Dispatch(
+                                            "WGPU fallback secondary output range overflows".into(),
+                                        )
+                                    },
+                                )?;
+                                min_offset = min_offset.min(secondary.offset);
+                                max_end = max_end.max(end);
+                            }
+                            if max_end > arena_len {
+                                return Err(BackendError::Dispatch(format!(
+                                    "WGPU fallback range {min_offset}..{max_end} exceeds arena size {arena_len}"
+                                )));
+                            }
 
                             let range_len = max_end - min_offset;
-                            let mut tmp = vec![0u8; range_len];
+                            let mut tmp = Vec::new();
+                            tmp.try_reserve_exact(range_len).map_err(|error| {
+                                BackendError::Dispatch(format!(
+                                    "WGPU fallback arena allocation failed: {error}"
+                                ))
+                            })?;
+                            tmp.resize(range_len, 0);
                             tmp.copy_from_slice(&arena.data_mut()[min_offset..max_end]);
 
                             let cpu_buf = crate::backend::cpu::CpuBuffer::new(tmp);
                             let cpu = CpuBackend;
 
                             // Adjust offsets into the temp buffer range.
-                            let adjusted_inputs: Vec<BufferSlice> = input_slices
-                                .iter()
-                                .map(|s| BufferSlice {
-                                    offset: s.offset - min_offset,
-                                    size: s.size,
-                                })
-                                .collect();
+                            let mut adjusted_inputs = Vec::new();
+                            adjusted_inputs
+                                .try_reserve_exact(input_slices.len())
+                                .map_err(|error| {
+                                    BackendError::Dispatch(format!(
+                                        "WGPU fallback input metadata allocation failed: {error}"
+                                    ))
+                                })?;
+                            adjusted_inputs.extend(input_slices.iter().map(|s| BufferSlice {
+                                offset: s.offset - min_offset,
+                                size: s.size,
+                            }));
                             let adjusted_output = BufferSlice {
                                 offset: output_slice.offset - min_offset,
                                 size: output_slice.size,
@@ -222,7 +266,7 @@ impl Backend for WgpuBackend {
                                     params: params.clone(),
                                     param_dims: param_dims.clone(),
                                     weight_meta: weight_meta.clone(),
-                                    node_id: node_id.clone(),
+                                    node_id: *node_id,
                                 }],
                                 arena_size: range_len,
                                 levels: vec![0],
@@ -236,14 +280,28 @@ impl Backend for WgpuBackend {
                             let adj_out_end = o_end - min_offset;
                             wgpu_data[out_start..o_end]
                                 .copy_from_slice(&cpu_data[adj_out_start..adj_out_end]);
+                            if let Some(secondary) = secondary_output_slice {
+                                let secondary_end = secondary
+                                    .offset
+                                    .checked_add(secondary.size)
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "WGPU fallback secondary output range overflows".into(),
+                                        )
+                                    })?;
+                                let adjusted_start = secondary.offset - min_offset;
+                                let adjusted_end = secondary_end - min_offset;
+                                wgpu_data[secondary.offset..secondary_end]
+                                    .copy_from_slice(&cpu_data[adjusted_start..adjusted_end]);
+                            }
                         }
                     }
                     Instruction::MemCopy { dst, src } => {
                         let data = arena.data_mut();
-                        let len = dst.size.min(src.size);
-                        let src_start = src.offset;
-                        let dst_start = dst.offset;
-                        data.copy_within(src_start..src_start + len, dst_start);
+                        let src_end = src.offset.checked_add(src.size).ok_or_else(|| {
+                            BackendError::Dispatch("memcopy source range overflows".into())
+                        })?;
+                        data.copy_within(src.offset..src_end, dst.offset);
                     }
                     Instruction::Fill { dst, value } => {
                         let data = arena.data_mut();
@@ -254,8 +312,10 @@ impl Backend for WgpuBackend {
                     }
                     Instruction::WriteConst { dst, data } => {
                         let arena_data = arena.data_mut();
-                        let end = (dst.offset + data.len()).min(arena_data.len());
-                        arena_data[dst.offset..end].copy_from_slice(&data[..end - dst.offset]);
+                        let end = dst.offset.checked_add(data.len()).ok_or_else(|| {
+                            BackendError::Dispatch("constant destination range overflows".into())
+                        })?;
+                        arena_data[dst.offset..end].copy_from_slice(data);
                     }
                 }
             }
@@ -286,15 +346,50 @@ impl Backend for WgpuBackend {
     }
 
     fn write_arena(&self, arena: &WgpuBuffer, offset: usize, data: &[u8]) {
+        let _ = self.try_write_arena(arena, offset, data);
+    }
+
+    fn try_write_arena(
+        &self,
+        arena: &WgpuBuffer,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), BackendError> {
+        let end = offset
+            .checked_add(data.len())
+            .ok_or_else(|| BackendError::Dispatch("WGPU arena write range overflows".into()))?;
         let buf = arena.data_mut();
-        let end = (offset + data.len()).min(buf.len());
-        buf[offset..end].copy_from_slice(&data[..end - offset]);
+        let capacity = buf.len();
+        let destination = buf.get_mut(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU arena write range {offset}..{end} exceeds {capacity} bytes"
+            ))
+        })?;
+        destination.copy_from_slice(data);
+        Ok(())
     }
 
     fn read_arena(&self, arena: &WgpuBuffer, offset: usize, size: usize) -> Vec<u8> {
+        self.try_read_arena(arena, offset, size).unwrap_or_default()
+    }
+
+    fn try_read_arena(
+        &self,
+        arena: &WgpuBuffer,
+        offset: usize,
+        size: usize,
+    ) -> Result<Vec<u8>, BackendError> {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| BackendError::Dispatch("WGPU arena read range overflows".into()))?;
         let buf = arena.data_mut();
-        let end = (offset + size).min(buf.len());
-        buf[offset..end].to_vec()
+        let source = buf.get(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU arena read range {offset}..{end} exceeds {} bytes",
+                buf.len()
+            ))
+        })?;
+        Ok(source.to_vec())
     }
 }
 
@@ -322,36 +417,75 @@ fn try_gpu_dispatch(
     let out_start = output_slice.offset;
 
     // Resolve symbolic params if present.
-    let resolved_params = if let Some(dims) = param_dims {
-        let n = params.len().min(dims.len());
-        let mut p = params.to_vec();
-        for i in 0..n {
-            if let Ok(v) = dims[i].evaluate_with_env(shape_env) {
-                p[i] = v as usize;
-            }
+    let mut resolved_params = Vec::new();
+    resolved_params
+        .try_reserve_exact(params.len())
+        .map_err(|error| {
+            BackendError::Dispatch(format!(
+                "WGPU parameter allocation failed for {kernel_name}: {error}"
+            ))
+        })?;
+    resolved_params.extend_from_slice(params);
+    if let Some(dims) = param_dims {
+        if dims.len() > resolved_params.len() {
+            return Err(BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} has {} dynamic parameters but only {} parameter slots",
+                dims.len(),
+                resolved_params.len()
+            )));
         }
-        p
-    } else {
-        params.to_vec()
-    };
-
-    // Read input data from arena.
-    let read_input = |idx: usize| -> Vec<f32> {
-        if idx < input_slices.len() {
-            let s = &input_slices[idx];
-            let d = arena.data_mut();
-            bytemuck::cast_slice::<_, f32>(&d[s.offset..s.offset + s.size]).to_vec()
-        } else {
-            Vec::new()
+        for (index, dim) in dims.iter().enumerate() {
+            let value = dim.evaluate_with_env(shape_env).map_err(|error| {
+                BackendError::Dispatch(format!(
+                    "WGPU kernel {kernel_name} dynamic parameter {index} failed: {error}"
+                ))
+            })?;
+            resolved_params[index] = usize::try_from(value).map_err(|_| {
+                BackendError::Dispatch(format!(
+                    "WGPU kernel {kernel_name} dynamic parameter {index} does not fit usize"
+                ))
+            })?;
         }
-    };
+    }
 
-    let input0 = read_input(0);
-    let input1 = read_input(1);
-    let _input2 = read_input(2);
-    let numel = input0.len();
+    let read_f32_input = |index: usize| -> Result<Vec<f32>, BackendError> {
+        let slice = input_slices.get(index).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} is missing input {index}"
+            ))
+        })?;
+        if !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
+            || !slice.size.is_multiple_of(std::mem::size_of::<f32>())
+        {
+            return Err(BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} input {index} is not complete aligned f32 storage"
+            )));
+        }
+        let end = slice.offset.checked_add(slice.size).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} input {index} range overflows"
+            ))
+        })?;
+        let data = arena.data_mut();
+        let source = bytemuck::cast_slice::<_, f32>(&data[slice.offset..end]);
+        let mut values = Vec::new();
+        values.try_reserve_exact(source.len()).map_err(|error| {
+            BackendError::Dispatch(format!(
+                "WGPU kernel {kernel_name} input {index} allocation failed: {error}"
+            ))
+        })?;
+        values.extend_from_slice(source);
+        Ok(values)
+    };
 
     if let Some(opcode) = elementwise::elementwise_opcode(kernel_name) {
+        let input0 = read_f32_input(0)?;
+        let input1 = if input_slices.len() > 1 {
+            read_f32_input(1)?
+        } else {
+            Vec::new()
+        };
+        let numel = input0.len();
         let extra0 = if kernel_name == "leaky_relu_f32" {
             params
                 .first()
@@ -386,6 +520,8 @@ fn try_gpu_dispatch(
 
     match kernel_name {
         "softmax" => {
+            let input0 = read_f32_input(0)?;
+            let numel = input0.len();
             let axis_dim = params.first().copied().unwrap_or(1);
             softmax::dispatch_softmax_gpu(
                 ctx,
@@ -398,6 +534,7 @@ fn try_gpu_dispatch(
             )
         }
         "reduce_f32" => {
+            let input0 = read_f32_input(0)?;
             let group_size = resolved_params.first().copied().unwrap_or(1);
             let is_mean = params.get(1).copied().unwrap_or(0);
             reduce::dispatch_reduce_gpu(
@@ -493,6 +630,7 @@ fn try_gpu_dispatch(
             true,
         ),
         "transpose_f32" => {
+            let input0 = read_f32_input(0)?;
             let m = resolved_params.first().copied().unwrap_or(1);
             let n = resolved_params.get(1).copied().unwrap_or(1);
             transpose::dispatch_transpose_gpu(ctx, encoder, pending_reads, &input0, m, n, out_start)
@@ -558,7 +696,7 @@ fn try_gpu_dispatch(
                 .unwrap_or_default();
             let zero_points = weight_meta
                 .as_ref()
-                .map(|m| m.zero_points.clone())
+                .map(|m| m.dequant_offsets.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_matmul_gpu(
                 ctx,
@@ -588,7 +726,7 @@ fn try_gpu_dispatch(
                 .unwrap_or_default();
             let zero_points = weight_meta
                 .as_ref()
-                .map(|m| m.zero_points.clone())
+                .map(|m| m.dequant_offsets.clone())
                 .unwrap_or_default();
             quantized::dispatch_quantized_conv_gpu(
                 ctx,
@@ -611,7 +749,7 @@ fn try_gpu_dispatch(
                     encoder,
                     pending_reads,
                     arena,
-                    input_slice,
+                    *input_slice,
                     output_slice,
                     numel,
                 )
@@ -629,7 +767,7 @@ fn try_gpu_dispatch(
                     encoder,
                     pending_reads,
                     arena,
-                    input_slice,
+                    *input_slice,
                     output_slice,
                     numel,
                 )

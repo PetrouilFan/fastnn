@@ -9,7 +9,7 @@
 //!
 //! This reduces quantization error and eliminates two kernel dispatches per chain.
 
-use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::ir::{ComputeGraph, NodeId, Opcode};
 use crate::FastnnError;
 use std::collections::HashSet;
 
@@ -120,7 +120,7 @@ pub fn prune_qdq_pairs(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::{DimExpr, IrDType, TensorType};
+    use crate::ir::{DimExpr, IrDType, TensorType};
 
     /// Build a graph with a prunable DQ→Q chain:
     /// `Input(0) → Relu(1) → Q(MatMul_A_act) → MatMul_A(3) → DQ(6)

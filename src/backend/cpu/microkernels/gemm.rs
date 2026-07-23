@@ -4,7 +4,9 @@
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use crate::dtypes::F16x2;
-use crate::dtypes::{F32x1, F4x8, F8x4, F8x4R, I4x8, I8x4, PackedWord};
+use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
+#[cfg(feature = "simd")]
+use crate::dtypes::{F4x8, F8x4, F8x4R};
 use crate::packed_tensor::PackedTensor;
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -1619,8 +1621,33 @@ pub fn gemm_cpu_flat<T: PackedWord>(
 }
 
 // ============================================================
-// I8 × I8x4 quantized GEMM  (scalar, no SIMD)
+// I8 × I8x4 quantized GEMM
 // ============================================================
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline]
+unsafe fn hsum256_epi32(value: __m256i) -> i32 {
+    let mut lanes = [0i32; 8];
+    // SAFETY: `lanes` has exactly 32 writable bytes and storeu permits any alignment.
+    unsafe { _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, value) };
+    lanes.into_iter().sum()
+}
+
+#[inline]
+fn apply_integer_affine_dot(
+    q_dot: i32,
+    q_weight_sum: i32,
+    q_activation_sum: i32,
+    k: usize,
+    weight_scale: f32,
+    weight_offset: f32,
+    activation: I8ActivationAffine,
+) -> f32 {
+    weight_scale * activation.scale * q_dot as f32
+        + weight_scale * activation.zero * q_weight_sum as f32
+        + weight_offset * activation.scale * q_activation_sum as f32
+        + k as f32 * weight_offset * activation.zero
+}
 
 /// Flat-buffer I8 × I8x4 quantized GEMM.
 ///
@@ -1660,27 +1687,37 @@ pub fn gemm_cpu_flat_i8_i8x4(
 
     let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
 
-    // Non-zero activation zero-point requires lane-by-lane dequantization.
+    // Affine offsets are corrected after collecting integer sufficient statistics.
     if activation_affine.zero != 0.0 {
         let k_packed = k.div_ceil(I8x4::ITEMS);
-        // M-outer loop: activation data for each pixel is reused across all output channels
         for bi in 0..m {
             let act_base = bi * k;
+            let q_activation_sum: i32 = act_i8[act_base..act_base + k]
+                .iter()
+                .map(|value| *value as i8 as i32)
+                .sum();
             for row in 0..oc {
                 let scale_w = weights.scale_for_row(row);
                 let zero_w = weights.zero_for_row(row);
                 let row_offset = row * k_packed;
-                let mut acc_f32 = 0.0f32;
-                let mut activation_sum = 0.0f32;
+                let mut q_dot = 0i32;
+                let mut q_weight_sum = 0i32;
                 for kk in 0..k {
-                    let a = activation_affine.dequantize(act_i8[act_base + kk] as i8);
-                    let word = weights.as_packed()[row_offset + kk / 4].0;
-                    let bytes = word.to_le_bytes();
-                    let q_w = bytes[kk % 4] as i8 as f32;
-                    acc_f32 += a * q_w;
-                    activation_sum += a;
+                    let word = weights.as_packed()[row_offset + kk / I8x4::ITEMS].0;
+                    let q_w = word.to_le_bytes()[kk % I8x4::ITEMS] as i8 as i32;
+                    let q_a = act_i8[act_base + kk] as i8 as i32;
+                    q_dot += q_w * q_a;
+                    q_weight_sum += q_w;
                 }
-                outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
+                outputs[bi * n + row] = apply_integer_affine_dot(
+                    q_dot,
+                    q_weight_sum,
+                    q_activation_sum,
+                    k,
+                    scale_w,
+                    zero_w,
+                    activation_affine,
+                );
             }
         }
         return;
@@ -1702,15 +1739,15 @@ pub fn gemm_cpu_flat_i8_i8x4(
                     let scale_w = weights.scale_for_row(row);
                     let zero_w = weights.zero_for_row(row);
                     let row_offset = row * k_packed;
-                    let mut acc = _mm256_setzero_ps();
-                    let mut act_sum_vec = _mm256_setzero_ps();
+                    let mut acc = _mm256_setzero_si256();
+                    let mut act_sum_vec = _mm256_setzero_si256();
                     let mut p = 0usize;
 
                     while p + 1 < k_packed && p * 4 + 8 <= k {
                         let w0 = weights.as_packed()[row_offset + p].0;
                         let w1 = weights.as_packed()[row_offset + p + 1].0;
                         let word_pair = _mm_set_epi32(0, 0, w1 as i32, w0 as i32);
-                        let qw_f32 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(word_pair));
+                        let qw_i32 = _mm256_cvtepi8_epi32(word_pair);
 
                         let act_ptr = act_i8.as_ptr().add(act_base + p * 4);
                         let act_128 = _mm_loadl_epi64(act_ptr as *const __m128i);
@@ -1718,15 +1755,14 @@ pub fn gemm_cpu_flat_i8_i8x4(
                         let act_hi4 = _mm256_cvtepi8_epi32(_mm_bsrli_si128(act_128, 4));
                         let act_i32 =
                             _mm256_insertf128_si256(act_lo4, _mm256_castsi256_si128(act_hi4), 1);
-                        let act_f32 = _mm256_cvtepi32_ps(act_i32);
 
-                        acc = _mm256_fmadd_ps(qw_f32, act_f32, acc);
-                        act_sum_vec = _mm256_add_ps(act_sum_vec, act_f32);
+                        acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(qw_i32, act_i32));
+                        act_sum_vec = _mm256_add_epi32(act_sum_vec, act_i32);
                         p += 2;
                     }
 
-                    let mut acc_tail = 0.0f32;
-                    let mut act_sum_tail = 0.0f32;
+                    let mut acc_tail = 0i32;
+                    let mut act_sum_tail = 0i32;
                     while p < k_packed {
                         let word = weights.as_packed()[row_offset + p].0;
                         let bytes = word.to_le_bytes();
@@ -1735,18 +1771,18 @@ pub fn gemm_cpu_flat_i8_i8x4(
                             if idx < k {
                                 let q_w = bytes[lane] as i8 as i32;
                                 let q_a = act_i8[act_base + idx] as i8 as i32;
-                                acc_tail += q_w as f32 * q_a as f32;
-                                act_sum_tail += q_a as f32;
+                                acc_tail += q_w * q_a;
+                                act_sum_tail += q_a;
                             }
                         }
                         p += 1;
                     }
 
-                    let raw_acc = hsum256_ps(acc) + acc_tail;
-                    let raw_q_sum = hsum256_ps(act_sum_vec) + act_sum_tail;
-                    let dot = raw_acc * activation_affine.scale;
-                    let input_sum =
-                        raw_q_sum * activation_affine.scale + (k as f32) * activation_affine.zero;
+                    let raw_acc = hsum256_epi32(acc) + acc_tail;
+                    let raw_q_sum = hsum256_epi32(act_sum_vec) + act_sum_tail;
+                    let dot = raw_acc as f32 * activation_affine.scale;
+                    let input_sum = raw_q_sum as f32 * activation_affine.scale
+                        + (k as f32) * activation_affine.zero;
                     outputs[bi * n + row] = apply_affine_dot(dot, scale_w, zero_w, input_sum);
                 }
             }
@@ -1792,6 +1828,217 @@ pub fn gemm_cpu_flat_i8_i8x4(
 /// Semantics mirror `gemm_cpu_flat_i8_i8x4`, but each packed weight word stores
 /// eight signed 4-bit qW lanes (`[-8, 7]`) before the affine `qW * scale_w + zero_w`
 /// dequantization is applied.
+fn gemm_cpu_flat_i8_i4x8_scalar_impl(
+    weights: &PackedTensor<I4x8>,
+    activation_affine: I8ActivationAffine,
+    act_i8: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    if weights.blocks_per_row() > 0 && !weights.quantized_group_sums().is_empty() {
+        gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
+            weights,
+            activation_affine,
+            act_i8,
+            outputs,
+            m,
+            k,
+            n,
+        );
+        return;
+    }
+    let k_packed = k.div_ceil(I4x8::ITEMS);
+    for bi in 0..m {
+        let act_base = bi * k;
+        let q_activation_sum: i32 = act_i8[act_base..act_base + k]
+            .iter()
+            .map(|value| *value as i8 as i32)
+            .sum();
+        for row in 0..n {
+            let row_offset = row * k_packed;
+            let mut q_dot = 0i32;
+            let mut q_weight_sum = 0i32;
+            for p in 0..k_packed {
+                let word = weights.as_packed()[row_offset + p].0;
+                for lane in 0..I4x8::ITEMS {
+                    let idx = p * I4x8::ITEMS + lane;
+                    if idx < k {
+                        let nibble = (word >> (lane * 4)) & 0xF;
+                        let q_w = if nibble & 0x8 != 0 {
+                            (nibble | 0xFFFFFFF0) as i32
+                        } else {
+                            nibble as i32
+                        };
+                        let q_a = act_i8[act_base + idx] as i8 as i32;
+                        q_dot += q_w * q_a;
+                        q_weight_sum += q_w;
+                    }
+                }
+            }
+            outputs[bi * n + row] = apply_integer_affine_dot(
+                q_dot,
+                q_weight_sum,
+                q_activation_sum,
+                k,
+                weights.scale_for_row(row),
+                weights.zero_for_row(row),
+                activation_affine,
+            );
+        }
+    }
+}
+
+fn gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
+    weights: &PackedTensor<I4x8>,
+    activation_affine: I8ActivationAffine,
+    act_i8: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let group_size = weights.quant_block_size;
+    let groups = weights.blocks_per_row();
+    let k_packed = k.div_ceil(I4x8::ITEMS);
+    debug_assert!(group_size > 0);
+
+    let mut activation_sums = vec![0i32; groups];
+    for batch in 0..m {
+        let activation_base = batch * k;
+        for (group, sum) in activation_sums.iter_mut().enumerate() {
+            let start = group * group_size;
+            let end = (start + group_size).min(k);
+            *sum = act_i8[activation_base + start..activation_base + end]
+                .iter()
+                .map(|value| *value as i8 as i32)
+                .sum();
+        }
+
+        for row in 0..n {
+            let row_offset = row * k_packed;
+            let mut output = 0.0f32;
+            for (group, &q_activation_sum) in activation_sums.iter().enumerate() {
+                let start = group * group_size;
+                let end = (start + group_size).min(k);
+                let mut q_dot = 0i32;
+                for index in start..end {
+                    let word = weights.as_packed()[row_offset + index / I4x8::ITEMS].0;
+                    let nibble = (word >> ((index % I4x8::ITEMS) * 4)) & 0x0f;
+                    let q_weight = if nibble & 0x08 != 0 {
+                        (nibble | 0xfffffff0) as i32
+                    } else {
+                        nibble as i32
+                    };
+                    let q_activation = act_i8[activation_base + index] as i8 as i32;
+                    q_dot += q_weight * q_activation;
+                }
+                output += apply_integer_affine_dot(
+                    q_dot,
+                    weights.quantized_group_sum(row, group),
+                    q_activation_sum,
+                    end - start,
+                    weights.scale_for_elem(row, start),
+                    weights.zero_for_elem(row, start),
+                    activation_affine,
+                );
+            }
+            outputs[batch * n + row] = output;
+        }
+    }
+}
+
+/// Reusable per-token symmetric I8 activation storage.
+#[derive(Default)]
+pub struct PerTokenI8Activations {
+    scales: Vec<f32>,
+    data: Vec<u8>,
+}
+
+impl PerTokenI8Activations {
+    pub fn scales(&self) -> &[f32] {
+        &self.scales
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Quantize each `[K]` token row independently with a symmetric signed-I8 map.
+/// Existing allocations are reused across calls.
+pub fn quantize_i8_per_token_symmetric(
+    input: &[f32],
+    m: usize,
+    k: usize,
+    output: &mut PerTokenI8Activations,
+) {
+    assert_eq!(input.len(), m * k);
+    output.scales.clear();
+    output.scales.reserve(m);
+    output.data.clear();
+    output.data.reserve(m * k);
+
+    for row in input.chunks_exact(k) {
+        let max_abs = row
+            .iter()
+            .fold(0.0f32, |maximum, value| maximum.max(value.abs()));
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        output.scales.push(scale);
+        output.data.extend(row.iter().map(|value| {
+            (value / scale)
+                .round()
+                .clamp(i8::MIN as f32, i8::MAX as f32) as i8 as u8
+        }));
+    }
+}
+
+/// Grouped W4A8 scalar reference with one symmetric I8 scale per token row.
+pub fn gemm_cpu_flat_i8_i4x8_grouped_per_token(
+    weights: &PackedTensor<I4x8>,
+    activations: &PerTokenI8Activations,
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    assert_eq!(weights.shape(), [n, k]);
+    assert!(weights.blocks_per_row() > 0, "grouped W4 weights required");
+    assert_eq!(activations.scales.len(), m);
+    assert_eq!(activations.data.len(), m * k);
+    assert_eq!(outputs.len(), m * n);
+
+    for row in 0..m {
+        gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
+            weights,
+            I8ActivationAffine {
+                scale: activations.scales[row],
+                zero: 0.0,
+            },
+            &activations.data[row * k..(row + 1) * k],
+            &mut outputs[row * n..(row + 1) * n],
+            1,
+            k,
+            n,
+        );
+    }
+}
+
+/// Portable scalar reference for parity testing and controlled benchmarks.
+pub fn gemm_cpu_flat_i8_i4x8_scalar(
+    weights: &PackedTensor<I4x8>,
+    activation_payload: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    assert_eq!(weights.shape(), [n, k]);
+    let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
+    gemm_cpu_flat_i8_i4x8_scalar_impl(weights, activation_affine, act_i8, outputs, m, k, n);
+}
+
 #[inline(always)]
 pub fn gemm_cpu_flat_i8_i4x8(
     weights: &PackedTensor<I4x8>,
@@ -1814,43 +2061,21 @@ pub fn gemm_cpu_flat_i8_i4x8(
     );
 
     let (activation_affine, act_i8) = parse_i8_activation_payload(activation_payload);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let k_packed = k.div_ceil(I4x8::ITEMS);
 
     if activation_affine.zero != 0.0 {
-        // M-outer loop: activation data reused across all output channels
-        for bi in 0..m {
-            let act_base = bi * k;
-            for row in 0..oc {
-                let scale_w = weights.scale_for_row(row);
-                let zero_w = weights.zero_for_row(row);
-                let row_offset = row * k_packed;
-                let mut acc_f32 = 0.0f32;
-                let mut activation_sum = 0.0f32;
-                for p in 0..k_packed {
-                    let word = weights.as_packed()[row_offset + p].0;
-                    for lane in 0..I4x8::ITEMS {
-                        let idx = p * I4x8::ITEMS + lane;
-                        if idx < k {
-                            let nibble = (word >> (lane * 4)) & 0xF;
-                            let signed = if nibble & 0x8 != 0 {
-                                (nibble | 0xFFFFFFF0) as i32
-                            } else {
-                                nibble as i32
-                            };
-                            let a = activation_affine.dequantize(act_i8[act_base + idx] as i8);
-                            acc_f32 += signed as f32 * a;
-                            activation_sum += a;
-                        }
-                    }
-                }
-                outputs[bi * n + row] = apply_affine_dot(acc_f32, scale_w, zero_w, activation_sum);
-            }
-        }
+        gemm_cpu_flat_i8_i4x8_scalar_impl(weights, activation_affine, act_i8, outputs, m, k, n);
         return;
     }
 
+    // The current AVX2 nibble-expansion kernel is retained for iteration but is
+    // not selected: controlled Criterion runs show the scalar loop is about 7x
+    // faster at both decode and prefill shapes on Zen 2.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if crate::backend::cpu::microkernels::has_avx2() {
+    let use_avx2 = false;
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if use_avx2 && crate::backend::cpu::microkernels::has_avx2() {
         // SAFETY: AVX2 feature check passed; all slices are valid and correctly
         // sized, and the I4x8 nibble extraction follows the packed layout.
         unsafe {
@@ -1860,9 +2085,9 @@ pub fn gemm_cpu_flat_i8_i4x8(
                     let scale_w = weights.scale_for_row(row);
                     let zero_w = weights.zero_for_row(row);
                     let row_offset = row * k_packed;
-                    let mut acc0 = _mm256_setzero_ps();
-                    let mut acc1 = _mm256_setzero_ps();
-                    let mut act_sum_vec = _mm256_setzero_ps();
+                    let mut acc0 = _mm256_setzero_si256();
+                    let mut acc1 = _mm256_setzero_si256();
+                    let mut act_sum_vec = _mm256_setzero_si256();
                     let mut p = 0usize;
                     let mask_lo = _mm256_set1_epi32(0xF);
                     let sign_ext = _mm256_set1_epi32(8);
@@ -1879,8 +2104,6 @@ pub fn gemm_cpu_flat_i8_i4x8(
                             _mm256_sub_epi32(_mm256_xor_si256(nib_lo0, sign_ext), sign_ext);
                         let signed_lo1 =
                             _mm256_sub_epi32(_mm256_xor_si256(nib_lo1, sign_ext), sign_ext);
-                        let fl0 = _mm256_cvtepi32_ps(signed_lo0);
-                        let fl1 = _mm256_cvtepi32_ps(signed_lo1);
 
                         let act_ptr = act_i8.as_ptr().add(act_base + p * 8);
                         let act0_128 = _mm_loadl_epi64(act_ptr as *const __m128i);
@@ -1888,26 +2111,24 @@ pub fn gemm_cpu_flat_i8_i4x8(
                         let act0_hi4 = _mm256_cvtepi8_epi32(_mm_bsrli_si128(act0_128, 4));
                         let act_i32_0 =
                             _mm256_insertf128_si256(act0_lo4, _mm256_castsi256_si128(act0_hi4), 1);
-                        let al0 = _mm256_cvtepi32_ps(act_i32_0);
 
                         let act1_128 = _mm_loadl_epi64(act_ptr.add(8) as *const __m128i);
                         let act1_lo4 = _mm256_cvtepi8_epi32(act1_128);
                         let act1_hi4 = _mm256_cvtepi8_epi32(_mm_bsrli_si128(act1_128, 4));
                         let act_i32_1 =
                             _mm256_insertf128_si256(act1_lo4, _mm256_castsi256_si128(act1_hi4), 1);
-                        let al1 = _mm256_cvtepi32_ps(act_i32_1);
 
-                        acc0 = _mm256_fmadd_ps(fl0, al0, acc0);
-                        acc1 = _mm256_fmadd_ps(fl1, al1, acc1);
+                        acc0 = _mm256_add_epi32(acc0, _mm256_mullo_epi32(signed_lo0, act_i32_0));
+                        acc1 = _mm256_add_epi32(acc1, _mm256_mullo_epi32(signed_lo1, act_i32_1));
 
-                        act_sum_vec = _mm256_add_ps(act_sum_vec, al0);
-                        act_sum_vec = _mm256_add_ps(act_sum_vec, al1);
+                        act_sum_vec = _mm256_add_epi32(act_sum_vec, act_i32_0);
+                        act_sum_vec = _mm256_add_epi32(act_sum_vec, act_i32_1);
 
                         p += 2;
                     }
 
-                    let mut acc_tail = 0.0f32;
-                    let mut act_sum_tail = 0.0f32;
+                    let mut acc_tail = 0i32;
+                    let mut act_sum_tail = 0i32;
                     while p < k_packed {
                         let word = weights.as_packed()[row_offset + p].0;
                         for lane in 0..I4x8::ITEMS {
@@ -1920,18 +2141,18 @@ pub fn gemm_cpu_flat_i8_i4x8(
                                     nibble as i32
                                 };
                                 let q_a = act_i8[act_base + idx] as i8 as i32;
-                                acc_tail += signed as f32 * (q_a as f32);
-                                act_sum_tail += q_a as f32;
+                                acc_tail += signed * q_a;
+                                act_sum_tail += q_a;
                             }
                         }
                         p += 1;
                     }
 
-                    let raw_acc = hsum256_ps(_mm256_add_ps(acc0, acc1)) + acc_tail;
-                    let raw_q_sum = hsum256_ps(act_sum_vec) + act_sum_tail;
-                    let dot = raw_acc * activation_affine.scale;
-                    let input_sum =
-                        raw_q_sum * activation_affine.scale + (k as f32) * activation_affine.zero;
+                    let raw_acc = hsum256_epi32(_mm256_add_epi32(acc0, acc1)) + acc_tail;
+                    let raw_q_sum = hsum256_epi32(act_sum_vec) + act_sum_tail;
+                    let dot = raw_acc as f32 * activation_affine.scale;
+                    let input_sum = raw_q_sum as f32 * activation_affine.scale
+                        + (k as f32) * activation_affine.zero;
                     outputs[bi * n + row] = apply_affine_dot(dot, scale_w, zero_w, input_sum);
                 }
             }
@@ -1939,39 +2160,7 @@ pub fn gemm_cpu_flat_i8_i4x8(
         return;
     }
 
-    for bi in 0..m {
-        let act_base = bi * k;
-        for row in 0..oc {
-            let scale_w = weights.scale_for_row(row);
-            let zero_w = weights.zero_for_row(row);
-            let row_offset = row * k_packed;
-            let mut acc = 0.0f32;
-            let mut q_activation_sum: i32 = 0;
-            for p in 0..k_packed {
-                let word = weights.as_packed()[row_offset + p].0;
-                for lane in 0..I4x8::ITEMS {
-                    let idx = p * I4x8::ITEMS + lane;
-                    if idx < k {
-                        let nibble = (word >> (lane * 4)) & 0xF;
-                        let signed = if nibble & 0x8 != 0 {
-                            (nibble | 0xFFFFFFF0) as i32
-                        } else {
-                            nibble as i32
-                        };
-                        let q_a = act_i8[act_base + idx] as i8 as i32;
-                        acc += signed as f32 * (q_a as f32);
-                        q_activation_sum += q_a;
-                    }
-                }
-            }
-            outputs[bi * n + row] = apply_affine_dot(
-                acc * activation_affine.scale,
-                scale_w,
-                zero_w,
-                activation_affine.sum_from_q_sum(q_activation_sum, k),
-            );
-        }
-    }
+    gemm_cpu_flat_i8_i4x8_scalar_impl(weights, activation_affine, act_i8, outputs, m, k, n);
 }
 
 // ============================================================
@@ -1983,10 +2172,12 @@ pub fn gemm_batch_packed_simd<T: PackedWord>(
     weights: &PackedTensor<T>,
     activation: &[f32],
     output: &mut [f32],
-    _n: usize,
+    n: usize,
     k: usize,
     m: usize,
 ) {
+    debug_assert_eq!(activation.len(), n.saturating_mul(k));
+    debug_assert_eq!(output.len(), n.saturating_mul(m));
     let k_packed = k.div_ceil(T::ITEMS);
 
     for o in output.iter_mut() {

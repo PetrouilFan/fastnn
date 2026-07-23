@@ -100,12 +100,16 @@ macro_rules! unary_op {
     };
 }
 
-/// Macro for binary operations: fn op(a, b) -> PyTensor
+/// Macro for recoverable binary operations.
 macro_rules! binary_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
-        fn $name(a: &PyTensor, b: &PyTensor) -> PyTensor {
-            PyTensor::from_tensor(a.inner.$method(&b.inner))
+        fn $name(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+            Ok(PyTensor::from_tensor(
+                a.inner
+                    .$method(&b.inner)
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+            ))
         }
     };
 }
@@ -115,52 +119,96 @@ macro_rules! arg_op {
     ($name:ident, $method:ident) => {
         #[pyfunction]
         #[pyo3(signature = (a, dim = None))]
-        fn $name(a: &PyTensor, dim: Option<i32>) -> PyTensor {
-            let dim = dim.unwrap_or(0) as usize;
-            PyTensor::from_tensor(a.inner.$method(Some(dim)))
+        fn $name(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
+            let rank = a.inner.ndim() as i64;
+            let requested = i64::from(dim.unwrap_or(0));
+            let normalized = if requested < 0 {
+                rank + requested
+            } else {
+                requested
+            };
+            if normalized < 0 || normalized >= rank {
+                return Err(crate::error::FastnnError::shape(format!(
+                    "{} dimension {requested} is out of range for {rank} dimensions",
+                    stringify!($name)
+                ))
+                .into());
+            }
+            Ok(PyTensor::from_tensor(
+                a.inner.try_argmax(Some(normalized as usize))?,
+            ))
         }
     };
 }
 
 #[pyfunction]
-fn full_like(tensor: &PyTensor, value: f32) -> PyTensor {
-    PyTensor::from_tensor(Tensor::full(
+fn full_like(tensor: &PyTensor, value: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(Tensor::try_full(
         tensor.inner.shape(),
         value,
         tensor.inner.dtype(),
         tensor.inner.device(),
-    ))
+    )?))
 }
 
 // Binary operations using macro
-binary_op!(add, add);
-binary_op!(sub, sub);
-binary_op!(mul, mul);
-binary_op!(div, div);
+binary_op!(add, try_add);
+binary_op!(sub, try_sub);
+binary_op!(mul, try_mul);
+binary_op!(div, try_div);
 
 #[pyfunction]
-fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.add(&b.inner).relu())
+fn fused_add_relu(a: &PyTensor, b: &PyTensor) -> PyResult<PyTensor> {
+    let added = a
+        .inner
+        .try_add(&b.inner)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let output = added
+        .try_relu()
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[pyfunction]
-fn fused_linear_relu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let out = x.inner.matmul(&w.inner);
-    let out = match bias {
-        Some(b) => out.add(&b.inner),
-        None => out,
-    };
-    PyTensor::from_tensor(out.relu())
+fn fused_linear_relu(
+    x: &PyTensor,
+    w: &PyTensor,
+    bias: Option<&PyTensor>,
+) -> PyResult<PyTensor> {
+    let mut output = x
+        .inner
+        .try_matmul(&w.inner)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    if let Some(bias) = bias {
+        output = output
+            .try_add(&bias.inner)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    }
+    output = output
+        .try_relu()
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[pyfunction]
-fn fused_linear_gelu(x: &PyTensor, w: &PyTensor, bias: Option<&PyTensor>) -> PyTensor {
-    let out = x.inner.matmul(&w.inner);
-    let out = match bias {
-        Some(b) => out.add(&b.inner),
-        None => out,
-    };
-    PyTensor::from_tensor(out.gelu())
+fn fused_linear_gelu(
+    x: &PyTensor,
+    w: &PyTensor,
+    bias: Option<&PyTensor>,
+) -> PyResult<PyTensor> {
+    let mut output = x
+        .inner
+        .try_matmul(&w.inner)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    if let Some(bias) = bias {
+        output = output
+            .try_add(&bias.inner)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    }
+    output = output
+        .try_gelu()
+        .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyTensor::from_tensor(output))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,20 +325,32 @@ unary_op!(silu, silu);
 // Activation ops
 #[pyfunction]
 #[pyo3(signature = (a, negative_slope = 0.01))]
-fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.leaky_relu(negative_slope))
+fn leaky_relu(a: &PyTensor, negative_slope: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        a.inner
+            .try_leaky_relu(negative_slope)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+    ))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, alpha = 1.0))]
-fn elu(a: &PyTensor, alpha: f32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.elu(alpha))
+fn elu(a: &PyTensor, alpha: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        a.inner
+            .try_elu(alpha)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+    ))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, beta = 1.0, threshold = 20.0))]
-fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.softplus(beta, threshold))
+fn softplus(a: &PyTensor, beta: f32, threshold: f32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        a.inner
+            .try_softplus(beta, threshold)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+    ))
 }
 
 #[pyfunction]
@@ -299,61 +359,61 @@ fn hardswish(a: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.softmax(dim))
+fn softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_softmax(dim).map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?))
 }
 
 #[pyfunction]
-fn log_softmax(a: &PyTensor, dim: i32) -> PyTensor {
-    PyTensor::from_tensor(a.inner.log_softmax(dim))
+fn log_softmax(a: &PyTensor, dim: i32) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_log_softmax(dim).map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.sum(d, keepdim)),
+fn sum(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.try_sum(d, keepdim)?),
         None => PyTensor::from_tensor(reduce_sum_all(&a.inner)),
-    }
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.mean(d, keepdim)),
+fn mean(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.try_mean(d, keepdim)?),
         None => PyTensor::from_tensor(reduce_mean_all(&a.inner)),
-    }
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.max(d, keepdim)),
+fn max(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.try_max(d, keepdim)?),
         None => PyTensor::from_tensor(reduce_max_all(&a.inner)),
-    }
+    })
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
-fn maximum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.maximum(&other.inner))
+fn maximum(a: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_maximum(&other.inner)?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, other))]
-fn minimum(a: &PyTensor, other: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(a.inner.minimum(&other.inner))
+fn minimum(a: &PyTensor, other: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(a.inner.try_minimum(&other.inner)?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, dim = None, keepdim = false))]
-fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyTensor {
-    match dim {
-        Some(d) => PyTensor::from_tensor(a.inner.neg().max(d, keepdim).neg()),
+fn min(a: &PyTensor, dim: Option<i32>, keepdim: bool) -> PyResult<PyTensor> {
+    Ok(match dim {
+        Some(d) => PyTensor::from_tensor(a.inner.neg().try_max(d, keepdim)?.neg()),
         None => PyTensor::from_tensor(reduce_min_all(&a.inner)),
-    }
+    })
 }
 
 // Argmax and argmin using macro
@@ -362,10 +422,20 @@ arg_op!(argmax, argmax);
 // argmin is argmax of negated input (no Tensor::argmin method)
 #[pyfunction]
 #[pyo3(signature = (a, dim = None))]
-fn argmin(a: &PyTensor, dim: Option<i32>) -> PyTensor {
+fn argmin(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
     let a_inner = a.inner.clone();
-    let d = dim.unwrap_or(0) as usize;
-    PyTensor::from_tensor(a_inner.neg().argmax(Some(d)))
+    let rank = a_inner.ndim() as i64;
+    let requested = i64::from(dim.unwrap_or(0));
+    let normalized = if requested < 0 { rank + requested } else { requested };
+    if normalized < 0 || normalized >= rank {
+        return Err(crate::error::FastnnError::shape(format!(
+            "argmin dimension {requested} is out of range for {rank} dimensions"
+        ))
+        .into());
+    }
+    Ok(PyTensor::from_tensor(
+        a_inner.neg().try_argmax(Some(normalized as usize))?,
+    ))
 }
 
 // Loss functions
@@ -592,15 +662,21 @@ fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
 }
 
 #[pyfunction]
-fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    PyTensor::from_tensor(core_tensor::Tensor::cat(&tensors_inner, dim))
+    Ok(PyTensor::from_tensor(core_tensor::Tensor::try_cat(
+        &tensors_inner,
+        dim,
+    )?))
 }
 
 #[pyfunction]
-fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyTensor {
+fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    PyTensor::from_tensor(core_tensor::Tensor::stack(&tensors_inner, dim))
+    Ok(PyTensor::from_tensor(core_tensor::Tensor::try_stack(
+        &tensors_inner,
+        dim,
+    )?))
 }
 
 #[pyfunction]
@@ -640,24 +716,38 @@ fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTen
 
 // Tensor manipulation ops
 #[pyfunction]
-fn where_(condition: &PyTensor, x: &PyTensor, y: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(x.inner.where_tensor(&condition.inner, &y.inner))
+fn where_(
+    condition: &PyTensor,
+    x: &PyTensor,
+    y: &PyTensor,
+) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        x.inner.try_where_tensor(&condition.inner, &y.inner)?,
+    ))
 }
 
 #[pyfunction]
-fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.repeat(&repeats))
+fn repeat(tensor: &PyTensor, repeats: Vec<i64>) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(tensor.inner.try_repeat(&repeats)?))
 }
 
 #[pyfunction]
-fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.expand(shape))
+fn expand(tensor: &PyTensor, shape: Vec<i64>) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(tensor.inner.try_expand(shape)?))
 }
 
 #[pyfunction]
 #[pyo3(signature = (tensor, dim, start, end, step = 1))]
-fn slice(tensor: &PyTensor, dim: usize, start: i64, end: i64, step: i64) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.slice(dim, start, end, step))
+fn slice(
+    tensor: &PyTensor,
+    dim: usize,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        tensor.inner.try_slice(dim, start, end, step)?,
+    ))
 }
 
 #[pyfunction]
@@ -682,15 +772,19 @@ fn topk(tensor: &PyTensor, k: i64, dim: i64) -> PyResult<(PyTensor, PyTensor)> {
 
 #[pyfunction]
 #[pyo3(signature = (tensor, axis, indices))]
-fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.gather(axis, &indices.inner))
+fn gather(tensor: &PyTensor, axis: i64, indices: &PyTensor) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        tensor.inner.try_gather(axis, &indices.inner)?,
+    ))
 }
 
 #[pyfunction]
-fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyTensor {
-    let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    let eq = equation.to_string();
-    PyTensor::from_tensor(core_tensor::einsum(&eq, &tensors_inner))
+fn einsum(equation: &str, tensors: Vec<PyTensor>) -> PyResult<PyTensor> {
+    let tensors_inner: Vec<Tensor> = tensors.into_iter().map(|t| t.inner).collect();
+    Ok(PyTensor::from_tensor(core_tensor::try_einsum(
+        equation,
+        &tensors_inner,
+    )?))
 }
 
 #[pyfunction]
@@ -781,8 +875,15 @@ fn flash_attention(
 }
 
 #[pyfunction]
-fn cumsum(tensor: &PyTensor, dim: i64, exclusive: bool, reverse: bool) -> PyTensor {
-    PyTensor::from_tensor(tensor.inner.cumsum(dim, exclusive, reverse))
+fn cumsum(
+    tensor: &PyTensor,
+    dim: i64,
+    exclusive: bool,
+    reverse: bool,
+) -> PyResult<PyTensor> {
+    Ok(PyTensor::from_tensor(
+        tensor.inner.try_cumsum(dim, exclusive, reverse)?,
+    ))
 }
 
 #[pyfunction]
@@ -791,13 +892,16 @@ fn erf(tensor: &PyTensor) -> PyTensor {
 }
 
 #[pyfunction]
-fn clip_grad_norm_(tensors: Vec<PyTensor>, max_norm: f32, norm_type: f32) -> f32 {
+fn clip_grad_norm_(tensors: Vec<PyTensor>, max_norm: f32, norm_type: f32) -> PyResult<f32> {
     let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    core_tensor::clip_grad_norm_(&tensors, max_norm, norm_type)
+    Ok(core_tensor::try_clip_grad_norm_(
+        &tensors, max_norm, norm_type,
+    )?)
 }
 
 #[pyfunction]
-fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) {
+fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) -> PyResult<()> {
     let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    core_tensor::clip_grad_value_(&tensors, clip_value);
+    core_tensor::try_clip_grad_value_(&tensors, clip_value)?;
+    Ok(())
 }

@@ -17,7 +17,25 @@
 //! compile) see the quantized representation.
 
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::types::{RepresentationTransform, ScalarType};
+
+fn has_transformed_storage(tensor_type: &TensorType) -> bool {
+    tensor_type
+        .value_representation()
+        .is_ok_and(|representation| {
+            !matches!(representation.transform, RepresentationTransform::None)
+        })
+}
+
+fn is_auto_cast_integer_weight(tensor_type: &TensorType) -> bool {
+    tensor_type
+        .value_representation()
+        .is_ok_and(|representation| {
+            matches!(representation.storage, ScalarType::I4 | ScalarType::I8)
+                && !matches!(representation.transform, RepresentationTransform::None)
+        })
+}
 
 /// Options for the auto-cast pass.
 #[derive(Debug, Clone, Default)]
@@ -76,16 +94,12 @@ fn quantize_weight_constants(
     let count_after = graph.node_count();
     // quantize_weights modifies nodes in-place (no new nodes), so the
     // count stays the same.  We track the number of modified nodes by
-    // checking how many Constants now have U4/U8 dtype.
+    // checking how many Constants now have the requested transformed integer storage.
     let quantized_count = graph
         .nodes
         .iter()
         .filter(|n| {
-            matches!(n.opcode, Opcode::Constant(_))
-                && matches!(
-                    n.output_type.dtype,
-                    IrDType::I4 { .. } | IrDType::I8Scaled { .. }
-                )
+            matches!(n.opcode, Opcode::Constant(_)) && is_auto_cast_integer_weight(&n.output_type)
         })
         .count();
     let _ = count_before;
@@ -125,13 +139,14 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
         );
 
         for (i, &input_id) in node.inputs.iter().enumerate() {
-            let input_dtype = match graph_ref.get_node(input_id) {
-                Some(n) => &n.output_type.dtype,
+            let input_type = match graph_ref.get_node(input_id) {
+                Some(n) => &n.output_type,
                 None => continue,
             };
 
-            // Check if input is quantized (U4/U8) but consumer expects f32
-            let is_quantized = matches!(input_dtype, IrDType::I4 { .. } | IrDType::I8Scaled { .. });
+            // Any transformed storage needs dequantization when the consumer
+            // accepts only the logical floating representation.
+            let is_quantized = has_transformed_storage(input_type);
 
             if is_quantized && !accepts_quantized {
                 rewrites.push(DequantRewrite {
@@ -177,7 +192,20 @@ fn insert_dequantize_for_f32_ops(graph: &mut ComputeGraph) -> Result<usize, Fast
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::{DimExpr, TensorValue};
+    use crate::ir::{DimExpr, TensorValue};
+
+    #[test]
+    fn canonical_transform_classifies_all_quantized_storage_families() {
+        let u4 = TensorType::new(vec![DimExpr::Known(8)], IrDType::U4Scaled);
+        let f4 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F4);
+        let f32 = TensorType::new(vec![DimExpr::Known(8)], IrDType::F32);
+        let i4 = TensorType::new(vec![DimExpr::Known(8)], IrDType::I4);
+        assert!(has_transformed_storage(&u4));
+        assert!(has_transformed_storage(&f4));
+        assert!(!has_transformed_storage(&f32));
+        assert!(!is_auto_cast_integer_weight(&u4));
+        assert!(is_auto_cast_integer_weight(&i4));
+    }
 
     /// Helper to create a weight Data constant with the given dimensions.
     fn make_weight_constant(
@@ -233,7 +261,7 @@ mod tests {
         // Check that the weight Constant now has U4 dtype
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(weight_node.output_type.dtype(), IrDType::I4),
             "weight should be quantized to U4 after auto_cast"
         );
     }
@@ -288,7 +316,7 @@ mod tests {
         // shared_weight should be quantized
         let shared_weight_node = graph.get_node(shared_weight_id).unwrap();
         assert!(
-            matches!(shared_weight_node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(shared_weight_node.output_type.dtype(), IrDType::I4),
             "shared_weight should be quantized"
         );
 
@@ -397,7 +425,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::I8Scaled { .. }),
+            matches!(weight_node.output_type.dtype(), IrDType::I8Scaled),
             "weight should be quantized to U8 after auto_cast with bit_width=8"
         );
     }
@@ -429,7 +457,7 @@ mod tests {
         // All nodes should remain F32
         for node in &graph.nodes {
             assert_eq!(
-                node.output_type.dtype,
+                node.output_type.dtype(),
                 IrDType::F32,
                 "node {} should remain F32",
                 node.id
@@ -470,7 +498,7 @@ mod tests {
             IrDType::F32,
         );
         let weight_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Data {
+            Opcode::Constant(crate::ir::TensorValue::Data {
                 bytes: weight_data,
                 tensor_type: tt.clone(),
             }),
@@ -513,7 +541,7 @@ mod tests {
 
         let weight_node = graph.get_node(weight_id).unwrap();
         assert!(
-            matches!(weight_node.output_type.dtype, IrDType::I4 { .. }),
+            matches!(weight_node.output_type.dtype(), IrDType::I4),
             "Conv2d weight should be quantized after auto_cast"
         );
     }

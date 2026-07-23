@@ -14,7 +14,7 @@
 
 use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
 
 /// Insert `QuantizeActivations`/`DequantizeActivations` around every `MatMul`
@@ -355,7 +355,7 @@ mod tests {
     use crate::backend::Backend;
     use crate::compiler::passes::calibration::CalibrationData;
     use crate::compiler::passes::{memory_planning, shape_inference};
-    use crate::ir::node::DimExpr;
+    use crate::ir::DimExpr;
 
     /// Test that activation quantization round-trips with reasonable accuracy.
     #[test]
@@ -388,7 +388,7 @@ mod tests {
             .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];
-        let input_w = vec![
+        let input_w: Vec<f32> = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let input_bytes_a: Vec<u8> = bytemuck::cast_slice(&input_a).to_vec();
@@ -514,7 +514,7 @@ mod tests {
         let const_data: Vec<u8> = vec![1u8; 16]; // 4 f32 values
         let const_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
         let const_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Data {
+            Opcode::Constant(crate::ir::TensorValue::Data {
                 bytes: const_data,
                 tensor_type: const_tt.clone(),
             }),

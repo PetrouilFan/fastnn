@@ -8,7 +8,7 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::wgpu::WgpuBackend;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::ir::{DimExpr, IrDType, TensorType};
 
 /// Helper: run matmul through the full pipeline with a given backend and quantization.
 fn run_matmul<B: fastnn::backend::Backend>(
@@ -42,6 +42,7 @@ fn run_matmul<B: fastnn::backend::Backend>(
 }
 
 /// Helper: run conv2d through the full pipeline with a given backend and quantization.
+#[allow(clippy::too_many_arguments)]
 fn run_conv2d<B: fastnn::backend::Backend>(
     batch: usize,
     in_channels: usize,

@@ -6,6 +6,7 @@ use crate::backend::wgpu::context::get_wgpu_context;
 use crate::storage::GpuStorage;
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
+use crate::{FastnnError, FastnnResult};
 #[cfg(feature = "gpu")]
 use parking_lot::RwLock;
 use smallvec::smallvec;
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicI8, AtomicU64};
 use std::sync::Arc;
 
 use super::shape::compute_strides;
-use super::{Tensor, TensorImpl};
+use super::{validate_tensor_shape, Tensor, TensorImpl};
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use std::arch::x86_64::{_mm256_loadu_ps, _mm256_storeu_ps};
@@ -91,12 +92,24 @@ impl Tensor {
     }
 
     pub fn from_vec(values: Vec<f32>, shape: Vec<i64>) -> Self {
+        Self::try_from_vec(values, shape).expect("Tensor::from_vec failed")
+    }
+
+    pub fn try_from_vec(values: Vec<f32>, shape: Vec<i64>) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let nbytes = values.len() * 4;
+        let (numel, nbytes) = validate_tensor_shape(&sizes, DType::F32)?;
+        if values.len() != numel {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {numel} values, but {} were provided",
+                values.len()
+            )));
+        }
         let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
         #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
         let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) else {
-            panic!("Expected CPU storage");
+            return Err(FastnnError::device(
+                "CPU storage pool returned non-CPU storage",
+            ));
         };
         let data = Arc::make_mut(&mut cpu.data);
         unsafe {
@@ -106,35 +119,60 @@ impl Tensor {
                 values.len(),
             );
         }
-        Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+        Ok(Tensor::new(TensorImpl::try_new(
+            storage,
+            sizes,
+            DType::F32,
+        )?))
     }
 
     pub fn from_vec_with_device(values: Vec<f32>, shape: Vec<i64>, device: Device) -> Self {
+        Self::try_from_vec_with_device(values, shape, device)
+            .expect("Tensor::from_vec_with_device failed")
+    }
+
+    pub fn try_from_vec_with_device(
+        values: Vec<f32>,
+        shape: Vec<i64>,
+        device: Device,
+    ) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
+        let (numel, _nbytes) = validate_tensor_shape(&sizes, DType::F32)?;
+        if values.len() != numel {
+            return Err(FastnnError::shape(format!(
+                "shape {sizes:?} requires {numel} values, but {} were provided",
+                values.len()
+            )));
+        }
         match device {
-            Device::Cpu => {
-                let storage = Arc::new(Storage::from_vec(values, DType::F32, Device::Cpu));
-                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
-            }
+            Device::Cpu => Self::try_from_vec(values, sizes.into_vec()),
             #[cfg(feature = "gpu")]
             Device::Wgpu(device_id) => {
                 let ctx = get_wgpu_context(device_id);
                 let buffer = ctx.create_gpu_buffer_from_data(&values, "from_vec");
                 let storage = Arc::new(Storage::Wgpu(GpuStorage {
                     buffer: buffer.buffer,
-                    nbytes: values.len() * 4,
+                    nbytes: _nbytes,
                     device_id,
                     staging: RwLock::new(None),
                 }));
-                Tensor::new(TensorImpl::new(storage, sizes, DType::F32))
+                Ok(Tensor::new(TensorImpl::try_new_with_device(
+                    storage,
+                    sizes,
+                    device,
+                    DType::F32,
+                )?))
             }
         }
     }
 
     pub fn zeros(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        Self::try_zeros(shape, dtype, device).expect("Tensor::zeros failed")
+    }
+
+    pub fn try_zeros(shape: Vec<i64>, dtype: DType, device: Device) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let numel: i64 = sizes.iter().product();
-        let nbytes = (numel * dtype.size() as i64) as usize;
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
@@ -151,25 +189,21 @@ impl Tensor {
             }
         };
 
-        let strides = compute_strides(&sizes);
-        Tensor::new(TensorImpl {
-            storage,
-            sizes,
-            strides,
-            storage_offset: 0,
-            dtype,
-            device,
-            version_counter: Arc::new(AtomicU64::new(0)),
-            autograd_meta: None,
-            requires_grad: false,
-            contiguous_cache: AtomicI8::new(1),
-        })
+        let inner = match device {
+            Device::Cpu => TensorImpl::try_new(storage, sizes, dtype)?,
+            #[cfg(feature = "gpu")]
+            Device::Wgpu(_) => TensorImpl::try_new_with_device(storage, sizes, device, dtype)?,
+        };
+        Ok(Tensor::new(inner))
     }
 
     pub fn empty(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        Self::try_empty(shape, dtype, device).expect("Tensor::empty failed")
+    }
+
+    pub fn try_empty(shape: Vec<i64>, dtype: DType, device: Device) -> FastnnResult<Self> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let numel: i64 = sizes.iter().product();
-        let nbytes = (numel * dtype.size() as i64) as usize;
+        let (_, nbytes) = validate_tensor_shape(&sizes, dtype)?;
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
@@ -186,21 +220,34 @@ impl Tensor {
             }
         };
 
-        match device {
-            Device::Cpu => Tensor::new(TensorImpl::new(storage, sizes, dtype)),
+        let inner = match device {
+            Device::Cpu => TensorImpl::try_new(storage, sizes, dtype)?,
             #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => {
-                Tensor::new(TensorImpl::new_with_device(storage, sizes, device, dtype))
-            }
-        }
+            Device::Wgpu(_) => TensorImpl::try_new_with_device(storage, sizes, device, dtype)?,
+        };
+        Ok(Tensor::new(inner))
     }
 
     pub fn ones(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
+        Self::try_ones(shape, dtype, device).expect("Tensor::ones failed")
+    }
+
+    pub fn try_ones(shape: Vec<i64>, dtype: DType, device: Device) -> FastnnResult<Self> {
+        validate_tensor_shape(&shape, dtype)?;
+        if dtype.scalar_byte_width().is_none() {
+            return Err(FastnnError::dtype(
+                "ones does not support packed dtypes; create packed weights through quantization",
+            ));
+        }
+        Ok(Self::ones_validated(shape, dtype, device))
+    }
+
+    fn ones_validated(shape: Vec<i64>, dtype: DType, device: Device) -> Self {
         match device {
             Device::Cpu => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
                 let numel: i64 = sizes.iter().product();
-                let nbytes = (numel * dtype.size() as i64) as usize;
+                let nbytes = dtype.storage_bytes(numel as usize);
                 let numel = numel as usize;
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
@@ -292,6 +339,25 @@ impl Tensor {
     }
 
     pub fn full(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
+        Self::try_full(shape, value, dtype, device).expect("Tensor::full failed")
+    }
+
+    pub fn try_full(
+        shape: Vec<i64>,
+        value: f32,
+        dtype: DType,
+        device: Device,
+    ) -> FastnnResult<Self> {
+        validate_tensor_shape(&shape, dtype)?;
+        if value != 0.0 && dtype.scalar_byte_width().is_none() {
+            return Err(FastnnError::dtype(
+                "full with a nonzero value does not support packed dtypes",
+            ));
+        }
+        Ok(Self::full_validated(shape, value, dtype, device))
+    }
+
+    fn full_validated(shape: Vec<i64>, value: f32, dtype: DType, device: Device) -> Self {
         if value == 0.0 {
             return Self::zeros(shape, dtype, device);
         }
@@ -300,7 +366,7 @@ impl Tensor {
             Device::Cpu => {
                 let sizes: SmallVec<[i64; 8]> = shape.into();
                 let numel: i64 = sizes.iter().product();
-                let nbytes = (numel * dtype.size() as i64) as usize;
+                let nbytes = dtype.storage_bytes(numel as usize);
                 let numel = numel as usize;
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);

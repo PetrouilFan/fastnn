@@ -1,10 +1,10 @@
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, DimExpr, IRNode, Opcode};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, Opcode};
 use crate::utils::{parse_conv_attrs, parse_shape_attr, spatial_output_dim};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
-    let order = graph.topological_sort();
+    let order = graph.try_topological_sort()?;
 
     for &node_id in &order {
         let node = graph.get_node(node_id).unwrap();
@@ -99,30 +99,31 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 }
             }
             Opcode::Reshape => node.attrs.get("shape").map(|s| parse_shape_attr(s)),
-            Opcode::Transpose => inputs.first().map(|i| {
-                if let Some(perm_str) = node.attrs.get("perm") {
-                    // Use explicit permutation if available
-                    let perm: Vec<usize> = perm_str
-                        .split(',')
-                        .filter_map(|v| v.trim().parse().ok())
-                        .collect();
-                    if perm.len() == i.output_type.shape.len() {
-                        perm.iter()
-                            .map(|&p| i.output_type.shape[p].clone())
-                            .collect()
-                    } else {
-                        // Fallback: if perm length doesn't match, reverse
-                        let mut s = i.output_type.shape.clone();
-                        s.reverse();
-                        s
+            Opcode::Transpose => {
+                if let Some(input) = inputs.first() {
+                    let rank = input.output_type.shape.len();
+                    let perm = node
+                        .optional_attr_list::<usize>("perm")?
+                        .filter(|perm| !perm.is_empty())
+                        .unwrap_or_else(|| (0..rank).rev().collect());
+                    let valid = perm.len() == rank && perm.iter().all(|&axis| axis < rank) && {
+                        let unique: HashSet<_> = perm.iter().copied().collect();
+                        unique.len() == rank
+                    };
+                    if !valid {
+                        return Err(FastnnError::shape(format!(
+                            "Transpose node {node_id} has invalid permutation {perm:?} for rank {rank}"
+                        )));
                     }
+                    Some(
+                        perm.iter()
+                            .map(|&axis| input.output_type.shape[axis].clone())
+                            .collect(),
+                    )
                 } else {
-                    // No perm attribute: reverse all dims (legacy behavior)
-                    let mut s = i.output_type.shape.clone();
-                    s.reverse();
-                    s
+                    None
                 }
-            }),
+            }
             Opcode::Flatten => inputs.first().map(|i| {
                 let shape = &i.output_type.shape;
                 if shape.len() >= 2 {
@@ -143,66 +144,59 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             }),
             Opcode::TopK => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => {
-                inputs.first().map(|i| {
-                    let mut s = i.output_type.shape.clone();
-                    let keepdim: bool = node
-                        .attrs
-                        .get("keepdim")
-                        .map(|v| parse_keepdim_attr(v))
-                        .unwrap_or(true);
-                    if let Some(axis_str) = node.attrs.get("axis") {
-                        if let Ok(axis_i64) = axis_str.parse::<i64>() {
-                            let rank = s.len();
-                            let axis = if axis_i64 < 0 {
-                                let r = rank as i64;
-                                if r > 0 {
-                                    ((r + axis_i64 % r) % r) as usize
-                                } else {
-                                    0
-                                }
-                            } else {
-                                axis_i64 as usize
-                            };
-                            if axis < s.len() {
-                                if keepdim {
-                                    s[axis] = DimExpr::Known(1);
-                                } else {
-                                    s.remove(axis);
-                                }
-                            }
+                if let Some(input) = inputs.first() {
+                    let mut shape = input.output_type.shape.clone();
+                    let keepdim = node.optional_bool_attr("keepdim")?.unwrap_or(true);
+                    if let Some(raw_axis) = node.optional_attr::<i64>("axis")? {
+                        let rank = i64::try_from(shape.len()).map_err(|_| {
+                            FastnnError::shape(format!(
+                                "{:?} node {node_id} rank does not fit i64",
+                                node.opcode
+                            ))
+                        })?;
+                        let axis = if raw_axis < 0 {
+                            rank.checked_add(raw_axis)
+                        } else {
+                            Some(raw_axis)
+                        }
+                        .filter(|&axis| axis >= 0 && axis < rank)
+                        .ok_or_else(|| {
+                            FastnnError::shape(format!(
+                                "{:?} node {node_id} axis {raw_axis} is out of range for rank {rank}",
+                                node.opcode
+                            ))
+                        })? as usize;
+                        if keepdim {
+                            shape[axis] = DimExpr::Known(1);
+                        } else {
+                            shape.remove(axis);
                         }
                     }
-                    s
-                })
+                    Some(shape)
+                } else {
+                    None
+                }
             }
             Opcode::Concat => {
                 if !inputs.is_empty() {
-                    let axis_i64: i64 = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
+                    let axis = node.optional_attr::<usize>("axis")?.unwrap_or(0);
                     let rank = inputs[0].output_type.shape.len();
-                    let axis = if axis_i64 < 0 {
-                        let r = rank as i64;
-                        if r > 0 {
-                            ((r + axis_i64 % r) % r) as usize
-                        } else {
-                            0
-                        }
-                    } else {
-                        axis_i64 as usize
-                    };
-                    let mut shape = inputs[0].output_type.shape.clone();
-                    if axis < shape.len() {
-                        let mut total = DimExpr::Known(0);
-                        for inp in &inputs {
-                            if axis < inp.output_type.shape.len() {
-                                total = total.add(&inp.output_type.shape[axis]);
-                            }
-                        }
-                        shape[axis] = total;
+                    if axis >= rank {
+                        return Err(FastnnError::shape(format!(
+                            "Concat node {node_id} axis {axis} is out of range for rank {rank}"
+                        )));
                     }
+                    let mut shape = inputs[0].output_type.shape.clone();
+                    let mut total = DimExpr::Known(0);
+                    for input in &inputs {
+                        if axis >= input.output_type.shape.len() {
+                            return Err(FastnnError::shape(format!(
+                                "Concat node {node_id} input rank is too small for axis {axis}"
+                            )));
+                        }
+                        total = total.add(&input.output_type.shape[axis]);
+                    }
+                    shape[axis] = total;
                     Some(shape)
                 } else {
                     None
@@ -214,34 +208,37 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             Opcode::MaxPool | Opcode::AvgPool => {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
-                    let kernel: i64 = node
-                        .attrs
-                        .get("kernel_size")
-                        .and_then(|k| k.parse().ok())
-                        .unwrap_or(2);
-                    let stride: i64 = node
-                        .attrs
-                        .get("stride")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(2);
+                    let kernel = node.optional_attr::<i64>("kernel_size")?.unwrap_or(2);
+                    let stride = node.optional_attr::<i64>("stride")?.unwrap_or(2);
+                    if kernel <= 0 || stride <= 0 {
+                        return Err(FastnnError::shape(format!(
+                            "{:?} node {node_id} requires positive kernel_size and stride",
+                            node.opcode
+                        )));
+                    }
                     // Parse padding: ONNX pads = [top, left, bottom, right] for 2D.
                     // If absent, assume 0 (valid padding).
                     // The builder stores symmetric `padding` as a single int; fall back
                     // to the ONNX `pads` CSV format when `padding` is absent.
-                    let symmetric_pad: i64 = node
-                        .attrs
-                        .get("padding")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
+                    let symmetric_pad = node.optional_attr::<i64>("padding")?.unwrap_or(0);
+                    if symmetric_pad < 0 {
+                        return Err(FastnnError::shape(format!(
+                            "{:?} node {node_id} requires non-negative padding",
+                            node.opcode
+                        )));
+                    }
                     let pads: Vec<i64> = if symmetric_pad > 0 {
                         // Symmetric padding: total pad = 2 * per-side padding
                         vec![symmetric_pad; 4]
                     } else {
-                        node.attrs
-                            .get("pads")
-                            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
-                            .unwrap_or_default()
+                        node.optional_attr_list::<i64>("pads")?.unwrap_or_default()
                     };
+                    if pads.iter().any(|&pad| pad < 0) {
+                        return Err(FastnnError::shape(format!(
+                            "{:?} node {node_id} requires non-negative pads",
+                            node.opcode
+                        )));
+                    }
                     let pad_h =
                         pads.first().copied().unwrap_or(0) + pads.get(2).copied().unwrap_or(0);
                     let pad_w =
@@ -285,61 +282,71 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
-                    if let Some(dim_str) = node.attrs.get("dim") {
-                        if let Ok(dim) = dim_str.parse::<usize>() {
-                            let start: u64 = node
-                                .attrs
-                                .get("start")
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0);
-                            let end: u64 = node
-                                .attrs
-                                .get("end")
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(0);
-                            if dim < shape.len() && end > start {
-                                shape[dim] = DimExpr::Known(end - start);
-                            }
+                    let dim = node.required_attr::<usize>("dim")?;
+                    let start = node.required_attr::<u64>("start")?;
+                    let end = node.required_attr::<u64>("end")?;
+                    if dim >= shape.len() {
+                        return Err(FastnnError::shape(format!(
+                            "Slice node {} dimension {dim} is out of range for rank {}",
+                            node.id,
+                            shape.len()
+                        )));
+                    }
+                    if end <= start {
+                        return Err(FastnnError::shape(format!(
+                            "Slice node {} requires end greater than start, got {start}..{end}",
+                            node.id
+                        )));
+                    }
+                    shape[dim] = DimExpr::Known(end - start);
+                    Some(shape)
+                } else {
+                    None
+                }
+            }
+            Opcode::Squeeze => {
+                if let Some(input) = inputs.first() {
+                    let mut shape = input.output_type.shape.clone();
+                    if let Some(dim) = node.optional_attr::<usize>("dim")? {
+                        if dim >= shape.len() {
+                            return Err(FastnnError::shape(format!(
+                                "Squeeze node {} dimension {dim} is out of range for rank {}",
+                                node.id,
+                                shape.len()
+                            )));
                         }
+                        shape.remove(dim);
+                    } else {
+                        shape.retain(|d| !matches!(d, DimExpr::Known(1)));
                     }
                     Some(shape)
                 } else {
                     None
                 }
             }
-            Opcode::Squeeze => inputs.first().map(|i| {
-                let mut shape = i.output_type.shape.clone();
-                if let Some(dim_str) = node.attrs.get("dim") {
-                    if let Ok(dim) = dim_str.parse::<usize>() {
-                        if dim < shape.len() {
-                            shape.remove(dim);
+            Opcode::Unsqueeze => {
+                if let Some(input) = inputs.first() {
+                    let mut shape = input.output_type.shape.clone();
+                    if let Some(dim) = node.optional_attr::<usize>("dim")? {
+                        if dim > shape.len() {
+                            return Err(FastnnError::shape(format!(
+                                "Unsqueeze node {} dimension {dim} is out of range for rank {}",
+                                node.id,
+                                shape.len()
+                            )));
                         }
+                        shape.insert(dim, DimExpr::Known(1));
                     }
+                    Some(shape)
                 } else {
-                    shape.retain(|d| !matches!(d, DimExpr::Known(1)));
+                    None
                 }
-                shape
-            }),
-            Opcode::Unsqueeze => inputs.first().map(|i| {
-                let mut shape = i.output_type.shape.clone();
-                if let Some(dim_str) = node.attrs.get("dim") {
-                    if let Ok(dim) = dim_str.parse::<usize>() {
-                        if dim <= shape.len() {
-                            shape.insert(dim, DimExpr::Known(1));
-                        }
-                    }
-                }
-                shape
-            }),
+            }
             Opcode::Pad => {
                 if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
-                    if let Some(pads_str) = node.attrs.get("pads") {
-                        let pads: Vec<u64> = pads_str
-                            .split(',')
-                            .filter_map(|s| s.trim().parse().ok())
-                            .collect();
+                    if let Some(pads) = node.optional_attr_list::<u64>("pads")? {
                         let n_dims = shape.len().min(pads.len() / 2);
                         for i in 0..n_dims {
                             let lo = DimExpr::Known(pads[2 * i]);
@@ -355,13 +362,15 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             Opcode::Gather => {
                 // ONNX Gather output shape: data_shape[:axis] + indices_shape + data_shape[axis+1:]
                 if inputs.len() >= 2 {
-                    let axis: usize = node
-                        .attrs
-                        .get("axis")
-                        .and_then(|a| a.parse().ok())
-                        .unwrap_or(0);
+                    let axis = node.optional_attr::<usize>("axis")?.unwrap_or(0);
                     let data_shape = &inputs[0].output_type.shape;
                     let indices_shape = &inputs[1].output_type.shape;
+                    if axis >= data_shape.len() {
+                        return Err(FastnnError::shape(format!(
+                            "Gather node {node_id} axis {axis} is out of range for rank {}",
+                            data_shape.len()
+                        )));
+                    }
                     let mut new_shape: Vec<DimExpr> = data_shape[..axis].to_vec();
                     new_shape.extend_from_slice(indices_shape);
                     new_shape.extend_from_slice(&data_shape[axis + 1..]);
@@ -465,11 +474,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 // Expand output shape: try to use the DAG builder's pre-computed
                 // "expand_shape" attr, which contains concrete target dims.
                 if inputs.len() >= 2 {
-                    let inferred = if let Some(shape_str) = node.attrs.get("expand_shape") {
-                        let target: Vec<u64> = shape_str
-                            .split(',')
-                            .filter_map(|s| s.trim().parse::<u64>().ok())
-                            .collect();
+                    if let Some(target) = node.optional_attr_list::<u64>("expand_shape")? {
                         if !target.is_empty() {
                             let data_shape = &inputs[0].output_type.shape;
                             let data_rank = data_shape.len();
@@ -502,8 +507,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                         // No expand_shape attr: fallback to data shape.
                         // The expand kernel will read the target shape at runtime.
                         Some(inputs[0].output_type.shape.clone())
-                    };
-                    inferred
+                    }
                 } else {
                     inputs.first().map(|i| i.output_type.shape.clone())
                 }
@@ -793,11 +797,4 @@ fn conv_transpose_spatial_dim(
             }
         }
     }
-}
-
-/// Parse a `keepdim` attribute string. The builder stores it as `"1"`
-/// or `"0"` to match the rest of the IR's stringly-typed attrs, but
-/// existing call sites also pass `"true"` / `"false"`. Accept both.
-fn parse_keepdim_attr(v: &str) -> bool {
-    !matches!(v.trim(), "0" | "false" | "False" | "FALSE")
 }

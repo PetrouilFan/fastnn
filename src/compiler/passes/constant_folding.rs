@@ -1,6 +1,4 @@
-use crate::ir::node::{
-    ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue,
-};
+use crate::ir::{ComputeGraph, DimExpr, IRNode, IrDType, NodeId, Opcode, TensorType, TensorValue};
 
 pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
     struct Fold {
@@ -203,7 +201,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     .iter()
                     .filter_map(|d| d.evaluate())
                     .product();
-                if output_type.dtype == IrDType::F32 && n == 1 {
+                if output_type.is_native_scalar(crate::types::ScalarType::F32) && n == 1 {
                     Some(TensorValue::Data {
                         bytes: v.to_le_bytes().to_vec(),
                         tensor_type: output_type.clone(),
@@ -218,7 +216,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     .iter()
                     .filter_map(|d| d.evaluate())
                     .product();
-                if output_type.dtype == IrDType::I64 && n == 1 {
+                if output_type.is_native_scalar(crate::types::ScalarType::I64) && n == 1 {
                     Some(TensorValue::Data {
                         bytes: v.to_le_bytes().to_vec(),
                         tensor_type: output_type.clone(),
@@ -232,13 +230,13 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
         }
 
         Opcode::Cast => {
-            // Cast constant data to target dtype (stored in output_type.dtype)
-            let target = &node.output_type.dtype;
+            // Cast constant data to target dtype (stored in output_type)
+            let target = node.output_type.dtype();
             if let Some(TensorValue::Data { bytes, tensor_type }) = input_vals.first() {
-                let src_dtype = &tensor_type.dtype;
+                let src_dtype = tensor_type.dtype();
                 let out_shape = tensor_type.shape.clone();
                 let elem_count = tensor_type.numel().unwrap_or(bytes.len() as u64 / 4) as usize;
-                match (src_dtype, target) {
+                match (&src_dtype, &target) {
                     (IrDType::F32, IrDType::I32) => {
                         let src: &[f32] = bytemuck::cast_slice(bytes);
                         let dst: Vec<i32> =
@@ -326,7 +324,7 @@ fn unary_int_op(inputs: &[TensorValue], op: impl Fn(i64) -> i64) -> Option<Tenso
 
 fn unary_f32_data_op(inputs: &[TensorValue], op: impl Fn(f32) -> f32) -> Option<TensorValue> {
     if let Some(TensorValue::Data { bytes, tensor_type }) = inputs.first() {
-        if tensor_type.dtype == IrDType::F32 && bytes.len() >= 4 && bytes.len() % 4 == 0 {
+        if tensor_type.dtype() == IrDType::F32 && bytes.len() >= 4 && bytes.len() % 4 == 0 {
             let transformed: Vec<u8> = bytes
                 .chunks_exact(4)
                 .flat_map(|chunk| {
@@ -381,8 +379,8 @@ fn binary_f32_data_op(inputs: &[TensorValue], op: impl Fn(f32, f32) -> f32) -> O
                 tensor_type: b_ty,
             },
         ) => {
-            if a_ty.dtype == IrDType::F32
-                && b_ty.dtype == IrDType::F32
+            if a_ty.dtype() == IrDType::F32
+                && b_ty.dtype() == IrDType::F32
                 && a_bytes.len() >= 4
                 && a_bytes.len() % 4 == 0
                 && b_bytes.len() >= 4

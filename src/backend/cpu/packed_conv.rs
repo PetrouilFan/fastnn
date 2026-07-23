@@ -157,57 +157,9 @@ unsafe fn im2col_pack_i8x4(
 
         // Pack each row independently for correct row-wise alignment
         let mut packed: Vec<I8x4> = vec![I8x4(0); m * k_packed];
-        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        {
-            use std::arch::x86_64::*;
-            let zv = _mm256_set1_ps(zero_point);
-            let iv = _mm256_set1_ps(inv_scale);
-            let c_lo = _mm256_set1_ps(-128.0);
-            let c_hi = _mm256_set1_ps(127.0);
-            let mut row_packed = [0u8; 32];
-            for row in 0..m {
-                let row_start = row * k;
-                let mut wp = 0usize;
-                while wp + 7 < k_packed {
-                    let base = row_start + wp * 4;
-                    let v = _mm256_loadu_ps(&col[base]);
-                    let x = _mm256_round_ps(_mm256_mul_ps(_mm256_sub_ps(v, zv), iv), 0);
-                    let clamped = _mm256_min_ps(_mm256_max_ps(x, c_lo), c_hi);
-                    let i32v = _mm256_cvttps_epi32(clamped);
-                    let lo128 = _mm256_castsi256_si128(i32v);
-                    let hi128 = _mm256_extracti128_si256(i32v, 1);
-                    let lo16 = _mm_packs_epi32(lo128, _mm_setzero_si128());
-                    let hi16 = _mm_packs_epi32(hi128, _mm_setzero_si128());
-                    let bytes = _mm_packus_epi16(lo16, hi16);
-                    _mm_storeu_si128(row_packed[0..16].as_mut_ptr() as *mut __m128i, bytes);
-                    for j in 0..8 {
-                        packed[row * k_packed + wp + j] = I8x4(u32::from_le_bytes([
-                            row_packed[4 * j],
-                            row_packed[4 * j + 1],
-                            row_packed[4 * j + 2],
-                            row_packed[4 * j + 3],
-                        ]));
-                    }
-                    wp += 8;
-                }
-                while wp < k_packed {
-                    let base = row_start + wp * 4;
-                    let mut w = 0u32;
-                    for i in 0..4 {
-                        let ei = base + i;
-                        if ei < row_start + k {
-                            let q = ((col[ei] - zero_point) * inv_scale)
-                                .round()
-                                .clamp(-128.0, 127.0) as i8;
-                            w |= (q as u8 as u32) << (i * 8);
-                        }
-                    }
-                    packed.push(I8x4(w));
-                    wp += 1;
-                }
-            }
-        }
-        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+        // Keep one correctness path here. The former AVX2 branch wrote tail words
+        // past the pre-sized vector and used unsigned saturation for negative i8
+        // values, corrupting every convolution whose K did not fill its SIMD tile.
         for row in 0..m {
             let row_start = row * k;
             for word in 0..k_packed {
@@ -223,7 +175,7 @@ unsafe fn im2col_pack_i8x4(
                         w |= (q as u8 as u32) << (i * 8);
                     }
                 }
-                packed.push(I8x4(w));
+                packed[row * k_packed + word] = I8x4(w);
             }
         }
 
@@ -437,6 +389,52 @@ unsafe fn slice_packed<U: PackedWord>(
 
 // (Tile constants moved to per-GEMM scope below)
 
+#[inline]
+fn dot_i8x4_rows(a: &[I8x4], b: &[I8x4]) -> i32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 availability is checked above. The helper performs only
+        // unaligned in-bounds loads and uses the scalar reference for its tail.
+        return unsafe { dot_i8x4_rows_avx2(a, b) };
+    }
+    a.iter()
+        .zip(b)
+        .map(|(&lhs, &rhs)| i8x4_dot_packed(lhs.0, rhs.0))
+        .sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_i8x4_rows_avx2(a: &[I8x4], b: &[I8x4]) -> i32 {
+    use std::arch::x86_64::*;
+
+    let mut words = 0;
+    let mut sums = _mm256_setzero_si256();
+    let ones = _mm256_set1_epi16(1);
+    while words + 4 <= a.len() {
+        // SAFETY: The loop condition proves both 16-byte source ranges exist;
+        // loadu has no alignment requirement.
+        let lhs = unsafe { _mm_loadu_si128(a.as_ptr().add(words).cast::<__m128i>()) };
+        let rhs = unsafe { _mm_loadu_si128(b.as_ptr().add(words).cast::<__m128i>()) };
+        let lhs_i16 = _mm256_cvtepi8_epi16(lhs);
+        let rhs_i16 = _mm256_cvtepi8_epi16(rhs);
+        let products = _mm256_mullo_epi16(lhs_i16, rhs_i16);
+        sums = _mm256_add_epi32(sums, _mm256_madd_epi16(products, ones));
+        words += 4;
+    }
+
+    let hi = _mm256_extracti128_si256::<1>(sums);
+    let mut sum128 = _mm_add_epi32(_mm256_castsi256_si128(sums), hi);
+    sum128 = _mm_hadd_epi32(sum128, sum128);
+    sum128 = _mm_hadd_epi32(sum128, sum128);
+    let mut total = _mm_cvtsi128_si32(sum128);
+    for index in words..a.len() {
+        total += i8x4_dot_packed(a[index].0, b[index].0);
+    }
+    total
+}
+
 /// Raw slice-based I8x4 packed GEMM with fused dequantize + bias + activation.
 /// Avoids PackedTensor wrapping overhead — takes slices and scalars directly.
 /// Activation scale/zp are per-tensor (scalar). Weight scales/zps can be
@@ -495,10 +493,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     c_row[col] = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -527,10 +522,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -560,10 +552,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -593,10 +582,7 @@ pub fn gemm_packed_i8x4_fused_raw(
                 let r = act_scale * qa_sum as f32;
                 for col in 0..n {
                     let w_row = &w_data[col * k_packed..(col + 1) * k_packed];
-                    let mut acc = bias_q_col[col];
-                    for kk in 0..k_packed {
-                        acc += i8x4_dot_packed(act_row[kk].0, w_row[kk].0);
-                    }
+                    let acc = bias_q_col[col] + dot_i8x4_rows(act_row, w_row);
                     let val = (acc as f32) * scale_ab_col[col]
                         + w_zp_col[col] * r
                         + act_zp * w_term_col[col]
@@ -1173,24 +1159,17 @@ pub unsafe fn conv2d_packed_i8x4(
                     b
                 }
             });
-            let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
+            with_col_buf(num_pixels * local_oc, |temp| {
                 gemm_packed_i8x4_fused(&act_packed, &w_slice, b, activation, temp);
-                let mut found = false;
-                for pixel in 0..num_pixels {
-                    for f in 0..local_oc {
-                        let v = temp[pixel * local_oc + f];
-                        if v.is_nan() {
-                            found = true;
-                            eprintln!("[FNN_NAN] conv2d_u8 out_base={} g_oc_off={} f={} pixel={} v=nan temp_slice={:?}", out_base, g_oc_off, f, pixel, &temp[..10.min(temp.len())]);
-                        }
-                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                // Write each NCHW output channel contiguously. The former
+                // pixel-major transpose scattered stores across every channel.
+                for f in 0..local_oc {
+                    for pixel in 0..num_pixels {
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] =
+                            temp[pixel * local_oc + f];
                     }
                 }
-                found
             });
-            if nan_found {
-                panic!("NaN in u8 conv output");
-            }
         }
     }
 }
@@ -1257,24 +1236,15 @@ pub unsafe fn conv2d_packed_i4x8(
                     b
                 }
             });
-            let nan_found = with_col_buf(num_pixels * local_oc, |temp| {
+            with_col_buf(num_pixels * local_oc, |temp| {
                 gemm_packed_i4x8_fused(&act_packed, &w_slice, b, activation, temp);
-                let mut found = false;
                 for pixel in 0..num_pixels {
                     for f in 0..local_oc {
-                        let v = temp[pixel * local_oc + f];
-                        if v.is_nan() {
-                            found = true;
-                            eprintln!("[FNN_NAN] conv2d_u8 out_base={} g_oc_off={} f={} pixel={} v=nan temp_slice={:?}", out_base, g_oc_off, f, pixel, &temp[..10.min(temp.len())]);
-                        }
-                        output[out_base + (g_oc_off + f) * num_pixels + pixel] = v;
+                        output[out_base + (g_oc_off + f) * num_pixels + pixel] =
+                            temp[pixel * local_oc + f];
                     }
                 }
-                found
             });
-            if nan_found {
-                panic!("NaN in u8 conv output");
-            }
         }
     }
 }
@@ -1368,6 +1338,39 @@ mod tests {
     use crate::dtypes::{F8x4, F8x4R};
 
     #[test]
+    fn test_i8x4_row_dot_matches_scalar_at_signed_endpoints_and_tails() {
+        let values = [-128i8, -127, -65, -1, 0, 1, 63, 126, 127];
+        for words in 1..=33 {
+            let lhs: Vec<I8x4> = (0..words)
+                .map(|word| {
+                    let mut packed = 0u32;
+                    for lane in 0..4 {
+                        let value = values[(word * 4 + lane) % values.len()];
+                        packed |= (value as u8 as u32) << (lane * 8);
+                    }
+                    I8x4(packed)
+                })
+                .collect();
+            let rhs: Vec<I8x4> = (0..words)
+                .map(|word| {
+                    let mut packed = 0u32;
+                    for lane in 0..4 {
+                        let value = values[values.len() - 1 - (word * 3 + lane) % values.len()];
+                        packed |= (value as u8 as u32) << (lane * 8);
+                    }
+                    I8x4(packed)
+                })
+                .collect();
+            let expected: i32 = lhs
+                .iter()
+                .zip(&rhs)
+                .map(|(&a, &b)| i8x4_dot_packed(a.0, b.0))
+                .sum();
+            assert_eq!(dot_i8x4_rows(&lhs, &rhs), expected, "words={words}");
+        }
+    }
+
+    #[test]
     fn test_conv2d_packed_i4x8_basic() {
         let n = 1;
         let c = 8;
@@ -1404,6 +1407,33 @@ mod tests {
         }
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_i4x8_nonfinite_input_never_panics() {
+        let input = vec![f32::NAN; 8];
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&[1.0; 8], &[1, 8]);
+        let mut output = vec![0.0f32; 1];
+        unsafe {
+            conv2d_packed_i4x8(
+                &input,
+                1,
+                8,
+                1,
+                1,
+                &weight,
+                None,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                PreparedActivation::None,
+                &mut output,
+            );
+        }
+        assert_eq!(output.len(), 1);
     }
 
     #[test]
@@ -1475,6 +1505,102 @@ mod tests {
     }
 
     #[test]
+    fn test_conv2d_packed_i4x8_matches_its_dequantized_operands() {
+        let (n, c, h, w, oc, kh, kw) = (1, 3, 8, 8, 5, 3, 3);
+        let (stride, padding, dilation, groups) = (2, 1, 1, 1);
+        let input: Vec<f32> = (0..n * c * h * w)
+            .map(|i| ((i * 37 % 211) as f32 - 105.0) / 29.0)
+            .collect();
+        let k = c * kh * kw;
+        let weights: Vec<f32> = (0..oc * k)
+            .map(|i| ((i * 53 % 173) as f32 - 86.0) / 113.0)
+            .collect();
+        let weight = PackedTensor::<I4x8>::from_f32_per_channel(&weights, &[oc, k]);
+        let h_out = conv_out_size(h, kh, stride, padding, dilation);
+        let w_out = conv_out_size(w, kw, stride, padding, dilation);
+        let pixels = h_out * w_out;
+        let mut actual = vec![0.0; n * oc * pixels];
+
+        unsafe {
+            conv2d_packed_i4x8(
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                None,
+                stride,
+                padding,
+                dilation,
+                groups,
+                kh,
+                kw,
+                PreparedActivation::None,
+                &mut actual,
+            );
+        }
+
+        let activations =
+            unsafe { im2col_pack_i4x8(&input, c, h, w, kh, kw, stride, padding, dilation) }
+                .to_f32_vec();
+        let mut reference_im2col = vec![0.0; pixels * k];
+        // SAFETY: `input` contains one complete NCHW image and
+        // `reference_im2col` is sized to the exact output matrix extent.
+        let _ = unsafe {
+            crate::backend::cpu::im2col::im2col_dispatch(
+                &input,
+                c,
+                h,
+                w,
+                kh,
+                kw,
+                stride,
+                padding,
+                dilation,
+                &mut reference_im2col,
+                false,
+            )
+        };
+        let activation_step = (reference_im2col
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - reference_im2col
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min))
+            / 15.0;
+        for (index, (&got, &want)) in activations.iter().zip(&reference_im2col).enumerate() {
+            assert!(
+                (got - want).abs() <= activation_step + 1e-6,
+                "packed activation[{index}] mismatch: got {got}, expected {want}, step {activation_step}"
+            );
+        }
+
+        let dequantized_weights = weight.to_f32_vec();
+        let mut expected = vec![0.0; actual.len()];
+        for pixel in 0..pixels {
+            for out_channel in 0..oc {
+                let mut sum = 0.0;
+                for depth in 0..k {
+                    sum += activations[pixel * k + depth]
+                        * dequantized_weights[out_channel * k + depth];
+                }
+                expected[out_channel * pixels + pixel] = sum;
+            }
+        }
+
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            let error = (got - want).abs();
+            assert!(
+                error <= 2e-4,
+                "output[{index}] mismatch: got {got}, expected {want}, error {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_conv2d_packed_i8x4_non_multiple_k() {
         let n = 1;
         let c = 3;
@@ -1526,6 +1652,102 @@ mod tests {
         }
         let max_abs = output.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01, "Output is all zeros (max_abs={})", max_abs);
+    }
+
+    #[test]
+    fn test_conv2d_packed_i8x4_matches_its_dequantized_operands() {
+        let (n, c, h, w, oc, kh, kw) = (1, 3, 8, 8, 5, 3, 3);
+        let (stride, padding, dilation, groups) = (2, 1, 1, 1);
+        let input: Vec<f32> = (0..n * c * h * w)
+            .map(|i| ((i * 37 % 211) as f32 - 105.0) / 29.0)
+            .collect();
+        let k = c * kh * kw;
+        let weights: Vec<f32> = (0..oc * k)
+            .map(|i| ((i * 53 % 173) as f32 - 86.0) / 113.0)
+            .collect();
+        let bias: Vec<f32> = (0..oc).map(|i| i as f32 * 0.07 - 0.11).collect();
+        let weight = PackedTensor::<I8x4>::from_f32_per_channel(&weights, &[oc, k]);
+        let h_out = conv_out_size(h, kh, stride, padding, dilation);
+        let w_out = conv_out_size(w, kw, stride, padding, dilation);
+        let pixels = h_out * w_out;
+        let mut actual = vec![0.0; n * oc * pixels];
+
+        unsafe {
+            conv2d_packed_i8x4(
+                &input,
+                n,
+                c,
+                h,
+                w,
+                &weight,
+                Some(&bias),
+                stride,
+                padding,
+                dilation,
+                groups,
+                kh,
+                kw,
+                PreparedActivation::None,
+                &mut actual,
+            );
+        }
+
+        let activations =
+            unsafe { im2col_pack_i8x4(&input, c, h, w, kh, kw, stride, padding, dilation) }
+                .to_f32_vec();
+        let mut reference_im2col = vec![0.0; pixels * k];
+        // SAFETY: `input` contains one complete NCHW image and
+        // `reference_im2col` is sized to the exact output matrix extent.
+        let _ = unsafe {
+            crate::backend::cpu::im2col::im2col_dispatch(
+                &input,
+                c,
+                h,
+                w,
+                kh,
+                kw,
+                stride,
+                padding,
+                dilation,
+                &mut reference_im2col,
+                false,
+            )
+        };
+        let activation_step = (reference_im2col
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            - reference_im2col
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min))
+            / 255.0;
+        for (index, (&got, &want)) in activations.iter().zip(&reference_im2col).enumerate() {
+            assert!(
+                (got - want).abs() <= activation_step + 1e-6,
+                "packed activation[{index}] mismatch: got {got}, expected {want}, step {activation_step}"
+            );
+        }
+        let dequantized_weights = weight.to_f32_vec();
+        let mut expected = vec![0.0; actual.len()];
+        for pixel in 0..pixels {
+            for out_channel in 0..oc {
+                let mut sum = bias[out_channel];
+                for depth in 0..k {
+                    sum += activations[pixel * k + depth]
+                        * dequantized_weights[out_channel * k + depth];
+                }
+                expected[out_channel * pixels + pixel] = sum;
+            }
+        }
+
+        for (index, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            let error = (got - want).abs();
+            assert!(
+                error <= 2e-4,
+                "output[{index}] mismatch: got {got}, expected {want}, error {error}"
+            );
+        }
     }
 
     #[test]

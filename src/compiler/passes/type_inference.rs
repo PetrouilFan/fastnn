@@ -21,7 +21,7 @@
 //!   natural input type.
 
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Returns the dtype that `opcode` expects for its `input_index`-th input
 /// (0-based).  Returns `None` when the opcode treats all inputs uniformly
@@ -80,7 +80,7 @@ pub fn infer_types(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             };
 
             let actual = match graph_ref.get_node(input_id) {
-                Some(n) => n.output_type.dtype.clone(),
+                Some(n) => n.output_type.dtype(),
                 None => continue,
             };
 
@@ -178,7 +178,7 @@ fn conversion_between(actual: &IrDType, expected: &IrDType) -> Option<Opcode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::DimExpr;
+    use crate::ir::DimExpr;
 
     /// Test insertion of Dequantize when a MatMul's weight is quantized
     /// but another consumer of that weight expects F32.
@@ -231,7 +231,7 @@ mod tests {
             TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
         );
         let weight_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Float(1.0)),
+            Opcode::Constant(crate::ir::TensorValue::Float(1.0)),
             vec![],
             TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32),
         );
@@ -282,7 +282,7 @@ mod tests {
         let inserted_id = dq_node.inputs[0];
         let inserted_node = graph.get_node(inserted_id).unwrap();
         assert_eq!(inserted_node.opcode, Opcode::QuantizeActivations);
-        assert_eq!(inserted_node.output_type.dtype, IrDType::I8);
+        assert_eq!(inserted_node.output_type.dtype(), IrDType::I8);
     }
 
     /// Test that type inference inserts DequantizeActivations before
@@ -314,7 +314,7 @@ mod tests {
         let inserted_id = qa_node.inputs[0];
         let inserted_node = graph.get_node(inserted_id).unwrap();
         assert_eq!(inserted_node.opcode, Opcode::DequantizeActivations);
-        assert_eq!(inserted_node.output_type.dtype, IrDType::F32);
+        assert_eq!(inserted_node.output_type.dtype(), IrDType::F32);
     }
 
     /// Test that type inference inserts ToF16 when a ToF16 node
@@ -388,14 +388,7 @@ mod tests {
         let q_id = graph.add_node(
             Opcode::Quantize,
             vec![input_id],
-            TensorType::new(
-                vec![DimExpr::Known(4)],
-                IrDType::I4 {
-                    scales: vec![],
-                    zero_points: vec![],
-                    codebooks: vec![],
-                },
-            ),
+            TensorType::new(vec![DimExpr::Known(4)], IrDType::I4),
         );
         graph.set_inputs(vec![input_id]);
         graph.set_outputs(vec![q_id]);
@@ -413,7 +406,7 @@ mod tests {
     fn test_type_inference_constants_unchanged() {
         let mut graph = ComputeGraph::new();
         let const_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Float(42.0)),
+            Opcode::Constant(crate::ir::TensorValue::Float(42.0)),
             vec![],
             TensorType::new(vec![], IrDType::F32),
         );
@@ -430,9 +423,9 @@ mod tests {
         graph.set_inputs(vec![input_id]);
         graph.set_outputs(vec![add_id]);
 
-        let dtype_before = graph.get_node(const_id).unwrap().output_type.dtype.clone();
+        let dtype_before = graph.get_node(const_id).unwrap().output_type.dtype();
         infer_types(&mut graph).unwrap();
-        let dtype_after = graph.get_node(const_id).unwrap().output_type.dtype.clone();
+        let dtype_after = graph.get_node(const_id).unwrap().output_type.dtype();
         assert_eq!(dtype_before, dtype_after);
     }
 }
