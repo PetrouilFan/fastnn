@@ -52,6 +52,17 @@ pub fn quantize_matmul_weights_k_grouped_i4(
     candidates.dedup();
 
     for weight_id in candidates {
+        let incompatible_consumer = graph.consumers(weight_id).into_iter().find(|consumer_id| {
+            graph.get_node(*consumer_id).is_none_or(|consumer| {
+                !matches!(consumer.opcode, Opcode::MatMul)
+                    || consumer.inputs.get(1).copied() != Some(weight_id)
+            })
+        });
+        if graph.outputs.contains(&weight_id) || incompatible_consumer.is_some() {
+            return Err(FastnnError::compilation(format!(
+                "dynamic W4A8 cannot mutate shared weight constant {weight_id}; clone the weight for non-MatMul consumers"
+            )));
+        }
         let weight = graph.get_node(weight_id).unwrap();
         let (values, logical_shape) = match &weight.opcode {
             Opcode::Constant(TensorValue::Data { bytes, tensor_type }) => {
@@ -63,17 +74,28 @@ pub fn quantize_matmul_weights_k_grouped_i4(
                     .ok_or_else(|| {
                         FastnnError::compilation("dynamic W4A8 requires static MatMul weights")
                     })?;
-                if shape.len() != 2 || bytes.len() != shape.iter().product::<usize>() * 4 {
+                let element_count = shape
+                    .iter()
+                    .try_fold(1usize, |count, dimension| count.checked_mul(*dimension));
+                let expected_bytes = element_count.and_then(|count| count.checked_mul(4));
+                if shape.len() != 2 || expected_bytes != Some(bytes.len()) {
                     return Err(FastnnError::compilation(
                         "dynamic W4A8 requires a two-dimensional F32 MatMul weight constant",
                     ));
                 }
-                (bytemuck::cast_slice::<u8, f32>(bytes).to_vec(), shape)
+                let values: Vec<f32> = bytes
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect();
+                (values, shape)
             }
             _ => continue,
         };
         let (k, n) = (logical_shape[0], logical_shape[1]);
-        let mut transposed = vec![0.0f32; k * n];
+        let transposed_len = k
+            .checked_mul(n)
+            .ok_or_else(|| FastnnError::compilation("dynamic W4A8 weight dimensions overflow"))?;
+        let mut transposed = vec![0.0f32; transposed_len];
         for row in 0..k {
             for column in 0..n {
                 transposed[column * k + row] = values[row * n + column];

@@ -106,6 +106,31 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     } else {
         1
     };
+    if meta.quant_block_size > 0 && kernel_name == "matmul_i4_i8" {
+        if !matches!(meta.quant_block_size, 32 | 64 | 128) || meta.shape.len() != 2 {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: grouped W4A8 metadata requires a 2D shape and K-group size 32, 64, or 128"
+            )));
+        }
+        let expected_groups = rows
+            .checked_mul(meta.shape[1].div_ceil(meta.quant_block_size))
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "{kernel_name}: grouped W4A8 metadata size overflows"
+                ))
+            })?;
+        if meta.scales.len() != expected_groups
+            || zero_points.len() != expected_groups
+            || meta.quantized_group_sums.len() != expected_groups
+        {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: grouped W4A8 metadata length mismatch: expected {expected_groups}, scales {}, offsets {}, compensation {}",
+                meta.scales.len(),
+                zero_points.len(),
+                meta.quantized_group_sums.len()
+            )));
+        }
+    }
     let valid_meta_len = meta.scales.len() == 1
         || meta.scales.len() == rows
         || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0)
@@ -523,5 +548,33 @@ mod grouped_metadata_tests {
         .unwrap();
         assert_eq!(reconstructed.quantized_group_sums(), expected_sums);
         assert_eq!(reconstructed.to_f32_vec(), original.to_f32_vec());
+    }
+
+    #[test]
+    fn rejects_malformed_grouped_metadata_before_kernel_indexing() {
+        let shape = [2usize, 65usize];
+        let values: Vec<f32> = (0..shape.iter().product())
+            .map(|index| index as f32 / 19.0 - 2.0)
+            .collect();
+        let original = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&values, &shape, 32);
+        let metadata = QuantizedWeightMeta {
+            bit_width: 4,
+            scales: original.scales.clone(),
+            dequant_offsets: original.zeros.clone(),
+            shape: shape.to_vec(),
+            quant_block_size: 32,
+            codebooks: vec![],
+            quantized_group_sums: original.quantized_group_sums().to_vec(),
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4_i8", 4, false),
+        };
+        let packed = Arc::new(original.as_packed().to_vec());
+
+        let mut short = metadata.clone();
+        short.scales.pop();
+        assert!(packed_tensor_from_meta(packed.clone(), Arc::new(short), "matmul_i4_i8").is_err());
+
+        let mut unsupported = metadata;
+        unsupported.quant_block_size = 16;
+        assert!(packed_tensor_from_meta(packed, Arc::new(unsupported), "matmul_i4_i8").is_err());
     }
 }

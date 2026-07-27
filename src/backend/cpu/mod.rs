@@ -10956,7 +10956,7 @@ impl Backend for CpuBackend {
                                         row.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
                                     let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
                                     out_bytes[8 + token * 4..12 + token * 4]
-                                        .copy_from_slice(&scale.to_le_bytes());
+                                        .copy_from_slice(&scale.to_ne_bytes());
                                     for (column, value) in row.iter().enumerate() {
                                         out_bytes[data_start + start + column] =
                                             (value / scale).round().clamp(-128.0, 127.0) as i8

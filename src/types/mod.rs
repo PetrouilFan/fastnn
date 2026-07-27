@@ -610,20 +610,28 @@ pub enum CompileTarget {
     Native,
     WeightOnly(QuantTarget),
     IntegerInference(QuantTarget),
+    TrainingMixedPrecision {
+        compute: ScalarType,
+        accumulator: ScalarType,
+    },
     /// Prepared signed-I4 MatMul weights grouped along K with dynamic
     /// per-token signed-I8 activations.
     DynamicW4A8 {
         group_size: usize,
-    },
-    TrainingMixedPrecision {
-        compute: ScalarType,
-        accumulator: ScalarType,
     },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_w4a8_compile_target_round_trips() {
+        let target = CompileTarget::DynamicW4A8 { group_size: 64 };
+        let encoded = bincode::serialize(&target).unwrap();
+        let decoded: CompileTarget = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded, target);
+    }
 
     #[test]
     fn packed_storage_rounds_to_whole_words() {

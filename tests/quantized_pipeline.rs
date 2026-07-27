@@ -1264,3 +1264,45 @@ fn dynamic_w4a8_rejects_batched_rank_three_activations() {
         .unwrap_err();
     assert!(error.to_string().contains("rank-2 activations"));
 }
+
+#[test]
+fn dynamic_w4a8_rejects_weight_constants_that_are_graph_outputs() {
+    let (m, k, n) = (2usize, 32usize, 8usize);
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+    let weight_type = TensorType::new(
+        vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&vec![0.5f32; k * n]).to_vec(),
+            tensor_type: weight_type.clone(),
+        }),
+        vec![],
+        weight_type.clone(),
+    );
+    let matmul_id = graph.add_node(
+        Opcode::MatMul,
+        vec![input_id, weight_id],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+            IrDType::F32,
+        ),
+    );
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![matmul_id, weight_id]);
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let error = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 32 }, None)
+        .unwrap_err();
+    assert!(error.to_string().contains("shared weight constant"));
+}
