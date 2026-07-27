@@ -348,7 +348,7 @@ fn get_or_cache_f32_weights<T: PackedWord + 'static>(
 
 #[cfg(test)]
 mod packed_weight_cache_tests {
-    use super::{clear_f32_weight_cache, get_or_cache_packed};
+    use super::{clear_f32_weight_cache, get_or_cache_packed, CpuBuffer, PACKED_WEIGHT_CACHE};
     use crate::dtypes::{PackedWord, U4x8};
 
     #[test]
@@ -361,6 +361,24 @@ mod packed_weight_cache_tests {
         clear_f32_weight_cache();
         let second = get_or_cache_packed::<U4x8>(0, raw.len(), &raw);
         assert_eq!(second[0].to_bits(), u32::MAX);
+    }
+
+    #[test]
+    fn dropping_arena_removes_pointer_keyed_weight_entries() {
+        let arena = CpuBuffer::new(vec![0x11; 64]);
+        // SAFETY: the test arena owns exactly 64 initialized bytes and no mutable view exists.
+        let raw = unsafe { arena.view_u8(0, 64) };
+        let pointer = raw.as_ptr() as usize;
+        let _packed = get_or_cache_packed::<U4x8>(0, 64, raw);
+        drop(arena);
+
+        assert!(!PACKED_WEIGHT_CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|(cached_pointer, _, _, _)| *cached_pointer == pointer));
     }
 }
 
@@ -406,6 +424,26 @@ fn aligned_packed_slice<T: PackedWord>(raw: &[u8]) -> Vec<T> {
 /// let _ = buffer.data_mut();
 /// ```
 pub struct CpuBuffer(UnsafeCell<AlignedVec>);
+
+impl Drop for CpuBuffer {
+    fn drop(&mut self) {
+        let data = self.0.get_mut();
+        let start = data.as_ptr() as usize;
+        let end = start.saturating_add(data.len());
+        if let Some(cache) = PACKED_WEIGHT_CACHE.get() {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(pointer, _, _, _), _| *pointer < start || *pointer >= end);
+        }
+        if let Some(cache) = F32_WEIGHT_CACHE.get() {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(pointer, _, _, _), _| *pointer < start || *pointer >= end);
+        }
+    }
+}
 
 impl CpuBuffer {
     pub fn new(data: Vec<u8>) -> Self {
