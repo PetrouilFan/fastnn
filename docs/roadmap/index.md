@@ -6,14 +6,18 @@ Current development priorities and historical planning documents.
 
 ## Current Focus
 
-fastnn v2.5 is stabilizing CPU performance work, improving maintainability,
-and expanding toward GPU-resident execution and multi-device training.
+fastnn v2.6 is in release stabilization after the canonical tensor-contract,
+compiler/runtime safety, signed quantization, and prepared grouped W4A8 MatMul
+migration. New feature work is frozen until the release gates pass.
 
 **Active areas:**
 
-- **CPU backend maturity** — benchmark expansion, copy-reduction, fused epilogues
-- **Telemetry and observability** — arena allocation counters, dispatch profiling
-- **Module maintainability** — splitting the large CPU backend module after perf work
+- **Release correctness** — package/version consistency, wheel smoke tests, and
+  Linux/macOS/Windows/AArch64 validation
+- **CPU numerical contracts** — signed I8/I4 endpoints, affine correction,
+  malformed-metadata rejection, and deterministic model evidence
+- **Prepared grouped W4A8 MatMul** — G32/G64/G128 integration, scalar fallback,
+  AVX2 execution, durable compensation, and shared activation reuse
 
 The active source-layout and ownership plan is
 [Codebase Reorganization Roadmap](codebase-reorganization.md). It defines
@@ -31,11 +35,14 @@ The dated [Safety and Assurance Inventory](safety-inventory-2026-07-18.md)
 records the pre-redesign unsafe, determinism, concurrency, and fuzzing
 boundaries that constrain the dtype/storage migration.
 
-**Upcoming:**
+**Post-v2.6 candidates:**
 
-- WGPU-resident arena execution
-- Multi-GPU training with real device-resident gradient synchronization
-- Maintained WGPU benchmark baseline
+- Transformer-level grouped W4A8 quality and perplexity validation
+- Profile-guided removal of remaining CPU hot-path allocations and copies
+- Separate calibrated Conv2d quantization work after compiler-ordering repair
+
+Grouped W4A8 Conv2d/YOLO, batched or dynamic-shape grouped MatMul, AVX-512,
+distributed execution, and WGPU expansion are outside the v2.6 release scope.
 
 For detailed performance work across all backends, see
 [Performance Roadmap](../internals/performance-roadmap.md).

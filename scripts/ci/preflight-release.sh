@@ -45,10 +45,10 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
 echo ""
 echo "Current branch: $BRANCH"
 
-if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "dev" ] || [[ "$BRANCH" == agent/* ]]; then
-  pass "Branch '$BRANCH' is acceptable for a release"
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "dev" ]; then
+  pass "Branch '$BRANCH' is acceptable for release preparation"
 else
-  warn "Branch '$BRANCH' is not a typical release branch (main/dev/agent/*). Intentional?"
+  fail "Branch '$BRANCH' is not a release branch (expected main or dev)"
 fi
 
 LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
@@ -78,6 +78,21 @@ if [ "$CARGO_VER" = "$PYPROJECT_VER" ] && [ "$PYPROJECT_VER" = "$INIT_VER" ]; th
   pass "All version strings match ($CARGO_VER)"
 else
   fail "Version mismatch: Cargo=$CARGO_VER pyproject=$PYPROJECT_VER init=$INIT_VER"
+fi
+
+for lockfile in Cargo.lock fuzz/Cargo.lock uv.lock; do
+  LOCK_VER=$(awk '/name = "fastnn"/{getline; sub(/version = "/, ""); sub(/"/, ""); print; exit}' "$lockfile")
+  if [ "$LOCK_VER" = "$CARGO_VER" ]; then
+    pass "$lockfile package version matches ($LOCK_VER)"
+  else
+    fail "$lockfile package version mismatch: expected $CARGO_VER, got $LOCK_VER"
+  fi
+done
+
+if grep -Fq "## [$CARGO_VER]" CHANGELOG.md; then
+  pass "CHANGELOG.md contains a $CARGO_VER release entry"
+else
+  fail "CHANGELOG.md has no [$CARGO_VER] release entry"
 fi
 
 # ── 4. Release workflow exists and references wheel artifacts ─────────────────
@@ -169,7 +184,7 @@ fi
 echo ""
 echo "--- cargo test ---"
 
-TEST_CMD="cargo test --lib --no-default-features --features \"simd,parallel,fusion-forward\""
+TEST_CMD="cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib -- --test-threads=1 && cargo test --tests -- --test-threads=1 && cargo test --release --test release_error_paths -- --test-threads=1"
 echo "Command: $TEST_CMD"
 
 if [ "$RUN_TESTS" = true ] && [ "$DRY_RUN" = false ]; then
@@ -191,8 +206,8 @@ fi
 echo ""
 echo "--- Manual checklist ---"
 echo "  [ ] Confirm CHANGELOG.md has an entry for the target version"
-echo "  [ ] Confirm no source changes since last release commit"
-echo "  [ ] Confirm GitHub Actions secrets (PYPI_TOKEN etc.) are valid"
+echo "  [ ] Confirm the release PR is merged and main CI is green"
+echo "  [ ] Confirm release artifacts are GitHub wheels only (no PyPI/crates.io publish)"
 echo "  [ ] Confirm no open blockers in issues/PRs"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -201,6 +216,10 @@ if [ "$FAILURES" -gt 0 ]; then
   echo -e "${RED}Preflight failed with $FAILURES failure(s)${NC}"
   exit 1
 else
-  echo -e "${GREEN}Preflight passed — ready to tag${NC}"
+  if [ "$BRANCH" = "main" ]; then
+    echo -e "${GREEN}Preflight passed — ready to tag${NC}"
+  else
+    echo -e "${GREEN}Preflight passed — ready for a release PR to main${NC}"
+  fi
   exit 0
 fi

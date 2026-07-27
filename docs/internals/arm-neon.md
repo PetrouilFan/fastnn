@@ -1,6 +1,6 @@
-# ARM NEON Support
+# AArch64 CPU Support
 
-ARM NEON SIMD acceleration for aarch64 targets in fastnn's CPU backend.
+Build and portability status for fastnn's CPU backend on 64-bit ARM.
 
 ## Building and Testing
 
@@ -8,40 +8,45 @@ ARM NEON SIMD acceleration for aarch64 targets in fastnn's CPU backend.
 # Cross-compile from x86
 rustup target add aarch64-unknown-linux-gnu
 sudo apt install gcc-aarch64-linux-gnu
-cargo build --target aarch64-unknown-linux-gnu --features neon
+cargo build --target aarch64-unknown-linux-gnu
+cargo build --target aarch64-unknown-linux-gnu \
+  --features "simd,parallel,fusion-forward,fusion-backward,fusion-residual-add-norm"
 
 # Build natively on Raspberry Pi
-cargo build --features "neon,simd,parallel"
+cargo build --features "simd,parallel,fusion-forward"
 
 # Run tests
-cargo test --features "neon,simd,parallel"
+cargo test --features "simd,parallel,fusion-forward"
 cargo test --test cross_arch_consistency
 ```
 
-## NEON Kernels
+## SIMD status
 
-NEON-optimized implementations in `src/backend/cpu/microkernels.rs`:
+The `simd` feature is architecture-portable. x86-specific AVX2 kernels are
+compiled only on x86_64; AArch64 builds retain scalar implementations for the
+same execution contracts. Runtime ISA reporting detects NEON where available,
+but fastnn does not currently claim dedicated NEON low-bit microkernels.
 
-- GEMV for I4x8 packed weights (`gemv_u4x8_neon`)
-- GEMV for I8x4 packed weights (`gemv_u8x4_neon`)
-- Element-wise add, mul, relu
-- Softmax
-- Reduction sum
+CI cross-compiles both the default feature set and all portable CPU fusion
+features for `aarch64-unknown-linux-gnu` on every change to `main` or `dev`.
 
 ## Benchmarking
 
+The maintained CPU benchmark is `benches/cpu_baselines.rs`:
+
 ```bash
-bash benchmarks/raspberry_pi/run_bench.sh
+cargo bench --bench cpu_baselines
 ```
 
-CI verifies NEON kernel outputs match scalar fallback on every commit.
+Run it natively on the target machine. Cross-compilation verifies portability,
+not target-device latency.
 
 ## Known Limitations
 
 - Requires aarch64 (64-bit ARM). 32-bit ARM (armv7) is not supported.
 - Unsupported ops fall back to scalar code.
-- NEON + parallel may have diminishing returns on lower-end Pi models.
-- Runtime ISA dispatch via `std::is_aarch64_feature_detect` enables a single binary for both NEON and non-NEON targets.
+- Parallel execution may have diminishing returns on lower-end devices.
+- Dedicated AArch64 low-bit SIMD kernels remain future work.
 
 ## See also
 
