@@ -69,6 +69,12 @@ pub fn quantize_matmul_activations_per_token(graph: &mut ComputeGraph) -> Result
                         "dynamic W4A8 currently requires static activation dimensions",
                     )
                 })?;
+            if dimensions.len() != 2 {
+                return Err(FastnnError::compilation(format!(
+                    "dynamic W4A8 currently requires rank-2 activations, got rank {}",
+                    dimensions.len()
+                )));
+            }
             let (&k, token_dimensions) = dimensions.split_last().ok_or_else(|| {
                 FastnnError::compilation("dynamic W4A8 activation shape must not be empty")
             })?;
