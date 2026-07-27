@@ -5,66 +5,116 @@ permissions:
 
 on:
   push:
-    tags: [ "v*" ]
+    tags: ["v*"]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  test:
+  validate-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a release tag from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git fetch origin main
+          test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
+      - name: Verify package versions and changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" = "$VERSION"
+          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml | head -1)" = "$VERSION"
+          test "$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' fastnn/__init__.py | head -1)" = "$VERSION"
+          grep -Fq "## [$VERSION]" CHANGELOG.md
+
+  quality:
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: python3 scripts/ci/check-agents-freshness.py
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --lib -- --test-threads=1
+      - run: cargo test --tests -- --test-threads=1
+      - run: cargo test --release --test release_error_paths -- --test-threads=1
+
+  portable-build:
+    needs: validate-tag
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
-    - run: cargo test --lib --no-default-features --features "simd,parallel,fusion-forward"
-      if: runner.os != 'macOS'
-    - run: cargo build --release --no-default-features --features "simd,parallel,fusion-forward"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --no-default-features --features "simd,parallel,fusion-forward"
 
   build-wheels:
-    needs: test
+    needs: [quality, portable-build]
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
-    - name: Install system dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
-    - uses: PyO3/maturin-action@v1
-      with:
-        command: build
-        args: --release --out dist
-    - name: Upload wheels
-      uses: actions/upload-artifact@v4
-      with:
-        name: wheels-${{ matrix.os }}
-        path: dist/*.whl
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libatlas-base-dev
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          manylinux: auto
+      - name: Install and smoke-test wheel outside the checkout
+        shell: bash
+        run: |
+          python -c "import glob,subprocess,sys; w=glob.glob('dist/*.whl'); assert len(w)==1, w; subprocess.check_call([sys.executable,'-m','pip','install','--force-reinstall',w[0]])"
+          python -c "import subprocess,sys,tempfile; code='import numpy as np; import fastnn as f; assert f.__version__ == \"${GITHUB_REF_NAME#v}\"; x=f.ones([2,2]); assert x.shape == [2,2]; n=[{\"name\":\"relu\",\"op_type\":\"Relu\",\"inputs\":\"x\",\"outputs\":\"y\"}]; e=f.AotExecutor(n,{},[\"x\"],[\"y\"],input_shapes={\"x\":[1,2]}); a=f.tensor(np.asarray([[-1.,2.]],dtype=np.float32),[1,2]); np.testing.assert_allclose(e.forward({\"x\":a})[\"y\"].numpy(),[[0.,2.]])'; subprocess.check_call([sys.executable,'-c',code], cwd=tempfile.mkdtemp())"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
 
   create-release:
     needs: build-wheels
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/download-artifact@v4
-      with:
-        pattern: wheels-*
-        path: dist
-        merge-multiple: true
-    - uses: softprops/action-gh-release@v2
-      with:
-        generate_release_notes: true
-        files: |
-          dist/*.whl
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.whl

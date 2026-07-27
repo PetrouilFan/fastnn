@@ -1,5 +1,63 @@
 # Changelog
 
+## [2.6.0] - 2026-07-27
+
+### Added
+- **Prepared grouped W4A8 MatMul**: signed I4 weights grouped along K (32, 64,
+  or 128), dynamic signed I8 activations per token, I32 accumulation, group-local
+  affine correction, durable precomputed compensation, and F32 output.
+- **Exact grouped scalar W4A8 kernel** with signed-I8 endpoint, reduction-tail,
+  partial-group, and packed-tail coverage on every supported CPU.
+- **Explicit quantized execution contracts** covering storage, accumulator and bias
+  domains, affine correction, requantization, rounding, saturation, kernel family,
+  workload phase, and ISA requirements.
+- **Compiler and runtime assurance**: structured pass reports, bounded executable
+  loading, malformed-plan subprocess tests, graph/runtime resource limits, fuzz
+  targets, AArch64 build gates, and independent CPU numerical oracles.
+
+### Changed
+- **Canonical tensor contracts**: `TensorType` now owns value representation and
+  storage layout; `IrDType` is metadata-free. Compiler passes, allocation, ONNX,
+  eager execution, Python bindings, and CPU lowering consume the canonical model.
+- **Grouped W4A8 preparation is explicit** through
+  `CompileTarget::DynamicW4A8 { group_size }`; eligible constant `[K, N]` MatMul
+  weights are transposed and packed once, and shared projections reuse one
+  per-token activation-quantization node.
+- **Prepared metadata persists grouped signed-code sums**, avoiding packed-weight
+  rescans during inference while retaining bounded deserialization.
+- **Release and CI gates** now cover serial shared-telemetry tests, release-mode
+  malformed inputs, feature profiles, Python on Linux/macOS/Windows, and AArch64.
+
+### Fixed
+- Signed-I8 activation packing now preserves negative values and the complete
+  `[-128, 127]` domain, including exact `-128 × -128` SIMD behavior.
+- Unsigned U4/U8 affine quantization now uses the correct unsigned code origin.
+- Packed-weight caches are retired with their owning CPU arenas, preventing stale
+  pointer-keyed entries from aliasing reused allocations under concurrent execution.
+- Packed descriptors, runtime payloads, quantization metadata, output shapes, and
+  non-finite activation values now fail explicitly instead of fabricating metadata,
+  silently falling back, indexing malformed arrays, or aborting in leaf kernels.
+
+### Performance and validation
+- Deterministic YOLO11n COCO-50 parity: PyTorch and fastnn F32 both measured
+  `0.6279 / 0.4739` mAP@0.5 / mAP@0.5:0.95; fastnn dynamic I8 measured
+  `0.6277 / 0.4766` with no malformed or non-finite outputs.
+- Grouped W4A8 decode using the selected scalar kernel (`M=1, N=K=512`)
+  measured 164.0 us (G32), 84.9 us
+  (G64), and 52.0 us (G128); prefill (`M=8`) measured 1.32 ms, 687.9 us, and
+  423.7 us respectively.
+- The rejected row-wise AVX2 W4 implementation remains excluded after measuring
+  approximately 6.9-7.0x slower than the scalar implementation.
+
+### Known limitations
+- Prepared grouped W4A8 currently supports static rank-2 MatMul only. Batched
+  rank-3 and dynamic-shape inputs are rejected explicitly; Conv2d and YOLO grouped
+  W4A8 are not implemented.
+- No transformer-level perplexity/quality gate is claimed for grouped W4A8 yet.
+- Dynamic I8 YOLO remains slower than F32 in the current CPU implementation.
+- U4/U8/F4/F8/F8R/I4Codebook cached paths unpack or dequantize to F32 and must not
+  be interpreted as native low-bit arithmetic.
+
 ## [2.5.0] - 2026-07-02
 
 ### Added
