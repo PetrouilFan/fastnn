@@ -178,6 +178,50 @@ pub mod sgemm;
 pub mod swar;
 pub mod telemetry;
 
+fn signed_i4_k_group_sums(
+    bytes: &[u8],
+    shape: &[usize],
+    group_size: usize,
+) -> Result<Vec<i32>, BackendError> {
+    let Some((&rows, inner_shape)) = shape.split_first() else {
+        return Err(BackendError::Compilation(
+            "grouped I4 weight shape must not be empty".into(),
+        ));
+    };
+    let inner = inner_shape.iter().try_fold(1usize, |size, &dimension| {
+        size.checked_mul(dimension)
+            .ok_or_else(|| BackendError::Compilation("grouped I4 weight shape overflows".into()))
+    })?;
+    let words_per_row = inner.div_ceil(I4x8::ITEMS);
+    let required_bytes = rows
+        .checked_mul(words_per_row)
+        .and_then(|words| words.checked_mul(std::mem::size_of::<I4x8>()))
+        .ok_or_else(|| BackendError::Compilation("grouped I4 payload size overflows".into()))?;
+    if bytes.len() < required_bytes {
+        return Err(BackendError::Compilation(format!(
+            "grouped I4 payload has {} bytes, expected at least {required_bytes}",
+            bytes.len()
+        )));
+    }
+    let groups_per_row = inner.div_ceil(group_size);
+    let mut sums = vec![0i32; rows * groups_per_row];
+    for row in 0..rows {
+        for col in 0..inner {
+            let word_index = row * words_per_row + col / I4x8::ITEMS;
+            let byte_start = word_index * std::mem::size_of::<I4x8>();
+            let word = u32::from_le_bytes(bytes[byte_start..byte_start + 4].try_into().unwrap());
+            let nibble = (word >> ((col % I4x8::ITEMS) * 4)) & 0x0f;
+            let code = if nibble & 0x08 != 0 {
+                (nibble | 0xfffffff0) as i32
+            } else {
+                nibble as i32
+            };
+            sums[row * groups_per_row + col / group_size] += code;
+        }
+    }
+    Ok(sums)
+}
+
 mod dispatch_helpers;
 use dispatch_helpers::*;
 
@@ -1037,6 +1081,24 @@ impl Backend for CpuBackend {
                                     } else {
                                         0
                                     };
+                                    let quantized_group_sums = if bit_width == 4
+                                        && quant_block_size > 0
+                                        && codebooks.is_empty()
+                                    {
+                                        let crate::ir::Opcode::Constant(crate::ir::TensorValue::Data {
+                                            bytes,
+                                            ..
+                                        }) = &wn.opcode
+                                        else {
+                                            return Err(BackendError::Compilation(format!(
+                                                "grouped I4 weight node {} must be a packed constant",
+                                                wn.id
+                                            )));
+                                        };
+                                        signed_i4_k_group_sums(bytes, &w_shape, quant_block_size)?
+                                    } else {
+                                        vec![]
+                                    };
                                     Ok(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                         bit_width,
                                         scales,
@@ -1044,6 +1106,7 @@ impl Backend for CpuBackend {
                                         shape: w_shape,
                                         quant_block_size,
                                         codebooks,
+                                        quantized_group_sums,
                                         execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                                             kernel_name,
                                             bit_width,
@@ -1386,6 +1449,24 @@ impl Backend for CpuBackend {
                                     } else {
                                         0
                                     };
+                                    let quantized_group_sums = if bw == 4
+                                        && quant_block_size > 0
+                                        && codebooks.is_empty()
+                                    {
+                                        let crate::ir::Opcode::Constant(crate::ir::TensorValue::Data {
+                                            bytes,
+                                            ..
+                                        }) = &wn.opcode
+                                        else {
+                                            return Err(BackendError::Compilation(format!(
+                                                "grouped I4 weight node {} must be a packed constant",
+                                                wn.id
+                                            )));
+                                        };
+                                        signed_i4_k_group_sums(bytes, &w_shape, quant_block_size)?
+                                    } else {
+                                        vec![]
+                                    };
                                     Ok(std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                                         bit_width: bw,
                                         scales,
@@ -1393,6 +1474,7 @@ impl Backend for CpuBackend {
                                         shape: w_shape,
                                         quant_block_size,
                                         codebooks,
+                                        quantized_group_sums,
                                         execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                                             &kernel,
                                             bw,

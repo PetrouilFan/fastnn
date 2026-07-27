@@ -144,6 +144,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             PackedTensor::from_raw_arc(data, meta.shape.clone(), meta.scales.clone(), zero_points);
         pt.quant_block_size = meta.quant_block_size;
         pt.codebooks = meta.codebooks.clone();
+        pt.set_quantized_group_sums(meta.quantized_group_sums.clone());
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;
         }
@@ -198,6 +199,7 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
                 shape: vec![m, k],
                 quant_block_size: 0,
                 codebooks: vec![],
+                quantized_group_sums: vec![],
                 execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                     kernel_name,
                     bit_width,
@@ -423,4 +425,38 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod grouped_metadata_tests {
+    use super::*;
+    use crate::backend::{QuantizedExecutionContract, QuantizedWeightMeta};
+
+    #[test]
+    fn reconstructs_grouped_compensation_without_rescanning_weights() {
+        let shape = [3usize, 145usize];
+        let values: Vec<f32> = (0..shape.iter().product())
+            .map(|index| ((index * 29 + 7) % 113) as f32 / 17.0 - 3.0)
+            .collect();
+        let original = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&values, &shape, 64);
+        let expected_sums = original.quantized_group_sums().to_vec();
+        let metadata = Arc::new(QuantizedWeightMeta {
+            bit_width: 4,
+            scales: original.scales.clone(),
+            dequant_offsets: original.zeros.clone(),
+            shape: shape.to_vec(),
+            quant_block_size: 64,
+            codebooks: vec![],
+            quantized_group_sums: expected_sums.clone(),
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4_i8", 4, false),
+        });
+        let reconstructed = packed_tensor_from_meta(
+            Arc::new(original.as_packed().to_vec()),
+            metadata,
+            "matmul_i4_i8",
+        )
+        .unwrap();
+        assert_eq!(reconstructed.quantized_group_sums(), expected_sums);
+        assert_eq!(reconstructed.to_f32_vec(), original.to_f32_vec());
+    }
 }

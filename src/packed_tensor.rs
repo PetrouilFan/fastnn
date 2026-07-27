@@ -1483,6 +1483,10 @@ impl<T: PackedWord> PackedTensor<T> {
         &self.quantized_group_sums
     }
 
+    pub(crate) fn set_quantized_group_sums(&mut self, sums: Vec<i32>) {
+        self.quantized_group_sums = sums;
+    }
+
     #[inline]
     pub fn scale_for_elem(&self, row: usize, col: usize) -> f32 {
         if let Some(block_idx) = col.checked_div(self.quant_block_size) {

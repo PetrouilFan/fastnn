@@ -486,6 +486,10 @@ pub struct QuantizedWeightMeta {
     pub codebooks: Vec<[f32; 16]>,
     /// Explicit numerical contract for the consuming quantized kernel.
     pub execution: QuantizedExecutionContract,
+    /// Precomputed sum of signed quantized codes for every K-axis block.
+    /// Empty for non-grouped weights and legacy serialized plans.
+    #[serde(default)]
+    pub quantized_group_sums: Vec<i32>,
 }
 
 impl QuantizedWeightMeta {
@@ -559,6 +563,16 @@ impl QuantizedWeightMeta {
                 )));
             }
         }
+        if !self.quantized_group_sums.is_empty()
+            && (self.bit_width != 4
+                || self.quant_block_size == 0
+                || !self.codebooks.is_empty()
+                || self.quantized_group_sums.len() != metadata_len)
+        {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} grouped weight compensation metadata is inconsistent"
+            )));
+        }
         Ok(())
     }
 
@@ -568,6 +582,14 @@ impl QuantizedWeightMeta {
         kernel_name: &str,
     ) -> Result<(), BackendError> {
         self.validate(instruction_index)?;
+        if kernel_name == "matmul_i4_i8"
+            && self.quant_block_size > 0
+            && self.quantized_group_sums.is_empty()
+        {
+            return Err(BackendError::Dispatch(format!(
+                "instruction {instruction_index} grouped W4A8 weights are missing precomputed compensation"
+            )));
+        }
         let expected = QuantizedExecutionContract::current_for_kernel(
             kernel_name,
             self.bit_width,
@@ -1008,6 +1030,7 @@ mod executable_plan_validation_tests {
             shape: vec![1, 4],
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             execution: QuantizedExecutionContract::current_for_kernel(kernel_name, 4, false),
         }
     }
@@ -1179,6 +1202,33 @@ mod executable_plan_validation_tests {
     }
 
     #[test]
+    fn grouped_weight_compensation_validates_and_round_trips() {
+        let metadata = QuantizedWeightMeta {
+            bit_width: 4,
+            scales: vec![0.25; 6],
+            dequant_offsets: vec![-0.5; 6],
+            shape: vec![2, 65],
+            quant_block_size: 32,
+            codebooks: vec![],
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4_i8", 4, false),
+            quantized_group_sums: vec![-7, 5, 2, 9, -3, 1],
+        };
+        metadata.validate_for_kernel(0, "matmul_i4_i8").unwrap();
+        let encoded = bincode::serialize(&metadata).unwrap();
+        let decoded: QuantizedWeightMeta = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.quantized_group_sums, metadata.quantized_group_sums);
+        decoded.validate_for_kernel(0, "matmul_i4_i8").unwrap();
+
+        let mut missing = metadata.clone();
+        missing.quantized_group_sums.clear();
+        assert!(missing.validate_for_kernel(0, "matmul_i4_i8").is_err());
+
+        let mut malformed = metadata;
+        malformed.quantized_group_sums.pop();
+        assert!(malformed.validate(0).is_err());
+    }
+
+    #[test]
     fn rejects_malformed_quantized_weight_metadata() {
         let invalid = QuantizedWeightMeta {
             bit_width: 4,
@@ -1187,6 +1237,7 @@ mod executable_plan_validation_tests {
             shape: vec![2, 4],
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             execution: QuantizedExecutionContract::current_for_kernel("matmul_i4", 4, false),
         };
         assert!(invalid.validate(0).is_err());
@@ -1198,6 +1249,7 @@ mod executable_plan_validation_tests {
             shape: vec![1, 4],
             quant_block_size: 0,
             codebooks: vec![],
+            quantized_group_sums: vec![],
             execution: QuantizedExecutionContract::current_for_kernel("matmul_i8", 8, false),
         };
         assert!(non_finite.validate(0).is_err());

@@ -96,6 +96,7 @@ fn run_malformed_dispatch() {
                 shape: vec![1, 1, 1, 1],
                 quant_block_size: 0,
                 codebooks: vec![],
+                quantized_group_sums: vec![],
                 execution: fastnn::backend::QuantizedExecutionContract::current_for_kernel(
                     "conv2d_i4",
                     4,
@@ -129,6 +130,7 @@ fn run_malformed_dispatch() {
                 shape: vec![1, 1],
                 quant_block_size: 0,
                 codebooks: vec![],
+                quantized_group_sums: vec![],
                 execution: fastnn::backend::QuantizedExecutionContract::current_for_kernel(
                     "conv2d_i4_i8",
                     4,

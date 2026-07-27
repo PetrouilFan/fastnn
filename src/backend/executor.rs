@@ -4318,6 +4318,7 @@ mod execution_storage_size_tests {
                     shape: vec![1, 1],
                     quant_block_size: 0,
                     codebooks: vec![],
+                    quantized_group_sums: vec![],
                     execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                         "matmul_i4",
                         4,
@@ -4451,6 +4452,7 @@ mod execution_storage_size_tests {
                     shape: vec![1, 1, 1, 1],
                     quant_block_size: 0,
                     codebooks: vec![],
+                    quantized_group_sums: vec![],
                     execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                         "matmul_i4",
                         4,
@@ -4488,6 +4490,7 @@ mod execution_storage_size_tests {
                         shape: vec![1, 1, 1, 1],
                         quant_block_size: 0,
                         codebooks: vec![],
+                        quantized_group_sums: vec![],
                         execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                             "conv2d_i4",
                             4,
@@ -4525,6 +4528,7 @@ mod execution_storage_size_tests {
                     shape: vec![1, 1],
                     quant_block_size: 0,
                     codebooks: vec![],
+                    quantized_group_sums: vec![],
                     execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
                         "matmul_i4",
                         4,
