@@ -1049,8 +1049,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     }
 }
 
-#[test]
-fn dynamic_w4a8_compiles_and_executes_grouped_per_token_matmul() {
+fn assert_dynamic_w4a8_matmul(group_size: usize) {
     let (m, k, n) = (3usize, 145usize, 5usize);
     let weights: Vec<f32> = (0..k * n)
         .map(|index| ((index * 31 + 9) % 137) as f32 / 23.0 - 3.0)
@@ -1096,7 +1095,7 @@ fn dynamic_w4a8_compiles_and_executes_grouped_per_token_matmul() {
 
     let mut executor = GraphExecutor::new(CpuBackend);
     let (mut plan, memory, compiled) = executor
-        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 64 }, None)
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size }, None)
         .unwrap();
     let matmul = compiled.get_node(output_id).unwrap();
     let quantize = compiled.get_node(matmul.inputs[0]).unwrap();
@@ -1117,8 +1116,11 @@ fn dynamic_w4a8_compiles_and_executes_grouped_per_token_matmul() {
             _ => None,
         })
         .expect("grouped W4A8 MatMul instruction");
-    assert_eq!(metadata.quant_block_size, 64);
-    assert_eq!(metadata.quantized_group_sums.len(), n * k.div_ceil(64));
+    assert_eq!(metadata.quant_block_size, group_size);
+    assert_eq!(
+        metadata.quantized_group_sums.len(),
+        n * k.div_ceil(group_size)
+    );
 
     let input_bytes: Vec<u8> = bytemuck::cast_slice(&input).to_vec();
     let result = executor
@@ -1132,7 +1134,7 @@ fn dynamic_w4a8_compiles_and_executes_grouped_per_token_matmul() {
             transposed[column * k + row] = weights[row * n + column];
         }
     }
-    let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], 64);
+    let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], group_size);
     let mut activations = PerTokenI8Activations::default();
     quantize_i8_per_token_symmetric(&input, m, k, &mut activations);
     let mut expected = vec![0.0f32; m * n];
@@ -1141,6 +1143,74 @@ fn dynamic_w4a8_compiles_and_executes_grouped_per_token_matmul() {
         assert!(
             (got - reference).abs() <= 1e-5 * reference.abs().max(1.0),
             "output[{index}] got {got}, expected {reference}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_w4a8_compiles_and_executes_all_group_sizes() {
+    for group_size in [32, 64, 128] {
+        assert_dynamic_w4a8_matmul(group_size);
+    }
+}
+
+#[test]
+fn dynamic_w4a8_reuses_one_per_token_activation_for_shared_projections() {
+    let (m, k, n) = (2usize, 64usize, 8usize);
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+    let mut outputs = Vec::new();
+    for projection in 0..3usize {
+        let weights: Vec<f32> = (0..k * n)
+            .map(|index| ((index * 13 + projection * 7) % 61) as f32 / 17.0 - 1.5)
+            .collect();
+        let weight_type = TensorType::new(
+            vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+            IrDType::F32,
+        );
+        let weight_id = graph.add_node(
+            Opcode::Constant(TensorValue::Data {
+                bytes: bytemuck::cast_slice(&weights).to_vec(),
+                tensor_type: weight_type.clone(),
+            }),
+            vec![],
+            weight_type,
+        );
+        outputs.push(graph.add_node(
+            Opcode::MatMul,
+            vec![input_id, weight_id],
+            TensorType::new(
+                vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+                IrDType::F32,
+            ),
+        ));
+    }
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(outputs.clone());
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let (_, _, compiled) = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 32 }, None)
+        .unwrap();
+    let quantize_nodes: Vec<_> = compiled
+        .nodes
+        .iter()
+        .filter(|node| node.opcode == Opcode::QuantizeActivations)
+        .collect();
+    assert_eq!(quantize_nodes.len(), 1);
+    assert_eq!(quantize_nodes[0].inputs, [input_id]);
+    let quantized_activation_id = quantize_nodes[0].id;
+    for output_id in outputs {
+        assert_eq!(
+            compiled.get_node(output_id).unwrap().inputs[0],
+            quantized_activation_id
         );
     }
 }

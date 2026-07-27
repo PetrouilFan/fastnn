@@ -1339,7 +1339,7 @@ pub fn build_backward_graph(
                 tensor_type: TensorType::new(shape, dtype),
             })
         }
-        None => create_constant_scalar(1.0f32, &loss_shape, loss_dtype.clone(), &mut grad_graph),
+        None => create_constant_scalar(1.0f32, &loss_shape, loss_dtype, &mut grad_graph),
     };
     grads.insert(loss_node, loss_grad_tensor);
 

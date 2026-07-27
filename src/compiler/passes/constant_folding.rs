@@ -243,7 +243,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                             src.iter().take(elem_count).map(|&x| x as i32).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
-                            tensor_type: TensorType::new(out_shape, target.clone()),
+                            tensor_type: TensorType::new(out_shape, target),
                         })
                     }
                     (IrDType::I32, IrDType::F32) => {
@@ -252,7 +252,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                             src.iter().take(elem_count).map(|&x| x as f32).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
-                            tensor_type: TensorType::new(out_shape, target.clone()),
+                            tensor_type: TensorType::new(out_shape, target),
                         })
                     }
                     (IrDType::F32, IrDType::I64) => {
@@ -261,7 +261,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                             src.iter().take(elem_count).map(|&x| x as i64).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
-                            tensor_type: TensorType::new(out_shape, target.clone()),
+                            tensor_type: TensorType::new(out_shape, target),
                         })
                     }
                     (IrDType::I64, IrDType::F32) => {
@@ -270,7 +270,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                             src.iter().take(elem_count).map(|&x| x as f32).collect();
                         Some(TensorValue::Data {
                             bytes: bytemuck::cast_slice(&dst).to_vec(),
-                            tensor_type: TensorType::new(out_shape, target.clone()),
+                            tensor_type: TensorType::new(out_shape, target),
                         })
                     }
                     (IrDType::F32, IrDType::F16) | (IrDType::F32, IrDType::BF16) => {

@@ -1246,7 +1246,7 @@ impl GraphBuilder {
     /// Cast tensor to a target dtype.
     pub fn cast_op(&self, input: &GraphTensor, to: IrDType) -> GraphTensor {
         let output_shape = input.shape().to_vec();
-        let output_type = TensorType::new(output_shape, to.clone());
+        let output_type = TensorType::new(output_shape, to);
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("to".to_string(), to.as_str().to_string());
         let mut inner = self.inner.borrow_mut();
