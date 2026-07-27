@@ -2063,20 +2063,40 @@ pub fn gemm_cpu_flat_i8_i4x8_grouped_per_token(
     k: usize,
     n: usize,
 ) {
+    gemm_cpu_flat_i8_i4x8_grouped_per_token_parts(
+        weights,
+        activations.scales(),
+        activations.data(),
+        outputs,
+        m,
+        k,
+        n,
+    );
+}
+
+pub fn gemm_cpu_flat_i8_i4x8_grouped_per_token_parts(
+    weights: &PackedTensor<I4x8>,
+    scales: &[f32],
+    data: &[u8],
+    outputs: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
     assert_eq!(weights.shape(), [n, k]);
     assert!(weights.blocks_per_row() > 0, "grouped W4 weights required");
-    assert_eq!(activations.scales.len(), m);
-    assert_eq!(activations.data.len(), m * k);
+    assert_eq!(scales.len(), m);
+    assert_eq!(data.len(), m * k);
     assert_eq!(outputs.len(), m * n);
 
     for row in 0..m {
         gemm_cpu_flat_i8_i4x8_grouped_scalar_impl(
             weights,
             I8ActivationAffine {
-                scale: activations.scales[row],
+                scale: scales[row],
                 zero: 0.0,
             },
-            &activations.data[row * k..(row + 1) * k],
+            &data[row * k..(row + 1) * k],
             &mut outputs[row * n..(row + 1) * n],
             1,
             k,

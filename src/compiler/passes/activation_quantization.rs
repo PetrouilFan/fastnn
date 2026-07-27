@@ -17,6 +17,89 @@ use crate::error::FastnnError;
 use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
 
+/// Insert one reusable per-token I8 activation node for grouped W4A8 MatMuls.
+pub fn quantize_matmul_activations_per_token(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
+    let mut targets = Vec::new();
+    for node in &graph.nodes {
+        if !matches!(node.opcode, Opcode::MatMul) {
+            continue;
+        }
+        let Some((&activation_id, &weight_id)) = node.inputs.first().zip(node.inputs.get(1)) else {
+            continue;
+        };
+        let grouped_i4 = graph.get_node(weight_id).is_some_and(|weight| {
+            weight
+                .output_type
+                .value_representation()
+                .is_ok_and(|representation| {
+                    representation.storage == crate::types::ScalarType::I4
+                        && matches!(
+                            representation.transform,
+                            crate::types::RepresentationTransform::AffineDequantization {
+                                granularity: crate::types::QuantizationGranularity::PerGroup {
+                                    axis: 0,
+                                    group_size: 32 | 64 | 128,
+                                },
+                                ..
+                            }
+                        )
+                })
+        });
+        if grouped_i4 {
+            targets.push((node.id, activation_id));
+        }
+    }
+
+    let mut quantized_by_input = HashMap::<NodeId, NodeId>::new();
+    for (matmul_id, activation_id) in targets {
+        let quantized_id = if let Some(&existing) = quantized_by_input.get(&activation_id) {
+            existing
+        } else {
+            let activation = graph.get_node(activation_id).ok_or_else(|| {
+                FastnnError::compilation("dynamic W4A8 activation input is missing")
+            })?;
+            let dimensions: Vec<usize> = activation
+                .output_type
+                .shape
+                .iter()
+                .map(|dimension| dimension.evaluate().map(|value| value as usize))
+                .collect::<Option<_>>()
+                .ok_or_else(|| {
+                    FastnnError::compilation(
+                        "dynamic W4A8 currently requires static activation dimensions",
+                    )
+                })?;
+            let (&k, token_dimensions) = dimensions.split_last().ok_or_else(|| {
+                FastnnError::compilation("dynamic W4A8 activation shape must not be empty")
+            })?;
+            let m = token_dimensions.iter().product::<usize>().max(1);
+            let representation = IrDType::I8.value_representation()?;
+            let mut layout = IrDType::I8.storage_layout()?;
+            layout.prefix_bytes = 8usize
+                .checked_add(m.checked_mul(4).ok_or_else(|| {
+                    FastnnError::compilation("dynamic W4A8 activation metadata size overflows")
+                })?)
+                .ok_or_else(|| {
+                    FastnnError::compilation("dynamic W4A8 activation metadata size overflows")
+                })?;
+            let quant_type = TensorType::from_parts(
+                activation.output_type.shape.clone(),
+                representation,
+                layout,
+            );
+            let id = graph.add_node(Opcode::QuantizeActivations, vec![activation_id], quant_type);
+            let node = graph.get_node_mut(id).unwrap();
+            node.attrs.insert("mode".into(), "per_token".into());
+            node.attrs.insert("num_tokens".into(), m.to_string());
+            node.attrs.insert("token_size".into(), k.to_string());
+            quantized_by_input.insert(activation_id, id);
+            id
+        };
+        graph.get_node_mut(matmul_id).unwrap().inputs[0] = quantized_id;
+    }
+    Ok(())
+}
+
 /// Insert `QuantizeActivations`/`DequantizeActivations` around every `MatMul`
 /// and `Conv2d` node whose first input (the activation) is not already quantized.
 ///

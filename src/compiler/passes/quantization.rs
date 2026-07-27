@@ -26,6 +26,98 @@ fn optimizer_affine_metadata(tensor_type: &TensorType) -> Option<(usize, Vec<f32
     }
 }
 
+/// Prepare constant MatMul weights as signed I4 groups along the reduction (K) axis.
+pub fn quantize_matmul_weights_k_grouped_i4(
+    graph: &mut ComputeGraph,
+    group_size: usize,
+) -> Result<(), FastnnError> {
+    if !matches!(group_size, 32 | 64 | 128) {
+        return Err(FastnnError::compilation(format!(
+            "dynamic W4A8 requires K-group size 32, 64, or 128, got {group_size}"
+        )));
+    }
+    let mut candidates: Vec<NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.opcode, Opcode::MatMul))
+        .filter_map(|node| node.inputs.get(1).copied())
+        .filter(|weight_id| {
+            graph.get_node(*weight_id).is_some_and(|weight| {
+                weight.output_type.is_native_float()
+                    && matches!(weight.opcode, Opcode::Constant(TensorValue::Data { .. }))
+            })
+        })
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    for weight_id in candidates {
+        let weight = graph.get_node(weight_id).unwrap();
+        let (values, logical_shape) = match &weight.opcode {
+            Opcode::Constant(TensorValue::Data { bytes, tensor_type }) => {
+                let shape: Vec<usize> = tensor_type
+                    .shape
+                    .iter()
+                    .map(|dim| dim.evaluate().map(|value| value as usize))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| {
+                        FastnnError::compilation("dynamic W4A8 requires static MatMul weights")
+                    })?;
+                if shape.len() != 2 || bytes.len() != shape.iter().product::<usize>() * 4 {
+                    return Err(FastnnError::compilation(
+                        "dynamic W4A8 requires a two-dimensional F32 MatMul weight constant",
+                    ));
+                }
+                (bytemuck::cast_slice::<u8, f32>(bytes).to_vec(), shape)
+            }
+            _ => continue,
+        };
+        let (k, n) = (logical_shape[0], logical_shape[1]);
+        let mut transposed = vec![0.0f32; k * n];
+        for row in 0..k {
+            for column in 0..n {
+                transposed[column * k + row] = values[row * n + column];
+            }
+        }
+        let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], group_size);
+        let representation = crate::types::ValueRepresentation::packed_affine_dequantization(
+            ScalarType::I4,
+            8,
+            crate::types::QuantizationGranularity::PerGroup {
+                axis: 0,
+                group_size,
+            },
+            packed.scales.clone(),
+            packed.zeros.clone(),
+        )?;
+        let tensor_type = TensorType::from_parts(
+            logical_shape
+                .iter()
+                .map(|&dimension| DimExpr::Known(dimension as u64))
+                .collect(),
+            representation,
+            crate::types::TensorStorageLayout {
+                encoding: crate::types::StorageEncoding::Packed {
+                    word_bits: 32,
+                    lanes: 8,
+                },
+                row_packed: true,
+                prefix_bytes: 0,
+                suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+            },
+        );
+        let node = graph.get_node_mut(weight_id).unwrap();
+        node.opcode = Opcode::Constant(TensorValue::Data {
+            bytes: packed.as_bytes().to_vec(),
+            tensor_type: tensor_type.clone(),
+        });
+        node.output_type = tensor_type;
+        node.attrs
+            .insert("quant_block_size".into(), group_size.to_string());
+    }
+    Ok(())
+}
+
 /// Quantize all f32 weight constants feeding MatMul / Conv2d nodes to the
 /// requested bit-width (4 or 8).
 ///

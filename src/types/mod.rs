@@ -610,6 +610,11 @@ pub enum CompileTarget {
     Native,
     WeightOnly(QuantTarget),
     IntegerInference(QuantTarget),
+    /// Prepared signed-I4 MatMul weights grouped along K with dynamic
+    /// per-token signed-I8 activations.
+    DynamicW4A8 {
+        group_size: usize,
+    },
     TrainingMixedPrecision {
         compute: ScalarType,
         accumulator: ScalarType,

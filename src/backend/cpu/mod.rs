@@ -3072,7 +3072,11 @@ impl Backend for CpuBackend {
                     })?;
                     let mode = node.attrs.get("mode").map(String::as_str);
                     let is_per_channel = mode == Some("per_channel");
-                    if !matches!(mode, None | Some("per_tensor") | Some("per_channel")) {
+                    let is_per_token = mode == Some("per_token");
+                    if !matches!(
+                        mode,
+                        None | Some("per_tensor") | Some("per_channel") | Some("per_token")
+                    ) {
                         return Err(BackendError::Compilation(format!(
                             "activation quantization node {node_id} has invalid mode"
                         )));
@@ -3103,7 +3107,15 @@ impl Backend for CpuBackend {
                                 ))
                             })
                     };
-                    let mut params = vec![numel, usize::from(is_per_channel), num_channels];
+                    let mut params = vec![
+                        numel,
+                        if is_per_token {
+                            2
+                        } else {
+                            usize::from(is_per_channel)
+                        },
+                        num_channels,
+                    ];
                     if is_per_channel {
                         let scales = parse_affine("scales")?;
                         let offsets = parse_affine("zero_points")?;
@@ -3120,6 +3132,23 @@ impl Backend for CpuBackend {
                         }
                         params.extend(scales.into_iter().map(|value| value.to_bits() as usize));
                         params.extend(offsets.into_iter().map(|value| value.to_bits() as usize));
+                    } else if is_per_token {
+                        let num_tokens = node
+                            .required_attr::<usize>("num_tokens")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                        let token_size = node
+                            .required_attr::<usize>("token_size")
+                            .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                        if num_tokens == 0
+                            || token_size == 0
+                            || num_tokens.checked_mul(token_size) != Some(numel)
+                        {
+                            return Err(BackendError::Compilation(format!(
+                                "activation quantization node {node_id} has incompatible per-token dimensions"
+                            )));
+                        }
+                        params[2] = num_tokens;
+                        params.push(token_size);
                     } else {
                         let scale = node
                             .optional_attr::<f32>("scale")
@@ -10796,13 +10825,24 @@ impl Backend for CpuBackend {
                             let numel = params[0];
                             let mode = params[1];
                             let num_channels = params[2];
-                            if mode > 1 {
+                            if mode > 2 {
                                 return Err(BackendError::Dispatch(
                                     "quantize_activations: invalid quantization mode".into(),
                                 ));
                             }
                             let is_per_channel = mode == 1;
-                            let expected_params = if is_per_channel {
+                            let is_per_token = mode == 2;
+                            let expected_params = if is_per_token {
+                                if num_channels == 0
+                                    || params.get(3).copied().unwrap_or(0) == 0
+                                    || num_channels.checked_mul(params[3]) != Some(numel)
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "quantize_activations: incompatible token metadata".into(),
+                                    ));
+                                }
+                                4
+                            } else if is_per_channel {
                                 if num_channels == 0
                                     || num_channels > u32::MAX as usize
                                     || numel % num_channels != 0
@@ -10844,7 +10884,17 @@ impl Backend for CpuBackend {
                                     "quantize_activations: input size overflows".into(),
                                 )
                             })?;
-                            let metadata_bytes = if is_per_channel {
+                            let metadata_bytes = if is_per_token {
+                                num_channels
+                                    .checked_mul(4)
+                                    .and_then(|value| value.checked_add(8))
+                                    .ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "quantize_activations: token metadata size overflows"
+                                                .into(),
+                                        )
+                                    })?
+                            } else if is_per_channel {
                                 num_channels
                                     .checked_mul(8)
                                     .and_then(|value| value.checked_add(8))
@@ -10881,7 +10931,39 @@ impl Backend for CpuBackend {
                             let out_bytes =
                                 unsafe { arena.view_u8_mut(out_start, out_end - out_start) };
 
-                            if is_per_channel {
+                            if is_per_token {
+                                let num_tokens = num_channels;
+                                let token_size = params[3];
+                                if num_tokens > u32::MAX as usize || token_size > u32::MAX as usize
+                                {
+                                    return Err(BackendError::Dispatch(
+                                        "quantize_activations: token dimensions exceed payload format".into(),
+                                    ));
+                                }
+                                out_bytes[0..4].copy_from_slice(&(num_tokens as u32).to_le_bytes());
+                                out_bytes[4..8].copy_from_slice(&(token_size as u32).to_le_bytes());
+                                let data_start = metadata_bytes;
+                                for token in 0..num_tokens {
+                                    let start = token * token_size;
+                                    let end = start + token_size;
+                                    let row = &f32_data[start..end];
+                                    if row.iter().any(|value| !value.is_finite()) {
+                                        return Err(BackendError::Dispatch(
+                                            "quantize_activations: per-token quantization requires finite input".into(),
+                                        ));
+                                    }
+                                    let max_abs =
+                                        row.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+                                    let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
+                                    out_bytes[8 + token * 4..12 + token * 4]
+                                        .copy_from_slice(&scale.to_le_bytes());
+                                    for (column, value) in row.iter().enumerate() {
+                                        out_bytes[data_start + start + column] =
+                                            (value / scale).round().clamp(-128.0, 127.0) as i8
+                                                as u8;
+                                    }
+                                }
+                            } else if is_per_channel {
                                 let scale_index = 3;
                                 let offset_index = 3 + num_channels;
                                 let chunk_size = numel / num_channels;

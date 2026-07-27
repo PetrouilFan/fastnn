@@ -40,6 +40,17 @@ impl CompilerPipeline {
             .validate_with_limits(&GraphResourceLimits::default())
             .map_err(|error| CompilerError::pass("graph validation", error))?;
         report.record("graph validation", graph.nodes.len(), graph.nodes.len());
+        let w4a8_group_size = match &self.target {
+            CompileTarget::DynamicW4A8 { group_size } => {
+                if !matches!(*group_size, 32 | 64 | 128) {
+                    return Err(CompilerError::InvalidTarget(format!(
+                        "dynamic W4A8 requires K-group size 32, 64, or 128, got {group_size}"
+                    )));
+                }
+                Some(*group_size)
+            }
+            _ => None,
+        };
         let quant_target = match self.target {
             CompileTarget::Native => None,
             CompileTarget::WeightOnly(target) => Some(target),
@@ -51,6 +62,7 @@ impl CompilerPipeline {
                 }
                 Some(target)
             }
+            CompileTarget::DynamicW4A8 { .. } => None,
             CompileTarget::TrainingMixedPrecision { .. } => {
                 return Err(CompilerError::InvalidTarget(
                     "mixed-precision training compilation is not implemented".into(),
@@ -105,6 +117,15 @@ impl CompilerPipeline {
             report.record("prune qdq pairs", before, graph.nodes.len());
         }
 
+        if let Some(group_size) = w4a8_group_size {
+            before = graph.nodes.len();
+            quantization::quantize_matmul_weights_k_grouped_i4(&mut graph, group_size)
+                .map_err(|error| CompilerError::pass("grouped W4 weight quantization", error))?;
+            activation_quantization::quantize_matmul_activations_per_token(&mut graph)
+                .map_err(|error| CompilerError::pass("per-token activation quantization", error))?;
+            report.record("dynamic W4A8 preparation", before, graph.nodes.len());
+        }
+
         before = graph.nodes.len();
         dead_code_elimination::eliminate_dead_code(&mut graph);
         report.record("final dead code elimination", before, graph.nodes.len());
@@ -133,7 +154,9 @@ fn validate_target_for_graph_kind(
     if matches!(graph_kind, GraphKind::Backward | GraphKind::OptimizerUpdate)
         && matches!(
             target,
-            CompileTarget::WeightOnly(_) | CompileTarget::IntegerInference(_)
+            CompileTarget::WeightOnly(_)
+                | CompileTarget::IntegerInference(_)
+                | CompileTarget::DynamicW4A8 { .. }
         )
     {
         return Err(CompilerError::InvalidTarget(format!(

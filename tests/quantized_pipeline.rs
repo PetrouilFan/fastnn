@@ -19,6 +19,10 @@ use fastnn::ir::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::packed_tensor::PackedTensor;
 use fastnn::types::{CompileTarget, QuantTarget};
 
+use fastnn::backend::cpu::microkernels::{
+    gemm_cpu_flat_i8_i4x8_grouped_per_token, quantize_i8_per_token_symmetric, PerTokenI8Activations,
+};
+
 /// Helper: build a MatMul graph and run through the full pipeline.
 /// Returns output as Vec<f32>.
 fn run_matmul(
@@ -1041,6 +1045,102 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
         assert!(
             err <= 0.5,
             "output[{i}] got {got}, expected {exp}, err={err}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_w4a8_compiles_and_executes_grouped_per_token_matmul() {
+    let (m, k, n) = (3usize, 145usize, 5usize);
+    let weights: Vec<f32> = (0..k * n)
+        .map(|index| ((index * 31 + 9) % 137) as f32 / 23.0 - 3.0)
+        .collect();
+    let input: Vec<f32> = (0..m * k)
+        .map(|index| {
+            let token = index / k;
+            (((index * 17 + 3) % 101) as f32 / 50.0 - 1.0) * [0.25, 3.0, 19.0][token]
+        })
+        .collect();
+
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+    let weight_type = TensorType::new(
+        vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&weights).to_vec(),
+            tensor_type: weight_type.clone(),
+        }),
+        vec![],
+        weight_type,
+    );
+    let output_id = graph.add_node(
+        Opcode::MatMul,
+        vec![input_id, weight_id],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+            IrDType::F32,
+        ),
+    );
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let (mut plan, memory, compiled) = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 64 }, None)
+        .unwrap();
+    let matmul = compiled.get_node(output_id).unwrap();
+    let quantize = compiled.get_node(matmul.inputs[0]).unwrap();
+    assert_eq!(quantize.opcode, Opcode::QuantizeActivations);
+    assert_eq!(
+        quantize.attrs.get("mode").map(String::as_str),
+        Some("per_token")
+    );
+    let metadata = plan
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::CallKernel {
+                kernel_name,
+                weight_meta: Some(metadata),
+                ..
+            } if kernel_name == "matmul_i4_i8" => Some(metadata),
+            _ => None,
+        })
+        .expect("grouped W4A8 MatMul instruction");
+    assert_eq!(metadata.quant_block_size, 64);
+    assert_eq!(metadata.quantized_group_sums.len(), n * k.div_ceil(64));
+
+    let input_bytes: Vec<u8> = bytemuck::cast_slice(&input).to_vec();
+    let result = executor
+        .execute(&compiled, &mut plan, &memory, &[&input_bytes])
+        .unwrap();
+    let actual: &[f32] = bytemuck::cast_slice(&result[0]);
+
+    let mut transposed = vec![0.0f32; k * n];
+    for row in 0..k {
+        for column in 0..n {
+            transposed[column * k + row] = weights[row * n + column];
+        }
+    }
+    let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], 64);
+    let mut activations = PerTokenI8Activations::default();
+    quantize_i8_per_token_symmetric(&input, m, k, &mut activations);
+    let mut expected = vec![0.0f32; m * n];
+    gemm_cpu_flat_i8_i4x8_grouped_per_token(&packed, &activations, &mut expected, m, k, n);
+    for (index, (&got, &reference)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            (got - reference).abs() <= 1e-5 * reference.abs().max(1.0),
+            "output[{index}] got {got}, expected {reference}"
         );
     }
 }

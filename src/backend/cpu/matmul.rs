@@ -255,9 +255,22 @@ fn validate_i8_matmul_contract(
     let activation_values = m.checked_mul(k).ok_or_else(|| {
         BackendError::Dispatch(format!("{kernel_name}: activation element count overflows"))
     })?;
-    let expected_activation = activation_values.checked_add(8).ok_or_else(|| {
-        BackendError::Dispatch(format!("{kernel_name}: activation payload size overflows"))
+    let meta = weight_meta.as_ref().ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
     })?;
+    let metadata_bytes = if meta.quant_block_size > 0 {
+        m.checked_mul(4).and_then(|bytes| bytes.checked_add(8))
+    } else {
+        Some(8)
+    }
+    .ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: activation metadata size overflows"))
+    })?;
+    let expected_activation = activation_values
+        .checked_add(metadata_bytes)
+        .ok_or_else(|| {
+            BackendError::Dispatch(format!("{kernel_name}: activation payload size overflows"))
+        })?;
     if activation.size != expected_activation {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: activation payload has {} bytes, expected {expected_activation}",
@@ -277,9 +290,6 @@ fn validate_i8_matmul_contract(
             "{kernel_name}: output slice does not match the declared dimensions"
         )));
     }
-    let meta = weight_meta.as_ref().ok_or_else(|| {
-        BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
-    })?;
     if meta.shape.as_slice() != [n, k] {
         return Err(BackendError::Dispatch(format!(
             "{kernel_name}: weight shape {:?} does not match [{n}, {k}]",
@@ -404,7 +414,6 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
 
         // Zero-copy views.
         let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
-        validate_i8_activation_affine(activation_payload, kernel_name)?;
         let typed_data = {
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
             get_or_cache_packed::<I4x8>(w_slice.offset, w_slice.size, raw)
@@ -412,17 +421,73 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
         let meta = weight_meta.clone().ok_or_else(|| {
             BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
         })?;
-        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let pt = packed_tensor_from_meta(typed_data, meta.clone(), kernel_name)?;
         let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
 
-        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8(
-            &pt,
-            activation_payload,
-            out_f32,
-            m,
-            k,
-            n,
-        );
+        if meta.quant_block_size > 0 {
+            if activation_payload.len() < 8 {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation payload is missing its header"
+                )));
+            }
+            let payload_m =
+                u32::from_le_bytes(activation_payload[0..4].try_into().unwrap()) as usize;
+            let payload_k =
+                u32::from_le_bytes(activation_payload[4..8].try_into().unwrap()) as usize;
+            let metadata_bytes = 8usize
+                .checked_add(payload_m.checked_mul(4).ok_or_else(|| {
+                    BackendError::Dispatch(format!("{kernel_name}: activation metadata overflows"))
+                })?)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!("{kernel_name}: activation metadata overflows"))
+                })?;
+            if payload_m != m
+                || payload_k != k
+                || activation_payload.len() != metadata_bytes + m * k
+            {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation payload dimensions do not match MatMul"
+                )));
+            }
+            let scale_bytes = &activation_payload[8..metadata_bytes];
+            if !scale_bytes.as_ptr().is_aligned() {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation scales are not f32-aligned"
+                )));
+            }
+            // SAFETY: The payload starts at an arena-aligned address, scales start
+            // after an 8-byte header, and the slice length is exactly m f32 values.
+            let scales = unsafe {
+                std::slice::from_raw_parts(scale_bytes.as_ptr().cast::<f32>(), payload_m)
+            };
+            if scales
+                .iter()
+                .any(|scale| !scale.is_finite() || *scale <= 0.0)
+            {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation scales must be finite and positive"
+                )));
+            }
+            crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8_grouped_per_token_parts(
+                &pt,
+                scales,
+                &activation_payload[metadata_bytes..],
+                out_f32,
+                m,
+                k,
+                n,
+            );
+        } else {
+            validate_i8_activation_affine(activation_payload, kernel_name)?;
+            crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8(
+                &pt,
+                activation_payload,
+                out_f32,
+                m,
+                k,
+                n,
+            );
+        }
     }
     Ok(())
 }
