@@ -1,0 +1,49 @@
+[package]
+name = "fastnn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fastnn]
+path = ".."
+
+[[bin]]
+name = "graph_deserialization"
+path = "fuzz_targets/graph_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "executable_deserialization"
+path = "fuzz_targets/executable_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typed_attributes"
+path = "fuzz_targets/typed_attributes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "runtime_tightening"
+path = "fuzz_targets/runtime_tightening.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quantization_metadata"
+path = "fuzz_targets/quantization_metadata.rs"
+test = false
+doc = false
+bench = false

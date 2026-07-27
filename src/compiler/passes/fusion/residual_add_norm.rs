@@ -1,5 +1,5 @@
 use super::FusionPass;
-use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::ir::{ComputeGraph, NodeId, Opcode};
 use crate::FastnnError;
 use std::collections::{HashMap, HashSet};
 
@@ -63,11 +63,16 @@ fn apply_fused_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, Fastn
         let add_consumers: Vec<NodeId> = graph.consumers(add_id);
         let can_remove_add = add_consumers.len() == 1 && add_consumers[0] == norm_id;
 
-        let eps = norm_node
-            .attrs
-            .get("eps")
-            .and_then(|s| s.parse::<f32>().ok())
-            .unwrap_or(1e-5);
+        let eps = norm_node.optional_attr::<f32>("eps")?.unwrap_or(1e-5);
+        if !eps.is_finite() || eps <= 0.0 {
+            continue;
+        }
+        let normalized_ndims = norm_node.optional_attr::<usize>("normalized_ndims")?;
+        if normalized_ndims
+            .is_some_and(|ndims| ndims == 0 || ndims > norm_node.output_type.shape.len())
+        {
+            continue;
+        }
 
         let norm_type = match norm_node.opcode {
             Opcode::LayerNorm => "layer_norm",

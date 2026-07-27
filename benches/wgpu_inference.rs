@@ -7,7 +7,7 @@ use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::wgpu::WgpuBackend;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::ir::{DimExpr, IrDType, TensorType};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -18,7 +18,7 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
 /// Run the WGPU quantized inference benchmark, returning the mean time in ms,
 /// or None if WGPU is unavailable or fails.
 fn bench_wgpu_quantized(
-    graph: &fastnn::ir::node::ComputeGraph,
+    graph: &fastnn::ir::ComputeGraph,
     input_bytes: &[u8],
     iters: usize,
 ) -> Option<f64> {

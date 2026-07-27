@@ -1,5 +1,5 @@
 use super::FusionPass;
-use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::ir::{ComputeGraph, NodeId, Opcode};
 use crate::FastnnError;
 use std::collections::HashSet;
 
@@ -181,8 +181,8 @@ impl FusionPass for ConvSilu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::IrDType;
-    use crate::ir::node::{TensorType, TensorValue};
+    use crate::ir::IrDType;
+    use crate::ir::{TensorType, TensorValue};
     use std::collections::HashMap;
 
     fn build_conv_silu_graph() -> (ComputeGraph, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId) {
@@ -193,10 +193,10 @@ mod tests {
         let mut graph = ComputeGraph::new();
         let input_type = TensorType::new(
             vec![
-                crate::ir::node::DimExpr::Known(1),
-                crate::ir::node::DimExpr::Known(3),
-                crate::ir::node::DimExpr::Known(8),
-                crate::ir::node::DimExpr::Known(8),
+                crate::ir::DimExpr::Known(1),
+                crate::ir::DimExpr::Known(3),
+                crate::ir::DimExpr::Known(8),
+                crate::ir::DimExpr::Known(8),
             ],
             IrDType::F32,
         );
@@ -204,10 +204,10 @@ mod tests {
 
         let weight_type = TensorType::new(
             vec![
-                crate::ir::node::DimExpr::Known(4),
-                crate::ir::node::DimExpr::Known(3),
-                crate::ir::node::DimExpr::Known(3),
-                crate::ir::node::DimExpr::Known(3),
+                crate::ir::DimExpr::Known(4),
+                crate::ir::DimExpr::Known(3),
+                crate::ir::DimExpr::Known(3),
+                crate::ir::DimExpr::Known(3),
             ],
             IrDType::F32,
         );
@@ -227,10 +227,10 @@ mod tests {
         conv_attrs.insert("groups".to_string(), "1".to_string());
         let conv_out = TensorType::new(
             vec![
-                crate::ir::node::DimExpr::Known(1),
-                crate::ir::node::DimExpr::Known(4),
-                crate::ir::node::DimExpr::Known(8),
-                crate::ir::node::DimExpr::Known(8),
+                crate::ir::DimExpr::Known(1),
+                crate::ir::DimExpr::Known(4),
+                crate::ir::DimExpr::Known(8),
+                crate::ir::DimExpr::Known(8),
             ],
             IrDType::F32,
         );
@@ -244,10 +244,7 @@ mod tests {
         // Reshape consumer: receives the Mul output. After fusion, the Reshape
         // should be rewired to read the Conv directly.
         let reshape_out = TensorType::new(
-            vec![
-                crate::ir::node::DimExpr::Known(1),
-                crate::ir::node::DimExpr::Known(256),
-            ],
+            vec![crate::ir::DimExpr::Known(1), crate::ir::DimExpr::Known(256)],
             IrDType::F32,
         );
         let consumer = graph.add_node(Opcode::Reshape, vec![mul], reshape_out);
@@ -279,7 +276,7 @@ mod tests {
     fn conv_silu_fusion_handles_swapped_mul_operand_order() {
         // Same pattern but Mul( sigmoid, conv ) instead of Mul( conv, sigmoid ).
         let mut graph = ComputeGraph::new();
-        let input_type = TensorType::new(vec![crate::ir::node::DimExpr::Known(1); 4], IrDType::F32);
+        let input_type = TensorType::new(vec![crate::ir::DimExpr::Known(1); 4], IrDType::F32);
         let x = graph.add_node(Opcode::Input, vec![], input_type.clone());
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
@@ -321,7 +318,7 @@ mod tests {
     fn conv_silu_fusion_does_not_touch_reshape_only_conv() {
         // Conv -> Reshape (no SiLU). Should not be touched.
         let mut graph = ComputeGraph::new();
-        let ty = TensorType::new(vec![crate::ir::node::DimExpr::Known(1); 4], IrDType::F32);
+        let ty = TensorType::new(vec![crate::ir::DimExpr::Known(1); 4], IrDType::F32);
         let x = graph.add_node(Opcode::Input, vec![], ty.clone());
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
@@ -354,7 +351,7 @@ mod tests {
         // Conv -> Sigmoid -> Mul(conv, sig)  AND  Sigmoid -> another consumer
         // (so Sigmoid has >1 consumer, the pattern is not safe to fuse).
         let mut graph = ComputeGraph::new();
-        let ty = TensorType::new(vec![crate::ir::node::DimExpr::Known(1); 4], IrDType::F32);
+        let ty = TensorType::new(vec![crate::ir::DimExpr::Known(1); 4], IrDType::F32);
         let x = graph.add_node(Opcode::Input, vec![], ty.clone());
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
@@ -400,7 +397,7 @@ mod tests {
         // tagged, Reshape + Sigmoid + Mul are removed, and the downstream
         // Reshape (next conv's input) should be rewired to the Conv.
         let mut graph = ComputeGraph::new();
-        let ty = TensorType::new(vec![crate::ir::node::DimExpr::Known(1); 4], IrDType::F32);
+        let ty = TensorType::new(vec![crate::ir::DimExpr::Known(1); 4], IrDType::F32);
         let x = graph.add_node(Opcode::Input, vec![], ty.clone());
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {

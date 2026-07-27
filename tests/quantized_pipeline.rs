@@ -3,9 +3,10 @@
 //! Tests the full flow: GraphBuilder → compile_with_quantize → execute → verify output.
 //! Covers MatMul and Conv2d with both U4 and U8 quantization.
 
+use fastnn::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
-use fastnn::backend::executor::WeightDtype;
+
 use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
@@ -13,9 +14,14 @@ use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::dtypes::I4x8;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::ComputeGraph;
-use fastnn::ir::node::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::ir::ComputeGraph;
+use fastnn::ir::{DimExpr, IrDType, Opcode, TensorType, TensorValue};
 use fastnn::packed_tensor::PackedTensor;
+use fastnn::types::{CompileTarget, QuantTarget};
+
+use fastnn::backend::cpu::microkernels::{
+    gemm_cpu_flat_i8_i4x8_grouped_per_token, quantize_i8_per_token_symmetric, PerTokenI8Activations,
+};
 
 /// Helper: build a MatMul graph and run through the full pipeline.
 /// Returns output as Vec<f32>.
@@ -398,24 +404,22 @@ fn test_graph_builder_compile_with_quantize() {
     let has_u4 = u4_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::I4 { .. }));
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I4));
     assert!(has_u4, "U4-compiled graph should contain a U4 weight node");
 
     let (_, _, u8_graph) = result_u8.unwrap();
     let has_u8 = u8_graph
         .nodes
         .iter()
-        .any(|n| matches!(&n.output_type.dtype, IrDType::I8Scaled { .. }));
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I8Scaled));
     assert!(has_u8, "U8-compiled graph should contain a U8 weight node");
 
     // No-quantize graph should have no U4/U8 nodes
     let (_, _, f32_graph) = result_no_q.unwrap();
-    let has_packed = f32_graph.nodes.iter().any(|n| {
-        matches!(
-            &n.output_type.dtype,
-            IrDType::I4 { .. } | IrDType::I8Scaled { .. }
-        )
-    });
+    let has_packed = f32_graph
+        .nodes
+        .iter()
+        .any(|n| matches!(n.output_type.dtype(), IrDType::I4 | IrDType::I8Scaled));
     assert!(
         !has_packed,
         "f32-compiled graph should not contain packed weight nodes"
@@ -621,12 +625,14 @@ fn test_matmul_u4_i8_dispatch_path() {
 
     let mm_node = graph.get_node(mm_id).unwrap();
     let packed_weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    let (scales, zero_points) = match &packed_weight_node.output_type.dtype {
-        IrDType::I4 {
-            scales,
-            zero_points,
-            ..
-        } => (scales.clone(), zero_points.clone()),
+    let (scales, dequant_offsets) = match packed_weight_node.output_type.dtype() {
+        IrDType::I4 => {
+            let (scales, dequant_offsets) = packed_weight_node
+                .output_type
+                .affine_dequantization()
+                .expect("I4 tensor type should expose affine dequantization");
+            (scales.to_vec(), dequant_offsets.to_vec())
+        }
         other => panic!("expected U4 weight node, got {:?}", other),
     };
     let raw_bytes = match &packed_weight_node.opcode {
@@ -647,7 +653,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     if packed_shape.len() == 2 {
         packed_shape.reverse();
     }
-    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, zero_points);
+    let packed = PackedTensor::from_raw(typed_data, packed_shape, scales, dequant_offsets);
     let mut expected_payload = Vec::new();
     expected_payload.extend_from_slice(&act_scale.to_le_bytes());
     expected_payload.extend_from_slice(&act_zp.to_le_bytes());
@@ -661,9 +667,28 @@ fn test_matmul_u4_i8_dispatch_path() {
         8,
         2,
     );
+    let mut scalar_expected = vec![0.0f32; 2];
+    fastnn::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8_scalar(
+        &packed,
+        &expected_payload,
+        &mut scalar_expected,
+        1,
+        8,
+        2,
+    );
+    for (index, (&dispatched, &scalar)) in expected.iter().zip(scalar_expected.iter()).enumerate() {
+        assert!(
+            (dispatched - scalar).abs() <= 1e-6,
+            "scalar/ISA mismatch at {index}: dispatched={dispatched}, scalar={scalar}"
+        );
+    }
 
     let mut executor = GraphExecutor::new(CpuBackend);
+    reset_cpu_telemetry();
     let result = executor.execute(&graph, &mut plan, &mem, &[]).unwrap();
+    let telemetry = cpu_telemetry_snapshot();
+    assert_eq!(telemetry.arena_temp_copies, 0, "snapshot={telemetry:?}");
+    assert_eq!(telemetry.arena_temp_copy_bytes, 0);
     let result_f32: Vec<f32> = bytemuck::cast_slice(&result[0]).to_vec();
 
     assert_eq!(result_f32.len(), expected.len());
@@ -835,7 +860,7 @@ fn test_matmul_i4codebook_roundtrip() {
         4,
         &weight_data,
         &input_data,
-        Some(WeightDtype::I4Codebook),
+        Some(QuantTarget::I4Codebook),
     );
     assert_eq!(result.len(), 4, "output shape mismatch");
     let expected = [1.0f32, 2.0, 3.0, 4.0];
@@ -856,7 +881,14 @@ fn test_matmul_f4x8_roundtrip() {
     ];
     let input_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
 
-    let result = run_matmul_fp(1, 4, 4, &weight_data, &input_data, Some(WeightDtype::F4x8));
+    let result = run_matmul_fp(
+        1,
+        4,
+        4,
+        &weight_data,
+        &input_data,
+        Some(QuantTarget::Fp4E2M1),
+    );
     assert_eq!(result.len(), 4, "output shape mismatch");
     let expected = [1.0f32, 2.0, 3.0, 4.0];
     for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
@@ -868,7 +900,7 @@ fn test_matmul_f4x8_roundtrip() {
     }
 }
 
-/// Helper: build a MatMul graph and run with compile_with_weight_dtype.
+/// Helper: build a MatMul graph and run with an explicit compile target.
 /// Returns output as Vec<f32>.
 fn run_matmul_fp(
     batch: usize,
@@ -876,7 +908,7 @@ fn run_matmul_fp(
     n: usize,
     weight_data: &[f32],
     input_data: &[f32],
-    weight_dtype: Option<WeightDtype>,
+    quant_target: Option<QuantTarget>,
 ) -> Vec<f32> {
     let mut graph = ComputeGraph::new();
 
@@ -915,10 +947,12 @@ fn run_matmul_fp(
     let input_bytes: Vec<u8> = bytemuck::cast_slice(input_data).to_vec();
 
     let mut executor = GraphExecutor::new(CpuBackend);
-    let weight_dt = weight_dtype.unwrap_or(WeightDtype::F32);
+    let target = quant_target
+        .map(CompileTarget::WeightOnly)
+        .unwrap_or(CompileTarget::Native);
     let (mut plan, mem, compiled_graph) = executor
-        .compile_with_weight_dtype(graph, weight_dt, None)
-        .expect("compile_with_weight_dtype should succeed");
+        .compile_with_target(graph, target, None)
+        .expect("compile_with_target should succeed");
 
     let result = executor
         .execute(&compiled_graph, &mut plan, &mem, &[&input_bytes])
@@ -991,10 +1025,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     let act_node = graph.get_node(mm_node.inputs[0]).unwrap();
     assert_eq!(act_node.opcode, Opcode::QuantizeActivations);
     let weight_node = graph.get_node(mm_node.inputs[1]).unwrap();
-    assert!(matches!(
-        weight_node.output_type.dtype,
-        IrDType::I8Scaled { .. }
-    ));
+    assert!(matches!(weight_node.output_type.dtype(), IrDType::I8Scaled));
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
     let mut plan = CpuBackend.compile(&graph, &mem).unwrap();
@@ -1016,4 +1047,262 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
             "output[{i}] got {got}, expected {exp}, err={err}"
         );
     }
+}
+
+fn assert_dynamic_w4a8_matmul(group_size: usize) {
+    let (m, k, n) = (3usize, 145usize, 5usize);
+    let weights: Vec<f32> = (0..k * n)
+        .map(|index| ((index * 31 + 9) % 137) as f32 / 23.0 - 3.0)
+        .collect();
+    let input: Vec<f32> = (0..m * k)
+        .map(|index| {
+            let token = index / k;
+            (((index * 17 + 3) % 101) as f32 / 50.0 - 1.0) * [0.25, 3.0, 19.0][token]
+        })
+        .collect();
+
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+    let weight_type = TensorType::new(
+        vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&weights).to_vec(),
+            tensor_type: weight_type.clone(),
+        }),
+        vec![],
+        weight_type,
+    );
+    let output_id = graph.add_node(
+        Opcode::MatMul,
+        vec![input_id, weight_id],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+            IrDType::F32,
+        ),
+    );
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let (mut plan, memory, compiled) = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size }, None)
+        .unwrap();
+    let matmul = compiled.get_node(output_id).unwrap();
+    let quantize = compiled.get_node(matmul.inputs[0]).unwrap();
+    assert_eq!(quantize.opcode, Opcode::QuantizeActivations);
+    assert_eq!(
+        quantize.attrs.get("mode").map(String::as_str),
+        Some("per_token")
+    );
+    let metadata = plan
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::CallKernel {
+                kernel_name,
+                weight_meta: Some(metadata),
+                ..
+            } if kernel_name == "matmul_i4_i8" => Some(metadata),
+            _ => None,
+        })
+        .expect("grouped W4A8 MatMul instruction");
+    assert_eq!(metadata.quant_block_size, group_size);
+    assert_eq!(
+        metadata.quantized_group_sums.len(),
+        n * k.div_ceil(group_size)
+    );
+
+    let input_bytes: Vec<u8> = bytemuck::cast_slice(&input).to_vec();
+    let result = executor
+        .execute(&compiled, &mut plan, &memory, &[&input_bytes])
+        .unwrap();
+    let actual: &[f32] = bytemuck::cast_slice(&result[0]);
+
+    let mut transposed = vec![0.0f32; k * n];
+    for row in 0..k {
+        for column in 0..n {
+            transposed[column * k + row] = weights[row * n + column];
+        }
+    }
+    let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], group_size);
+    let mut activations = PerTokenI8Activations::default();
+    quantize_i8_per_token_symmetric(&input, m, k, &mut activations);
+    let mut expected = vec![0.0f32; m * n];
+    gemm_cpu_flat_i8_i4x8_grouped_per_token(&packed, &activations, &mut expected, m, k, n);
+    for (index, (&got, &reference)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            (got - reference).abs() <= 1e-5 * reference.abs().max(1.0),
+            "output[{index}] got {got}, expected {reference}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_w4a8_compiles_and_executes_all_group_sizes() {
+    for group_size in [32, 64, 128] {
+        assert_dynamic_w4a8_matmul(group_size);
+    }
+}
+
+#[test]
+fn dynamic_w4a8_reuses_one_per_token_activation_for_shared_projections() {
+    let (m, k, n) = (2usize, 64usize, 8usize);
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+    let mut outputs = Vec::new();
+    for projection in 0..3usize {
+        let weights: Vec<f32> = (0..k * n)
+            .map(|index| ((index * 13 + projection * 7) % 61) as f32 / 17.0 - 1.5)
+            .collect();
+        let weight_type = TensorType::new(
+            vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+            IrDType::F32,
+        );
+        let weight_id = graph.add_node(
+            Opcode::Constant(TensorValue::Data {
+                bytes: bytemuck::cast_slice(&weights).to_vec(),
+                tensor_type: weight_type.clone(),
+            }),
+            vec![],
+            weight_type,
+        );
+        outputs.push(graph.add_node(
+            Opcode::MatMul,
+            vec![input_id, weight_id],
+            TensorType::new(
+                vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+                IrDType::F32,
+            ),
+        ));
+    }
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(outputs.clone());
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let (_, _, compiled) = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 32 }, None)
+        .unwrap();
+    let quantize_nodes: Vec<_> = compiled
+        .nodes
+        .iter()
+        .filter(|node| node.opcode == Opcode::QuantizeActivations)
+        .collect();
+    assert_eq!(quantize_nodes.len(), 1);
+    assert_eq!(quantize_nodes[0].inputs, [input_id]);
+    let quantized_activation_id = quantize_nodes[0].id;
+    for output_id in outputs {
+        assert_eq!(
+            compiled.get_node(output_id).unwrap().inputs[0],
+            quantized_activation_id
+        );
+    }
+}
+
+#[test]
+fn dynamic_w4a8_rejects_batched_rank_three_activations() {
+    let (batch, m, k, n) = (2usize, 3usize, 64usize, 8usize);
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![
+                DimExpr::Known(batch as u64),
+                DimExpr::Known(m as u64),
+                DimExpr::Known(k as u64),
+            ],
+            IrDType::F32,
+        ),
+    );
+    let weight_type = TensorType::new(
+        vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&vec![0.25f32; k * n]).to_vec(),
+            tensor_type: weight_type.clone(),
+        }),
+        vec![],
+        weight_type,
+    );
+    let output_id = graph.add_node(
+        Opcode::MatMul,
+        vec![input_id, weight_id],
+        TensorType::new(
+            vec![
+                DimExpr::Known(batch as u64),
+                DimExpr::Known(m as u64),
+                DimExpr::Known(n as u64),
+            ],
+            IrDType::F32,
+        ),
+    );
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![output_id]);
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let error = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 32 }, None)
+        .unwrap_err();
+    assert!(error.to_string().contains("rank-2 activations"));
+}
+
+#[test]
+fn dynamic_w4a8_rejects_weight_constants_that_are_graph_outputs() {
+    let (m, k, n) = (2usize, 32usize, 8usize);
+    let mut graph = ComputeGraph::new();
+    let input_id = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(k as u64)],
+            IrDType::F32,
+        ),
+    );
+    let weight_type = TensorType::new(
+        vec![DimExpr::Known(k as u64), DimExpr::Known(n as u64)],
+        IrDType::F32,
+    );
+    let weight_id = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: bytemuck::cast_slice(&vec![0.5f32; k * n]).to_vec(),
+            tensor_type: weight_type.clone(),
+        }),
+        vec![],
+        weight_type.clone(),
+    );
+    let matmul_id = graph.add_node(
+        Opcode::MatMul,
+        vec![input_id, weight_id],
+        TensorType::new(
+            vec![DimExpr::Known(m as u64), DimExpr::Known(n as u64)],
+            IrDType::F32,
+        ),
+    );
+    graph.set_inputs(vec![input_id]);
+    graph.set_outputs(vec![matmul_id, weight_id]);
+
+    let executor = GraphExecutor::new(CpuBackend);
+    let error = executor
+        .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 32 }, None)
+        .unwrap_err();
+    assert!(error.to_string().contains("shared weight constant"));
 }

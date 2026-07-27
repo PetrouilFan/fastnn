@@ -458,9 +458,9 @@ class TestOpHandlers:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "ShapeOp" in types, f"ShapeOp not in {types}"
+            assert "Shape" in types, f"Shape not in {types}"
             assert "CastOp" in types, f"CastOp not in {types}"
-            assert "GatherOp" in types, f"GatherOp not in {types}"
+            assert "Gather" in types, f"Gather not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -503,8 +503,8 @@ class TestOpHandlers:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "AvgPool" in types
-            avg_layer = result["layers"][types.index("AvgPool")]
+            assert "AveragePool" in types
+            avg_layer = result["layers"][types.index("AveragePool")]
             assert avg_layer["kernel_size"] == 3
         finally:
             import shutil
@@ -627,7 +627,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "CeilOp" in types, f"CeilOp not in {types}"
+            assert "Ceil" in types, f"Ceil not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -645,7 +645,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "FloorOp" in types, f"FloorOp not in {types}"
+            assert "Floor" in types, f"Floor not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -663,7 +663,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "RoundOp" in types, f"RoundOp not in {types}"
+            assert "Round" in types, f"Round not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -681,7 +681,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "SignOp" in types, f"SignOp not in {types}"
+            assert "Sign" in types, f"Sign not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -699,7 +699,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "ReciprocalOp" in types, f"ReciprocalOp not in {types}"
+            assert "Reciprocal" in types, f"Reciprocal not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -717,7 +717,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "IsNaNOp" in types, f"IsNaNOp not in {types}"
+            assert "IsNaN" in types, f"IsNaN not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -736,7 +736,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "IsInfOp" in types, f"IsInfOp not in {types}"
+            assert "IsInf" in types, f"IsInf not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -758,7 +758,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "NotOp" in types, f"NotOp not in {types}"
+            assert "Not" in types, f"Not not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -777,7 +777,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "AndOp" in types, f"AndOp not in {types}"
+            assert "And" in types, f"And not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -796,7 +796,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "OrOp" in types, f"OrOp not in {types}"
+            assert "Or" in types, f"Or not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -815,7 +815,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "XorOp" in types, f"XorOp not in {types}"
+            assert "Xor" in types, f"Xor not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -834,7 +834,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "LessOp" in types, f"LessOp not in {types}"
+            assert "Less" in types, f"Less not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -853,7 +853,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "GreaterOp" in types, f"GreaterOp not in {types}"
+            assert "Greater" in types, f"Greater not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -872,7 +872,7 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "EqualOp" in types, f"EqualOp not in {types}"
+            assert "Equal" in types, f"Equal not in {types}"
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -1067,8 +1067,8 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "InstanceNorm" in types, f"InstanceNorm not in {types}"
-            ins = result["layers"][types.index("InstanceNorm")]
+            assert "InstanceNormalization" in types, f"InstanceNormalization not in {types}"
+            ins = result["layers"][types.index("InstanceNormalization")]
             assert ins["num_features"] == 4
             assert ins["eps"] == pytest.approx(1e-5, rel=1e-6)
         finally:
@@ -1132,8 +1132,8 @@ class TestNewOps:
             from fastnn.io.onnx import import_onnx
             result = import_onnx(path, os.path.join(tmpdir, "out.fnn"))
             types = [l["type"] for l in result["layers"]]
-            assert "RMSNorm" in types, f"RMSNorm not in {types}"
-            rn = result["layers"][types.index("RMSNorm")]
+            assert "RMSNormalization" in types, f"RMSNormalization not in {types}"
+            rn = result["layers"][types.index("RMSNormalization")]
             assert rn["eps"] == pytest.approx(1e-5, rel=1e-6)
         finally:
             import shutil

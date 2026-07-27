@@ -4,10 +4,12 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 
 use fastnn::backend::cpu::CpuBackend;
-use fastnn::backend::executor::{GraphExecutor, WeightDtype};
+use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::runtime::Runtime;
-use fastnn::backend::{ExecutablePlan, Instruction, MemoryPlan};
+use fastnn::backend::{ExecutablePlan, Instruction};
+use fastnn::compiler::MemoryPlan;
 use fastnn::onnx::converter::{OnnxConverter, OnnxNode};
+use fastnn::types::{CompileTarget, QuantTarget};
 use fastnn::Tensor;
 
 #[derive(Parser)]
@@ -477,15 +479,15 @@ fn cmd_compile(
 
     println!("ONNX model loaded: {} nodes", graph.node_count());
 
-    let weight_dtype = match quantize.as_deref() {
-        None => WeightDtype::F32,
-        Some("4") | Some("i4") => WeightDtype::I4,
-        Some("8") | Some("i8") => WeightDtype::I8,
-        Some("u4") => WeightDtype::U4,
-        Some("u8") => WeightDtype::U8,
-        Some("f8") => WeightDtype::F8x4,
-        Some("f8r") => WeightDtype::F8x4R,
-        Some("f4") => WeightDtype::F4x8,
+    let target = match quantize.as_deref() {
+        None => CompileTarget::Native,
+        Some("4") | Some("i4") => CompileTarget::WeightOnly(QuantTarget::I4),
+        Some("8") | Some("i8") => CompileTarget::WeightOnly(QuantTarget::I8),
+        Some("u4") => CompileTarget::WeightOnly(QuantTarget::U4),
+        Some("u8") => CompileTarget::WeightOnly(QuantTarget::U8),
+        Some("f8") => CompileTarget::WeightOnly(QuantTarget::Fp8E4M3),
+        Some("f8r") => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
+        Some("f4") => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
         Some(other) => {
             return Err(format!(
                 "unsupported quantize value: '{other}' (expected 4, 8, u4, u8, f8, f8r, or f4)"
@@ -496,7 +498,7 @@ fn cmd_compile(
 
     let executor = GraphExecutor::new(CpuBackend);
     let (plan, memory_plan, _compiled_graph) = executor
-        .compile_with_weight_dtype(graph, weight_dtype, None)
+        .compile_with_target(graph, target, None)
         .map_err(|e| format!("Compilation: {e}"))?;
 
     plan.save(output_plan)?;

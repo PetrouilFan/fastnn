@@ -477,7 +477,14 @@ class TestFullPipelineIntegration:
         )
         result, fnn_path = _run_pipeline(path, fnn_dir=tmp_model_dir)
 
-        assert len(result.get("output_shape", [])) > 0
+        output_ids = result["graph"]["outputs"]
+        assert len(output_ids) == 2
+        nodes_by_id = {node["id"]: node for node in result["graph"]["nodes"]}
+        output_shapes = [nodes_by_id[node_id]["output_shape"]["shape"] for node_id in output_ids]
+        assert output_shapes == [
+            ["Known(1)", "Known(16)", "Known(32)", "Known(32)"],
+            ["Known(1)", "Known(8)", "Known(64)", "Known(64)"],
+        ]
 
         from fastnn.io.graph_builder import build_model_from_fnn
         model = build_model_from_fnn(fnn_path)

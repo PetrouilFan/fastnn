@@ -1,5 +1,5 @@
 use crate::backend::BackendError;
-use crate::ir::node::{DimExpr, ShapeEnv};
+use crate::ir::{DimExpr, ShapeEnv};
 use std::borrow::Cow;
 
 /// Resolve kernel dimension params at dispatch time using the runtime shape

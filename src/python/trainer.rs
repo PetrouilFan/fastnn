@@ -1,9 +1,9 @@
 use crate::backend::cpu::CpuBackend;
 use crate::backend::executor::{CompiledTrainingModel, GraphExecutor};
 use crate::compiler::passes::training::{OptimizerConfig, TrainConfig};
-use crate::ir::node::ComputeGraph;
+use crate::ir::ComputeGraph;
 
-#[pyclass]
+#[pyclass(unsendable)]
 pub struct PyCompiledTrainingModel {
     pub inner: CompiledTrainingModel<CpuBackend>,
 }
@@ -39,7 +39,7 @@ pub fn compile_train_model(
     eps: Option<f64>,
     quantize: Option<u8>,
 ) -> PyResult<PyCompiledTrainingModel> {
-    let graph: ComputeGraph = bincode::deserialize(graph_bytes).map_err(|e| {
+    let graph = ComputeGraph::from_fnn_bytes(graph_bytes).map_err(|e| {
         PyRuntimeError::new_err(format!(
             "compile_train_model: failed to deserialize graph: {e}"
         ))

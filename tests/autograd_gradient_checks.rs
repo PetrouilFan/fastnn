@@ -25,10 +25,10 @@ where
         .map(|(data, shape)| Tensor::from_vec(data.to_vec(), shape.to_vec()).requires_grad_(true))
         .collect();
     let loss = build_loss(&tensors);
-    autograd::backward(&loss, None);
+    autograd::backward(&loss, None).unwrap();
     tensors
         .iter()
-        .map(|tensor| tensor.grad().expect("missing gradient").to_numpy())
+        .map(|tensor| tensor.grad().expect("missing gradient").to_numpy().unwrap())
         .collect()
 }
 
@@ -51,7 +51,7 @@ where
                         Tensor::from_vec(values.clone(), tensor_shape.to_vec())
                     })
                     .collect();
-                let plus = build_loss(&plus_tensors).item();
+                let plus = build_loss(&plus_tensors).item().unwrap();
 
                 let mut minus_inputs: Vec<Vec<f32>> =
                     inputs.iter().map(|(values, _)| values.to_vec()).collect();
@@ -63,7 +63,7 @@ where
                         Tensor::from_vec(values.clone(), tensor_shape.to_vec())
                     })
                     .collect();
-                let minus = build_loss(&minus_tensors).item();
+                let minus = build_loss(&minus_tensors).item().unwrap();
 
                 grad[element_idx] = (plus - minus) / (2.0 * FINITE_DIFF_EPS);
             }

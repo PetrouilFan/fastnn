@@ -128,7 +128,7 @@ pub fn save_state_dict(state_dict: Vec<(String, Tensor)>, path: &str) -> FastnnR
         if let Some(bytes) = tensor.as_byte_slice() {
             write_length_prefixed(&mut writer, bytes)?;
         } else {
-            let data = tensor.to_numpy();
+            let data = tensor.to_numpy()?;
             // Convert f32 vec to bytes using safe reinterpretation.
             let bytes = bytemuck::cast_slice(&data);
             write_length_prefixed(&mut writer, bytes)?;
@@ -263,12 +263,11 @@ pub fn load_model(path: &str) -> FastnnResult<HashMap<String, Tensor>> {
                         shape, name
                     ))
                 })?;
-            let elem_size = dtype.size();
-            let data_len = nbytes / elem_size;
-            if expected_numel != data_len {
+            let expected_bytes = dtype.storage_bytes(expected_numel);
+            if expected_bytes != nbytes {
                 return Err(FastnnError::Serialization(format!(
-                    "Shape mismatch for parameter '{}': shape {:?} expects {} elements of {:?}, but data has {} elements",
-                    name, shape, expected_numel, dtype, data_len
+                    "Shape mismatch for parameter '{}': shape {:?} and dtype {:?} require {} bytes, but data has {} bytes",
+                    name, shape, dtype, expected_bytes, nbytes
                 )));
             }
 

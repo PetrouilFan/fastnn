@@ -1,6 +1,8 @@
+use fastnn::backend::cpu::CpuBackend;
+use fastnn::backend::Backend;
 use fastnn::compiler::passes::{memory_planning, shape_inference};
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 
 #[test]
 fn test_single_node_graph() {
@@ -16,6 +18,38 @@ fn test_single_node_graph() {
 
     assert_eq!(plan.slots.len(), 1, "single-node graph should have 1 slot");
     assert!(plan.slots.contains_key(&a.node_id()));
+}
+
+#[test]
+fn shape_lowering_rejects_dimensions_that_f32_cannot_represent() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[16_777_217], IrDType::F32);
+    let shape = builder.shape_op(&input);
+    let mut graph = builder.to_graph();
+    graph.set_inputs(vec![input.node_id()]);
+    graph.set_outputs(vec![shape.node_id()]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let memory = memory_planning::plan_memory(&graph).unwrap();
+    assert!(CpuBackend.compile(&graph, &memory).is_err());
+}
+
+#[test]
+fn activation_dequantization_requires_quantize_predecessor() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let mut graph = builder.to_graph();
+    let dequantized = graph.add_node(
+        Opcode::DequantizeActivations,
+        vec![input.node_id()],
+        TensorType::new(vec![DimExpr::Known(4)], IrDType::F32),
+    );
+    graph.set_inputs(vec![input.node_id()]);
+    graph.set_outputs(vec![dequantized]);
+
+    shape_inference::infer_shapes(&mut graph).unwrap();
+    let memory = memory_planning::plan_memory(&graph).unwrap();
+    assert!(CpuBackend.compile(&graph, &memory).is_err());
 }
 
 #[test]
@@ -105,12 +139,10 @@ fn test_cyclic_graph_detection() {
         n1_mut.inputs = vec![n2];
     }
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        shape_inference::infer_shapes(&mut graph)
-    }));
+    let result = shape_inference::infer_shapes(&mut graph);
     assert!(
         result.is_err(),
-        "cyclic graph should panic during topological sort"
+        "cyclic graph should return an error during topological sort"
     );
 }
 
@@ -181,7 +213,7 @@ fn test_different_dtype_graph() {
 
     shape_inference::infer_shapes(&mut graph).unwrap();
     let c_node = graph.get_node(c.node_id()).unwrap();
-    assert_eq!(c_node.output_type.dtype, IrDType::F32);
+    assert_eq!(c_node.output_type.dtype(), IrDType::F32);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use crate::ir::node::{ComputeGraph, NodeId, Opcode, TensorValue};
+use crate::ir::{ComputeGraph, NodeId, Opcode, TensorValue};
 
 pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
     let mut simplified = 0;

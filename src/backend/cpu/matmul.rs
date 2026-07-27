@@ -3,7 +3,7 @@
 use crate::backend::cpu::blas::matmul_blas_into;
 use crate::backend::{BackendError, BufferSlice};
 use crate::dtypes::{I4x8, I8x4, PackedWord};
-use crate::ir::node::{DimExpr, ShapeEnv};
+use crate::ir::{DimExpr, ShapeEnv};
 use crate::packed_tensor::PackedTensor;
 use std::sync::Arc;
 
@@ -88,10 +88,10 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             "{kernel_name}: quantized weight metadata missing scales"
         )));
     }
-    let zero_points = if meta.zero_points.is_empty() {
+    let zero_points = if meta.dequant_offsets.is_empty() {
         vec![0.0; meta.scales.len()]
     } else {
-        meta.zero_points.clone()
+        meta.dequant_offsets.clone()
     };
     if meta.scales.len() != zero_points.len() {
         return Err(BackendError::Dispatch(format!(
@@ -106,6 +106,31 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
     } else {
         1
     };
+    if meta.quant_block_size > 0 && kernel_name == "matmul_i4_i8" {
+        if !matches!(meta.quant_block_size, 32 | 64 | 128) || meta.shape.len() != 2 {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: grouped W4A8 metadata requires a 2D shape and K-group size 32, 64, or 128"
+            )));
+        }
+        let expected_groups = rows
+            .checked_mul(meta.shape[1].div_ceil(meta.quant_block_size))
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "{kernel_name}: grouped W4A8 metadata size overflows"
+                ))
+            })?;
+        if meta.scales.len() != expected_groups
+            || zero_points.len() != expected_groups
+            || meta.quantized_group_sums.len() != expected_groups
+        {
+            return Err(BackendError::Dispatch(format!(
+                "{kernel_name}: grouped W4A8 metadata length mismatch: expected {expected_groups}, scales {}, offsets {}, compensation {}",
+                meta.scales.len(),
+                zero_points.len(),
+                meta.quantized_group_sums.len()
+            )));
+        }
+    }
     let valid_meta_len = meta.scales.len() == 1
         || meta.scales.len() == rows
         || (meta.scales.len() > 1 && rows > meta.scales.len() && rows % meta.scales.len() == 0)
@@ -144,6 +169,7 @@ pub(super) fn packed_tensor_from_meta<T: PackedWord>(
             PackedTensor::from_raw_arc(data, meta.shape.clone(), meta.scales.clone(), zero_points);
         pt.quant_block_size = meta.quant_block_size;
         pt.codebooks = meta.codebooks.clone();
+        pt.set_quantized_group_sums(meta.quantized_group_sums.clone());
         if pt.group_size == 0 && scales_len > 1 && rows > scales_len {
             pt.group_size = rows / scales_len;
         }
@@ -194,10 +220,16 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
             std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
                 bit_width,
                 scales: vec![1.0],
-                zero_points: vec![0.0],
+                dequant_offsets: vec![0.0],
                 shape: vec![m, k],
                 quant_block_size: 0,
                 codebooks: vec![],
+                quantized_group_sums: vec![],
+                execution: crate::backend::QuantizedExecutionContract::current_for_kernel(
+                    kernel_name,
+                    bit_width,
+                    false,
+                ),
             })
         });
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
@@ -224,6 +256,74 @@ pub(super) fn quantized_matmul_dispatch<T: PackedWord + 'static>(
     Ok(())
 }
 
+fn validate_i8_activation_affine(payload: &[u8], kernel_name: &str) -> Result<(), BackendError> {
+    let scale = f32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let offset = f32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    if !scale.is_finite() || scale <= 0.0 || !offset.is_finite() {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: activation affine metadata must be finite with a positive scale"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_i8_matmul_contract(
+    activation: BufferSlice,
+    output_start: usize,
+    output_end: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    weight_meta: &Option<std::sync::Arc<crate::backend::QuantizedWeightMeta>>,
+    kernel_name: &str,
+) -> Result<(), BackendError> {
+    let activation_values = m.checked_mul(k).ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: activation element count overflows"))
+    })?;
+    let meta = weight_meta.as_ref().ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
+    })?;
+    let metadata_bytes = if meta.quant_block_size > 0 {
+        m.checked_mul(4).and_then(|bytes| bytes.checked_add(8))
+    } else {
+        Some(8)
+    }
+    .ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: activation metadata size overflows"))
+    })?;
+    let expected_activation = activation_values
+        .checked_add(metadata_bytes)
+        .ok_or_else(|| {
+            BackendError::Dispatch(format!("{kernel_name}: activation payload size overflows"))
+        })?;
+    if activation.size != expected_activation {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: activation payload has {} bytes, expected {expected_activation}",
+            activation.size
+        )));
+    }
+    let output_values = m.checked_mul(n).ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: output element count overflows"))
+    })?;
+    let expected_output = output_values.checked_mul(4).ok_or_else(|| {
+        BackendError::Dispatch(format!("{kernel_name}: output byte size overflows"))
+    })?;
+    if output_end.checked_sub(output_start) != Some(expected_output)
+        || !output_start.is_multiple_of(4)
+    {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: output slice does not match the declared dimensions"
+        )));
+    }
+    if meta.shape.as_slice() != [n, k] {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: weight shape {:?} does not match [{n}, {k}]",
+            meta.shape
+        )));
+    }
+    Ok(())
+}
+
 /// Dispatch pre-quantized I8 activation × I8x4 packed-weight MatMul.
 ///
 /// Reads activation from arena as raw bytes (I8 payload format:
@@ -245,6 +345,11 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
     out_end: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
+    if input_slices.len() != 2 {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: expected activation and weight inputs"
+        )));
+    }
     if let [a_slice, w_slice] = input_slices {
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = &matmul_params[..] else {
@@ -252,23 +357,27 @@ pub(super) fn quantized_matmul_dispatch_i8_u8(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
+        validate_i8_matmul_contract(
+            *a_slice,
+            out_start,
+            out_end,
+            m,
+            k,
+            n,
+            weight_meta,
+            kernel_name,
+        )?;
 
         // Zero-copy views.
         let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
+        validate_i8_activation_affine(activation_payload, kernel_name)?;
         let typed_data = {
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
             get_or_cache_packed::<I8x4>(w_slice.offset, w_slice.size, raw)
         };
-        let meta = weight_meta.clone().unwrap_or_else(|| {
-            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                bit_width: 8,
-                scales: vec![1.0],
-                zero_points: vec![0.0],
-                shape: vec![m, k],
-                quant_block_size: 0,
-                codebooks: vec![],
-            })
-        });
+        let meta = weight_meta.clone().ok_or_else(|| {
+            BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
+        })?;
         let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
         let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
 
@@ -305,6 +414,11 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
     out_end: usize,
     kernel_name: &str,
 ) -> Result<(), BackendError> {
+    if input_slices.len() != 2 {
+        return Err(BackendError::Dispatch(format!(
+            "{kernel_name}: expected activation and weight inputs"
+        )));
+    }
     if let [a_slice, w_slice] = input_slices {
         let matmul_params = resolve_params(params, param_dims, shape_env, 3)?;
         let &[m, k, n] = &matmul_params[..] else {
@@ -312,6 +426,16 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
                 "{kernel_name}: expected params [M,K,N]"
             )));
         };
+        validate_i8_matmul_contract(
+            *a_slice,
+            out_start,
+            out_end,
+            m,
+            k,
+            n,
+            weight_meta,
+            kernel_name,
+        )?;
 
         // Zero-copy views.
         let activation_payload: &[u8] = unsafe { arena.view_u8(a_slice.offset, a_slice.size) };
@@ -319,27 +443,138 @@ pub(super) fn quantized_matmul_dispatch_i8_u4(
             let raw: &[u8] = unsafe { arena.view_u8(w_slice.offset, w_slice.size) };
             get_or_cache_packed::<I4x8>(w_slice.offset, w_slice.size, raw)
         };
-        let meta = weight_meta.clone().unwrap_or_else(|| {
-            std::sync::Arc::new(crate::backend::QuantizedWeightMeta {
-                bit_width: 4,
-                scales: vec![1.0],
-                zero_points: vec![0.0],
-                shape: vec![m, k],
-                quant_block_size: 0,
-                codebooks: vec![],
-            })
-        });
-        let pt = packed_tensor_from_meta(typed_data, meta, kernel_name)?;
+        let meta = weight_meta.clone().ok_or_else(|| {
+            BackendError::Dispatch(format!("{kernel_name}: missing quantized weight metadata"))
+        })?;
+        let pt = packed_tensor_from_meta(typed_data, meta.clone(), kernel_name)?;
         let out_f32: &mut [f32] = unsafe { arena.view_f32_mut(out_start, out_end - out_start) };
 
-        crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8(
-            &pt,
-            activation_payload,
-            out_f32,
-            m,
-            k,
-            n,
-        );
+        if meta.quant_block_size > 0 {
+            if activation_payload.len() < 8 {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation payload is missing its header"
+                )));
+            }
+            let payload_m =
+                u32::from_le_bytes(activation_payload[0..4].try_into().unwrap()) as usize;
+            let payload_k =
+                u32::from_le_bytes(activation_payload[4..8].try_into().unwrap()) as usize;
+            let metadata_bytes = 8usize
+                .checked_add(payload_m.checked_mul(4).ok_or_else(|| {
+                    BackendError::Dispatch(format!("{kernel_name}: activation metadata overflows"))
+                })?)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!("{kernel_name}: activation metadata overflows"))
+                })?;
+            if payload_m != m
+                || payload_k != k
+                || activation_payload.len() != metadata_bytes + m * k
+            {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation payload dimensions do not match MatMul"
+                )));
+            }
+            let scale_bytes = &activation_payload[8..metadata_bytes];
+            if !scale_bytes.as_ptr().is_aligned() {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation scales are not f32-aligned"
+                )));
+            }
+            // SAFETY: The payload starts at an arena-aligned address, scales start
+            // after an 8-byte header, and the slice length is exactly m f32 values.
+            let scales = unsafe {
+                std::slice::from_raw_parts(scale_bytes.as_ptr().cast::<f32>(), payload_m)
+            };
+            if scales
+                .iter()
+                .any(|scale| !scale.is_finite() || *scale <= 0.0)
+            {
+                return Err(BackendError::Dispatch(format!(
+                    "{kernel_name}: per-token activation scales must be finite and positive"
+                )));
+            }
+            crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8_grouped_per_token_parts(
+                &pt,
+                scales,
+                &activation_payload[metadata_bytes..],
+                out_f32,
+                m,
+                k,
+                n,
+            );
+        } else {
+            validate_i8_activation_affine(activation_payload, kernel_name)?;
+            crate::backend::cpu::microkernels::gemm_cpu_flat_i8_i4x8(
+                &pt,
+                activation_payload,
+                out_f32,
+                m,
+                k,
+                n,
+            );
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod grouped_metadata_tests {
+    use super::*;
+    use crate::backend::{QuantizedExecutionContract, QuantizedWeightMeta};
+
+    #[test]
+    fn reconstructs_grouped_compensation_without_rescanning_weights() {
+        let shape = [3usize, 145usize];
+        let values: Vec<f32> = (0..shape.iter().product())
+            .map(|index| ((index * 29 + 7) % 113) as f32 / 17.0 - 3.0)
+            .collect();
+        let original = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&values, &shape, 64);
+        let expected_sums = original.quantized_group_sums().to_vec();
+        let metadata = Arc::new(QuantizedWeightMeta {
+            bit_width: 4,
+            scales: original.scales.clone(),
+            dequant_offsets: original.zeros.clone(),
+            shape: shape.to_vec(),
+            quant_block_size: 64,
+            codebooks: vec![],
+            quantized_group_sums: expected_sums.clone(),
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4_i8", 4, false),
+        });
+        let reconstructed = packed_tensor_from_meta(
+            Arc::new(original.as_packed().to_vec()),
+            metadata,
+            "matmul_i4_i8",
+        )
+        .unwrap();
+        assert_eq!(reconstructed.quantized_group_sums(), expected_sums);
+        assert_eq!(reconstructed.to_f32_vec(), original.to_f32_vec());
+    }
+
+    #[test]
+    fn rejects_malformed_grouped_metadata_before_kernel_indexing() {
+        let shape = [2usize, 65usize];
+        let values: Vec<f32> = (0..shape.iter().product())
+            .map(|index| index as f32 / 19.0 - 2.0)
+            .collect();
+        let original = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&values, &shape, 32);
+        let metadata = QuantizedWeightMeta {
+            bit_width: 4,
+            scales: original.scales.clone(),
+            dequant_offsets: original.zeros.clone(),
+            shape: shape.to_vec(),
+            quant_block_size: 32,
+            codebooks: vec![],
+            quantized_group_sums: original.quantized_group_sums().to_vec(),
+            execution: QuantizedExecutionContract::current_for_kernel("matmul_i4_i8", 4, false),
+        };
+        let packed = Arc::new(original.as_packed().to_vec());
+
+        let mut short = metadata.clone();
+        short.scales.pop();
+        assert!(packed_tensor_from_meta(packed.clone(), Arc::new(short), "matmul_i4_i8").is_err());
+
+        let mut unsupported = metadata;
+        unsupported.quant_block_size = 16;
+        assert!(packed_tensor_from_meta(packed, Arc::new(unsupported), "matmul_i4_i8").is_err());
+    }
 }

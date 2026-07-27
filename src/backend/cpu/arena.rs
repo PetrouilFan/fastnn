@@ -10,6 +10,31 @@ pub(super) fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end
     a_start < b_end && b_start < a_end
 }
 
+fn with_disjoint_output_bytes<R>(
+    arena_bytes: &mut [u8],
+    inputs: &[BufferSlice],
+    output: BufferSlice,
+    f: impl FnOnce(&[&[u8]], &mut [u8]) -> R,
+) -> R {
+    let output_end = checked_end(output);
+    let (before_output, output_and_after) = arena_bytes.split_at_mut(output.offset);
+    let (output_bytes, after_output) = output_and_after.split_at_mut(output.size);
+    let input_bytes: SmallVec<[&[u8]; 8]> = inputs
+        .iter()
+        .map(|input| {
+            let input_end = checked_end(*input);
+            if input_end <= output.offset {
+                &before_output[input.offset..input_end]
+            } else {
+                debug_assert!(input.offset >= output_end);
+                let start = input.offset - output_end;
+                &after_output[start..start + input.size]
+            }
+        })
+        .collect();
+    f(&input_bytes, output_bytes)
+}
+
 #[inline]
 pub(super) fn with_unary_f32_slices<R>(
     arena: &CpuBuffer,
@@ -25,16 +50,11 @@ pub(super) fn with_unary_f32_slices<R>(
         assert_slice_in_bounds(arena_bytes.len(), input, input_end);
         assert_slice_in_bounds(arena_bytes.len(), output, output_end);
 
-        // SAFETY: the input and output byte ranges were bounds-checked above and
-        // proven disjoint, so creating one shared f32 slice and one mutable f32
-        // slice from the arena cannot alias. Dispatch is single-threaded for a
-        // CpuBuffer, matching CpuBuffer::data_mut's safety contract.
-        unsafe {
-            let input_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(input.offset), input.size);
-            let output_f32 =
-                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+        with_disjoint_output_bytes(arena_bytes, &[input], output, |inputs, output| {
+            let input_f32 = bytemuck::cast_slice::<_, f32>(inputs[0]);
+            let output_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
             f(input_f32, output_f32)
-        }
+        })
     } else {
         let input_copy = {
             let arena_bytes = arena.data_mut();
@@ -75,16 +95,12 @@ pub(super) fn with_binary_f32_slices<R>(
         assert_slice_in_bounds(arena_bytes.len(), b, b_end);
         assert_slice_in_bounds(arena_bytes.len(), output, output_end);
 
-        // SAFETY: both input ranges are disjoint from output, so neither shared
-        // input f32 slice can alias the mutable output f32 slice. The two input
-        // slices may overlap each other, which is permitted for shared borrows.
-        unsafe {
-            let a_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(a.offset), a.size);
-            let b_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(b.offset), b.size);
-            let output_f32 =
-                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+        with_disjoint_output_bytes(arena_bytes, &[a, b], output, |inputs, output| {
+            let a_f32 = bytemuck::cast_slice::<_, f32>(inputs[0]);
+            let b_f32 = bytemuck::cast_slice::<_, f32>(inputs[1]);
+            let output_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
             f(a_f32, b_f32, output_f32)
-        }
+        })
     } else if output_overlaps_a && !output_overlaps_b {
         let a_copy = {
             let arena_bytes = arena.data_mut();
@@ -100,15 +116,11 @@ pub(super) fn with_binary_f32_slices<R>(
         assert_slice_in_bounds(arena_bytes.len(), b, b_end);
         assert_slice_in_bounds(arena_bytes.len(), output, output_end);
 
-        // SAFETY: a was copied before taking the mutable output slice, and b's
-        // byte range was bounds-checked and proven disjoint from output above.
-        // Therefore the borrowed b slice cannot alias the mutable output slice.
-        unsafe {
-            let b_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(b.offset), b.size);
-            let output_f32 =
-                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+        with_disjoint_output_bytes(arena_bytes, &[b], output, |inputs, output| {
+            let b_f32 = bytemuck::cast_slice::<_, f32>(inputs[0]);
+            let output_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
             f(&a_copy, b_f32, output_f32)
-        }
+        })
     } else if output_overlaps_b && !output_overlaps_a {
         let b_copy = {
             let arena_bytes = arena.data_mut();
@@ -124,15 +136,11 @@ pub(super) fn with_binary_f32_slices<R>(
         assert_slice_in_bounds(arena_bytes.len(), a, a_end);
         assert_slice_in_bounds(arena_bytes.len(), output, output_end);
 
-        // SAFETY: b was copied before taking the mutable output slice, and a's
-        // byte range was bounds-checked and proven disjoint from output above.
-        // Therefore the borrowed a slice cannot alias the mutable output slice.
-        unsafe {
-            let a_f32 = bytes_as_f32_slice(arena_bytes.as_ptr().add(a.offset), a.size);
-            let output_f32 =
-                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+        with_disjoint_output_bytes(arena_bytes, &[a], output, |inputs, output| {
+            let a_f32 = bytemuck::cast_slice::<_, f32>(inputs[0]);
+            let output_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
             f(a_f32, &b_copy, output_f32)
-        }
+        })
     } else {
         let (a_copy, b_copy) = {
             let arena_bytes = arena.data_mut();
@@ -186,18 +194,14 @@ pub(super) fn with_nary_f32_slices<R>(
         }
         assert_slice_in_bounds(arena_bytes.len(), output, output_end);
 
-        // SAFETY: every input byte range was bounds-checked and proven disjoint
-        // from the mutable output byte range. Input ranges may overlap each
-        // other, which is fine for shared f32 slices.
-        unsafe {
+        with_disjoint_output_bytes(arena_bytes, inputs, output, |inputs, output| {
             let input_f32: SmallVec<[&[f32]; 8]> = inputs
                 .iter()
-                .map(|input| bytes_as_f32_slice(arena_bytes.as_ptr().add(input.offset), input.size))
+                .map(|input| bytemuck::cast_slice::<_, f32>(input))
                 .collect();
-            let output_f32 =
-                bytes_as_f32_slice_mut(arena_bytes.as_mut_ptr().add(output.offset), output.size);
+            let output_f32 = bytemuck::cast_slice_mut::<_, f32>(output);
             f(&input_f32, output_f32)
-        }
+        })
     } else {
         let input_copies = {
             let arena_bytes = arena.data_mut();
@@ -260,18 +264,6 @@ fn assert_slice_in_bounds(arena_len: usize, slice: BufferSlice, end: usize) {
         0,
         "f32 BufferSlice size must be a multiple of 4"
     );
-}
-
-#[inline]
-// SAFETY: Caller must ensure `ptr` is valid for `len_bytes` and properly aligned for f32.
-unsafe fn bytes_as_f32_slice<'a>(ptr: *const u8, len_bytes: usize) -> &'a [f32] {
-    std::slice::from_raw_parts(ptr.cast::<f32>(), len_bytes / std::mem::size_of::<f32>())
-}
-
-#[inline]
-// SAFETY: Caller must ensure `ptr` is valid for `len_bytes` and properly aligned for f32.
-unsafe fn bytes_as_f32_slice_mut<'a>(ptr: *mut u8, len_bytes: usize) -> &'a mut [f32] {
-    std::slice::from_raw_parts_mut(ptr.cast::<f32>(), len_bytes / std::mem::size_of::<f32>())
 }
 
 #[cfg(test)]

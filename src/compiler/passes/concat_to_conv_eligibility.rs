@@ -1,4 +1,4 @@
-use crate::ir::node::{ComputeGraph, NodeId, Opcode};
+use crate::ir::{ComputeGraph, NodeId, Opcode};
 
 /// Reasons why a concat→Conv2d pattern is NOT eligible for segmented planning.
 ///
@@ -12,6 +12,8 @@ pub enum Ineligible {
     TooFewInputs,
     /// The concat axis is not the channel axis (axis 1 for NCHW).
     WrongAxis { axis: i64 },
+    /// A required numeric attribute is missing or malformed.
+    MalformedAttribute { name: String },
     /// The concat output feeds multiple consumers — cannot safely fuse.
     MultipleConsumers,
     /// The single downstream consumer is not a Conv2d.
@@ -95,11 +97,19 @@ pub fn check_concat_to_conv_eligibility(
     }
 
     // 3. Axis must be 1 (channel axis for NCHW).
-    let axis: i64 = concat
-        .attrs
-        .get("axis")
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(0);
+    let axis = match concat.required_attr::<i64>("axis") {
+        Ok(axis) => axis,
+        Err(_) => {
+            return EligibilityResult {
+                concat_node_id,
+                conv_node_id: None,
+                eligible: false,
+                reason: Some(Ineligible::MalformedAttribute {
+                    name: "axis".into(),
+                }),
+            };
+        }
+    };
     if axis != 1 {
         return EligibilityResult {
             concat_node_id,
@@ -143,11 +153,19 @@ pub fn check_concat_to_conv_eligibility(
     }
 
     // 6. Conv2d must be ungrouped.
-    let groups: usize = consumer
-        .attrs
-        .get("groups")
-        .and_then(|g| g.parse().ok())
-        .unwrap_or(1);
+    let groups = match consumer.required_attr::<usize>("groups") {
+        Ok(groups) => groups,
+        Err(_) => {
+            return EligibilityResult {
+                concat_node_id,
+                conv_node_id: Some(consumer_id),
+                eligible: false,
+                reason: Some(Ineligible::MalformedAttribute {
+                    name: "groups".into(),
+                }),
+            };
+        }
+    };
     if groups != 1 {
         return EligibilityResult {
             concat_node_id,
@@ -158,11 +176,19 @@ pub fn check_concat_to_conv_eligibility(
     }
 
     // 7. Conv2d must have dilation == 1.
-    let dilation: usize = consumer
-        .attrs
-        .get("dilation")
-        .and_then(|d| d.parse().ok())
-        .unwrap_or(1);
+    let dilation = match consumer.required_attr::<usize>("dilation") {
+        Ok(dilation) => dilation,
+        Err(_) => {
+            return EligibilityResult {
+                concat_node_id,
+                conv_node_id: Some(consumer_id),
+                eligible: false,
+                reason: Some(Ineligible::MalformedAttribute {
+                    name: "dilation".into(),
+                }),
+            };
+        }
+    };
     if dilation != 1 {
         return EligibilityResult {
             concat_node_id,
@@ -305,7 +331,7 @@ pub fn check_concat_to_conv_eligibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+    use crate::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
     use std::collections::HashMap;
 
     fn nchw(n: u64, c: u64, h: u64, w: u64) -> TensorType {
@@ -359,6 +385,41 @@ mod tests {
         );
         assert_eq!(result.conv_node_id, Some(conv_id));
         assert!(result.reason.is_none());
+    }
+
+    #[test]
+    fn malformed_attributes_are_never_eligible() {
+        let (mut graph, concat_id, conv_id) = build_simple_concat_to_conv();
+        graph
+            .get_node_mut(concat_id)
+            .unwrap()
+            .attrs
+            .insert("axis".into(), "invalid".into());
+        let result = check_concat_to_conv_eligibility(&graph, concat_id);
+        assert_eq!(
+            result.reason,
+            Some(Ineligible::MalformedAttribute {
+                name: "axis".into()
+            })
+        );
+
+        graph
+            .get_node_mut(concat_id)
+            .unwrap()
+            .attrs
+            .insert("axis".into(), "1".into());
+        graph
+            .get_node_mut(conv_id)
+            .unwrap()
+            .attrs
+            .insert("groups".into(), "invalid".into());
+        let result = check_concat_to_conv_eligibility(&graph, concat_id);
+        assert_eq!(
+            result.reason,
+            Some(Ineligible::MalformedAttribute {
+                name: "groups".into()
+            })
+        );
     }
 
     #[test]

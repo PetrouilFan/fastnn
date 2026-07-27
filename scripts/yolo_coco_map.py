@@ -18,7 +18,10 @@ import gc
 import io
 import json
 import os
+import platform
+import random
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -33,6 +36,17 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 VALID_DTYPES = ("f32", "u4", "u8", "i4", "i8", "f8", "f8r", "f4", "i4cb")
+EXECUTION_CONTRACTS = {
+    "f32": "W32A32",
+    "u4": "WU4A32-unpack",
+    "u8": "WU8A32-unpack",
+    "i4": "WI4A4-dynamic",
+    "i8": "WI8A8-dynamic",
+    "f8": "WF8A32-unpack",
+    "f8r": "WF8RA32-unpack",
+    "f4": "WF4A32-unpack",
+    "i4cb": "WI4-codebook-A32-unpack",
+}
 DEFAULT_COCO_DIR = "/home/petrouil/Projects/YOLO_Validation/coco"
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "yolo11n": {"pt_name": "yolo11n.pt"},
@@ -268,7 +282,12 @@ def _dtype_to_quantize(dtype: str) -> int | str | None:
         return 8  # signed → pass as int for WeightDtype::I8
     return dtype  # "f8", "f8r", "f4" — passed as string
 
-def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
+def _build_fastnn_executor(
+    onnx_path: Path,
+    dtype: str,
+    *,
+    extra_outputs: tuple[str, ...] = (),
+) -> tuple[Any, str, str]:
     """Load ONNX, constant-fold (Shape/Gather/Add/Sub/Mul/Div for DFL paths),
     build AotExecutor. Returns (executor, input_name, output_name)."""
     import onnx
@@ -280,6 +299,8 @@ def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
     initializer_names = {init.name for init in model.graph.initializer}
     input_names = [i.name for i in model.graph.input if i.name not in initializer_names]
     output_names = [o.name for o in model.graph.output]
+    primary_output = output_names[0]
+    output_names.extend(name for name in extra_outputs if name not in output_names)
     input_shapes: dict[str, list[int]] = {}
     for i in model.graph.input:
         if i.name in input_names:
@@ -375,7 +396,7 @@ def _build_fastnn_executor(onnx_path: Path, dtype: str) -> tuple[Any, str, str]:
     quantize = _dtype_to_quantize(dtype)
     executor = fnn.AotExecutor(nodes, params, input_names, output_names,
                                input_shapes=input_shapes, quantize=quantize)
-    return executor, input_names[0], output_names[0]
+    return executor, input_names[0], primary_output
 
 # ---------------------------------------------------------------------------
 # Memory measurement
@@ -456,15 +477,26 @@ def _postprocess(preds_bcn: np.ndarray, conf_thres: float = 0.001,
     return [r.cpu().numpy() if hasattr(r, "cpu") else np.asarray(r) for r in results]
 
 def _scale_to_original(dets: np.ndarray, img_shape: tuple[int, int],
-                       gain: float, pad: tuple[int, int]) -> np.ndarray:
+                       gain: float, pad: tuple[int, int], imgsz: int) -> np.ndarray:
     """Scale detection boxes from model input coords to original image coords."""
     if len(dets) == 0:
         return dets
     from ultralytics.utils.ops import scale_boxes
     dets_copy = dets.copy()
     ratio_pad = ([gain, gain], pad)
-    dets_copy[:, :4] = scale_boxes((640, 640), dets_copy[:, :4], img_shape, ratio_pad=ratio_pad)
+    dets_copy[:, :4] = scale_boxes((imgsz, imgsz), dets_copy[:, :4], img_shape,
+                                   ratio_pad=ratio_pad)
     return dets_copy
+
+
+def _validate_model_output(output: np.ndarray, *, model: str, dtype: str) -> None:
+    if output.ndim != 3 or output.shape[0] != 1:
+        raise RuntimeError(
+            f"{model}/{dtype}: expected rank-3 batch-1 YOLO output, got {output.shape}"
+        )
+    if not np.isfinite(output).all():
+        nonfinite = int(output.size - np.count_nonzero(np.isfinite(output)))
+        raise RuntimeError(f"{model}/{dtype}: output contains {nonfinite} non-finite values")
 
 # ---------------------------------------------------------------------------
 # COCO evaluation
@@ -488,6 +520,9 @@ def _preds_to_coco_json(all_dets: list[tuple[int, np.ndarray]],
 def _evaluate_coco(coco, coco_results: list[dict], img_ids: list[int],
                    quiet: bool = False) -> dict[str, float]:
     from pycocotools.cocoeval import COCOeval
+    if not coco_results:
+        return {"mAP@0.5": 0.0, "mAP@0.5:0.95": 0.0,
+                "AP_small": 0.0, "AP_medium": 0.0, "AP_large": 0.0}
     old_stdout = sys.stdout
     if quiet:
         sys.stdout = io.StringIO()
@@ -527,7 +562,8 @@ def _export_yolo_pt_to_onnx(pt_path: str, onnx_path: Path, imgsz: int) -> Any:
 def main() -> int:
     ap = argparse.ArgumentParser(description="YOLO COCO val2017 mAP: PyTorch vs fastnn across dtypes")
     ap.add_argument("--models", default="yolo11n", help="Comma-separated model names")
-    ap.add_argument("--dtypes", default="f32,f8,f8r,f4", help=f"Dtypes ({','.join(VALID_DTYPES)})")
+    ap.add_argument("--dtypes", default="all",
+                    help=f"Comma-separated dtypes ({','.join(VALID_DTYPES)}) or 'all'")
     ap.add_argument("--coco-dir", default=None, help="Local COCO dataset root (disables HF streaming)")
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--max-images", type=int, default=0, help="Limit images (0 = all)")
@@ -544,8 +580,16 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    model_names = [m.strip() for m in args.models.split(",")]
-    dtypes = [d.strip() for d in args.dtypes.split(",")]
+    if args.imgsz <= 0 or args.max_images < 0 or args.warmup < 0 or args.iters <= 0:
+        ap.error("imgsz and iters must be positive; max-images and warmup must be non-negative")
+
+    model_names = [m.strip() for m in args.models.split(",") if m.strip()]
+    unknown_models = [model for model in model_names if model not in MODEL_SPECS]
+    if unknown_models:
+        ap.error(f"unknown models: {','.join(unknown_models)}")
+    dtypes = list(VALID_DTYPES) if args.dtypes.strip() == "all" else [
+        d.strip() for d in args.dtypes.split(",") if d.strip()
+    ]
     for d in dtypes:
         if d not in VALID_DTYPES:
             print(f"error: unknown dtype '{d}' (valid: {','.join(VALID_DTYPES)})")
@@ -561,10 +605,13 @@ def main() -> int:
         print(f"Loading COCO from {args.coco_dir} ...")
         coco, images, cat_map = _load_coco(args.coco_dir)
         if args.max_images > 0:
-            images = images[: args.max_images]
+            images = random.Random(args.seed).sample(
+                images, min(args.max_images, len(images))
+            )
     print(f"  {len(images)} images, {len(cat_map)} classes")
     img_id_to_idx = {img["id"]: idx for idx, img in enumerate(images)}
     all_results: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
 
     def _get_preprocessed(img_idx: int) -> tuple[np.ndarray, float, tuple[int, int]]:
         """Get preprocessed image from either local file or PIL cache."""
@@ -578,7 +625,7 @@ def main() -> int:
         print(f"\n{'=' * 70}\n  MODEL: {model_name}\n{'=' * 70}")
         cache_dir = Path(f"/tmp/fastnn-yolo-coco/{model_name}")
         cache_dir.mkdir(parents=True, exist_ok=True)
-        onnx_path = cache_dir / "model.onnx"
+        onnx_path = cache_dir / f"model-{args.imgsz}.onnx"
         pt_name = MODEL_SPECS[model_name]["pt_name"]
         if not onnx_path.exists():
             print(f"  exporting {pt_name} -> {onnx_path}")
@@ -613,9 +660,12 @@ def main() -> int:
         for idx, img_info in enumerate(images):
             x_np, gain, pad = _get_preprocessed(idx)
             y_pt = _run_pytorch(pt_model, torch.from_numpy(x_np[np.newaxis]))
+            _validate_model_output(y_pt, model=model_name, dtype="pytorch")
             dets_list = _postprocess(y_pt, args.conf_thres, args.iou_thres)
             dets = dets_list[0] if dets_list else np.empty((0, 6))
-            dets = _scale_to_original(dets, (img_info["height"], img_info["width"]), gain, pad)
+            dets = _scale_to_original(
+                dets, (img_info["height"], img_info["width"]), gain, pad, args.imgsz
+            )
             pytorch_dets.append((img_info["id"], dets))
         pytorch_coco = _preds_to_coco_json(pytorch_dets, cat_map, img_id_to_idx)
         eval_ids = [img["id"] for img in images]
@@ -649,9 +699,13 @@ def main() -> int:
                     fx_img = fnn.tensor(x_np[np.newaxis], list(x_np[np.newaxis].shape))
                     result = executor.forward({input_name: fx_img})
                     y_fn = result[output_name].numpy()
+                    _validate_model_output(y_fn, model=model_name, dtype=dtype)
                     dets_list = _postprocess(y_fn, args.conf_thres, args.iou_thres)
                     dets = dets_list[0] if dets_list else np.empty((0, 6))
-                    dets = _scale_to_original(dets, (img_info["height"], img_info["width"]), gain, pad)
+                    dets = _scale_to_original(
+                        dets, (img_info["height"], img_info["width"]), gain, pad,
+                        args.imgsz,
+                    )
                     fastnn_dets.append((img_info["id"], dets))
                 coco_results = _preds_to_coco_json(fastnn_dets, cat_map, img_id_to_idx)
                 metrics = _evaluate_coco(coco, coco_results, eval_ids, quiet=True)
@@ -668,7 +722,8 @@ def main() -> int:
                           f"weights={fastnn_mem['weights_mb']:.1f}MB  "
                           f"workspace={fastnn_mem['workspace_mb']:.1f}MB")
 
-                entry: dict[str, Any] = {"metrics": metrics, "speed": speed,
+                entry: dict[str, Any] = {"execution_contract": EXECUTION_CONTRACTS[dtype],
+                    "metrics": metrics, "speed": speed,
                     "delta_vs_pytorch": {"mAP@0.5": delta5, "mAP@0.5:0.95": delta595},
                     "speedup": speedup, "num_predictions": len(coco_results)}
                 if fastnn_mem:
@@ -679,6 +734,7 @@ def main() -> int:
                 print(f"  ERROR: {type(exc).__name__}: {exc}")
                 traceback.print_exc()
                 model_results["fastnn"][dtype] = {"error": f"{type(exc).__name__}: {exc}"}
+                failures.append(f"{model_name}/{dtype}: {type(exc).__name__}: {exc}")
 
         all_results[model_name] = model_results
 
@@ -695,7 +751,8 @@ def main() -> int:
                 print(f"    {dtype:6s}: ERROR {fr['error']}")
             else:
                 m, s, d, mem = fr["metrics"], fr["speed"], fr["delta_vs_pytorch"], fr.get("memory_stats", {})
-                line = (f"    {dtype:6s}: mAP@0.5={m['mAP@0.5']:.4f}  "
+                contract = fr["execution_contract"]
+                line = (f"    {dtype:6s} [{contract}]: mAP@0.5={m['mAP@0.5']:.4f}  "
                         f"mAP@0.5:0.95={m['mAP@0.5:0.95']:.4f}  "
                         f"{s['mean_ms']:.1f}ms/img ({fr['speedup']:.2f}x)  "
                         f"Δ={d['mAP@0.5']:+.4f}/{d['mAP@0.5:0.95']:+.4f}")
@@ -705,8 +762,39 @@ def main() -> int:
 
     if args.json_output is not None:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(json.dumps(all_results, indent=2, sort_keys=True))
+        try:
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            git_commit = None
+        report = {
+            "metadata": {
+                "schema_version": 1,
+                "git_commit": git_commit,
+                "python": platform.python_version(),
+                "platform": platform.platform(),
+                "models": model_names,
+                "dtypes": dtypes,
+                "imgsz": args.imgsz,
+                "max_images": args.max_images,
+                "image_ids": [img["id"] for img in images],
+                "dataset_source": "huggingface-stream" if use_hf else str(args.coco_dir),
+                "selection": "stream-prefix" if use_hf else "seeded-sample",
+                "seed": args.seed,
+                "warmup": args.warmup,
+                "iters": args.iters,
+                "conf_threshold": args.conf_thres,
+                "iou_threshold": args.iou_thres,
+                "failures": failures,
+            },
+            "models": all_results,
+        }
+        args.json_output.write_text(json.dumps(report, indent=2, sort_keys=True))
         print(f"\nResults written to {args.json_output}")
+    if failures:
+        print(f"\nFAILED: {len(failures)} dtype evaluation(s) failed")
+        return 1
     return 0
 
 

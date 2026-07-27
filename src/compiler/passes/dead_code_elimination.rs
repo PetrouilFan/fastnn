@@ -1,4 +1,4 @@
-use crate::ir::node::{ComputeGraph, DimExpr, NodeId, Opcode};
+use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode};
 use crate::utils::parse_shape_attr;
 use std::collections::HashSet;
 
@@ -90,10 +90,10 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
             }
 
             Opcode::Cast => {
-                // Identity cast: input dtype matches output dtype
+                // Identity cast: the complete input/output tensor contracts match.
                 node.inputs.first().copied().and_then(|inp_id| {
                     let input_node = graph_ref.get_node(inp_id)?;
-                    if input_node.output_type.dtype == node.output_type.dtype {
+                    if input_node.output_type == node.output_type {
                         Some(inp_id)
                     } else {
                         None
@@ -114,17 +114,9 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
                 // Full-tensor slice: Slice(0..dim) that covers the entire dimension
                 node.inputs.first().copied().and_then(|inp_id| {
                     let input_node = graph_ref.get_node(inp_id)?;
-                    let dim: usize = node.attrs.get("dim").and_then(|s| s.parse().ok())?;
-                    let start: u64 = node
-                        .attrs
-                        .get("start")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let end: u64 = node
-                        .attrs
-                        .get("end")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+                    let dim = node.required_attr::<usize>("dim").ok()?;
+                    let start = node.required_attr::<u64>("start").ok()?;
+                    let end = node.required_attr::<u64>("end").ok()?;
 
                     if dim < input_node.output_type.shape.len() && start == 0 {
                         let input_dim = &input_node.output_type.shape[dim];
@@ -179,4 +171,49 @@ fn shapes_equal(a: &[DimExpr], b: &[DimExpr]) -> bool {
             (Some(va), Some(vb)) => va == vb,
             _ => da == db,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{ComputeGraph, Opcode, TensorType};
+
+    #[test]
+    fn cast_with_different_quantization_metadata_is_not_eliminated() {
+        let mut graph = ComputeGraph::new();
+        // Two U4Scaled types with different quantization metadata should
+        // NOT be considered equal by the DCE pass.
+        let input_rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::U4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![0.5],
+            vec![-1.0],
+        )
+        .unwrap();
+        let output_rep = crate::types::ValueRepresentation::packed_affine_dequantization(
+            crate::types::ScalarType::U4,
+            8,
+            crate::types::QuantizationGranularity::PerTensor,
+            vec![1.0],
+            vec![0.0],
+        )
+        .unwrap();
+        let layout = crate::types::TensorStorageLayout {
+            encoding: crate::types::StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            row_packed: true,
+            prefix_bytes: 0,
+            suffix_bytes: crate::types::PACKED_SIMD_MARGIN_BYTES,
+        };
+        let input_type = TensorType::from_parts(vec![DimExpr::Known(8)], input_rep, layout);
+        let output_type = TensorType::from_parts(vec![DimExpr::Known(8)], output_rep, layout);
+        let input = graph.add_node(Opcode::Input, vec![], input_type);
+        let cast = graph.add_node(Opcode::Cast, vec![input], output_type);
+
+        assert_eq!(eliminate_noops(&mut graph), 0);
+        assert!(graph.get_node(cast).is_some());
+    }
 }

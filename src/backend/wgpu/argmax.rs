@@ -104,7 +104,7 @@ pub(super) fn dispatch_argmax_gpu(
         return Ok(());
     }
 
-    let num_level1_wgs = (numel + 255) / 256;
+    let num_level1_wgs = numel.div_ceil(256);
 
     // Level 1 shader: each workgroup finds local max among up to 256 elements
     let shader_l1 = build_argmax_level1_shader();

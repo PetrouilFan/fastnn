@@ -163,10 +163,7 @@ macro_rules! build_pipeline {
             wgsl_source: &str,
         ) -> Result<(), String> {
             let pipeline_key = format!("{}{}", $key_prefix, key);
-            if ctx.pipelines.contains_key(&pipeline_key) {
-                $crate::backend::wgpu::pipeline::record_pipeline_hit();
-            } else {
-                $crate::backend::wgpu::pipeline::record_pipeline_miss();
+            if !ctx.pipelines.contains_key(&pipeline_key) {
                 let shader = ctx
                     .device
                     .create_shader_module(wgpu::ShaderModuleDescriptor {

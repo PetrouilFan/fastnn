@@ -1,4 +1,4 @@
-use crate::ir::node::Opcode;
+use crate::ir::Opcode;
 use std::collections::HashMap;
 
 /// Returns the ONNX op_type for opcodes that have a simple 1:1 mapping

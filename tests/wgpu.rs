@@ -16,7 +16,7 @@
 use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::wgpu::WgpuBackend;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType, TensorType};
+use fastnn::ir::{DimExpr, IrDType, TensorType};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ fn test_wgpu_elementwise_add() {
         ],
     );
     assert_eq!(
-        read_f32(&bytemuck::cast_slice(&pairs[0].0)),
+        read_f32(bytemuck::cast_slice(&pairs[0].0)),
         &[6.0, 8.0, 10.0, 12.0]
     );
 }
@@ -334,7 +334,7 @@ fn test_wgpu_conv2d_multichannel() {
     let weight = g.constant(&weight_bytes, weight_tt);
     let out = g.conv2d_with_params(&input, &weight, 1, 0, 1, 1);
 
-    let input_data: Vec<f32> = (0..1 * 2 * 4 * 4).map(|i| (i as f32) * 0.5).collect();
+    let input_data: Vec<f32> = (0..2 * 4 * 4).map(|i| (i as f32) * 0.5).collect();
 
     let result = g
         .compile_and_execute(&[&out], WgpuBackend, &[&f32_data(&input_data)])

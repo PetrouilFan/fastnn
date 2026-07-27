@@ -1,168 +1,154 @@
+use crate::error::{FastnnError, FastnnResult};
 use crate::storage::{CpuStorage, DType, Device, Storage};
 use std::sync::Arc;
 
+use super::{Tensor, TensorImpl};
 #[cfg(feature = "gpu")]
 use crate::storage::GpuStorage;
 #[cfg(feature = "gpu")]
 use parking_lot::RwLock;
-#[cfg(feature = "gpu")]
-use std::collections::HashMap;
-
-use super::{Tensor, TensorImpl};
 
 impl TensorImpl {
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
+        self.try_to_dtype(dtype)
+            .expect("TensorImpl::to_dtype failed")
+    }
+
+    pub fn try_to_dtype(&self, dtype: DType) -> FastnnResult<Tensor> {
         if dtype == self.dtype {
-            return self.clone().into();
+            return Ok(self.clone().into());
         }
-        match self.storage.as_ref() {
-            Storage::Cpu(cpu) => {
-                let numel = self.numel() as usize;
-                let data = cpu.data.as_ref();
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "dtype conversion requires a contiguous tensor",
+            ));
+        }
+        if self.dtype.scalar_byte_width().is_none() || dtype.scalar_byte_width().is_none() {
+            return Err(FastnnError::dtype(
+                "packed tensor dtype conversion requires explicit quantize/dequantize operations",
+            ));
+        }
+        if !matches!(self.storage.as_ref(), Storage::Cpu(_)) {
+            return Err(FastnnError::device("dtype conversion requires CPU storage"));
+        }
+        self.to_dtype_validated(dtype)
+    }
 
-                // Read source elements as f32 (handles all source dtypes)
-                let f32_data: Vec<f32> = match self.dtype {
-                    DType::F32 => {
-                        let src = bytemuck::cast_slice::<_, f32>(data);
-                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
-                            .to_vec()
-                    }
-                    DType::F64 => {
-                        let src = bytemuck::cast_slice::<_, f64>(data);
-                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
-                            .iter()
-                            .map(|&v| v as f32)
-                            .collect()
-                    }
-                    DType::I32 => {
-                        let src = bytemuck::cast_slice::<_, i32>(data);
-                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
-                            .iter()
-                            .map(|&v| v as f32)
-                            .collect()
-                    }
-                    DType::I64 => {
-                        let src = bytemuck::cast_slice::<_, i64>(data);
-                        src[self.storage_offset as usize..self.storage_offset as usize + numel]
-                            .iter()
-                            .map(|&v| v as f32)
-                            .collect()
-                    }
-                    DType::F16 => {
-                        let src = data.as_ptr() as *const half::f16;
-                        let offset = self.storage_offset as usize;
-                        // SAFETY: The `src` pointer is derived from a valid `Vec<u8>` storage and `offset + numel`
-                        // is within the bounds of that storage, verified by prior shape/offset validation.
-                        let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
-                        slice.iter().map(|&v| f32::from(v)).collect()
-                    }
-                    DType::BF16 => {
-                        let src = data.as_ptr() as *const half::bf16;
-                        let offset = self.storage_offset as usize;
-                        // SAFETY: The `src` pointer is derived from a valid `Vec<u8>` storage and `offset + numel`
-                        // is within the bounds of that storage, verified by prior shape/offset validation.
-                        let slice = unsafe { std::slice::from_raw_parts(src.add(offset), numel) };
-                        slice.iter().map(|&v| f32::from(v)).collect()
-                    }
-                    DType::Bool => data
-                        [self.storage_offset as usize..self.storage_offset as usize + numel]
-                        .iter()
-                        .map(|&v| if v != 0 { 1.0 } else { 0.0 })
-                        .collect(),
-                    DType::I4
-                    | DType::I8Scaled
-                    | DType::U4Scaled
-                    | DType::U8Scaled
-                    | DType::F8
-                    | DType::F8R
-                    | DType::F4 => {
-                        panic!("to_dtype: packed/FP tensors cannot be converted via the Tensor-level conversion path. Use the IR pipeline with explicit quantize/dequantize nodes.")
-                    }
-                };
+    fn to_dtype_validated(&self, dtype: DType) -> FastnnResult<Tensor> {
+        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
+        let Storage::Cpu(cpu) = self.storage.as_ref() else {
+            return Err(FastnnError::device("dtype conversion requires CPU storage"));
+        };
+        let numel = usize::try_from(self.numel())
+            .map_err(|_| FastnnError::Overflow("dtype conversion element count overflow".into()))?;
+        let source_width = self.dtype.scalar_byte_width().ok_or_else(|| {
+            FastnnError::dtype("dtype conversion requires plain scalar source storage")
+        })?;
+        let source_offset = usize::try_from(self.storage_offset)
+            .map_err(|_| FastnnError::shape("dtype conversion storage offset is negative"))?
+            .checked_mul(source_width)
+            .ok_or_else(|| {
+                FastnnError::Overflow("dtype conversion source offset overflow".into())
+            })?;
+        let source_len = numel
+            .checked_mul(source_width)
+            .ok_or_else(|| FastnnError::Overflow("dtype conversion source size overflow".into()))?;
+        let source_end = source_offset.checked_add(source_len).ok_or_else(|| {
+            FastnnError::Overflow("dtype conversion source range overflow".into())
+        })?;
+        let source = cpu
+            .data
+            .get(source_offset..source_end)
+            .ok_or_else(|| FastnnError::shape("dtype conversion source range exceeds storage"))?;
 
-                // Convert f32 to target dtype
-                let nbytes = numel * dtype.size();
-                let mut new_bytes = vec![0u8; nbytes];
-
-                match dtype {
-                    DType::F32 => {
-                        let dst = bytemuck::cast_slice_mut::<_, f32>(&mut new_bytes);
-                        dst.copy_from_slice(&f32_data);
-                    }
-                    DType::F64 => {
-                        let dst = bytemuck::cast_slice_mut::<_, f64>(&mut new_bytes);
-                        for (i, &v) in f32_data.iter().enumerate() {
-                            dst[i] = v as f64;
-                        }
-                    }
-                    DType::I32 => {
-                        let dst = bytemuck::cast_slice_mut::<_, i32>(&mut new_bytes);
-                        for (i, &v) in f32_data.iter().enumerate() {
-                            dst[i] = v as i32;
-                        }
-                    }
-                    DType::I64 => {
-                        let dst = bytemuck::cast_slice_mut::<_, i64>(&mut new_bytes);
-                        for (i, &v) in f32_data.iter().enumerate() {
-                            dst[i] = v as i64;
-                        }
-                    }
-                    DType::F16 => {
-                        let dst = new_bytes.as_mut_ptr() as *mut half::f16;
-                        for (i, &v) in f32_data.iter().enumerate() {
-                            // SAFETY: The `dst` pointer is derived from `new_bytes` which has been allocated
-                            // with `nbytes = numel * dtype.size()`, ensuring `dst.add(i)` is valid for all `i < numel`.
-                            unsafe {
-                                *dst.add(i) = half::f16::from_f32(v);
-                            }
-                        }
-                    }
-                    DType::BF16 => {
-                        let dst = new_bytes.as_mut_ptr() as *mut half::bf16;
-                        for (i, &v) in f32_data.iter().enumerate() {
-                            // SAFETY: The `dst` pointer is derived from `new_bytes` which has been allocated
-                            // with `nbytes = numel * dtype.size()`, ensuring `dst.add(i)` is valid for all `i < numel`.
-                            unsafe {
-                                *dst.add(i) = half::bf16::from_f32(v);
-                            }
-                        }
-                    }
-                    DType::Bool => {
-                        for (i, &v) in f32_data.iter().enumerate() {
-                            new_bytes[i] = if v != 0.0 { 1 } else { 0 };
-                        }
-                    }
-                    DType::I4
-                    | DType::I8Scaled
-                    | DType::U4Scaled
-                    | DType::U8Scaled
-                    | DType::F8
-                    | DType::F8R
-                    | DType::F4 => {
-                        panic!("to_dtype: packed/FP tensors cannot be converted via the Tensor-level path. Use the IR pipeline with explicit quantize/dequantize nodes.")
-                    }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(numel)
+            .map_err(|error| FastnnError::Allocation(error.to_string()))?;
+        for chunk in source.chunks_exact(source_width) {
+            let value = match self.dtype {
+                DType::F32 => {
+                    let mut bytes = [0u8; 4];
+                    bytes.copy_from_slice(chunk);
+                    f32::from_le_bytes(bytes)
                 }
+                DType::F64 => {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(chunk);
+                    f64::from_le_bytes(bytes) as f32
+                }
+                DType::I32 => {
+                    let mut bytes = [0u8; 4];
+                    bytes.copy_from_slice(chunk);
+                    i32::from_le_bytes(bytes) as f32
+                }
+                DType::I64 => {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(chunk);
+                    i64::from_le_bytes(bytes) as f32
+                }
+                DType::F16 => {
+                    let mut bytes = [0u8; 2];
+                    bytes.copy_from_slice(chunk);
+                    half::f16::from_bits(u16::from_le_bytes(bytes)).to_f32()
+                }
+                DType::BF16 => {
+                    let mut bytes = [0u8; 2];
+                    bytes.copy_from_slice(chunk);
+                    half::bf16::from_bits(u16::from_le_bytes(bytes)).to_f32()
+                }
+                DType::Bool => f32::from(chunk[0] != 0),
+                _ => {
+                    return Err(FastnnError::dtype(
+                        "dtype conversion requires plain scalar source storage",
+                    ));
+                }
+            };
+            values.push(value);
+        }
 
-                let new_storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(new_bytes, nbytes)));
-
-                TensorImpl::new(new_storage, self.sizes.clone(), dtype).into()
-            }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                panic!("to_dtype for GPU tensors not yet supported. Use .cpu() first.");
+        let nbytes = dtype.try_storage_bytes(numel)?;
+        let mut new_bytes = Vec::new();
+        new_bytes
+            .try_reserve_exact(nbytes)
+            .map_err(|error| FastnnError::Allocation(error.to_string()))?;
+        for value in values {
+            match dtype {
+                DType::F32 => new_bytes.extend_from_slice(&value.to_le_bytes()),
+                DType::F64 => new_bytes.extend_from_slice(&(value as f64).to_le_bytes()),
+                DType::I32 => new_bytes.extend_from_slice(&(value as i32).to_le_bytes()),
+                DType::I64 => new_bytes.extend_from_slice(&(value as i64).to_le_bytes()),
+                DType::F16 => {
+                    new_bytes.extend_from_slice(&half::f16::from_f32(value).to_bits().to_le_bytes())
+                }
+                DType::BF16 => new_bytes
+                    .extend_from_slice(&half::bf16::from_f32(value).to_bits().to_le_bytes()),
+                DType::Bool => new_bytes.push(u8::from(value != 0.0)),
+                _ => {
+                    return Err(FastnnError::dtype(
+                        "dtype conversion requires plain scalar target storage",
+                    ));
+                }
             }
         }
+        let new_storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(new_bytes, nbytes)));
+        Ok(TensorImpl::try_new(new_storage, self.sizes.clone(), dtype)?.into())
     }
 
     pub fn to_device(&self, device: Device) -> Tensor {
+        self.try_to_device(device)
+            .expect("TensorImpl::to_device failed")
+    }
+
+    pub fn try_to_device(&self, device: Device) -> FastnnResult<Tensor> {
         if device == self.device {
-            return self.clone().into();
+            return Ok(self.clone().into());
         }
         let tensor: Tensor = self.clone().into();
         match device {
-            Device::Cpu => tensor.to_cpu(),
+            Device::Cpu => tensor.try_to_cpu(),
             #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => tensor.to_gpu(device_id),
+            Device::Wgpu(device_id) => tensor.try_to_gpu(device_id),
         }
     }
 
@@ -219,33 +205,83 @@ impl TensorImpl {
 
 impl Tensor {
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
-        self.inner.to_dtype(dtype)
+        self.try_to_dtype(dtype).expect("Tensor::to_dtype failed")
+    }
+
+    pub fn try_to_dtype(&self, dtype: DType) -> FastnnResult<Tensor> {
+        self.inner.try_to_dtype(dtype)
     }
 
     pub fn to_device(&self, device: Device) -> Tensor {
-        self.inner.to_device(device)
+        self.try_to_device(device)
+            .expect("Tensor::to_device failed")
+    }
+
+    pub fn try_to_device(&self, device: Device) -> FastnnResult<Tensor> {
+        self.inner.try_to_device(device)
     }
 
     pub fn to_cpu(&self) -> Tensor {
+        self.try_to_cpu().expect("Tensor::to_cpu failed")
+    }
+
+    pub fn try_to_cpu(&self) -> FastnnResult<Tensor> {
         match self.inner.storage.as_ref() {
-            Storage::Cpu(_) => Tensor::new(
+            Storage::Cpu(_) => Ok(Tensor::new(
                 self.inner
                     .new_on_device(self.inner.storage.clone(), Device::Cpu),
-            ),
+            )),
             #[cfg(feature = "gpu")]
             Storage::Wgpu(gpu) => {
-                use crate::backend::wgpu::context::get_wgpu_context;
-                let ctx = get_wgpu_context(gpu.device_id);
+                use crate::backend::wgpu::context::try_get_wgpu_context;
+                let ctx = try_get_wgpu_context(gpu.device_id).ok_or_else(|| {
+                    FastnnError::device(format!("WGPU device {} is not initialized", gpu.device_id))
+                })?;
                 let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
                 let byte_data = bytemuck::cast_slice(&data).to_vec();
                 let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(byte_data, gpu.nbytes)));
-                Tensor::new(self.inner.new_on_device(storage, Device::Cpu))
+                Ok(Tensor::new(self.inner.new_on_device(storage, Device::Cpu)))
             }
         }
     }
 
     #[cfg(feature = "gpu")]
     pub fn to_gpu(&self, device_id: usize) -> Tensor {
+        self.try_to_gpu(device_id).expect("Tensor::to_gpu failed")
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn try_to_gpu(&self, device_id: usize) -> FastnnResult<Tensor> {
+        if matches!(self.device(), Device::Wgpu(current) if current == device_id) {
+            return Ok(self.clone());
+        }
+        if self.dtype() != DType::F32 {
+            return Err(FastnnError::dtype(
+                "WGPU transfer currently requires F32 tensors",
+            ));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "WGPU transfer currently requires contiguous tensors",
+            ));
+        }
+        if let Device::Wgpu(current) = self.device() {
+            if crate::backend::wgpu::context::try_get_wgpu_context(current).is_none() {
+                return Err(FastnnError::device(format!(
+                    "source WGPU device {current} is not initialized"
+                )));
+            }
+        }
+        if crate::backend::wgpu::context::try_get_wgpu_context(device_id).is_none() {
+            return Err(FastnnError::device(format!(
+                "WGPU device {device_id} is not initialized"
+            )));
+        }
+        Ok(self.to_gpu_validated(device_id))
+    }
+
+    #[cfg(feature = "gpu")]
+    fn to_gpu_validated(&self, device_id: usize) -> Tensor {
         match self.inner.storage.as_ref() {
             Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
             Storage::Wgpu(gpu) => {

@@ -1,3 +1,7 @@
 pub mod builder;
-pub mod node;
-pub use node::*;
+pub mod graph;
+pub mod opcode;
+pub mod types;
+pub use graph::*;
+pub use opcode::Opcode;
+pub use types::*;

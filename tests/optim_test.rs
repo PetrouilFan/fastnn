@@ -27,7 +27,7 @@ fn test_adam_optimizer() {
     let initial = adam
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
 
     adam.step();
@@ -36,7 +36,7 @@ fn test_adam_optimizer() {
     let final_params = adam
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "Adam should update parameters");
 
@@ -58,7 +58,7 @@ fn test_adamw_optimizer() {
     let initial = adamw
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
 
     adamw.step();
@@ -67,7 +67,7 @@ fn test_adamw_optimizer() {
     let final_params = adamw
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "AdamW should update parameters");
 }
@@ -84,7 +84,7 @@ fn test_sgd_optimizer() {
     let initial = sgd
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
 
     sgd.step();
@@ -93,7 +93,7 @@ fn test_sgd_optimizer() {
     let final_params = sgd
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "SGD should update parameters");
     for (init_vals, final_vals) in initial.iter().zip(final_params.iter()) {
@@ -118,7 +118,7 @@ fn test_rmsprop_optimizer() {
     let initial = rmsprop
         .params
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
 
     rmsprop.step();
@@ -127,7 +127,7 @@ fn test_rmsprop_optimizer() {
     let final_params = rmsprop
         .params
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "RMSprop should update parameters");
 }
@@ -144,7 +144,7 @@ fn test_lion_optimizer() {
     let initial = lion
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
 
     lion.step();
@@ -153,7 +153,7 @@ fn test_lion_optimizer() {
     let final_params = lion
         .params()
         .iter()
-        .map(|p| p.to_numpy())
+        .map(|p| p.to_numpy().unwrap())
         .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "Lion should update parameters");
 }
@@ -168,12 +168,20 @@ fn test_muon_optimizer() {
     set_grads(&mut params_with_grad);
     muon.params_mut().clone_from(&params_with_grad);
 
-    let initial = muon.params.iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let initial = muon
+        .params
+        .iter()
+        .map(|p| p.to_numpy().unwrap())
+        .collect::<Vec<_>>();
 
     muon.step();
     muon.zero_grad();
 
-    let final_params = muon.params.iter().map(|p| p.to_numpy()).collect::<Vec<_>>();
+    let final_params = muon
+        .params
+        .iter()
+        .map(|p| p.to_numpy().unwrap())
+        .collect::<Vec<_>>();
     assert_ne!(initial, final_params, "Muon should update parameters");
 }
 
@@ -239,7 +247,7 @@ fn test_muon_orthogonalization_quality() {
 
     muon.step();
 
-    let result: Vec<f32> = muon.params[0].to_numpy();
+    let result: Vec<f32> = muon.params[0].to_numpy().unwrap();
     assert!(
         result.iter().all(|x| x.is_finite()),
         "Muon update produced non-finite values: {:?}",
@@ -256,7 +264,7 @@ fn test_muon_orthogonalization_quality() {
         set_grads(muon.params_mut());
         muon.step();
     }
-    let final_result: Vec<f32> = muon.params[0].to_numpy();
+    let final_result: Vec<f32> = muon.params[0].to_numpy().unwrap();
     assert!(
         final_result.iter().all(|x| x.is_finite()),
         "Muon diverged after multiple steps: {:?}",
@@ -277,7 +285,7 @@ fn test_muon_zero_norm_handling() {
 
     muon.step();
 
-    let result: Vec<f32> = muon.params[0].to_numpy();
+    let result: Vec<f32> = muon.params[0].to_numpy().unwrap();
     assert!(
         result.iter().all(|x| x.is_finite()),
         "Muon with zero input produced non-finite values: {:?}",
@@ -299,7 +307,7 @@ fn test_muon_state_dict_roundtrip() {
     let mut muon2 = Muon::new(params.clone(), 0.02, 0.9, 0.01, false);
     muon2.load_state_dict(state);
 
-    let r1: Vec<f32> = muon.params[0].to_numpy();
-    let r2: Vec<f32> = muon2.params[0].to_numpy();
+    let r1: Vec<f32> = muon.params[0].to_numpy().unwrap();
+    let r2: Vec<f32> = muon2.params[0].to_numpy().unwrap();
     assert_eq!(r1, r2, "state_dict roundtrip should preserve parameters");
 }

@@ -21,6 +21,8 @@ pub use u8x4::U8x4;
 /// Core trait for packed multi-precision types.
 /// Each implementor packs N values into a single u32 word.
 pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + Default {
+    /// Canonical scalar format stored in each packed lane.
+    const SCALAR_TYPE: crate::types::ScalarType;
     /// Number of values stored per u32 word
     const ITEMS: usize;
     /// Bit width of each individual value
@@ -30,6 +32,18 @@ pub trait PackedWord: Send + Sync + Copy + bytemuck::Pod + bytemuck::Zeroable + 
     /// Maximum representable value in this format (for scale computation).
     /// For integer types: 2^(BIT_WIDTH-1)-1. For float types: format-specific max.
     const MAX_REPRESENTABLE: f32;
+
+    /// Return the exact canonical 32-bit storage word.
+    #[inline]
+    fn to_bits(self) -> u32 {
+        bytemuck::cast(self)
+    }
+
+    /// Construct a packed value from its exact canonical 32-bit storage word.
+    #[inline]
+    fn from_bits(bits: u32) -> Self {
+        bytemuck::cast(bits)
+    }
 
     /// Unpacked representation as f32 array for compute
     type Array: AsRef<[f32]> + AsMut<[f32]> + Copy + Default;

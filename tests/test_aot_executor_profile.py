@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 
 def test_aot_executor_profile_reports_per_kernel_timings():
@@ -32,6 +33,44 @@ def test_aot_executor_profile_reports_per_kernel_timings():
     assert relu_entries
     assert relu_entries[0]["elapsed_ns"] > 0
     assert relu_entries[0]["node_name"] == "relu1"
+
+
+def test_aot_executor_preserves_dynamic_runtime_shapes_in_forward_and_profile():
+    import fastnn as fnn
+
+    nodes = [{"name": "relu1", "op_type": "Relu", "inputs": "x", "outputs": "y"}]
+    executor = fnn.AotExecutor(
+        nodes,
+        {},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [-1, 4]},
+    )
+
+    for batch in (2, 3):
+        values = np.arange(batch * 4, dtype=np.float32).reshape(batch, 4) - 2.0
+        x = fnn.tensor(values, [batch, 4])
+        forward = executor.forward({"x": x})["y"].numpy()
+        profiled = executor.profile({"x": x})["outputs"]["y"].numpy()
+        expected = np.maximum(values, 0.0)
+        assert forward.shape == (batch, 4)
+        assert profiled.shape == (batch, 4)
+        np.testing.assert_allclose(forward, expected)
+        np.testing.assert_allclose(profiled, expected)
+
+
+def test_aot_executor_rejects_duplicate_output_names():
+    import fastnn as fnn
+
+    nodes = [{"name": "relu1", "op_type": "Relu", "inputs": "x", "outputs": "y"}]
+    with pytest.raises(ValueError, match="unique"):
+        fnn.AotExecutor(
+            nodes,
+            {},
+            ["x"],
+            ["y", "y"],
+            input_shapes={"x": [1, 4]},
+        )
 
 
 def test_memory_stats_reports_instruction_level_static_traffic():
@@ -160,3 +199,97 @@ def test_memory_stats_cross_references_prepared_static_weight_write_consts():
         assert row["prepared_input_index"] in {1, 2}
         assert row["prepared_constant_index"] >= 0
         assert row["prepared_constant_name"].startswith("conv_")
+
+
+def test_aot_executor_rejects_minimum_i64_input_dimension():
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "relu1",
+            "op_type": "Relu",
+            "inputs": "x",
+            "outputs": "y",
+        }
+    ]
+    with pytest.raises(ValueError, match="unsupported dimension"):
+        fnn.AotExecutor(
+            nodes,
+            {},
+            ["x"],
+            ["y"],
+            input_shapes={"x": [-(2**63), 4]},
+        )
+
+
+def test_aot_executor_rejects_noncontiguous_input_without_panicking():
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "relu1",
+            "op_type": "Relu",
+            "inputs": "x",
+            "outputs": "y",
+        }
+    ]
+    executor = fnn.AotExecutor(
+        nodes,
+        {},
+        ["x"],
+        ["y"],
+        input_shapes={"x": [2, 2]},
+    )
+    noncontiguous = fnn.zeros([2, 2]).transpose(0, 1)
+    with pytest.raises(ValueError, match="cannot be passed to AOT execution"):
+        executor.forward({"x": noncontiguous})
+
+
+@pytest.mark.parametrize(
+    ("op_type", "inputs", "minimum"),
+    [("Relu", "", 1), ("Add", "x", 2)],
+)
+def test_aot_executor_rejects_missing_node_inputs(op_type, inputs, minimum):
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "malformed",
+            "op_type": op_type,
+            "inputs": inputs,
+            "outputs": "y",
+        }
+    ]
+    with pytest.raises(RuntimeError, match=rf"requires at least {minimum} input"):
+        fnn.AotExecutor(
+            nodes,
+            {},
+            ["x"],
+            ["y"],
+            input_shapes={"x": [1]},
+        )
+
+
+@pytest.mark.parametrize(
+    ("dimension", "message"),
+    [
+        (-1.0, "invalid dimension"),
+        (float("nan"), "invalid dimension"),
+        (1.5, "invalid dimension"),
+        (1_000_000_000.0, "import budget"),
+    ],
+)
+def test_constant_of_shape_rejects_hostile_dimensions(dimension, message):
+    import fastnn as fnn
+
+    nodes = [
+        {
+            "name": "constant_shape",
+            "op_type": "ConstantOfShape",
+            "inputs": "shape",
+            "outputs": "y",
+        }
+    ]
+    shape = fnn.tensor(np.asarray([dimension], dtype=np.float32), [1])
+    with pytest.raises(RuntimeError, match=message):
+        fnn.AotExecutor(nodes, {"shape": shape}, [], ["y"])

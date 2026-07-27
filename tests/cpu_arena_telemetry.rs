@@ -3,7 +3,7 @@ use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::Instruction;
 use fastnn::ir::builder::{GraphBuilder, GraphTensor};
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, TensorType};
 use std::sync::Mutex;
 
 const LEN: usize = 257;

@@ -3,6 +3,23 @@ use std::sync::OnceLock;
 
 use super::topology;
 
+#[derive(Debug)]
+pub enum AffinityError {
+    NoPhysicalCores,
+    Build(rayon::ThreadPoolBuildError),
+}
+
+impl std::fmt::Display for AffinityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPhysicalCores => formatter.write_str("no physical CPU cores were discovered"),
+            Self::Build(error) => write!(formatter, "failed to build pinned thread pool: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for AffinityError {}
+
 /// A pinned Rayon thread pool that binds workers to physical cores.
 /// Once created, all parallel operations in the CPU backend use this pool.
 pub struct PinnedThreadPool {
@@ -12,8 +29,14 @@ pub struct PinnedThreadPool {
 impl PinnedThreadPool {
     /// Build a thread pool with workers pinned to physical cores.
     /// The pool size equals `topology::physical_core_count()`.
-    pub fn new() -> Result<Self, rayon::ThreadPoolBuildError> {
-        let core_ids = topology::physical_core_ids();
+    pub fn new() -> Result<Self, AffinityError> {
+        Self::new_with_core_ids(topology::physical_core_ids())
+    }
+
+    fn new_with_core_ids(core_ids: Vec<core_affinity::CoreId>) -> Result<Self, AffinityError> {
+        if core_ids.is_empty() {
+            return Err(AffinityError::NoPhysicalCores);
+        }
         let num_threads = core_ids.len();
         let core_counter = AtomicUsize::new(0);
 
@@ -38,7 +61,8 @@ impl PinnedThreadPool {
                 })?;
                 Ok(())
             })
-            .build()?;
+            .build()
+            .map_err(AffinityError::Build)?;
 
         Ok(Self { pool })
     }
@@ -51,12 +75,11 @@ impl PinnedThreadPool {
 }
 
 // Global pool instance, lazily initialized.
-static GLOBAL_POOL: OnceLock<PinnedThreadPool> = OnceLock::new();
+static GLOBAL_POOL: OnceLock<Result<PinnedThreadPool, AffinityError>> = OnceLock::new();
 
 /// Get or initialize the global pinned thread pool.
-pub fn global_pinned_pool() -> &'static PinnedThreadPool {
-    GLOBAL_POOL
-        .get_or_init(|| PinnedThreadPool::new().expect("Failed to create pinned thread pool"))
+pub fn global_pinned_pool() -> Result<&'static PinnedThreadPool, &'static AffinityError> {
+    GLOBAL_POOL.get_or_init(PinnedThreadPool::new).as_ref()
 }
 
 /// Ensure the global Rayon thread pool is initialized with pinned threads.
@@ -104,4 +127,17 @@ pub fn ensure_global_pool_initialized() {
         }
     }
     INITIALIZED.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_core_discovery_is_recoverable() {
+        assert!(matches!(
+            PinnedThreadPool::new_with_core_ids(Vec::new()),
+            Err(AffinityError::NoPhysicalCores)
+        ));
+    }
 }

@@ -2,6 +2,7 @@
 
 use crate::autograd;
 use crate::backend::BackendError;
+use crate::error::{FastnnError, FastnnResult};
 
 use crate::ir::builder::{GraphBuilder, GraphTensor};
 use crate::storage::{DType, Device, Storage};
@@ -56,6 +57,36 @@ macro_rules! impl_unary_op_extra {
             if autograd::is_grad_enabled() && self.requires_grad() {
                 let inputs = vec![self.clone()];
                 Ok(Self::attach_grad_fn(output, autograd::make_node_info($backward, inputs)))
+            } else {
+                Ok(output)
+            }
+        }
+
+        pub fn $name(&self, $($param: $ptype),*) -> Tensor {
+            self.$try_name($($param),*)
+                .expect(concat!("Tensor::", stringify!($name), ": AOT execution failed"))
+        }
+    };
+}
+
+macro_rules! impl_validated_unary_op_extra {
+    ($try_name:ident, $name:ident, $backward:literal,
+     ($($param:ident: $ptype:ty),*), $validation:expr, $message:literal,
+     $ir_method:ident $(, $extra_arg:expr)*) => {
+        pub fn $try_name(&self, $($param: $ptype),*) -> Result<Tensor, BackendError> {
+            if !($validation) {
+                return Err(BackendError::Dispatch(
+                    concat!(stringify!($name), ": ", $message).into(),
+                ));
+            }
+            let output = exec_single(&[self], |g, ins| {
+                vec![g.$ir_method(&ins[0] $(, $extra_arg)*)]
+            })?;
+            if autograd::is_grad_enabled() && self.requires_grad() {
+                Ok(Self::attach_grad_fn(
+                    output,
+                    autograd::make_node_info($backward, vec![self.clone()]),
+                ))
             } else {
                 Ok(output)
             }
@@ -199,14 +230,111 @@ macro_rules! impl_inplace_binary_op {
 }
 
 impl Tensor {
+    fn validate_optimizer_tensors(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        operation: &str,
+    ) -> Result<(), BackendError> {
+        for (name, tensor) in [
+            ("gradient", grad),
+            ("first moment", m),
+            ("second moment", v),
+        ] {
+            if tensor.shape() != self.shape() {
+                return Err(BackendError::Dispatch(format!(
+                    "{operation}: {name} shape {:?} does not match weight shape {:?}",
+                    tensor.shape(),
+                    self.shape()
+                )));
+            }
+            if tensor.dtype() != self.dtype() || tensor.device() != self.device() {
+                return Err(BackendError::Dispatch(format!(
+                    "{operation}: {name} dtype and device must match the weight"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_axis(&self, axis: i32, operation: &str) -> Result<usize, BackendError> {
+        let rank = self.ndim() as i64;
+        let requested = i64::from(axis);
+        let normalized = if requested < 0 {
+            rank + requested
+        } else {
+            requested
+        };
+        if normalized < 0 || normalized >= rank {
+            return Err(BackendError::Dispatch(format!(
+                "{operation}: dimension {axis} is out of range for {rank} dimensions"
+            )));
+        }
+        Ok(normalized as usize)
+    }
+
+    fn attach_unary_grad(&self, output: Tensor, backward: &'static str) -> Tensor {
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info(backward, vec![self.clone()]),
+            )
+        } else {
+            output
+        }
+    }
+
+    fn validate_binary_inputs(&self, other: &Tensor, operation: &str) -> Result<(), BackendError> {
+        if self.device() != other.device() {
+            return Err(BackendError::Dispatch(format!(
+                "{operation}: tensors must be on the same device"
+            )));
+        }
+        if self.dtype() != other.dtype() {
+            return Err(BackendError::Dispatch(format!(
+                "{operation}: tensor dtypes must match, got {:?} and {:?}",
+                self.dtype(),
+                other.dtype()
+            )));
+        }
+        Self::broadcast_shapes(&self.shape(), &other.shape())
+            .map_err(|error| BackendError::Dispatch(format!("{operation}: {error}")))?;
+        Ok(())
+    }
+
+    fn validate_matmul_inputs(&self, other: &Tensor) -> Result<(), BackendError> {
+        if self.device() != other.device() || self.dtype() != other.dtype() {
+            return Err(BackendError::Dispatch(
+                "matmul: tensors must have matching devices and dtypes".into(),
+            ));
+        }
+        let left = self.shape();
+        let right = other.shape();
+        if left.len() < 2 || right.len() < 2 {
+            return Err(BackendError::Dispatch(
+                "matmul: both tensors must have at least two dimensions".into(),
+            ));
+        }
+        if left[left.len() - 1] != right[right.len() - 2] {
+            return Err(BackendError::Dispatch(format!(
+                "matmul: contracting dimensions differ: {} and {}",
+                left[left.len() - 1],
+                right[right.len() - 2]
+            )));
+        }
+        Self::broadcast_shapes(&left[..left.len() - 2], &right[..right.len() - 2])
+            .map_err(|error| BackendError::Dispatch(format!("matmul batch dimensions: {error}")))?;
+        Ok(())
+    }
+
     pub fn add(&self, other: &Tensor) -> Tensor {
         self.try_add(other)
             .expect("Tensor::add: AOT execution failed")
     }
 
     pub fn try_add(&self, other: &Tensor) -> Result<Tensor, BackendError> {
-        Self::broadcast_shapes(&self.shape(), &other.shape())
-            .map_err(|e| BackendError::Dispatch(format!("shape broadcast: {e}")))?;
+        self.validate_binary_inputs(other, "add")?;
         // Fast path: CPU contiguous same-shape add, skip dispatch overhead
         if self.device() == Device::Cpu
             && other.device() == Device::Cpu
@@ -497,6 +625,7 @@ impl Tensor {
     }
 
     pub fn try_sub(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_binary_inputs(other, "sub")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.sub(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -515,6 +644,7 @@ impl Tensor {
     }
 
     pub fn try_mul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_binary_inputs(other, "mul")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.mul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -533,6 +663,7 @@ impl Tensor {
     }
 
     pub fn try_div(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_binary_inputs(other, "div")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.div(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -551,6 +682,7 @@ impl Tensor {
     }
 
     pub fn try_matmul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
+        self.validate_matmul_inputs(other)?;
         let output = exec_single(&[self, other], |g, ins| vec![g.matmul(&ins[0], &ins[1])])?;
         if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
             let inputs = vec![self.clone(), other.clone()];
@@ -576,12 +708,49 @@ impl Tensor {
     impl_unary_op!(try_tanh, tanh, tanh, "TanhBackward");
     impl_unary_op!(try_silu, silu, silu, "SiLUBackward");
     impl_unary_op!(try_gelu, gelu, gelu, "GeluBackward");
-    impl_unary_op_extra!(try_leaky_relu, leaky_relu, "LeakyReLUBackward", (negative_slope: f32), leaky_relu, negative_slope);
-    impl_unary_op_extra!(try_softplus, softplus, "SoftplusBackward", (beta: f32, threshold: f32), softplus);
+    impl_validated_unary_op_extra!(
+        try_leaky_relu,
+        leaky_relu,
+        "LeakyReLUBackward",
+        (negative_slope: f32),
+        negative_slope.is_finite(),
+        "negative_slope must be finite",
+        leaky_relu,
+        negative_slope
+    );
+    impl_validated_unary_op_extra!(
+        try_softplus,
+        softplus,
+        "SoftplusBackward",
+        (beta: f32, threshold: f32),
+        beta.is_finite() && beta > 0.0 && threshold.is_finite(),
+        "beta must be finite and positive and threshold must be finite",
+        softplus
+    );
     impl_unary_op!(try_hardswish, hardswish, hardswish, "HardswishBackward");
     impl_unary_op!(try_mish, mish, mish, "MishBackward");
-    impl_unary_op_extra!(try_elu, elu, "EluBackward", (alpha: f32), elu, alpha);
-    impl_unary_op_extra!(try_softmax, softmax, "SoftmaxBackward", (dim: i32), softmax, dim as i64);
+    impl_validated_unary_op_extra!(
+        try_elu,
+        elu,
+        "EluBackward",
+        (alpha: f32),
+        alpha.is_finite(),
+        "alpha must be finite",
+        elu,
+        alpha
+    );
+    pub fn try_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
+        let dim = self.normalize_axis(dim, "softmax")?;
+        let output = exec_single(&[self], |graph, inputs| {
+            vec![graph.softmax(&inputs[0], dim as i64)]
+        })?;
+        Ok(self.attach_unary_grad(output, "SoftmaxBackward"))
+    }
+
+    pub fn softmax(&self, dim: i32) -> Tensor {
+        self.try_softmax(dim)
+            .expect("Tensor::softmax: AOT execution failed")
+    }
     impl_unary_op!(try_sqrt, sqrt, sqrt, "SqrtBackward");
 
     /// Fused linear + gelu — single graph node.
@@ -629,32 +798,62 @@ impl Tensor {
     }
 
     impl_unary_op!(try_abs, abs, abs, "AbsBackward");
-    impl_unary_op_extra!(try_log_softmax, log_softmax, "LogSoftmaxBackward", (dim: i32), log_softmax, dim as i64);
+    pub fn try_log_softmax(&self, dim: i32) -> Result<Tensor, BackendError> {
+        let dim = self.normalize_axis(dim, "log_softmax")?;
+        let output = exec_single(&[self], |graph, inputs| {
+            vec![graph.log_softmax(&inputs[0], dim as i64)]
+        })?;
+        Ok(self.attach_unary_grad(output, "LogSoftmaxBackward"))
+    }
+
+    pub fn log_softmax(&self, dim: i32) -> Tensor {
+        self.try_log_softmax(dim)
+            .expect("Tensor::log_softmax: AOT execution failed")
+    }
 
     pub fn as_i64_slice(&self) -> Vec<i64> {
-        let src = self.to_cpu();
-        match src.inner.dtype {
+        self.try_as_i64_slice()
+            .expect("Tensor::as_i64_slice failed")
+    }
+
+    pub fn try_as_i64_slice(&self) -> FastnnResult<Vec<i64>> {
+        if self.device() != Device::Cpu {
+            return Err(FastnnError::device(
+                "integer slice access requires CPU storage",
+            ));
+        }
+        if !self.is_contiguous() {
+            return Err(FastnnError::shape(
+                "integer slice access requires a contiguous tensor",
+            ));
+        }
+        match self.inner.dtype {
             DType::I32 => {
-                let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i32>(data)
-                    .iter()
-                    .map(|&v| v as i64)
-                    .collect()
+                let data = self.try_as_bytes()?;
+                let values = bytemuck::try_cast_slice::<_, i32>(data).map_err(|error| {
+                    FastnnError::dtype(format!(
+                        "I32 storage cannot be reinterpreted safely: {error}"
+                    ))
+                })?;
+                Ok(values.iter().map(|&value| i64::from(value)).collect())
             }
             DType::I64 => {
-                let data = src.as_byte_slice().expect("contiguous CPU tensor");
-                bytemuck::cast_slice::<_, i64>(data).to_vec()
+                let data = self.try_as_bytes()?;
+                let values = bytemuck::try_cast_slice::<_, i64>(data).map_err(|error| {
+                    FastnnError::dtype(format!(
+                        "I64 storage cannot be reinterpreted safely: {error}"
+                    ))
+                })?;
+                Ok(values.to_vec())
             }
-            DType::F32 => {
-                let data = src.as_f32_slice();
-                data.iter().map(|&v| v as i64).collect()
-            }
-            _ => {
-                panic!(
-                    "as_i64_slice: unsupported dtype {:?}. Use explicit conversion.",
-                    src.inner.dtype
-                )
-            }
+            DType::F32 => Ok(self
+                .try_as_f32_slice()?
+                .iter()
+                .map(|&value| value as i64)
+                .collect()),
+            dtype => Err(FastnnError::dtype(format!(
+                "integer slice conversion does not support {dtype:?}"
+            ))),
         }
     }
 
@@ -674,6 +873,40 @@ impl Tensor {
         t: u64,
         weight_decay: f32,
     ) -> Vec<Tensor> {
+        self.try_adamw_update(grad, m, v, lr, beta1, beta2, eps, t, weight_decay)
+            .expect("Tensor::adamw_update failed")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_adamw_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+        weight_decay: f32,
+    ) -> Result<Vec<Tensor>, BackendError> {
+        self.validate_optimizer_tensors(grad, m, v, "adamw_update")?;
+        if !lr.is_finite()
+            || lr < 0.0
+            || !beta1.is_finite()
+            || !(0.0..1.0).contains(&beta1)
+            || !beta2.is_finite()
+            || !(0.0..1.0).contains(&beta2)
+            || !eps.is_finite()
+            || eps <= 0.0
+            || t == 0
+            || !weight_decay.is_finite()
+            || weight_decay < 0.0
+        {
+            return Err(BackendError::Dispatch(
+                "adamw_update: invalid optimizer hyperparameters".into(),
+            ));
+        }
         Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
             let updated = g.apply_adamw(
                 &ins[0],
@@ -689,7 +922,6 @@ impl Tensor {
             );
             vec![updated, ins[2].clone(), ins[3].clone()]
         })
-        .expect("Tensor::adamw_update: AOT execution failed")
     }
 
     /// Fused Adam weight update — single graph node replaces ~12 intermediate tensors.
@@ -705,12 +937,42 @@ impl Tensor {
         eps: f32,
         t: u64,
     ) -> Vec<Tensor> {
+        self.try_adam_update(grad, m, v, lr, beta1, beta2, eps, t)
+            .expect("Tensor::adam_update failed")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_adam_update(
+        &self,
+        grad: &Tensor,
+        m: &Tensor,
+        v: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: u64,
+    ) -> Result<Vec<Tensor>, BackendError> {
+        self.validate_optimizer_tensors(grad, m, v, "adam_update")?;
+        if !lr.is_finite()
+            || lr < 0.0
+            || !beta1.is_finite()
+            || !(0.0..1.0).contains(&beta1)
+            || !beta2.is_finite()
+            || !(0.0..1.0).contains(&beta2)
+            || !eps.is_finite()
+            || eps <= 0.0
+            || t == 0
+        {
+            return Err(BackendError::Dispatch(
+                "adam_update: invalid optimizer hyperparameters".into(),
+            ));
+        }
         Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
             let updated =
                 g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
             vec![updated, ins[2].clone(), ins[3].clone()]
         })
-        .expect("Tensor::adam_update: AOT execution failed")
     }
 }
 

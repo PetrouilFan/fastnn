@@ -1,15 +1,751 @@
+use fastnn::autograd;
 use fastnn::backend::cpu::CpuBackend;
-use fastnn::backend::executor::GraphExecutor;
-use fastnn::backend::Backend;
+
+use fastnn::backend::{Backend, Instruction};
 use fastnn::compiler::passes::dead_code_elimination::eliminate_dead_code;
 use fastnn::compiler::passes::memory_planning::plan_memory;
 use fastnn::compiler::passes::quantization::quantize_weights;
 use fastnn::compiler::passes::shape_inference::infer_shapes;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType, TensorValue};
+use fastnn::storage::{CpuStorage, DType, Device, Storage};
+use fastnn::tensor::{dtype_to_ir, tensor_type_to_dtype, Tensor, TensorImpl};
+use std::sync::Arc;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(values).to_vec()
+}
+
+#[test]
+fn item_on_non_scalar_tensor_returns_shape_error() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    let error = tensor
+        .item()
+        .expect_err("item on a multi-element tensor must fail");
+    assert!(error.to_string().contains("requires one element"));
+}
+
+#[test]
+fn malformed_tensor_construction_returns_structured_errors() {
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+
+    let negative = match TensorImpl::try_new(storage.clone(), vec![-1].into(), DType::F32) {
+        Err(error) => error,
+        Ok(_) => panic!("negative tensor dimensions must fail"),
+    };
+    assert!(negative.to_string().contains("negative size"));
+
+    let oversized = match TensorImpl::try_new(storage.clone(), vec![2].into(), DType::F32) {
+        Err(error) => error,
+        Ok(_) => panic!("undersized storage must fail"),
+    };
+    assert!(oversized.to_string().contains("only 4 bytes"));
+
+    let overflow = match TensorImpl::try_new(storage, vec![i64::MAX, i64::MAX].into(), DType::F32) {
+        Err(error) => error,
+        Ok(_) => panic!("overflowing tensor shape must fail"),
+    };
+    assert!(overflow.to_string().contains("overflow"));
+
+    let byte_overflow = DType::F64
+        .try_storage_bytes(usize::MAX)
+        .expect_err("overflowing storage size must fail");
+    assert!(byte_overflow.to_string().contains("overflow"));
+
+    let value_count = Tensor::try_from_vec(vec![1.0, 2.0], vec![3])
+        .expect_err("mismatched value count must fail");
+    assert!(value_count.to_string().contains("2 were provided"));
+
+    let device_value_count = Tensor::try_from_vec_with_device(vec![1.0], vec![2], Device::Cpu)
+        .expect_err("device vector value-count mismatch must fail");
+    assert!(device_value_count.to_string().contains("1 were provided"));
+
+    let negative_factory = Tensor::try_zeros(vec![-1], DType::F32, Device::Cpu)
+        .expect_err("negative zero shape must fail");
+    assert!(negative_factory.to_string().contains("negative size"));
+
+    let overflowing_factory = Tensor::try_empty(vec![i64::MAX, i64::MAX], DType::F32, Device::Cpu)
+        .expect_err("overflowing empty shape must fail");
+    assert!(overflowing_factory.to_string().contains("overflow"));
+
+    let negative_ones = Tensor::try_ones(vec![-1], DType::F32, Device::Cpu)
+        .expect_err("negative ones shape must fail");
+    assert!(negative_ones.to_string().contains("negative size"));
+
+    let packed_full = Tensor::try_full(vec![8], 1.0, DType::I4, Device::Cpu)
+        .expect_err("nonzero packed full must fail");
+    assert!(packed_full.to_string().contains("packed dtypes"));
+
+    let non_f32 = Tensor::try_zeros(vec![1], DType::I32, Device::Cpu).unwrap();
+    let dtype_error = non_f32
+        .try_as_f32_slice()
+        .expect_err("typed slice access must validate dtype");
+    assert!(dtype_error.to_string().contains("requires F32"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut out_of_bounds = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
+    out_of_bounds.storage_offset = 1;
+    let bounds_error = out_of_bounds
+        .try_as_f32_slice()
+        .expect_err("typed slice access must validate storage bounds");
+    assert!(bounds_error.to_string().contains("exceeds storage length"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut mutable = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
+    mutable.try_as_f32_slice_mut().unwrap()[0] = 3.0;
+    assert_eq!(mutable.try_as_f32_slice().unwrap(), &[3.0]);
+
+    mutable.storage_offset = 1;
+    let mutable_bounds = mutable
+        .try_as_f32_slice_mut()
+        .expect_err("mutable typed slice access must validate storage bounds");
+    assert!(mutable_bounds
+        .to_string()
+        .contains("exceeds storage length"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut wrong_dtype = TensorImpl::try_new(storage, vec![1].into(), DType::I32).unwrap();
+    let mutable_dtype = wrong_dtype
+        .try_as_f32_slice_mut()
+        .expect_err("mutable typed slice access must validate dtype");
+    assert!(mutable_dtype.to_string().contains("requires F32"));
+
+    let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
+    let packed_pointer = packed
+        .try_data_ptr()
+        .expect_err("packed raw pointer access must fail");
+    assert!(packed_pointer.to_string().contains("plain scalar storage"));
+    assert_eq!(packed.try_as_bytes().unwrap().len(), 4);
+
+    let mut packed_offset = packed.inner.as_ref().clone();
+    packed_offset.storage_offset = 1;
+    let packed_offset = Tensor::new(packed_offset)
+        .try_as_bytes()
+        .expect_err("packed byte slices with offsets must fail");
+    assert!(packed_offset
+        .to_string()
+        .contains("nonzero storage offsets"));
+
+    let noncontiguous = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])
+        .try_transpose(0, 1)
+        .unwrap();
+    let contiguity = noncontiguous
+        .try_as_bytes()
+        .expect_err("non-contiguous byte slices must fail");
+    assert!(contiguity.to_string().contains("contiguous"));
+
+    let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(vec![0; 4], 4)));
+    let mut pointer_bounds = TensorImpl::try_new(storage, vec![1].into(), DType::F32).unwrap();
+    pointer_bounds.storage_offset = 2;
+    let immutable_pointer = pointer_bounds
+        .try_data_ptr_f32()
+        .expect_err("immutable pointer access must validate bounds");
+    assert!(immutable_pointer
+        .to_string()
+        .contains("exceeds storage length"));
+    let mutable_pointer = pointer_bounds
+        .try_data_ptr_f32_mut()
+        .expect_err("mutable pointer access must validate bounds");
+    assert!(mutable_pointer
+        .to_string()
+        .contains("exceeds storage length"));
+}
+
+#[test]
+fn conflicting_shape_binding_returns_error() {
+    let mut env = fastnn::ir::ShapeEnv::new();
+    env.try_bind("N", 2).unwrap();
+    let error = env
+        .try_bind("N", 3)
+        .expect_err("conflicting shape binding must fail");
+    assert!(error.contains("inconsistently"));
+}
+
+#[test]
+fn unsupported_numpy_dtype_returns_error() {
+    let tensor = Tensor::zeros(vec![1], DType::Bool, Device::Cpu);
+    let error = tensor
+        .to_numpy()
+        .expect_err("unsupported NumPy dtype must fail");
+    assert!(error.to_string().contains("does not support"));
+}
+
+#[test]
+fn invalid_graph_quantization_width_returns_error() {
+    let graph = GraphBuilder::new();
+    let input = graph.input(&[4], IrDType::F32);
+
+    let signed_error = graph
+        .quantize(&input, 3)
+        .expect_err("invalid signed quantization width must fail");
+    assert!(signed_error.to_string().contains("must be 4 or 8"));
+
+    let unsigned_error = graph
+        .quantize_unsigned(&input, 16)
+        .expect_err("invalid unsigned quantization width must fail");
+    assert!(unsigned_error.to_string().contains("must be 4 or 8"));
+}
+
+#[test]
+fn runtime_activation_dtype_cannot_escape_to_eager_tensor() {
+    let tensor_type = TensorType::new(vec![DimExpr::Known(4)], IrDType::I8);
+    let error = tensor_type_to_dtype(&tensor_type)
+        .expect_err("runtime activation dtype must not become an eager tensor dtype");
+    assert!(error.to_string().contains("runtime-described quantization"));
+}
+
+#[test]
+fn unsupported_eager_dtype_cannot_enter_executable_ir() {
+    let error =
+        dtype_to_ir(DType::F64).expect_err("unsupported eager dtype must not enter executable IR");
+    assert!(error.to_string().contains("not supported in executable IR"));
+}
+
+#[test]
+fn packed_eager_dtype_cannot_invent_executable_ir_metadata() {
+    let error = dtype_to_ir(DType::U4Scaled)
+        .expect_err("packed eager dtype must require explicit representation metadata");
+    assert!(error
+        .to_string()
+        .contains("without representation metadata"));
+}
+
+#[test]
+fn malformed_reshape_returns_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+
+    let mismatch = tensor
+        .try_reshape(vec![3])
+        .expect_err("mismatched reshape must fail");
+    assert!(mismatch.to_string().contains("Shape error"));
+
+    let multiple_inferred = tensor
+        .try_view(vec![-1, -1])
+        .expect_err("multiple inferred dimensions must fail");
+    assert!(multiple_inferred
+        .to_string()
+        .contains("infer one dimension"));
+
+    let overflow = tensor
+        .try_reshape(vec![i64::MAX, 2])
+        .expect_err("overflowing shape product must fail");
+    assert!(overflow.to_string().contains("overflow"));
+}
+
+#[test]
+fn invalid_dimension_reordering_returns_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+
+    let transpose = tensor
+        .try_transpose(0, 2)
+        .expect_err("out-of-range transpose must fail");
+    assert!(transpose.to_string().contains("out of range"));
+
+    let duplicate = tensor
+        .try_permute(vec![0, 0])
+        .expect_err("duplicate permutation dimensions must fail");
+    assert!(duplicate.to_string().contains("not a permutation"));
+
+    let wrong_rank = tensor
+        .try_permute(vec![0])
+        .expect_err("wrong-rank permutation must fail");
+    assert!(wrong_rank.to_string().contains("requires 2 dimensions"));
+}
+
+#[test]
+fn invalid_expand_and_unsqueeze_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+
+    let unsqueeze = tensor
+        .try_unsqueeze(3)
+        .expect_err("out-of-range unsqueeze must fail");
+    assert!(unsqueeze.to_string().contains("out of range"));
+
+    let rank = tensor
+        .try_expand(vec![2])
+        .expect_err("lower-rank expansion must fail");
+    assert!(rank.to_string().contains("target has 1 dimensions"));
+
+    let incompatible = tensor
+        .try_expand(vec![3, 3])
+        .expect_err("non-singleton expansion must fail");
+    assert!(incompatible.to_string().contains("only size-1 dimensions"));
+
+    let negative = tensor
+        .try_expand(vec![-1, 2])
+        .expect_err("negative expansion dimension must fail");
+    assert!(negative.to_string().contains("non-negative"));
+}
+
+#[test]
+fn invalid_cat_stack_and_repeat_return_structured_errors() {
+    let a = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+    let b = Tensor::from_vec(vec![3.0, 4.0, 5.0], vec![1, 3]);
+
+    let empty = Tensor::try_cat(&[], 0).expect_err("empty cat must fail");
+    assert!(empty.to_string().contains("at least one"));
+
+    let mismatch =
+        Tensor::try_cat(&[a.clone(), b.clone()], 0).expect_err("cat shape mismatch must fail");
+    assert!(mismatch.to_string().contains("differ at dimension"));
+
+    let stack = Tensor::try_stack(&[a.clone(), b], 0).expect_err("stack shape mismatch must fail");
+    assert!(stack.to_string().contains("same shape"));
+
+    let repeat_rank = a
+        .try_repeat(&[2])
+        .expect_err("too few repeat dimensions must fail");
+    assert!(repeat_rank.to_string().contains("at least 2"));
+
+    let repeat_negative = a
+        .try_repeat(&[1, -1])
+        .expect_err("negative repeat must fail");
+    assert!(repeat_negative.to_string().contains("non-negative"));
+}
+
+#[test]
+fn invalid_slice_returns_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+
+    let dimension = tensor
+        .try_slice(2, 0, 1, 1)
+        .expect_err("out-of-range slice dimension must fail");
+    assert!(dimension.to_string().contains("out of range"));
+
+    let zero_step = tensor
+        .try_slice(0, 0, 1, 0)
+        .expect_err("zero slice step must fail");
+    assert!(zero_step.to_string().contains("must be positive"));
+
+    let reversed = tensor
+        .try_slice(0, 2, 1, 1)
+        .expect_err("reversed slice range must fail");
+    assert!(reversed.to_string().contains("reversed"));
+
+    let clamped = tensor
+        .try_slice(0, i64::MIN, i64::MAX, 1)
+        .expect("extreme bounds should clamp safely");
+    assert_eq!(clamped.shape(), vec![2, 2]);
+}
+
+#[test]
+fn invalid_argmax_and_gather_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let indices = Tensor::from_vec(vec![0.0], vec![1]);
+
+    let argmax = tensor
+        .try_argmax(Some(2))
+        .expect_err("out-of-range argmax dimension must fail");
+    assert!(argmax.to_string().contains("out of range"));
+
+    let gather = tensor
+        .try_gather(-3, &indices)
+        .expect_err("out-of-range gather axis must fail");
+    assert!(gather.to_string().contains("out of range"));
+
+    let invalid_indices = Tensor::zeros(vec![1], DType::I64, Device::Cpu);
+    let dtype = tensor
+        .try_gather(0, &invalid_indices)
+        .expect_err("unsupported gather index dtype must fail");
+    assert!(dtype.to_string().contains("requires F32"));
+}
+
+#[test]
+fn invalid_binary_shapes_return_dispatch_errors() {
+    let matrix = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+
+    for error in [
+        matrix.try_add(&incompatible).unwrap_err(),
+        matrix.try_sub(&incompatible).unwrap_err(),
+        matrix.try_mul(&incompatible).unwrap_err(),
+        matrix.try_div(&incompatible).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("broadcast"));
+    }
+
+    let matmul = matrix
+        .try_matmul(&incompatible)
+        .expect_err("mismatched matmul contraction must fail");
+    assert!(matmul.to_string().contains("contracting dimensions differ"));
+
+    let vector = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    let rank = vector
+        .try_matmul(&incompatible)
+        .expect_err("rank-one eager matmul must fail explicitly");
+    assert!(rank.to_string().contains("at least two dimensions"));
+}
+
+#[test]
+fn invalid_sgd_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+    let shape = graph
+        .try_apply_sgd(&weight, &wrong_shape, 0.1, 0.0)
+        .expect_err("SGD must reject mismatched gradient shapes");
+    assert!(shape.to_string().contains("gradient shape"));
+
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    assert!(graph
+        .try_apply_sgd(&weight, &gradient, f32::NAN, 0.0)
+        .is_err());
+    assert!(graph.try_apply_sgd(&weight, &gradient, 0.1, -1.0).is_err());
+}
+
+#[test]
+fn invalid_adam_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let first_moment = graph.input(&[2, 2], IrDType::F32);
+    let second_moment = graph.input(&[2, 2], IrDType::F32);
+    let half_moment = graph.input(&[2, 2], IrDType::F16);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &gradient,
+            &half_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            1e-8,
+            1,
+        )
+        .is_err());
+
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &wrong_shape,
+            &first_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            1e-8,
+            1,
+        )
+        .is_err());
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &gradient,
+            &first_moment,
+            &second_moment,
+            0.001,
+            1.0,
+            0.999,
+            1e-8,
+            1,
+        )
+        .is_err());
+    assert!(graph
+        .try_apply_adam(
+            &weight,
+            &gradient,
+            &first_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            0.0,
+            0,
+        )
+        .is_err());
+    assert!(graph
+        .try_apply_adamw(
+            &weight,
+            &gradient,
+            &first_moment,
+            &second_moment,
+            0.001,
+            0.9,
+            0.999,
+            1e-8,
+            1,
+            -0.01,
+        )
+        .is_err());
+}
+
+#[test]
+fn invalid_comparison_operands_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    assert!(values.try_ge_tensor(&incompatible).is_err());
+    assert!(values.try_le_tensor(&incompatible).is_err());
+
+    let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
+    assert!(packed.try_sign().is_err());
+    assert!(packed.try_logical_not().is_err());
+}
+
+#[test]
+fn invalid_gradient_clipping_parameters_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    assert!(fastnn::tensor::try_clip_grad_norm_(std::slice::from_ref(&tensor), -1.0, 2.0).is_err());
+    assert!(fastnn::tensor::try_clip_grad_norm_(std::slice::from_ref(&tensor), 1.0, 0.0).is_err());
+    assert!(fastnn::tensor::try_clip_grad_value_(&[tensor], f32::NAN).is_err());
+}
+
+#[test]
+fn invalid_einsum_inputs_return_structured_errors() {
+    let left = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let right = Tensor::from_vec(vec![1.0; 8], vec![4, 2]);
+
+    assert!(fastnn::tensor::try_einsum("ij,jk", &[left.clone(), right.clone()]).is_err());
+    assert!(fastnn::tensor::try_einsum("ij,jk->ik", std::slice::from_ref(&left)).is_err());
+    assert!(fastnn::tensor::try_einsum("ii,ij->ij", &[left.clone(), left.clone()]).is_err());
+    assert!(fastnn::tensor::try_einsum("ij,jk->iz", &[left, right]).is_err());
+}
+
+#[test]
+fn invalid_squeeze_dimensions_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0], vec![1, 2]);
+    assert_eq!(values.try_squeeze(Some(0)).unwrap().shape(), &[2]);
+    assert!(values.try_squeeze(Some(2)).is_err());
+}
+
+#[test]
+fn invalid_flip_dimensions_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    assert!(values.try_flip(&[2]).is_err());
+    assert!(values.try_flip(&[0, 0]).is_err());
+}
+
+#[test]
+fn nonzero_conversion_returns_structured_errors() {
+    let values = Tensor::from_vec(vec![0.0, 2.0, 3.0, 0.0, 5.0, 0.0], vec![2, 3]);
+    assert_eq!(values.try_nonzero().unwrap(), vec![0, 1, 0, 2, 1, 1]);
+
+    let transposed = values.try_transpose(0, 1).unwrap();
+    assert_eq!(transposed.try_nonzero().unwrap(), vec![1, 0, 1, 1, 2, 0]);
+
+    let unsupported = Tensor::try_zeros(vec![2], DType::Bool, Device::Cpu).unwrap();
+    assert!(unsupported.try_nonzero().is_err());
+}
+
+#[test]
+fn contiguous_conversion_returns_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let transposed = values.try_transpose(0, 1).unwrap();
+    let contiguous = transposed.try_contiguous().unwrap();
+    assert!(contiguous.is_contiguous());
+    assert_eq!(
+        contiguous.try_as_f32_slice().unwrap(),
+        &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+    );
+
+    let packed = Tensor::try_zeros(vec![2, 8], DType::I4, Device::Cpu).unwrap();
+    let packed_view = packed.try_transpose(0, 1).unwrap();
+    assert!(packed_view.try_contiguous().is_err());
+    assert!(packed_view.try_reshape(vec![16]).is_err());
+}
+
+#[test]
+fn invalid_device_transfers_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
+    let cpu = values.try_to_device(Device::Cpu).unwrap();
+    assert_eq!(cpu.device(), Device::Cpu);
+
+    #[cfg(feature = "gpu")]
+    assert!(values.try_to_gpu(usize::MAX).is_err());
+}
+
+#[test]
+fn invalid_dtype_conversions_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    assert_eq!(values.try_to_dtype(DType::I32).unwrap().dtype(), DType::I32);
+    for dtype in [
+        DType::F64,
+        DType::I32,
+        DType::I64,
+        DType::F16,
+        DType::BF16,
+        DType::Bool,
+    ] {
+        let converted = values.try_to_dtype(dtype).unwrap();
+        assert_eq!(converted.dtype(), dtype);
+        assert_eq!(converted.try_to_dtype(DType::F32).unwrap().shape(), &[2, 2]);
+    }
+    let offset_view = values.try_slice(0, 1, 2, 1).unwrap();
+    let offset_i32 = offset_view.try_to_dtype(DType::I32).unwrap();
+    assert_eq!(offset_i32.try_as_i64_slice().unwrap(), vec![3, 4]);
+
+    let packed_target = values
+        .try_to_dtype(DType::I4)
+        .expect_err("packed conversion target must fail");
+    assert!(packed_target.to_string().contains("quantize/dequantize"));
+
+    let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
+    assert!(packed.try_to_dtype(DType::F32).is_err());
+
+    let noncontiguous = values.try_transpose(0, 1).unwrap();
+    assert!(noncontiguous.try_to_dtype(DType::I32).is_err());
+}
+
+#[test]
+fn integer_slice_conversion_returns_structured_errors() {
+    let values = Tensor::from_vec(vec![1.9, -2.1, 3.0], vec![3]);
+    assert_eq!(values.try_as_i64_slice().unwrap(), vec![1, -2, 3]);
+
+    let unsupported = Tensor::try_zeros(vec![3], DType::Bool, Device::Cpu).unwrap();
+    let dtype = unsupported
+        .try_as_i64_slice()
+        .expect_err("unsupported integer conversion dtype must fail");
+    assert!(dtype.to_string().contains("does not support"));
+
+    let noncontiguous = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2])
+        .try_transpose(0, 1)
+        .unwrap();
+    assert!(noncontiguous.try_as_i64_slice().is_err());
+}
+
+#[test]
+fn invalid_fused_optimizer_tensors_return_dispatch_errors() {
+    let weight = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    let gradient = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    let moment = Tensor::from_vec(vec![0.0; 4], vec![2, 2]);
+    let wrong_shape = Tensor::from_vec(vec![0.0; 2], vec![2]);
+
+    assert!(weight
+        .try_adam_update(&wrong_shape, &moment, &moment, 0.001, 0.9, 0.999, 1e-8, 1)
+        .is_err());
+    assert!(weight
+        .try_adamw_update(&gradient, &moment, &moment, 0.001, 0.9, 0.999, 1e-8, 1, -0.1,)
+        .is_err());
+}
+
+#[test]
+fn invalid_rmsprop_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let second_moment = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_rmsprop(&weight, &wrong_shape, &second_moment, 0.01, 0.99, 1e-8)
+        .is_err());
+    assert!(graph
+        .try_apply_rmsprop(&weight, &gradient, &second_moment, 0.01, 1.0, 1e-8)
+        .is_err());
+    assert!(graph
+        .try_apply_rmsprop(&weight, &gradient, &second_moment, 0.01, 0.99, 0.0)
+        .is_err());
+}
+
+#[test]
+fn invalid_lion_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let momentum = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_lion(&weight, &wrong_shape, &momentum, 0.01, 0.9, 0.99, 0.0)
+        .is_err());
+    assert!(graph
+        .try_apply_lion(&weight, &gradient, &momentum, 0.01, 0.9, 1.0, 0.0)
+        .is_err());
+    assert!(graph
+        .try_apply_lion(&weight, &gradient, &momentum, 0.01, 0.9, 0.99, -0.1)
+        .is_err());
+}
+
+#[test]
+fn invalid_muon_inputs_return_structured_errors() {
+    let graph = GraphBuilder::new();
+    let weight = graph.input(&[2, 2], IrDType::F32);
+    let gradient = graph.input(&[2, 2], IrDType::F32);
+    let momentum = graph.input(&[2, 2], IrDType::F32);
+    let wrong_shape = graph.input(&[4], IrDType::F32);
+
+    assert!(graph
+        .try_apply_muon(&weight, &wrong_shape, &momentum, 0.01, 0.9, 0.0)
+        .is_err());
+    assert!(graph
+        .try_apply_muon(&weight, &gradient, &momentum, 0.01, 1.0, 0.0)
+        .is_err());
+    assert!(graph
+        .try_apply_muon(&weight, &gradient, &momentum, 0.01, 0.9, -0.1)
+        .is_err());
+}
+
+#[test]
+fn invalid_selection_operands_return_structured_errors() {
+    let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
+    let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
+    assert!(values.try_maximum(&incompatible).is_err());
+    assert!(values.try_minimum(&incompatible).is_err());
+
+    let condition = Tensor::from_vec(vec![1.0; 5], vec![5]);
+    assert!(values.try_where_tensor(&condition, &values).is_err());
+    assert!(values
+        .try_where_tensor(&Tensor::from_vec(vec![1.0; 6], vec![2, 3]), &values)
+        .is_ok());
+}
+
+#[test]
+fn invalid_activation_parameters_return_dispatch_errors() {
+    let tensor = Tensor::from_vec(vec![-1.0, 0.0, 1.0], vec![3]);
+    assert!(tensor.try_leaky_relu(f32::NAN).is_err());
+    assert!(tensor.try_elu(f32::INFINITY).is_err());
+    assert!(tensor.try_softplus(0.0, 20.0).is_err());
+    assert!(tensor.try_softplus(1.0, f32::NAN).is_err());
+    assert_eq!(tensor.try_softplus(1.0, 20.0).unwrap().shape(), vec![3]);
+}
+
+#[test]
+fn invalid_softmax_dimensions_return_dispatch_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let softmax = tensor
+        .try_softmax(2)
+        .expect_err("out-of-range softmax dimension must fail");
+    assert!(softmax.to_string().contains("out of range"));
+
+    let log_softmax = tensor
+        .try_log_softmax(-3)
+        .expect_err("out-of-range log-softmax dimension must fail");
+    assert!(log_softmax.to_string().contains("out of range"));
+
+    assert_eq!(tensor.try_softmax(-1).unwrap().shape(), vec![2, 2]);
+}
+
+#[test]
+fn invalid_reduction_dimensions_return_structured_errors() {
+    let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+
+    for error in [
+        tensor.try_sum(2, false).unwrap_err(),
+        tensor.try_mean(-3, false).unwrap_err(),
+        tensor.try_max(4, true).unwrap_err(),
+        tensor.try_cumsum(-3, false, false).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("out of range"));
+    }
+
+    assert_eq!(tensor.try_sum(-1, false).unwrap().shape(), vec![2]);
+    assert_eq!(
+        tensor.try_cumsum(-1, false, false).unwrap().shape(),
+        vec![2, 2]
+    );
+}
+
+#[test]
+fn backward_rejects_mismatched_gradient_shape() {
+    let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
+    let loss = input.sum(0, false);
+    let wrong_gradient = Tensor::from_vec(vec![1.0], vec![1]);
+
+    let error = autograd::backward(&loss, Some(wrong_gradient))
+        .expect_err("mismatched backward gradient must fail");
+    assert!(error.to_string().contains("gradient shape"));
 }
 
 #[test]
@@ -90,29 +826,234 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     let matmul_node = graph.get_node(mm_id).unwrap().clone();
     let weight_id = matmul_node.inputs[1];
     let weight_node = graph.get_node_mut(weight_id).unwrap();
-    weight_node.output_type.dtype = IrDType::I8Scaled {
-        scales: vec![],
-        zero_points: vec![],
+    // Corrupt the metadata by using a representation with RuntimeAffineQuantization
+    // (which the backend's canonical_quantized_weight_metadata rejects because
+    // it lacks static dequantization metadata).
+    let bad_rep = fastnn::types::ValueRepresentation {
+        logical: fastnn::types::ScalarType::F32,
+        storage: fastnn::types::ScalarType::I4,
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
+        },
+        transform: fastnn::types::RepresentationTransform::RuntimeAffineQuantization,
     };
+    let bad_layout = fastnn::types::TensorStorageLayout {
+        encoding: fastnn::types::StorageEncoding::Packed {
+            word_bits: 32,
+            lanes: 8,
+        },
+        row_packed: true,
+        prefix_bytes: 0,
+        suffix_bytes: fastnn::types::PACKED_SIMD_MARGIN_BYTES,
+    };
+    weight_node.output_type = TensorType::from_parts(
+        weight_node.output_type.shape.clone(),
+        bad_rep.clone(),
+        bad_layout,
+    );
     if let Opcode::Constant(TensorValue::Data { tensor_type, .. }) = &mut weight_node.opcode {
-        tensor_type.dtype = IrDType::I8Scaled {
-            scales: vec![],
-            zero_points: vec![],
-        };
+        *tensor_type = TensorType::from_parts(tensor_type.shape.clone(), bad_rep, bad_layout);
     }
 
     let mem = plan_memory(&graph).expect("memory planning should succeed");
-    let mut plan = CpuBackend
+    let err = CpuBackend
         .compile(&graph, &mem)
-        .expect("compile should succeed");
-    let mut executor = GraphExecutor::new(CpuBackend);
-    let err = executor
-        .execute(&graph, &mut plan, &mem, &[])
-        .expect_err("malformed quantized metadata should return an error");
+        .expect_err("malformed quantized metadata should return an error during compile");
 
     let message = err.to_string();
     assert!(
         message.contains("quant") || message.contains("scale") || message.contains("zero"),
         "unexpected error: {message}"
     );
+}
+
+#[test]
+fn malformed_activation_attributes_fail_cpu_lowering() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.leaky_relu(&input, 0.25);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::LeakyRelu))
+        .expect("leaky relu node should exist")
+        .attrs
+        .clear();
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing leaky relu slope must fail lowering");
+    assert!(error.to_string().contains("negative_slope"));
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.clamp(&input, -1.0, 1.0);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    let clamp = graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Clamp))
+        .expect("clamp node should exist");
+    clamp.attrs.insert("min".into(), "not-a-number".into());
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("invalid clamp bound must fail lowering");
+    assert!(error.to_string().contains("min"));
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[1, 1, 4, 4], IrDType::F32);
+    let weight = builder.parameter(&[1, 1, 3, 3], IrDType::F32);
+    let output = builder.conv2d(&input, &weight, 1, 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Conv2d))
+        .expect("conv2d node should exist")
+        .attrs
+        .remove("stride");
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing convolution stride must fail lowering");
+    assert!(error.to_string().contains("stride"));
+
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[2, 2], IrDType::F32);
+    let output = builder.softmax(&input, 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Softmax))
+        .expect("softmax node should exist")
+        .attrs
+        .insert("axis".into(), "-3".into());
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("out-of-range softmax axis must fail lowering");
+    assert!(error.to_string().contains("axis"));
+
+    let builder = GraphBuilder::new();
+    let left = builder.input(&[1, 2], IrDType::F32);
+    let right = builder.input(&[1, 2], IrDType::F32);
+    let output = builder.concat(&[&left, &right], 1);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Concat))
+        .expect("concat node should exist")
+        .attrs
+        .insert("axis".into(), "9".into());
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("out-of-range concat axis must fail lowering");
+    assert!(error.to_string().contains("axis"));
+}
+
+#[test]
+fn rank_zero_quantized_weights_fail_cpu_lowering() {
+    let mut graph = ComputeGraph::new();
+    let activation = graph.add_node(
+        Opcode::Input,
+        vec![],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(1)], IrDType::F32),
+    );
+    let quantized_type = TensorType::new(vec![], IrDType::I4);
+    let weight = graph.add_node(
+        Opcode::Constant(TensorValue::Data {
+            bytes: vec![0; 4],
+            tensor_type: quantized_type.clone(),
+        }),
+        vec![],
+        quantized_type,
+    );
+    let output = graph.add_node(
+        Opcode::MatMul,
+        vec![activation, weight],
+        TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(1)], IrDType::F32),
+    );
+    graph.set_inputs(vec![activation]);
+    graph.set_outputs(vec![output]);
+
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("rank-zero quantized weight must fail lowering");
+    assert!(error.to_string().contains("weight shape"));
+}
+
+#[test]
+fn slice_lowering_rejects_missing_attributes_and_normalizes_negative_end() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.slice(&input, 0, 1, 3);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    let slice = graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Slice))
+        .expect("slice node should exist");
+    slice.attrs.insert("end".into(), "-1".into());
+
+    let memory = plan_memory(&graph).expect("memory planning should succeed");
+    let plan = CpuBackend
+        .compile(&graph, &memory)
+        .expect("negative slice end should normalize during lowering");
+    let params = plan
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::CallKernel {
+                kernel_name,
+                params,
+                ..
+            } if kernel_name == "slice_f32" => Some(params),
+            _ => None,
+        })
+        .expect("slice instruction should exist");
+    assert_eq!(&params[params.len() - 3..], &[0, 1, 4]);
+
+    graph
+        .nodes
+        .iter_mut()
+        .find(|node| matches!(node.opcode, Opcode::Slice))
+        .expect("slice node should exist")
+        .attrs
+        .remove("end");
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing slice end must fail lowering");
+    assert!(error.to_string().contains("end"));
+}
+
+#[test]
+fn cpu_lowering_rejects_input_without_memory_slot() {
+    let builder = GraphBuilder::new();
+    let input = builder.input(&[4], IrDType::F32);
+    let output = builder.relu(&input);
+    let mut graph = builder.to_graph();
+    graph.set_outputs(vec![output.node_id()]);
+    let mut memory = plan_memory(&graph).expect("memory planning should succeed");
+    memory
+        .slots
+        .remove(&input.node_id())
+        .expect("input slot should exist");
+
+    let error = CpuBackend
+        .compile(&graph, &memory)
+        .expect_err("missing input slot must fail lowering");
+    assert!(error.to_string().contains("no memory slot"));
 }

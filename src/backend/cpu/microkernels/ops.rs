@@ -27,7 +27,13 @@ pub fn batch_norm_inference_f32(
     eps: f32,
 ) {
     let c = weight.len();
-    let len = output.len().min(data.len());
+    debug_assert!(c > 0);
+    debug_assert_eq!(bias.len(), c);
+    debug_assert_eq!(running_mean.len(), c);
+    debug_assert_eq!(running_var.len(), c);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(data.len().is_multiple_of(c));
+    let len = output.len();
     // Pre-compute per-channel scale and shift
     for ch in 0..c {
         let scale = weight[ch] / (running_var[ch] + eps).sqrt();
@@ -55,18 +61,19 @@ pub unsafe fn batch_norm_inference_f32_avx2(
     eps: f32,
 ) {
     let c = weight.len();
-    let len = output.len().min(data.len());
-    // Pre-compute per-channel scale and shift
-    let mut scale = vec![0.0f32; c];
-    let mut shift = vec![0.0f32; c];
-    for ch in 0..c {
-        scale[ch] = weight[ch] / (running_var[ch] + eps).sqrt();
-        shift[ch] = bias[ch] - running_mean[ch] * scale[ch];
-    }
-
-    let vscale_base = scale.as_ptr();
-    let vshift_base = shift.as_ptr();
+    debug_assert!(c > 0);
+    debug_assert_eq!(bias.len(), c);
+    debug_assert_eq!(running_mean.len(), c);
+    debug_assert_eq!(running_var.len(), c);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(data.len().is_multiple_of(c));
+    let len = output.len();
+    let weight_base = weight.as_ptr();
+    let bias_base = bias.as_ptr();
+    let mean_base = running_mean.as_ptr();
+    let var_base = running_var.as_ptr();
     let vc = _mm256_set1_ps(c as f32);
+    let veps = _mm256_set1_ps(eps);
     let vinc = _mm256_set_ps(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
 
     let mut i = 0usize;
@@ -78,9 +85,12 @@ pub unsafe fn batch_norm_inference_f32_avx2(
         let vch_f = _mm256_sub_ps(vindices_f, _mm256_mul_ps(vdiv, vc));
         let vch = _mm256_cvttps_epi32(vch_f);
 
-        // Gather scale[ch] and shift[ch]
-        let vscale = _mm256_i32gather_ps(vscale_base, vch, 4);
-        let vshift = _mm256_i32gather_ps(vshift_base, vch, 4);
+        let vweight = _mm256_i32gather_ps(weight_base, vch, 4);
+        let vbias = _mm256_i32gather_ps(bias_base, vch, 4);
+        let vmean = _mm256_i32gather_ps(mean_base, vch, 4);
+        let vvar = _mm256_i32gather_ps(var_base, vch, 4);
+        let vscale = _mm256_div_ps(vweight, _mm256_sqrt_ps(_mm256_add_ps(vvar, veps)));
+        let vshift = _mm256_sub_ps(vbias, _mm256_mul_ps(vmean, vscale));
 
         // out[i] = data[i] * scale + shift
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
@@ -92,7 +102,9 @@ pub unsafe fn batch_norm_inference_f32_avx2(
     }
     for j in i..len {
         let ch = j % c;
-        output[j] = data[j] * scale[ch] + shift[ch];
+        let scale = weight[ch] / (running_var[ch] + eps).sqrt();
+        let shift = bias[ch] - running_mean[ch] * scale;
+        output[j] = data[j] * scale + shift;
     }
 }
 
@@ -115,6 +127,12 @@ pub fn pool_max_f32_scalar(
     w_out: usize,
     mut indices_out: Option<&mut [i64]>,
 ) {
+    debug_assert!(kernel > 0 && stride_val > 0);
+    debug_assert_eq!(input.len(), n * c * h * w);
+    debug_assert_eq!(output.len(), n * c * h_out * w_out);
+    debug_assert!(indices_out
+        .as_ref()
+        .is_none_or(|indices| indices.len() == output.len()));
     let hw_out = h_out * w_out;
     for nn in 0..n {
         for cc in 0..c {
@@ -132,25 +150,19 @@ pub fn pool_max_f32_scalar(
                                 let w_in_s = w_in - padding_val;
                                 if h_in_s < h && w_in_s < w {
                                     let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
-                                    if idx < input.len() {
-                                        if input[idx] > val {
-                                            val = input[idx];
-                                            best_kh = kh;
-                                            best_kw = kw;
-                                        }
+                                    if input[idx] > val {
+                                        val = input[idx];
+                                        best_kh = kh;
+                                        best_kw = kw;
                                     }
                                 }
                             }
                         }
                     }
                     let out_idx = nn * (c * hw_out) + cc * hw_out + hh * w_out + ww;
-                    if out_idx < output.len() {
-                        output[out_idx] = val;
-                    }
+                    output[out_idx] = val;
                     if let Some(ref mut idx_out) = indices_out {
-                        if out_idx < idx_out.len() {
-                            idx_out[out_idx] = (best_kh * kernel + best_kw) as i64;
-                        }
+                        idx_out[out_idx] = (best_kh * kernel + best_kw) as i64;
                     }
                 }
             }
@@ -172,6 +184,9 @@ pub fn pool_avg_f32_scalar(
     h_out: usize,
     w_out: usize,
 ) {
+    debug_assert!(kernel > 0 && stride_val > 0);
+    debug_assert_eq!(input.len(), n * c * h * w);
+    debug_assert_eq!(output.len(), n * c * h_out * w_out);
     let hw_out = h_out * w_out;
     for nn in 0..n {
         for cc in 0..c {
@@ -188,10 +203,8 @@ pub fn pool_avg_f32_scalar(
                                 let w_in_s = w_in - padding_val;
                                 if h_in_s < h && w_in_s < w {
                                     let idx = nn * (c * h * w) + cc * (h * w) + h_in_s * w + w_in_s;
-                                    if idx < input.len() {
-                                        val += input[idx];
-                                        count += 1;
-                                    }
+                                    val += input[idx];
+                                    count += 1;
                                 }
                             }
                         }
@@ -200,9 +213,7 @@ pub fn pool_avg_f32_scalar(
                         val /= count as f32;
                     }
                     let out_idx = nn * (c * hw_out) + cc * hw_out + hh * w_out + ww;
-                    if out_idx < output.len() {
-                        output[out_idx] = val;
-                    }
+                    output[out_idx] = val;
                 }
             }
         }
@@ -219,14 +230,17 @@ pub fn adaptive_avg_pool2d_f32_scalar(
     out_h: usize,
     out_w: usize,
 ) {
+    debug_assert!(h > 0 && w > 0 && out_h > 0 && out_w > 0);
+    debug_assert_eq!(input.len(), nc * h * w);
+    debug_assert_eq!(output.len(), nc * out_h * out_w);
     let hw = h * w;
     for nci in 0..nc {
         for ohi in 0..out_h {
             for owi in 0..out_w {
                 let h_start = ohi * h / out_h;
-                let h_end = (ohi + 1) * h / out_h;
+                let h_end = ((ohi + 1) * h).div_ceil(out_h);
                 let w_start = owi * w / out_w;
-                let w_end = (owi + 1) * w / out_w;
+                let w_end = ((owi + 1) * w).div_ceil(out_w);
                 let mut sum = 0.0f32;
                 let mut count = 0;
                 for hi in h_start..h_end {
@@ -236,9 +250,8 @@ pub fn adaptive_avg_pool2d_f32_scalar(
                     }
                 }
                 let out_idx = nci * out_h * out_w + ohi * out_w + owi;
-                if out_idx < output.len() {
-                    output[out_idx] = if count > 0 { sum / count as f32 } else { 0.0 };
-                }
+                debug_assert!(count > 0);
+                output[out_idx] = sum / count as f32;
             }
         }
     }
@@ -606,21 +619,19 @@ pub unsafe fn pool_avg_f32_avx2(
 
 #[inline]
 pub fn reduce_sum_f32_scalar(input: &[f32], output: &mut [f32], group_size: usize, is_mean: bool) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
-        let cnt = (end - start) as f32;
+        let end = start + group_size;
         let mut sum = 0.0f32;
         for i in start..end {
             sum += input[i];
         }
         output[g] = if is_mean {
-            if cnt > 0.0 {
-                sum / cnt
-            } else {
-                0.0
-            }
+            sum / group_size as f32
         } else {
             sum
         };
@@ -637,11 +648,13 @@ pub unsafe fn reduce_sum_f32_avx2(
     group_size: usize,
     is_mean: bool,
 ) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
-        let cnt = (end - start) as f32;
+        let end = start + group_size;
         let mut i = start;
         let mut acc = _mm256_setzero_ps();
         while i + 8 <= end {
@@ -653,11 +666,7 @@ pub unsafe fn reduce_sum_f32_avx2(
             sum += input[j];
         }
         output[g] = if is_mean {
-            if cnt > 0.0 {
-                sum / cnt
-            } else {
-                0.0
-            }
+            sum / group_size as f32
         } else {
             sum
         };
@@ -668,10 +677,13 @@ pub unsafe fn reduce_sum_f32_avx2(
 
 #[inline]
 pub fn reduce_max_f32_scalar(input: &[f32], output: &mut [f32], group_size: usize) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
+        let end = start + group_size;
         let mut val = f32::NEG_INFINITY;
         for i in start..end {
             if input[i] > val {
@@ -687,10 +699,13 @@ pub fn reduce_max_f32_scalar(input: &[f32], output: &mut [f32], group_size: usiz
 // SAFETY: Same as reduce_sum_f32_avx2 — caller ensures valid, non-overlapping
 // slices with `input` sized at least `num_groups * group_size`.
 pub unsafe fn reduce_max_f32_avx2(input: &[f32], output: &mut [f32], group_size: usize) {
+    debug_assert!(group_size > 0);
+    debug_assert!(input.len().is_multiple_of(group_size));
+    debug_assert_eq!(input.len() / group_size, output.len());
     let num_groups = output.len();
     for g in 0..num_groups {
         let start = g * group_size;
-        let end = (start + group_size).min(input.len());
+        let end = start + group_size;
         let mut i = start;
         let mut vmax = _mm256_set1_ps(f32::NEG_INFINITY);
         while i + 8 <= end {
@@ -715,8 +730,11 @@ pub unsafe fn reduce_max_f32_avx2(input: &[f32], output: &mut [f32], group_size:
 
 #[inline]
 pub fn biasadd_f32_scalar(data: &[f32], bias: &[f32], output: &mut [f32], channel_stride: usize) {
-    let len = output.len().min(data.len());
-    let bias_len = bias.len().max(1);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(!bias.is_empty());
+    debug_assert!(channel_stride > 0);
+    let len = output.len();
+    let bias_len = bias.len();
     for i in 0..len {
         output[i] = data[i] + bias[(i / channel_stride) % bias_len];
     }
@@ -732,8 +750,11 @@ pub unsafe fn biasadd_f32_avx2(
     output: &mut [f32],
     channel_stride: usize,
 ) {
-    let len = output.len().min(data.len());
-    let bias_len = bias.len().max(1);
+    debug_assert_eq!(data.len(), output.len());
+    debug_assert!(!bias.is_empty());
+    debug_assert!(channel_stride > 0);
+    let len = output.len();
+    let bias_len = bias.len();
     let mut i = 0;
     while i + 8 <= len {
         let vdata = _mm256_loadu_ps(data.as_ptr().add(i));
@@ -760,6 +781,9 @@ pub unsafe fn biasadd_f32_avx2(
 /// instead of two, reducing memory traffic by ~33%.
 #[inline]
 pub fn norm_layernorm_f32_scalar(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -794,8 +818,13 @@ pub fn fused_residual_add_layer_norm_f32_scalar(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert_eq!(bias.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -817,9 +846,7 @@ pub fn fused_residual_add_layer_norm_f32_scalar(
 
         for i in start..end {
             let idx = i - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
-            output[i] = (main[i] + residual[i] - mean) * inv_std * w + b;
+            output[i] = (main[i] + residual[i] - mean) * inv_std * weight[idx] + bias[idx];
         }
     }
 }
@@ -834,6 +861,9 @@ pub unsafe fn norm_layernorm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -899,8 +929,13 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert_eq!(bias.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -948,16 +983,8 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
             let vm = _mm256_loadu_ps(main.as_ptr().add(i));
             let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
             let vnorm = _mm256_mul_ps(_mm256_sub_ps(_mm256_add_ps(vm, vr), vmean), vinv_std);
-            let vw = if weight.len() >= 8 {
-                _mm256_loadu_ps(weight.as_ptr().add(idx))
-            } else {
-                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
-            };
-            let vb = if bias.len() >= 8 {
-                _mm256_loadu_ps(bias.as_ptr().add(idx))
-            } else {
-                _mm256_set1_ps(if idx < bias.len() { bias[idx] } else { 0.0 })
-            };
+            let vw = _mm256_loadu_ps(weight.as_ptr().add(idx));
+            let vb = _mm256_loadu_ps(bias.as_ptr().add(idx));
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
                 _mm256_add_ps(_mm256_mul_ps(vnorm, vw), vb),
@@ -966,9 +993,7 @@ pub unsafe fn fused_residual_add_layer_norm_f32_avx2(
         }
         for j in i..end {
             let idx = j - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            let b = if idx < bias.len() { bias[idx] } else { 0.0 };
-            output[j] = (main[j] + residual[j] - mean) * inv_std * w + b;
+            output[j] = (main[j] + residual[j] - mean) * inv_std * weight[idx] + bias[idx];
         }
     }
 }
@@ -983,6 +1008,10 @@ pub fn rms_norm_f32_scalar(
     row_size: usize,
     eps: f32,
 ) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -998,12 +1027,7 @@ pub fn rms_norm_f32_scalar(
             1.0
         };
         for i in start..end {
-            let w = if i - start < weight.len() {
-                weight[i - start]
-            } else {
-                1.0
-            };
-            output[i] = input[i] / rms * w;
+            output[i] = input[i] / rms * weight[i - start];
         }
     }
 }
@@ -1017,8 +1041,12 @@ pub fn fused_residual_add_rms_norm_f32_scalar(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -1037,8 +1065,7 @@ pub fn fused_residual_add_rms_norm_f32_scalar(
 
         for i in start..end {
             let idx = i - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            output[i] = (main[i] + residual[i]) / rms * w;
+            output[i] = (main[i] + residual[i]) / rms * weight[idx];
         }
     }
 }
@@ -1055,8 +1082,12 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
-    let len = output.len().min(main.len()).min(residual.len());
-    let num_rows = len / row_size;
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(main.len(), output.len());
+    debug_assert_eq!(residual.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(output.len().is_multiple_of(row_size));
+    let num_rows = output.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
         let end = start + row_size;
@@ -1089,11 +1120,7 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
             let vm = _mm256_loadu_ps(main.as_ptr().add(i));
             let vr = _mm256_loadu_ps(residual.as_ptr().add(i));
             let vx = _mm256_add_ps(vm, vr);
-            let w = if weight.len() >= 8 {
-                _mm256_loadu_ps(weight.as_ptr().add(idx))
-            } else {
-                _mm256_set1_ps(if idx < weight.len() { weight[idx] } else { 1.0 })
-            };
+            let w = _mm256_loadu_ps(weight.as_ptr().add(idx));
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
                 _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
@@ -1102,8 +1129,7 @@ pub unsafe fn fused_residual_add_rms_norm_f32_avx2(
         }
         for j in i..end {
             let idx = j - start;
-            let w = if idx < weight.len() { weight[idx] } else { 1.0 };
-            output[j] = (main[j] + residual[j]) / rms * w;
+            output[j] = (main[j] + residual[j]) / rms * weight[idx];
         }
     }
 }
@@ -1119,6 +1145,10 @@ pub unsafe fn rms_norm_f32_avx2(
     row_size: usize,
     eps: f32,
 ) {
+    debug_assert!(row_size > 0);
+    debug_assert_eq!(input.len(), output.len());
+    debug_assert_eq!(weight.len(), row_size);
+    debug_assert!(input.len().is_multiple_of(row_size));
     let num_rows = input.len() / row_size;
     for r in 0..num_rows {
         let start = r * row_size;
@@ -1146,15 +1176,7 @@ pub unsafe fn rms_norm_f32_avx2(
         i = start;
         while i + 8 <= end {
             let vx = _mm256_loadu_ps(input.as_ptr().add(i));
-            let w = if weight.len() >= 8 {
-                _mm256_loadu_ps(weight.as_ptr().add(i - start))
-            } else {
-                _mm256_set1_ps(if i - start < weight.len() {
-                    weight[i - start]
-                } else {
-                    1.0
-                })
-            };
+            let w = _mm256_loadu_ps(weight.as_ptr().add(i - start));
             _mm256_storeu_ps(
                 output.as_mut_ptr().add(i),
                 _mm256_mul_ps(_mm256_mul_ps(vx, inv_rms), w),
@@ -1162,12 +1184,7 @@ pub unsafe fn rms_norm_f32_avx2(
             i += 8;
         }
         for j in i..end {
-            let w = if j - start < weight.len() {
-                weight[j - start]
-            } else {
-                1.0
-            };
-            *output.as_mut_ptr().add(j) = input[j] / rms * w;
+            *output.as_mut_ptr().add(j) = input[j] / rms * weight[j - start];
         }
     }
 }
@@ -1176,7 +1193,8 @@ pub unsafe fn rms_norm_f32_avx2(
 
 #[inline]
 pub fn add_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = data[i] + s;
     }
@@ -1187,7 +1205,8 @@ pub fn add_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Caller must ensure `data` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn add_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
@@ -1204,7 +1223,8 @@ pub unsafe fn add_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn mul_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = data[i] * s;
     }
@@ -1215,7 +1235,8 @@ pub fn mul_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn mul_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
@@ -1232,7 +1253,8 @@ pub unsafe fn mul_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn div_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = data[i] / s;
     }
@@ -1243,7 +1265,8 @@ pub fn div_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn div_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     while i + 8 <= len {
@@ -1262,7 +1285,8 @@ pub unsafe fn div_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn gt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = if data[i] > s { 1.0 } else { 0.0 };
     }
@@ -1273,7 +1297,8 @@ pub fn gt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn gt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     let vone = _mm256_set1_ps(1.0);
@@ -1293,7 +1318,8 @@ pub unsafe fn gt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn lt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = if data[i] < s { 1.0 } else { 0.0 };
     }
@@ -1304,7 +1330,8 @@ pub fn lt_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn lt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     let vone = _mm256_set1_ps(1.0);
@@ -1324,7 +1351,8 @@ pub unsafe fn lt_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
 
 #[inline]
 pub fn eq_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     for i in 0..len {
         output[i] = if (data[i] - s).abs() < 1e-6 { 1.0 } else { 0.0 };
     }
@@ -1335,7 +1363,8 @@ pub fn eq_scalar_f32_scalar(data: &[f32], s: f32, output: &mut [f32]) {
 // SAFETY: Same as add_scalar_f32_avx2 — caller ensures valid, non-overlapping
 // data/output slices with at least 8 elements.
 pub unsafe fn eq_scalar_f32_avx2(data: &[f32], s: f32, output: &mut [f32]) {
-    let len = output.len().min(data.len());
+    debug_assert_eq!(data.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vs = _mm256_set1_ps(s);
     let vone = _mm256_set1_ps(1.0);

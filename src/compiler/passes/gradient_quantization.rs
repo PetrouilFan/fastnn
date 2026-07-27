@@ -6,14 +6,15 @@
 
 use std::collections::HashMap;
 
-use crate::ir::node::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
+use crate::error::FastnnResult;
+use crate::ir::{ComputeGraph, IrDType, NodeId, Opcode, TensorType};
 
 /// Insert gradient quantization for all optimizer update nodes.
 ///
 /// For each optimizer node, the gradient input (index 1) is wrapped with:
 ///   grad_f32 → QuantizeGradient → grad_f8x4r → DequantizeGradient → grad_f32'
-pub fn quantize_gradients(graph: &mut ComputeGraph) {
-    let node_ids = graph.topological_sort();
+pub fn quantize_gradients(graph: &mut ComputeGraph) -> FastnnResult<()> {
+    let node_ids = graph.try_topological_sort()?;
     let mut rewrites: Vec<(NodeId, NodeId, f32)> = Vec::with_capacity(graph.nodes.len());
 
     for &node_id in &node_ids {
@@ -39,12 +40,7 @@ pub fn quantize_gradients(graph: &mut ComputeGraph) {
             .map(|n| n.output_type.clone())
             .unwrap_or(TensorType::new(vec![], IrDType::F32));
 
-        let f8x4r_type = TensorType::new(
-            grad_type.shape.clone(),
-            IrDType::F8R {
-                scales: vec![scale],
-            },
-        );
+        let f8x4r_type = TensorType::new(grad_type.shape.clone(), IrDType::F8R);
 
         let mut attrs = HashMap::new();
         attrs.insert("scale".to_string(), scale.to_string());
@@ -58,6 +54,7 @@ pub fn quantize_gradients(graph: &mut ComputeGraph) {
             opt.inputs[1] = dq_id;
         }
     }
+    Ok(())
 }
 
 fn is_optimizer_op(opcode: &Opcode) -> bool {
@@ -129,7 +126,7 @@ mod tests {
     fn test_quantize_gradients_wraps_sgd_gradient() {
         let mut graph = make_sgd_graph();
         let count_before = graph.nodes.len();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         assert_eq!(graph.nodes.len(), count_before + 2, "Should add Q+DQ nodes");
         let sgd_node = graph.get_node(graph.outputs[0]).unwrap();
         let new_grad = sgd_node.inputs[1];
@@ -138,46 +135,53 @@ mod tests {
         let q_id = deq.inputs[0];
         let q = graph.get_node(q_id).unwrap();
         assert_eq!(q.opcode, Opcode::QuantizeGradient);
-        assert!(matches!(q.output_type.dtype, IrDType::F8R { .. }));
+        assert!(matches!(q.output_type.dtype(), IrDType::F8R));
     }
 
     #[test]
     fn test_quantize_gradients_f8r_output_type_has_scale() {
         let mut graph = make_sgd_graph();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         let q = graph
             .nodes
             .iter()
             .find(|n| matches!(n.opcode, Opcode::QuantizeGradient))
             .unwrap();
-        match &q.output_type.dtype {
-            IrDType::F8R { scales } => {
-                assert_eq!(scales.len(), 1, "F8R should have one scale");
-                assert!(
-                    (scales[0] - 1.0).abs() < 1e-6,
-                    "Default scale should be 1.0"
-                );
-            }
-            _ => panic!("Expected F8R dtype"),
-        }
+        // F8R now uses RuntimeScaledAffine (scale is a node attribute, not static in representation)
+        assert!(
+            matches!(
+                q.output_type.value_representation().unwrap().transform,
+                crate::types::RepresentationTransform::RuntimeScaledAffine
+            ),
+            "Expected RuntimeScaledAffine for F8R"
+        );
+        // The scale is stored as a node attribute
+        let scale_attr = q
+            .attrs
+            .get("scale")
+            .expect("QuantizeGradient should have scale attr");
+        assert!(
+            (scale_attr.parse::<f32>().unwrap() - 1.0).abs() < 1e-6,
+            "Default scale should be 1.0"
+        );
     }
 
     #[test]
     fn test_quantize_gradients_deq_output_is_f32() {
         let mut graph = make_sgd_graph();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         let dq = graph
             .nodes
             .iter()
             .find(|n| matches!(n.opcode, Opcode::DequantizeGradient))
             .unwrap();
-        assert_eq!(dq.output_type.dtype, IrDType::F32);
+        assert_eq!(dq.output_type.dtype(), IrDType::F32);
     }
 
     #[test]
     fn test_quantize_gradients_q_has_scale_attr() {
         let mut graph = make_sgd_graph();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         let q = graph
             .nodes
             .iter()
@@ -190,7 +194,7 @@ mod tests {
     fn test_quantize_gradients_no_optimizer_noop() {
         let mut graph = make_graph_no_optimizer();
         let count_before = graph.nodes.len();
-        quantize_gradients(&mut graph);
+        quantize_gradients(&mut graph).unwrap();
         assert_eq!(
             graph.nodes.len(),
             count_before,
@@ -269,7 +273,7 @@ mod tests {
             graph.set_inputs(vec![w, g]);
             graph.set_outputs(vec![opt_id]);
             let count_before = graph.nodes.len();
-            quantize_gradients(&mut graph);
+            quantize_gradients(&mut graph).unwrap();
             assert_eq!(
                 graph.nodes.len(),
                 count_before + 2,

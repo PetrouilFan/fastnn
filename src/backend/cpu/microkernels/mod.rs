@@ -147,11 +147,7 @@ macro_rules! tls_pool {
             if v.capacity() < min_capacity {
                 v.reserve(min_capacity - v.len());
             }
-            // SAFETY: `v` was just reserved with sufficient capacity; `set_len` is
-            // safe because the elements are uninitialized but immediately overwritten.
-            unsafe {
-                v.set_len(min_capacity);
-            }
+            v.resize(min_capacity, Default::default());
             $scoped { inner: Some(v) }
         }
 
@@ -227,8 +223,54 @@ impl TlsVecPool {
     pub(crate) fn alloc(min_capacity: usize) -> ScopedVec {
         tls_alloc_f32(min_capacity)
     }
+
+    pub(crate) fn try_alloc(
+        min_capacity: usize,
+    ) -> Result<ScopedVec, std::collections::TryReserveError> {
+        let pooled = TLS_VEC_POOL_F32.with(|pool| pool.borrow_mut().pop());
+        let mut values = if let Some(values) = pooled {
+            crate::backend::cpu::telemetry::record_tls_vec_reuse();
+            values
+        } else {
+            crate::backend::cpu::telemetry::record_tls_vec_alloc();
+            Vec::new()
+        };
+        if values.capacity() < min_capacity {
+            values.try_reserve_exact(min_capacity - values.len())?;
+        }
+        values.resize(min_capacity, 0.0);
+        Ok(ScopedVec {
+            inner: Some(values),
+        })
+    }
+
     pub(crate) fn alloc_zeroed(len: usize) -> ScopedVec {
         tls_alloc_zeroed_f32(len)
+    }
+}
+
+#[cfg(test)]
+mod tls_pool_tests {
+    use super::TlsVecPool;
+
+    #[test]
+    fn reused_vectors_resize_without_uninitialized_elements() {
+        {
+            let mut values = TlsVecPool::alloc(4);
+            values.fill(1.0);
+        }
+        {
+            let values = TlsVecPool::alloc(2);
+            assert_eq!(values.len(), 2);
+        }
+        let values = TlsVecPool::alloc(5);
+        assert_eq!(values.len(), 5);
+        assert_eq!(&values[2..], &[0.0, 0.0, 0.0]);
+        drop(values);
+
+        let values = TlsVecPool::try_alloc(7).unwrap();
+        assert_eq!(values.len(), 7);
+        assert_eq!(&values[5..], &[0.0, 0.0]);
     }
 }
 
@@ -303,11 +345,6 @@ pub(crate) struct I8ActivationAffine {
 }
 
 impl I8ActivationAffine {
-    #[inline(always)]
-    fn dequantize(self, q: i8) -> f32 {
-        (q as f32) * self.scale + self.zero
-    }
-
     #[inline(always)]
     fn sum_from_q_sum(self, q_sum: i32, len: usize) -> f32 {
         (q_sum as f32) * self.scale + (len as f32) * self.zero

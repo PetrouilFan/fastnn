@@ -106,6 +106,7 @@ pub fn f4x8_dot_packed(a: u32, b: u32) -> i32 {
 }
 
 impl PackedWord for F4x8 {
+    const SCALAR_TYPE: crate::types::ScalarType = crate::types::ScalarType::Fp4E2M1;
     const ITEMS: usize = 8;
     const BIT_WIDTH: usize = 4;
     const IS_FLOAT: bool = true;

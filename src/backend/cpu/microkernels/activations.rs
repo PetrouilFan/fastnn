@@ -29,7 +29,8 @@ pub fn relu_f32_scalar(x: f32) -> f32 {
 // SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn relu_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let zero = _mm256_setzero_ps();
     while i + 8 <= len {
@@ -54,7 +55,8 @@ pub fn neg_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as relu_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn neg_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let sign_mask = _mm256_set1_ps(-0.0f32);
     while i + 8 <= len {
@@ -79,7 +81,8 @@ pub fn abs_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as relu_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn abs_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let inv_sign_mask = _mm256_set1_ps(f32::from_bits(0x7fff_ffff));
     while i + 8 <= len {
@@ -104,7 +107,8 @@ pub fn sqrt_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as relu_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn sqrt_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     while i + 8 <= len {
         _mm256_storeu_ps(
@@ -128,7 +132,8 @@ pub fn sign_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as relu_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn sign_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let zero = _mm256_setzero_ps();
     let one = _mm256_set1_ps(1.0);
@@ -159,7 +164,8 @@ pub fn round_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as relu_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn round_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     while i + 8 <= len {
         _mm256_storeu_ps(
@@ -190,7 +196,8 @@ pub fn logical_not_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as relu_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn logical_not_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let zero = _mm256_setzero_ps();
     let one = _mm256_set1_ps(1.0);
@@ -221,7 +228,8 @@ pub fn clamp_f32_scalar(x: f32, min_val: f32, max_val: f32) -> f32 {
 // SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn clamp_f32_avx2(input: &[f32], output: &mut [f32], min_val: f32, max_val: f32) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vmin = _mm256_set1_ps(min_val);
     let vmax = _mm256_set1_ps(max_val);
@@ -254,7 +262,8 @@ pub fn leaky_relu_f32_scalar(x: f32, slope: f32) -> f32 {
 // SAFETY: Same as clamp_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn leaky_relu_f32_avx2(input: &[f32], output: &mut [f32], slope: f32) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let zero = _mm256_setzero_ps();
     let vslope = _mm256_set1_ps(slope);
@@ -286,7 +295,8 @@ macro_rules! avx2_elwise_fallback {
         // SAFETY: Same as other SIMD elementwise ops — caller ensures valid, non-overlapping
         // input/output slices with sufficient length.
         pub unsafe fn $name(input: &[f32], output: &mut [f32]) {
-            let len = output.len().min(input.len());
+            debug_assert_eq!(input.len(), output.len());
+            let len = output.len();
             let mut i = 0;
             while i + 8 <= len {
                 let x0 = *input.as_ptr().add(i);
@@ -438,7 +448,8 @@ pub(crate) unsafe fn log_avx2_vec(x: __m256) -> __m256 {
 // SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn exp_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
@@ -461,7 +472,8 @@ pub fn log_f32_scalar(x: f32) -> f32 {
 // SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn log_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
@@ -479,7 +491,8 @@ pub unsafe fn log_f32_avx2(input: &[f32], output: &mut [f32]) {
 // SAFETY: Caller must ensure `input` and `output` are valid, non-overlapping,
 // and each at least 8 elements long.
 pub unsafe fn sigmoid_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vone = _mm256_set1_ps(1.0f32);
     while i + 8 <= len {
@@ -504,7 +517,8 @@ pub unsafe fn sigmoid_f32_avx2(input: &[f32], output: &mut [f32]) {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn tanh_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     while i + 8 <= len {
         let x = _mm256_loadu_ps(input.as_ptr().add(i));
@@ -532,7 +546,8 @@ pub fn elu_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn elu_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vzero = _mm256_setzero_ps();
     while i + 8 <= len {
@@ -566,7 +581,8 @@ pub fn gelu_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn gelu_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vhalf = _mm256_set1_ps(0.5f32);
     let vone = _mm256_set1_ps(1.0f32);
@@ -600,7 +616,8 @@ pub fn silu_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn silu_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vone = _mm256_set1_ps(1.0f32);
     while i + 8 <= len {
@@ -628,7 +645,8 @@ pub fn softplus_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn softplus_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vone = _mm256_set1_ps(1.0f32);
     while i + 8 <= len {
@@ -657,7 +675,8 @@ pub fn hardswish_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn hardswish_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vthree = _mm256_set1_ps(3.0f32);
     let vsix = _mm256_set1_ps(6.0f32);
@@ -691,7 +710,8 @@ pub fn mish_f32_scalar(x: f32) -> f32 {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn mish_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     let mut i = 0;
     let vone = _mm256_set1_ps(1.0f32);
     while i + 8 <= len {
@@ -717,7 +737,8 @@ pub unsafe fn mish_f32_avx2(input: &[f32], output: &mut [f32]) {
 // SAFETY: Same as sigmoid_f32_avx2 — caller ensures valid, non-overlapping
 // input/output slices with at least 8 elements.
 pub unsafe fn log_softmax_f32_avx2(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     if len == 0 {
         return;
     }
@@ -764,7 +785,8 @@ pub unsafe fn log_softmax_f32_avx2(input: &[f32], output: &mut [f32]) {
 
 /// Scalar fallback for log_softmax
 pub fn log_softmax_f32_scalar_all(input: &[f32], output: &mut [f32]) {
-    let len = output.len().min(input.len());
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
     if len == 0 {
         return;
     }

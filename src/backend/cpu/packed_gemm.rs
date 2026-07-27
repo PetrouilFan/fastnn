@@ -9,9 +9,39 @@ use crate::backend::cpu::swar::{
     quantize_f32_to_i4x8, quantize_f32_to_i8x4,
 };
 use crate::backend::prepared::PreparedActivation;
+use crate::backend::BackendError;
 use crate::dtypes::f4x8::f4x8_dot_packed;
 use crate::dtypes::{F4x8, I4x8, I8x4, PackedWord};
 use crate::packed_tensor::PackedTensor;
+
+fn validate_packed_gemm<T: PackedWord>(
+    a: &PackedTensor<T>,
+    b: &PackedTensor<T>,
+    output_len: usize,
+) -> Result<(usize, usize, usize), BackendError> {
+    a.validate_matrix_storage()
+        .map_err(|error| BackendError::Dispatch(format!("packed GEMM lhs: {error}")))?;
+    b.validate_matrix_storage()
+        .map_err(|error| BackendError::Dispatch(format!("packed GEMM rhs: {error}")))?;
+    let [m, k] = <[usize; 2]>::try_from(a.shape())
+        .map_err(|_| BackendError::Dispatch("packed GEMM lhs must have rank 2".into()))?;
+    let [n, rhs_k] = <[usize; 2]>::try_from(b.shape())
+        .map_err(|_| BackendError::Dispatch("packed GEMM rhs must have rank 2".into()))?;
+    if rhs_k != k {
+        return Err(BackendError::Dispatch(format!(
+            "packed GEMM contraction mismatch: lhs K={k}, rhs K={rhs_k}"
+        )));
+    }
+    let expected_output = m
+        .checked_mul(n)
+        .ok_or_else(|| BackendError::Dispatch("packed GEMM output size overflows usize".into()))?;
+    if output_len != expected_output {
+        return Err(BackendError::Dispatch(format!(
+            "packed GEMM output has {output_len} elements, expected {expected_output}"
+        )));
+    }
+    Ok((m, k, n))
+}
 
 /// Packed I8x4 GEMM: C = A × Bᵀ
 ///
@@ -26,17 +56,9 @@ pub fn gemm_packed_i8x4(
     a_packed: &PackedTensor<I8x4>,
     b_packed: &PackedTensor<I8x4>,
     c: &mut [f32],
-) {
-    let shape_a = a_packed.shape();
-    let shape_b = b_packed.shape();
-
-    let m = shape_a[0];
-    let k = shape_a[1];
-    let n = shape_b[0];
+) -> Result<(), BackendError> {
+    let (m, k, n) = validate_packed_gemm(a_packed, b_packed, c.len())?;
     let k_packed = k.div_ceil(4);
-
-    assert_eq!(shape_b[1], k, "K dimension mismatch in packed GEMM");
-    assert_eq!(c.len(), m * n, "Output buffer size mismatch");
 
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
@@ -98,6 +120,7 @@ pub fn gemm_packed_i8x4(
                 + a_zp * b_zp * k_f32;
         }
     }
+    Ok(())
 }
 
 /// Packed I4x8 GEMM: C = A × Bᵀ
@@ -108,17 +131,9 @@ pub fn gemm_packed_i4x8(
     a_packed: &PackedTensor<I4x8>,
     b_packed: &PackedTensor<I4x8>,
     c: &mut [f32],
-) {
-    let shape_a = a_packed.shape();
-    let shape_b = b_packed.shape();
-
-    let m = shape_a[0];
-    let k = shape_a[1];
-    let n = shape_b[0];
+) -> Result<(), BackendError> {
+    let (m, k, n) = validate_packed_gemm(a_packed, b_packed, c.len())?;
     let k_packed = k.div_ceil(8);
-
-    assert_eq!(shape_b[1], k);
-    assert_eq!(c.len(), m * n);
 
     let a_packed_slice = a_packed.as_packed();
     let b_packed_slice = b_packed.as_packed();
@@ -190,6 +205,7 @@ pub fn gemm_packed_i4x8(
                 + a_zp * b_zp * k_f32;
         }
     }
+    Ok(())
 }
 
 /// Packed F4x8 GEMM: C = A × Bᵀ
@@ -202,17 +218,9 @@ pub fn gemm_packed_f4x8(
     a_packed: &PackedTensor<F4x8>,
     b_packed: &PackedTensor<F4x8>,
     c: &mut [f32],
-) {
-    let shape_a = a_packed.shape();
-    let shape_b = b_packed.shape();
-
-    let m = shape_a[0];
-    let k = shape_a[1];
-    let n = shape_b[0];
+) -> Result<(), BackendError> {
+    let (m, k, n) = validate_packed_gemm(a_packed, b_packed, c.len())?;
     let k_packed = k.div_ceil(8);
-
-    assert_eq!(shape_b[1], k, "K dimension mismatch in packed F4x8 GEMM");
-    assert_eq!(c.len(), m * n, "Output buffer size mismatch");
 
     let a_slice = a_packed.as_packed();
     let b_slice = b_packed.as_packed();
@@ -233,6 +241,7 @@ pub fn gemm_packed_f4x8(
             c[row * n + col] = (acc as f32) * a_scale * b_scale / 4.0;
         }
     }
+    Ok(())
 }
 
 /// Packed F4x8 GEMM with fused bias + activation.
@@ -242,14 +251,14 @@ pub fn gemm_packed_f4x8_fused(
     bias: Option<&[f32]>,
     activation: PreparedActivation,
     c: &mut [f32],
-) {
-    let m = act_packed.shape()[0];
-    let k = act_packed.shape()[1];
-    let n = weight_packed.shape()[0];
+) -> Result<(), BackendError> {
+    let (m, k, n) = validate_packed_gemm(act_packed, weight_packed, c.len())?;
     let k_packed = k.div_ceil(8);
-
-    assert_eq!(weight_packed.shape()[1], k);
-    assert_eq!(c.len(), m * n);
+    if bias.is_some_and(|values| values.len() != n) {
+        return Err(BackendError::Dispatch(format!(
+            "packed GEMM bias must contain {n} elements"
+        )));
+    }
 
     let act_slice = act_packed.as_packed();
     let weight_slice = weight_packed.as_packed();
@@ -285,6 +294,7 @@ pub fn gemm_packed_f4x8_fused(
             c[row * n + col] = val;
         }
     }
+    Ok(())
 }
 
 /// Packed I8x4 GEMM: C = A × Bᵀ with pre-quantized activations.
@@ -306,13 +316,14 @@ pub fn gemm_packed_i8x4_fused(
     bias: Option<&[f32]>,
     activation: PreparedActivation,
     c: &mut [f32],
-) {
-    let m = act_packed.shape()[0];
-    let k_packed = act_packed.shape()[1].div_ceil(4);
-    let n = weight_packed.shape()[0];
-
-    assert_eq!(weight_packed.shape()[1].div_ceil(4), k_packed);
-    assert_eq!(c.len(), m * n);
+) -> Result<(), BackendError> {
+    let (m, k, n) = validate_packed_gemm(act_packed, weight_packed, c.len())?;
+    let k_packed = k.div_ceil(4);
+    if bias.is_some_and(|values| values.len() != n) {
+        return Err(BackendError::Dispatch(format!(
+            "packed GEMM bias must contain {n} elements"
+        )));
+    }
 
     let act_packed_slice = act_packed.as_packed();
     let weight_packed_slice = weight_packed.as_packed();
@@ -352,7 +363,7 @@ pub fn gemm_packed_i8x4_fused(
             .sum();
         let r_act = act_scale * qa_sum as f32;
 
-        let k_f32 = act_packed.shape()[1] as f32;
+        let k_f32 = k as f32;
 
         for col in 0..n {
             let w_row_start = col * k_packed;
@@ -391,6 +402,7 @@ pub fn gemm_packed_i8x4_fused(
             c[row * n + col] = val;
         }
     }
+    Ok(())
 }
 
 /// Quantize FP32 activations to PackedTensor<I8x4>
@@ -438,14 +450,14 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
     bias: Option<&[f32]>,
     activation: PreparedActivation,
     c: &mut [f32],
-) {
-    let m = act_packed.shape()[0];
-    let k = act_packed.shape()[1];
-    let n = weight_packed.shape()[0];
+) -> Result<(), BackendError> {
+    let (m, k, n) = validate_packed_gemm(act_packed, weight_packed, c.len())?;
+    if bias.is_some_and(|values| values.len() != n) {
+        return Err(BackendError::Dispatch(format!(
+            "packed GEMM bias must contain {n} elements"
+        )));
+    }
     let k_packed = k.div_ceil(T::ITEMS);
-
-    assert_eq!(weight_packed.shape()[1], k);
-    assert_eq!(c.len(), m * n);
 
     let act_slice = act_packed.as_packed();
 
@@ -549,6 +561,7 @@ pub fn gemm_packed_float_fused<T: PackedWord>(
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -571,10 +584,25 @@ mod tests {
         let b_packed = PackedTensor::<I8x4>::from_f32_per_channel(&b_data, &[4, 4]);
 
         let mut c = vec![0.0; 16];
-        gemm_packed_i8x4(&a_packed, &b_packed, &mut c);
+        gemm_packed_i8x4(&a_packed, &b_packed, &mut c).unwrap();
 
         // Execute without panic - exact value depends on quantization scheme
         assert_eq!(c.len(), 16);
+    }
+
+    #[test]
+    fn packed_gemm_rejects_malformed_shapes_and_outputs() {
+        let malformed =
+            PackedTensor::<I8x4>::from_raw(Vec::new(), Vec::new(), vec![1.0], vec![0.0]);
+        let valid = PackedTensor::<I8x4>::from_f32_per_channel(&[1.0; 8], &[1, 8]);
+        let mut output = [0.0f32; 1];
+        assert!(gemm_packed_i8x4(&malformed, &valid, &mut output).is_err());
+
+        let lhs = PackedTensor::<I8x4>::from_f32_per_channel(&[1.0; 4], &[1, 4]);
+        assert!(gemm_packed_i8x4(&lhs, &valid, &mut output).is_err());
+
+        let rhs = PackedTensor::<I8x4>::from_f32_per_channel(&[1.0; 4], &[1, 4]);
+        assert!(gemm_packed_i8x4(&lhs, &rhs, &mut []).is_err());
     }
 
     #[test]
@@ -588,7 +616,7 @@ mod tests {
         let a_packed = PackedTensor::<F4x8>::from_f32_per_channel(&a_data, &[2, 8]);
         let b_packed = PackedTensor::<F4x8>::from_f32_per_channel(&b_data, &[2, 8]);
         let mut c = vec![0.0f32; 4];
-        gemm_packed_f4x8(&a_packed, &b_packed, &mut c);
+        gemm_packed_f4x8(&a_packed, &b_packed, &mut c).unwrap();
         assert_eq!(c.len(), 4);
         for &v in &c {
             assert!(v.is_finite(), "Non-finite: {}", v);
@@ -602,7 +630,7 @@ mod tests {
         let a_packed = PackedTensor::<F4x8>::from_f32_per_channel(&a_data, &[2, 8]);
         let b_packed = PackedTensor::<F4x8>::from_f32_per_channel(&b_data, &[2, 8]);
         let mut c = vec![0.0f32; 4];
-        gemm_packed_f4x8(&a_packed, &b_packed, &mut c);
+        gemm_packed_f4x8(&a_packed, &b_packed, &mut c).unwrap();
         assert!(
             c.iter().all(|v| *v == 0.0),
             "All-zero GEMM should give zeros: {:?}",

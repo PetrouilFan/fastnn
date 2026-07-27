@@ -1,4 +1,4 @@
-use crate::ir::node::ComputeGraph;
+use crate::ir::ComputeGraph;
 use crate::FastnnError;
 
 pub mod backward;

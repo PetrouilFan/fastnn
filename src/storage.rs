@@ -1,4 +1,4 @@
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -38,7 +38,13 @@ impl AlignedVec {
             };
         }
         let layout = Layout::from_size_align(nbytes, CACHE_LINE_ALIGN).expect("AlignedVec layout");
+        // SAFETY: `layout` has non-zero size and valid 64-byte alignment. The
+        // returned allocation is owned exclusively by this `AlignedVec` and is
+        // deallocated with the identical layout in `Drop`.
         let ptr = unsafe { alloc_zeroed(layout) };
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
         AlignedVec { ptr, len: nbytes }
     }
 
@@ -76,6 +82,8 @@ impl Drop for AlignedVec {
             // Layout must match the one used in new_zeroed.
             let layout = Layout::from_size_align(self.len, CACHE_LINE_ALIGN)
                 .expect("AlignedVec dealloc layout");
+            // SAFETY: non-empty `AlignedVec` values own a live allocation made
+            // by `alloc_zeroed` with this exact size and alignment.
             unsafe { dealloc(self.ptr, layout) };
         }
     }
@@ -88,6 +96,8 @@ impl Deref for AlignedVec {
         if self.len == 0 {
             &[]
         } else {
+            // SAFETY: `self.ptr` is non-null, 64-byte aligned, initialized for
+            // `self.len` bytes, and remains alive for the returned borrow.
             unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
         }
     }
@@ -98,6 +108,8 @@ impl DerefMut for AlignedVec {
         if self.len == 0 {
             &mut []
         } else {
+            // SAFETY: `&mut self` guarantees exclusive access; `self.ptr` is
+            // non-null, aligned, initialized, and valid for `self.len` bytes.
             unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
         }
     }
@@ -134,49 +146,87 @@ pub enum DType {
 }
 
 impl DType {
-    pub fn size(&self) -> usize {
+    /// Canonical scalar stored by this legacy dtype label.
+    pub const fn scalar_type(self) -> crate::types::ScalarType {
+        use crate::types::ScalarType;
         match self {
-            DType::F32 | DType::I32 => 4,
-            DType::F64 | DType::I64 => 8,
-            DType::F16 | DType::BF16 => 2,
-            DType::Bool => 1,
-            DType::I4 => 1,
-            DType::I8Scaled => 1,
-            DType::F8 => 1,
-            DType::F8R => 1,
-            DType::F4 => 1,
-            DType::U4Scaled => 1,
-            DType::U8Scaled => 1,
+            DType::F32 => ScalarType::F32,
+            DType::F64 => ScalarType::F64,
+            DType::I32 => ScalarType::I32,
+            DType::I64 => ScalarType::I64,
+            DType::Bool => ScalarType::Bool,
+            DType::F16 => ScalarType::F16,
+            DType::BF16 => ScalarType::BF16,
+            DType::I4 => ScalarType::I4,
+            DType::I8Scaled => ScalarType::I8,
+            DType::F8 => ScalarType::Fp8E4M3,
+            DType::F8R => ScalarType::Fp8E5M2,
+            DType::F4 => ScalarType::Fp4E2M1,
+            DType::U4Scaled => ScalarType::U4,
+            DType::U8Scaled => ScalarType::U8,
         }
     }
 
-    pub fn packed_size(&self, numel: usize) -> usize {
+    /// Canonical physical encoding used by this legacy dtype label.
+    pub const fn storage_encoding(self) -> crate::types::StorageEncoding {
+        use crate::types::StorageEncoding;
         match self {
-            DType::F32 | DType::I32 => numel * 4,
-            DType::F64 | DType::I64 => numel * 8,
-            DType::F16 | DType::BF16 => numel * 2,
-            DType::Bool => numel,
-            DType::I4 => {
-                let words = numel.div_ceil(8);
-                words * 4
-            }
-            DType::I8Scaled | DType::F8 | DType::F8R => {
-                let words = numel.div_ceil(4);
-                words * 4
-            }
-            DType::F4 => {
-                let words = numel.div_ceil(8);
-                words * 4
-            }
-            DType::U4Scaled => {
-                let words = numel.div_ceil(8);
-                words * 4
-            }
-            DType::U8Scaled => {
-                let words = numel.div_ceil(4);
-                words * 4
-            }
+            DType::I4 | DType::F4 | DType::U4Scaled => StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            },
+            DType::I8Scaled | DType::F8 | DType::F8R | DType::U8Scaled => StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 4,
+            },
+            _ => StorageEncoding::Plain,
         }
+    }
+
+    /// Canonical logical/storage/transform contract represented by this runtime dtype.
+    pub fn value_representation(self) -> crate::types::ValueRepresentation {
+        use crate::types::{RepresentationTransform, ScalarType, ValueRepresentation};
+        let storage = self.scalar_type();
+        let transform = match self {
+            DType::I4 | DType::I8Scaled | DType::U4Scaled | DType::U8Scaled => {
+                RepresentationTransform::RuntimeAffineQuantization
+            }
+            DType::F4 | DType::F8 | DType::F8R => RepresentationTransform::RuntimeScaledAffine,
+            _ => RepresentationTransform::None,
+        };
+        ValueRepresentation {
+            logical: if matches!(transform, RepresentationTransform::None) {
+                storage
+            } else {
+                ScalarType::F32
+            },
+            storage,
+            encoding: self.storage_encoding(),
+            transform,
+        }
+    }
+
+    /// Logical width of one encoded value.
+    pub fn logical_bit_width(self) -> usize {
+        usize::from(self.scalar_type().bit_width())
+    }
+
+    /// Byte width for plain scalar storage. Packed representations return `None`.
+    pub fn scalar_byte_width(self) -> Option<usize> {
+        match self.storage_encoding() {
+            crate::types::StorageEncoding::Plain => self.scalar_type().plain_byte_width(),
+            crate::types::StorageEncoding::Packed { .. } => None,
+        }
+    }
+
+    /// Exact bytes required for `numel` values, including packed-word rounding.
+    pub fn storage_bytes(self, numel: usize) -> usize {
+        self.try_storage_bytes(numel)
+            .expect("dtype storage size overflow")
+    }
+
+    pub fn try_storage_bytes(self, numel: usize) -> crate::FastnnResult<usize> {
+        self.value_representation().storage_bytes(numel)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -502,4 +552,64 @@ pub fn allocator_stats() -> String {
         stats.total_freed(),
         stats.current_bytes(),
         stats.num_allocs())
+}
+
+#[cfg(test)]
+mod dtype_tests {
+    use super::{AlignedVec, DType, CACHE_LINE_ALIGN};
+    use crate::types::{RepresentationTransform, ScalarType, StorageEncoding};
+
+    #[test]
+    fn aligned_vec_is_zeroed_and_cache_line_aligned() {
+        let mut storage = AlignedVec::new_zeroed(65);
+        assert_eq!((storage.as_ptr() as usize) % CACHE_LINE_ALIGN, 0);
+        assert!(storage.iter().all(|byte| *byte == 0));
+        storage[64] = 7;
+        assert_eq!(storage[64], 7);
+    }
+
+    #[test]
+    fn separates_logical_width_from_scalar_storage_width() {
+        assert_eq!(DType::F32.logical_bit_width(), 32);
+        assert_eq!(DType::F32.scalar_byte_width(), Some(4));
+        assert_eq!(DType::U4Scaled.logical_bit_width(), 4);
+        assert_eq!(DType::U4Scaled.scalar_byte_width(), None);
+    }
+
+    #[test]
+    fn packed_storage_size_rounds_to_complete_words() {
+        assert_eq!(DType::U4Scaled.storage_bytes(1), 4);
+        assert_eq!(DType::U4Scaled.storage_bytes(8), 4);
+        assert_eq!(DType::U4Scaled.storage_bytes(9), 8);
+        assert_eq!(DType::U8Scaled.storage_bytes(5), 8);
+    }
+
+    #[test]
+    fn legacy_dtype_storage_contract_maps_to_canonical_types() {
+        assert_eq!(DType::F32.scalar_type(), ScalarType::F32);
+        assert_eq!(DType::F32.storage_encoding(), StorageEncoding::Plain);
+        assert_eq!(DType::U4Scaled.scalar_type(), ScalarType::U4);
+        assert_eq!(
+            DType::U4Scaled.storage_encoding(),
+            StorageEncoding::Packed {
+                word_bits: 32,
+                lanes: 8,
+            }
+        );
+        assert_eq!(
+            DType::U4Scaled.try_storage_bytes(9).unwrap(),
+            DType::U4Scaled
+                .storage_encoding()
+                .storage_bytes(DType::U4Scaled.scalar_type(), 9)
+                .unwrap()
+        );
+        assert!(matches!(
+            DType::U4Scaled.value_representation().transform,
+            RepresentationTransform::RuntimeAffineQuantization
+        ));
+        assert!(matches!(
+            DType::F4.value_representation().transform,
+            RepresentationTransform::RuntimeScaledAffine
+        ));
+    }
 }

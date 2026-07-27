@@ -1,5 +1,5 @@
 use crate::error::FastnnError;
-use crate::ir::node::*;
+use crate::ir::*;
 use std::collections::HashMap;
 
 pub enum OptimizerConfig {
@@ -89,10 +89,7 @@ pub fn inject_optimizer(
                 let m_id = graph.add_node(
                     Opcode::Input,
                     vec![],
-                    TensorType {
-                        shape: param_type.shape.clone(),
-                        dtype: param_type.dtype.clone(),
-                    },
+                    TensorType::new(param_type.shape.clone(), param_type.dtype()),
                 );
                 if let Some(node) = graph.get_node_mut(m_id) {
                     node.name = format!("optimizer/m_{}", param_name);
@@ -101,23 +98,14 @@ pub fn inject_optimizer(
                 let v_id = graph.add_node(
                     Opcode::Input,
                     vec![],
-                    TensorType {
-                        shape: param_type.shape.clone(),
-                        dtype: param_type.dtype.clone(),
-                    },
+                    TensorType::new(param_type.shape.clone(), param_type.dtype()),
                 );
                 if let Some(node) = graph.get_node_mut(v_id) {
                     node.name = format!("optimizer/v_{}", param_name);
                 }
 
-                let t_id = graph.add_node(
-                    Opcode::Input,
-                    vec![],
-                    TensorType {
-                        shape: vec![],
-                        dtype: IrDType::I64,
-                    },
-                );
+                let t_id =
+                    graph.add_node(Opcode::Input, vec![], TensorType::new(vec![], IrDType::I64));
                 if let Some(node) = graph.get_node_mut(t_id) {
                     node.name = format!("optimizer/t_{}", param_name);
                 }
@@ -146,10 +134,7 @@ pub fn inject_optimizer(
                 let m_id = graph.add_node(
                     Opcode::Input,
                     vec![],
-                    TensorType {
-                        shape: param_type.shape.clone(),
-                        dtype: param_type.dtype.clone(),
-                    },
+                    TensorType::new(param_type.shape.clone(), param_type.dtype()),
                 );
                 if let Some(node) = graph.get_node_mut(m_id) {
                     node.name = format!("optimizer/m_{}", param_name);
@@ -178,10 +163,7 @@ pub fn inject_optimizer(
                 let m_id = graph.add_node(
                     Opcode::Input,
                     vec![],
-                    TensorType {
-                        shape: param_type.shape.clone(),
-                        dtype: param_type.dtype.clone(),
-                    },
+                    TensorType::new(param_type.shape.clone(), param_type.dtype()),
                 );
                 if let Some(node) = graph.get_node_mut(m_id) {
                     node.name = format!("optimizer/m_{}", param_name);
@@ -206,10 +188,7 @@ pub fn inject_optimizer(
                 let v_id = graph.add_node(
                     Opcode::Input,
                     vec![],
-                    TensorType {
-                        shape: param_type.shape.clone(),
-                        dtype: param_type.dtype.clone(),
-                    },
+                    TensorType::new(param_type.shape.clone(), param_type.dtype()),
                 );
                 if let Some(node) = graph.get_node_mut(v_id) {
                     node.name = format!("optimizer/v_{}", param_name);
@@ -232,6 +211,7 @@ pub fn inject_optimizer(
         }
     }
 
+    graph.set_kind(GraphKind::OptimizerUpdate);
     Ok(OptimizerInjection {
         updated_param_nodes,
         state_input_nodes,

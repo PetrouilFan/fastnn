@@ -14,8 +14,97 @@
 
 use crate::compiler::passes::calibration::{CalibrationData, CalibrationStats};
 use crate::error::FastnnError;
-use crate::ir::node::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, TensorType};
 use std::collections::HashMap;
+
+/// Insert one reusable per-token I8 activation node for grouped W4A8 MatMuls.
+pub fn quantize_matmul_activations_per_token(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
+    let mut targets = Vec::new();
+    for node in &graph.nodes {
+        if !matches!(node.opcode, Opcode::MatMul) {
+            continue;
+        }
+        let Some((&activation_id, &weight_id)) = node.inputs.first().zip(node.inputs.get(1)) else {
+            continue;
+        };
+        let grouped_i4 = graph.get_node(weight_id).is_some_and(|weight| {
+            weight
+                .output_type
+                .value_representation()
+                .is_ok_and(|representation| {
+                    representation.storage == crate::types::ScalarType::I4
+                        && matches!(
+                            representation.transform,
+                            crate::types::RepresentationTransform::AffineDequantization {
+                                granularity: crate::types::QuantizationGranularity::PerGroup {
+                                    axis: 0,
+                                    group_size: 32 | 64 | 128,
+                                },
+                                ..
+                            }
+                        )
+                })
+        });
+        if grouped_i4 {
+            targets.push((node.id, activation_id));
+        }
+    }
+
+    let mut quantized_by_input = HashMap::<NodeId, NodeId>::new();
+    for (matmul_id, activation_id) in targets {
+        let quantized_id = if let Some(&existing) = quantized_by_input.get(&activation_id) {
+            existing
+        } else {
+            let activation = graph.get_node(activation_id).ok_or_else(|| {
+                FastnnError::compilation("dynamic W4A8 activation input is missing")
+            })?;
+            let dimensions: Vec<usize> = activation
+                .output_type
+                .shape
+                .iter()
+                .map(|dimension| dimension.evaluate().map(|value| value as usize))
+                .collect::<Option<_>>()
+                .ok_or_else(|| {
+                    FastnnError::compilation(
+                        "dynamic W4A8 currently requires static activation dimensions",
+                    )
+                })?;
+            if dimensions.len() != 2 {
+                return Err(FastnnError::compilation(format!(
+                    "dynamic W4A8 currently requires rank-2 activations, got rank {}",
+                    dimensions.len()
+                )));
+            }
+            let (&k, token_dimensions) = dimensions.split_last().ok_or_else(|| {
+                FastnnError::compilation("dynamic W4A8 activation shape must not be empty")
+            })?;
+            let m = token_dimensions.iter().product::<usize>().max(1);
+            let representation = IrDType::I8.value_representation()?;
+            let mut layout = IrDType::I8.storage_layout()?;
+            layout.prefix_bytes = 8usize
+                .checked_add(m.checked_mul(4).ok_or_else(|| {
+                    FastnnError::compilation("dynamic W4A8 activation metadata size overflows")
+                })?)
+                .ok_or_else(|| {
+                    FastnnError::compilation("dynamic W4A8 activation metadata size overflows")
+                })?;
+            let quant_type = TensorType::from_parts(
+                activation.output_type.shape.clone(),
+                representation,
+                layout,
+            );
+            let id = graph.add_node(Opcode::QuantizeActivations, vec![activation_id], quant_type);
+            let node = graph.get_node_mut(id).unwrap();
+            node.attrs.insert("mode".into(), "per_token".into());
+            node.attrs.insert("num_tokens".into(), m.to_string());
+            node.attrs.insert("token_size".into(), k.to_string());
+            quantized_by_input.insert(activation_id, id);
+            id
+        };
+        graph.get_node_mut(matmul_id).unwrap().inputs[0] = quantized_id;
+    }
+    Ok(())
+}
 
 /// Insert `QuantizeActivations`/`DequantizeActivations` around every `MatMul`
 /// and `Conv2d` node whose first input (the activation) is not already quantized.
@@ -355,7 +444,7 @@ mod tests {
     use crate::backend::Backend;
     use crate::compiler::passes::calibration::CalibrationData;
     use crate::compiler::passes::{memory_planning, shape_inference};
-    use crate::ir::node::DimExpr;
+    use crate::ir::DimExpr;
 
     /// Test that activation quantization round-trips with reasonable accuracy.
     #[test]
@@ -388,7 +477,7 @@ mod tests {
             .unwrap();
 
         let input_a = vec![1.0f32, 2.0, 3.0, 4.0];
-        let input_w = vec![
+        let input_w: Vec<f32> = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let input_bytes_a: Vec<u8> = bytemuck::cast_slice(&input_a).to_vec();
@@ -514,7 +603,7 @@ mod tests {
         let const_data: Vec<u8> = vec![1u8; 16]; // 4 f32 values
         let const_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
         let const_id = graph.add_node(
-            Opcode::Constant(crate::ir::node::TensorValue::Data {
+            Opcode::Constant(crate::ir::TensorValue::Data {
                 bytes: const_data,
                 tensor_type: const_tt.clone(),
             }),

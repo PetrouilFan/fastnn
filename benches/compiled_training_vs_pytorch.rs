@@ -10,7 +10,7 @@ use fastnn::backend::cpu::CpuBackend;
 use fastnn::backend::executor::GraphExecutor;
 use fastnn::compiler::passes::training::{OptimizerConfig, TrainConfig};
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::IrDType;
+use fastnn::ir::IrDType;
 use std::hint::black_box;
 use std::time::Instant;
 

@@ -8,7 +8,7 @@ use fastnn::backend::executor::GraphExecutor;
 use fastnn::backend::Instruction;
 use fastnn::compiler::passes::operator_fusion::fuse_operators;
 use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 
 /// Check if a graph contains a node with the given opcode.
 fn has_opcode(graph: &ComputeGraph, op: Opcode) -> bool {

@@ -5,7 +5,7 @@
 //! per-tensor or per-channel quantization scales and zero-points.
 
 use crate::error::FastnnError;
-use crate::ir::node::NodeId;
+use crate::ir::NodeId;
 use std::collections::HashMap;
 
 /// Calibration statistics collected per tensor.

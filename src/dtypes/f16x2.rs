@@ -12,6 +12,7 @@ unsafe impl bytemuck::Pod for F16x2 {}
 unsafe impl bytemuck::Zeroable for F16x2 {}
 
 impl PackedWord for F16x2 {
+    const SCALAR_TYPE: crate::types::ScalarType = crate::types::ScalarType::F16;
     const ITEMS: usize = 2;
     const BIT_WIDTH: usize = 16;
     const IS_FLOAT: bool = true;

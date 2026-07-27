@@ -1,5 +1,5 @@
 use super::FusionPass;
-use crate::ir::node::{ComputeGraph, NodeId, Opcode, TensorType};
+use crate::ir::{ComputeGraph, NodeId, Opcode, TensorType};
 use crate::FastnnError;
 use std::collections::HashMap;
 

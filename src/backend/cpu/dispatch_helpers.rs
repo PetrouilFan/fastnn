@@ -10,6 +10,43 @@
 
 use super::microkernels;
 
+#[inline]
+pub(super) fn batch_norm_inference_f32(
+    data: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    running_mean: &[f32],
+    running_var: &[f32],
+    output: &mut [f32],
+    eps: f32,
+) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if microkernels::has_avx2() {
+        // SAFETY: AVX2 support was checked, dispatch validated complete non-overlapping
+        // typed slices, and this wrapper receives matching input/output contracts.
+        return unsafe {
+            microkernels::batch_norm_inference_f32_avx2(
+                data,
+                weight,
+                bias,
+                running_mean,
+                running_var,
+                output,
+                eps,
+            )
+        };
+    }
+    microkernels::batch_norm_inference_f32(
+        data,
+        weight,
+        bias,
+        running_mean,
+        running_var,
+        output,
+        eps,
+    );
+}
+
 macro_rules! impl_simd_unary_wrapper {
     ($name:ident, $avx2:path, $scalar:path) => {
         #[inline]
@@ -18,7 +55,8 @@ macro_rules! impl_simd_unary_wrapper {
             if microkernels::simd_avx2_available() {
                 return unsafe { $avx2(input, output) };
             }
-            let len = output.len().min(input.len());
+            debug_assert_eq!(input.len(), output.len());
+            let len = output.len();
             #[cfg(feature = "parallel")]
             if len >= 4096 {
                 use rayon::prelude::*;
@@ -48,7 +86,11 @@ macro_rules! impl_simd_binary_wrapper {
             {
                 return unsafe { $avx2(a, b, output) };
             }
-            let len = output.len().min(a.len().max(b.len()));
+            debug_assert!(!a.is_empty() && !b.is_empty());
+            debug_assert!(a.len() == output.len() || output.len().is_multiple_of(a.len()));
+            debug_assert!(b.len() == output.len() || output.len().is_multiple_of(b.len()));
+            #[cfg(feature = "parallel")]
+            let len = output.len();
             #[cfg(feature = "parallel")]
             if len >= 4096 {
                 use rayon::prelude::*;
@@ -65,7 +107,9 @@ macro_rules! impl_simd_binary_wrapper {
                 }
             }
             #[cfg(not(feature = "parallel"))]
-            $scalar(a, b, output);
+            for i in 0..output.len() {
+                output[i] = $op(a[i % a.len()], b[i % b.len()]);
+            }
         }
     };
 }
@@ -78,7 +122,9 @@ macro_rules! impl_simd_scalar_wrapper {
             if microkernels::simd_avx2_available() {
                 return unsafe { $avx2(data, s, output) };
             }
-            let len = output.len().min(data.len());
+            debug_assert_eq!(data.len(), output.len());
+            #[cfg(feature = "parallel")]
+            let len = output.len();
             #[cfg(feature = "parallel")]
             if len >= 4096 {
                 use rayon::prelude::*;
@@ -91,7 +137,9 @@ macro_rules! impl_simd_scalar_wrapper {
                 }
             }
             #[cfg(not(feature = "parallel"))]
-            $scalar(data, s, output);
+            for i in 0..output.len() {
+                output[i] = $op(data[i], s);
+            }
         }
     };
 }
@@ -192,8 +240,8 @@ pub(super) fn leaky_relu_f32(input: &[f32], output: &mut [f32], slope: f32) {
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::leaky_relu_f32_avx2(input, output, slope) };
     }
-    let len = output.len().min(input.len());
-    for i in 0..len {
+    debug_assert_eq!(input.len(), output.len());
+    for i in 0..output.len() {
         output[i] = microkernels::leaky_relu_f32_scalar(input[i], slope);
     }
 }
@@ -204,8 +252,8 @@ pub(super) fn clamp_f32(input: &[f32], output: &mut [f32], min_val: f32, max_val
     if microkernels::simd_avx2_available() {
         return unsafe { microkernels::clamp_f32_avx2(input, output, min_val, max_val) };
     }
-    let len = output.len().min(input.len());
-    for i in 0..len {
+    debug_assert_eq!(input.len(), output.len());
+    for i in 0..output.len() {
         output[i] = microkernels::clamp_f32_scalar(input[i], min_val, max_val);
     }
 }
@@ -348,6 +396,7 @@ pub(super) fn biasadd_f32(data: &[f32], bias: &[f32], output: &mut [f32], channe
 
 #[inline]
 pub(super) fn norm_layernorm_f32(input: &[f32], output: &mut [f32], row_size: usize, eps: f32) {
+    #[cfg(feature = "parallel")]
     let num_rows = input.len() / row_size;
 
     #[cfg(feature = "parallel")]
@@ -396,6 +445,7 @@ pub(super) fn rms_norm_f32(
     row_size: usize,
     eps: f32,
 ) {
+    #[cfg(feature = "parallel")]
     let num_rows = input.len() / row_size;
 
     #[cfg(feature = "parallel")]
@@ -489,40 +539,27 @@ pub(super) fn softmax_f32(
 pub(super) fn argmax_f32(
     input: &[f32],
     output: &mut [u64],
-    axis: usize,
+    _axis: usize,
     dim_size: usize,
     inner: usize,
 ) {
-    if axis == usize::MAX || dim_size == 0 || dim_size > input.len() {
-        let max_idx = input
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u64)
-            .unwrap_or(0);
-        for v in output.iter_mut() {
-            *v = max_idx;
-        }
-    } else {
-        let outer = input.len() / (dim_size * inner);
-        for o in 0..outer {
-            for i in 0..inner {
-                let base = o * dim_size * inner + i;
-                let mut best_flat = base as u64;
-                let mut best_val = input[base];
-                for k in 1..dim_size {
-                    let flat_idx = base + k * inner;
-                    let val = input[flat_idx];
-                    if val > best_val {
-                        best_val = val;
-                        best_flat = flat_idx as u64;
-                    }
-                }
-                let out_idx = o * inner + i;
-                if out_idx < output.len() {
-                    output[out_idx] = best_flat;
+    debug_assert!(dim_size > 0 && inner > 0);
+    debug_assert!(input.len().is_multiple_of(dim_size * inner));
+    let outer = input.len() / (dim_size * inner);
+    debug_assert_eq!(output.len(), outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * dim_size * inner + i;
+            let mut best_index = 0usize;
+            let mut best_val = input[base];
+            for k in 1..dim_size {
+                let val = input[base + k * inner];
+                if val.total_cmp(&best_val).is_gt() {
+                    best_val = val;
+                    best_index = k;
                 }
             }
+            output[o * inner + i] = best_index as u64;
         }
     }
 }

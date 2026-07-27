@@ -1,5 +1,5 @@
-use crate::backend::{BufferSlice, ExecutablePlan, Instruction};
-use crate::ir::node::NodeId;
+use crate::backend::{BackendError, BufferSlice, ExecutablePlan, Instruction};
+use crate::ir::NodeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -12,6 +12,28 @@ pub struct PreparedExecutablePlan {
     /// consulted by any runtime dispatch path yet). Populated via
     /// [`PreparedExecutablePlan::register_constant_arena`].
     constant_arena: Option<PreparedConstantArena>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedPlanResourceLimits {
+    pub max_arena_bytes: usize,
+    pub max_scratch_bytes: usize,
+    pub max_instructions: usize,
+    pub max_constant_entries: usize,
+    pub max_constant_bytes: usize,
+}
+
+impl Default for PreparedPlanResourceLimits {
+    fn default() -> Self {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        Self {
+            max_arena_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
+            max_scratch_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_instructions: 1_000_000,
+            max_constant_entries: 1_000_000,
+            max_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -38,7 +60,7 @@ pub enum PreparedConvKernelKind {
     FuturePackedU4,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedConv2d {
     pub instruction_index: usize,
     pub node_id: Option<NodeId>,
@@ -72,7 +94,7 @@ pub struct PreparedConv2d {
     pub scratch_len: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedMatMul {
     pub instruction_index: usize,
     pub node_id: Option<NodeId>,
@@ -306,13 +328,26 @@ impl PreparedConstantArena {
     /// is already registered the existing id is returned and `data` is
     /// dropped — duplicate names never duplicate storage.
     pub fn insert(&mut self, name: impl Into<String>, data: Vec<f32>) -> PackedWeightId {
+        self.try_insert(name, data)
+            .expect("prepared fp32 constant byte size overflow")
+    }
+
+    pub fn try_insert(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<f32>,
+    ) -> Result<PackedWeightId, BackendError> {
         let name = name.into();
         if let Some(id) = self.name_to_id.get(&name) {
-            return *id;
+            return Ok(*id);
         }
         let index = self.entries.len();
         let numel = data.len();
-        let byte_len = numel * PackedWeightKind::Fp32.element_bytes();
+        let byte_len = numel
+            .checked_mul(PackedWeightKind::Fp32.element_bytes())
+            .ok_or_else(|| {
+                BackendError::Dispatch("prepared fp32 constant byte size overflows".into())
+            })?;
         let id = PackedWeightId::new(index);
         self.entries.push(PreparedConstantEntry {
             id,
@@ -323,7 +358,7 @@ impl PreparedConstantArena {
             store: PackedWeightStore::unpacked(data),
         });
         self.name_to_id.insert(name, id);
-        id
+        Ok(id)
     }
 
     /// Register a named constant with an explicit storage variant.
@@ -511,14 +546,14 @@ pub type StaticWeightMap = Vec<StaticWeightBinding>;
 /// Snapshot of one [`Instruction::WriteConst`] in the plan. Used as an
 /// intermediate representation while we match consumer input slots
 /// against static producers.
-#[derive(Clone, Debug)]
-struct WriteConstEntry {
+#[derive(Clone, Copy, Debug)]
+struct WriteConstEntry<'a> {
     /// Plan-wide index of the WriteConst instruction.
     writer_idx: usize,
     /// Destination slot the WriteConst materialises.
     dst: BufferSlice,
     /// Raw bytes the WriteConst deposits into the arena.
-    data: Vec<u8>,
+    data: &'a [u8],
 }
 
 /// Map a kernel name suffix to the corresponding [`PreparedActivation`].
@@ -605,12 +640,15 @@ pub fn try_prepare_conv2d(
         return None;
     }
 
-    // Conv2d params: [stride, padding, dilation, groups, c, h, w, kh, kw]
+    // Conv2d params begin with the stable lowering contract
+    // [stride, padding, dilation, groups, c, h, w, kh, kw]. Runtime shape
+    // tightening appends [n, f, h_out, w_out, spatial_size, col_w].
     let slice = params.as_slice();
-    if slice.len() != 9 {
+    if !matches!(slice.len(), 9 | 15) {
         return None;
     }
-    let [stride, padding, dilation, groups, c, h, w, kh, kw]: [usize; 9] = slice.try_into().ok()?;
+    let [stride, padding, dilation, groups, c, h, w, kh, kw]: [usize; 9] =
+        slice[..9].try_into().ok()?;
 
     if input_slices.len() < 2 {
         return None;
@@ -800,7 +838,15 @@ fn detect_weight_kind(
 pub fn detect_static_weights(
     plan: &ExecutablePlan,
     arena: &mut PreparedConstantArena,
-) -> StaticWeightMap {
+) -> Result<StaticWeightMap, BackendError> {
+    detect_static_weights_with_limits(plan, arena, &PreparedPlanResourceLimits::default())
+}
+
+fn detect_static_weights_with_limits(
+    plan: &ExecutablePlan,
+    arena: &mut PreparedConstantArena,
+    limits: &PreparedPlanResourceLimits,
+) -> Result<StaticWeightMap, BackendError> {
     // First pass: collect every WriteConst in the plan.
     let mut const_slots: Vec<WriteConstEntry> = Vec::new();
     for (writer_idx, inst) in plan.instructions.iter().enumerate() {
@@ -809,7 +855,7 @@ pub fn detect_static_weights(
                 const_slots.push(WriteConstEntry {
                     writer_idx,
                     dst: *dst,
-                    data: data.clone(),
+                    data,
                 });
             }
         }
@@ -857,7 +903,8 @@ pub fn detect_static_weights(
                 weight_slice,
                 role,
                 weight_kind,
-            ) {
+                limits,
+            )? {
                 bindings.push(binding);
             }
         }
@@ -875,13 +922,14 @@ pub fn detect_static_weights(
                 bias_slice,
                 role,
                 PackedWeightKind::Fp32,
-            ) {
+                limits,
+            )? {
                 bindings.push(binding);
             }
         }
     }
 
-    bindings
+    Ok(bindings)
 }
 
 /// Look up a `WriteConst` covering `slot`, register it in `arena` under
@@ -889,37 +937,81 @@ pub fn detect_static_weights(
 /// [`StaticWeightBinding`]. Returns `None` when no `WriteConst` covers
 /// the slot — the consumer is treated as dynamic in that case.
 fn bind_consumer_input(
-    const_slots: &[WriteConstEntry],
+    const_slots: &[WriteConstEntry<'_>],
     arena: &mut PreparedConstantArena,
     instruction_index: usize,
     input_index: usize,
     slot: &BufferSlice,
     role: &str,
     kind: PackedWeightKind,
-) -> Option<StaticWeightBinding> {
-    let producer = find_covering_write_const(const_slots, slot)?;
-    let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
-    let weight_id = if kind == PackedWeightKind::Fp32 {
-        let payload = bytes_to_f32_vec(&producer.data);
-        arena.insert(&name, payload)
-    } else {
-        arena.insert_raw(&name, producer.data.clone(), kind)
+    limits: &PreparedPlanResourceLimits,
+) -> Result<Option<StaticWeightBinding>, BackendError> {
+    let Some(producer) = find_covering_write_const(const_slots, slot) else {
+        return Ok(None);
     };
-    Some(StaticWeightBinding {
+    let relative_start = slot
+        .offset
+        .checked_sub(producer.dst.offset)
+        .ok_or_else(|| {
+            BackendError::Dispatch("prepared constant relative offset underflows".into())
+        })?;
+    let relative_end = relative_start.checked_add(slot.size).ok_or_else(|| {
+        BackendError::Dispatch("prepared constant relative range overflows".into())
+    })?;
+    let payload_bytes = producer
+        .data
+        .get(relative_start..relative_end)
+        .ok_or_else(|| {
+            BackendError::Dispatch("prepared constant source does not cover consumer slice".into())
+        })?;
+    let name = format!("{}_{}_i{}", role, producer.writer_idx, input_index);
+    if !arena.name_to_id.contains_key(&name) {
+        let next_entries = arena.entries.len().checked_add(1).ok_or_else(|| {
+            BackendError::Dispatch("prepared constant entry count overflows".into())
+        })?;
+        if next_entries > limits.max_constant_entries {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena would have {next_entries} entries, exceeding limit {}",
+                limits.max_constant_entries
+            )));
+        }
+        let payload_bytes = payload_bytes.len();
+        let current_bytes = arena.entries.iter().try_fold(0usize, |total, entry| {
+            total.checked_add(entry.byte_len).ok_or_else(|| {
+                BackendError::Dispatch("prepared constant arena size overflows".into())
+            })
+        })?;
+        let next_bytes = current_bytes.checked_add(payload_bytes).ok_or_else(|| {
+            BackendError::Dispatch("prepared constant arena size overflows".into())
+        })?;
+        if next_bytes > limits.max_constant_bytes {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena would use {next_bytes} bytes, exceeding limit {}",
+                limits.max_constant_bytes
+            )));
+        }
+    }
+    let weight_id = if kind == PackedWeightKind::Fp32 {
+        let payload = bytes_to_f32_vec(payload_bytes)?;
+        arena.try_insert(&name, payload)?
+    } else {
+        arena.insert_raw(&name, payload_bytes.to_vec(), kind)
+    };
+    Ok(Some(StaticWeightBinding {
         instruction_index,
         input_index,
         weight_id,
         kind,
-    })
+    }))
 }
 
 /// Return the first `WriteConst` whose destination either equals
 /// `slot` (byte-exact) or strictly covers it. Order of producers
 /// follows plan order, so a tie-break favours the earliest writer.
 fn find_covering_write_const<'a>(
-    const_slots: &'a [WriteConstEntry],
+    const_slots: &'a [WriteConstEntry<'a>],
     slot: &BufferSlice,
-) -> Option<&'a WriteConstEntry> {
+) -> Option<&'a WriteConstEntry<'a>> {
     const_slots
         .iter()
         .find(|entry| covers_slice(&entry.dst, entry.data.len(), slot))
@@ -933,18 +1025,22 @@ fn covers_slice(producer: &BufferSlice, producer_bytes: usize, slot: &BufferSlic
     producer.offset <= slot.offset && producer_end >= slot_end && producer_bytes > 0
 }
 
-/// Interpret `bytes` as a little-endian `f32` payload. Trailing bytes
-/// that do not form a complete `f32` are dropped — `WriteConst` always
-/// carries whole-element payloads in practice.
-fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
-    bytes
+/// Interpret an exact little-endian `f32` payload.
+fn bytes_to_f32_vec(bytes: &[u8]) -> Result<Vec<f32>, BackendError> {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return Err(BackendError::Dispatch(format!(
+            "prepared fp32 constant payload has {} trailing byte(s)",
+            bytes.len() % std::mem::size_of::<f32>()
+        )));
+    }
+    Ok(bytes
         .chunks_exact(4)
         .map(|chunk| {
             // chunks_exact guarantees exactly 4 bytes per chunk.
             let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
             f32::from_le_bytes(arr)
         })
-        .collect()
+        .collect())
 }
 
 /// Apply a slice of [`StaticWeightBinding`]s to a prepared instruction,
@@ -1008,7 +1104,64 @@ pub fn validate_prepared_against_plan(
     prepared: &PreparedExecutablePlan,
     plan: &ExecutablePlan,
 ) -> Result<(), crate::backend::BackendError> {
+    validate_prepared_against_plan_with_limits(
+        prepared,
+        plan,
+        &PreparedPlanResourceLimits::default(),
+    )
+}
+
+pub fn validate_prepared_against_plan_with_limits(
+    prepared: &PreparedExecutablePlan,
+    plan: &ExecutablePlan,
+    limits: &PreparedPlanResourceLimits,
+) -> Result<(), crate::backend::BackendError> {
     use crate::backend::BackendError;
+    if prepared.arena_size > limits.max_arena_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan arena requests {} bytes, exceeding limit {}",
+            prepared.arena_size, limits.max_arena_bytes
+        )));
+    }
+    if prepared.scratch_size > limits.max_scratch_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan scratch requests {} bytes, exceeding limit {}",
+            prepared.scratch_size, limits.max_scratch_bytes
+        )));
+    }
+    if prepared.instructions.len() > limits.max_instructions {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan has {} instructions, exceeding limit {}",
+            prepared.instructions.len(),
+            limits.max_instructions
+        )));
+    }
+    if let Some(arena) = prepared.constant_arena.as_ref() {
+        if arena.entries.len() > limits.max_constant_entries {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena has {} entries, exceeding limit {}",
+                arena.entries.len(),
+                limits.max_constant_entries
+            )));
+        }
+        let total_bytes = arena.entries.iter().try_fold(0usize, |total, entry| {
+            total.checked_add(entry.byte_len).ok_or_else(|| {
+                BackendError::Dispatch("prepared constant arena size overflows".into())
+            })
+        })?;
+        if total_bytes > limits.max_constant_bytes {
+            return Err(BackendError::Dispatch(format!(
+                "prepared constant arena has {total_bytes} bytes, exceeding limit {}",
+                limits.max_constant_bytes
+            )));
+        }
+    }
+    if prepared.arena_size < plan.arena_size {
+        return Err(BackendError::Dispatch(format!(
+            "prepared fallback: prepared arena size {} is smaller than plan arena size {}",
+            prepared.arena_size, plan.arena_size
+        )));
+    }
     let order = prepared.original_instruction_order();
     if order.len() != plan.instructions.len() {
         return Err(BackendError::Dispatch(format!(
@@ -1023,6 +1176,42 @@ pub fn validate_prepared_against_plan(
                 "prepared fallback: order mismatch at slot {}: prepared says {}, expected {}",
                 i, idx, i
             )));
+        }
+        match &prepared.instructions[i] {
+            PreparedInstruction::Generic { .. } => {}
+            PreparedInstruction::Conv2d(actual) => {
+                let Some(PreparedInstruction::Conv2d(mut expected)) =
+                    try_prepare_conv2d(&plan.instructions[i], i)
+                else {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: conv metadata at slot {i} does not match the source instruction"
+                    )));
+                };
+                expected.packed_weight = actual.packed_weight;
+                expected.packed_bias = actual.packed_bias;
+                expected.transposed_weight = actual.transposed_weight;
+                if actual != &expected {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: conv payload mismatch at slot {i}"
+                    )));
+                }
+            }
+            PreparedInstruction::MatMul(actual) => {
+                let Some(PreparedInstruction::MatMul(mut expected)) =
+                    try_prepare_matmul(&plan.instructions[i], i)
+                else {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: matmul metadata at slot {i} does not match the source instruction"
+                    )));
+                };
+                expected.packed_weight = actual.packed_weight;
+                expected.packed_bias = actual.packed_bias;
+                if actual != &expected {
+                    return Err(BackendError::Dispatch(format!(
+                        "prepared fallback: matmul payload mismatch at slot {i}"
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -1042,9 +1231,32 @@ pub fn validate_prepared_against_plan(
 /// arena is created internally and attached via
 /// [`PreparedExecutablePlan::register_constant_arena`]; both the arena
 /// and the bindings are metadata-only.
-pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan {
+pub fn prepare_executable_plan(
+    plan: &ExecutablePlan,
+) -> Result<PreparedExecutablePlan, BackendError> {
+    prepare_executable_plan_with_limits(plan, &PreparedPlanResourceLimits::default())
+}
+
+pub fn prepare_executable_plan_with_limits(
+    plan: &ExecutablePlan,
+    limits: &PreparedPlanResourceLimits,
+) -> Result<PreparedExecutablePlan, BackendError> {
+    plan.validate()?;
+    if plan.instructions.len() > limits.max_instructions {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan would have {} instructions, exceeding limit {}",
+            plan.instructions.len(),
+            limits.max_instructions
+        )));
+    }
+    if plan.arena_size > limits.max_arena_bytes {
+        return Err(BackendError::Dispatch(format!(
+            "prepared plan arena would use {} bytes, exceeding limit {}",
+            plan.arena_size, limits.max_arena_bytes
+        )));
+    }
     let mut arena = PreparedConstantArena::new();
-    let bindings = detect_static_weights(plan, &mut arena);
+    let bindings = detect_static_weights_with_limits(plan, &mut arena, limits)?;
 
     // Bucket bindings by consumer instruction index so the
     // per-instruction pass below can locate its bindings in O(1).
@@ -1073,7 +1285,7 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         })
         .collect();
 
-    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions);
+    materialize_transposed_fp32_conv_weights(&mut arena, &mut instructions, limits)?;
 
     let mut prepared = PreparedExecutablePlan {
         instructions,
@@ -1082,64 +1294,169 @@ pub fn prepare_executable_plan(plan: &ExecutablePlan) -> PreparedExecutablePlan 
         constant_arena: None,
     };
     prepared.register_constant_arena(arena);
-    prepared
+    validate_prepared_against_plan_with_limits(&prepared, plan, limits)?;
+    Ok(prepared)
 }
 
-fn should_materialize_transposed_fp32_conv(conv: &PreparedConv2d) -> bool {
+fn prepared_conv_contraction(conv: &PreparedConv2d) -> Result<usize, BackendError> {
+    let groups = conv.groups.max(1);
+    let channels_per_group = conv.c.checked_div(groups).ok_or_else(|| {
+        BackendError::Dispatch(format!(
+            "prepared Conv instruction {} has invalid group geometry",
+            conv.instruction_index
+        ))
+    })?;
+    channels_per_group
+        .checked_mul(conv.kh)
+        .and_then(|value| value.checked_mul(conv.kw))
+        .ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "prepared Conv instruction {} contraction size overflows",
+                conv.instruction_index
+            ))
+        })
+}
+
+fn should_materialize_transposed_fp32_conv(conv: &PreparedConv2d) -> Result<bool, BackendError> {
     let m = conv.f;
-    let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
-    conv.packed_weight.is_some()
+    let k = prepared_conv_contraction(conv)?;
+    Ok(conv.packed_weight.is_some()
         && conv.groups == 1
         && conv.dilation == 1
         && conv.kh == 3
         && conv.kw == 3
         && m == 64
         && k == 576
-        && matches!(conv.activation, PreparedActivation::Silu)
+        && matches!(conv.activation, PreparedActivation::Silu))
 }
 
-fn transpose_row_major_mk_to_km(data: &[f32], m: usize, k: usize) -> Vec<f32> {
-    let mut out = vec![0.0; data.len()];
-    for i in 0..m {
-        for j in 0..k {
-            out[j * m + i] = data[i * k + j];
+fn transpose_row_major_mk_to_km(
+    data: &[f32],
+    m: usize,
+    k: usize,
+) -> Result<Vec<f32>, BackendError> {
+    let expected_len = m.checked_mul(k).ok_or_else(|| {
+        BackendError::Dispatch("prepared Conv transpose element count overflows".into())
+    })?;
+    if data.len() != expected_len {
+        return Err(BackendError::Dispatch(format!(
+            "prepared Conv transpose source has {} values, expected {expected_len}",
+            data.len()
+        )));
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(expected_len).map_err(|error| {
+        BackendError::Dispatch(format!(
+            "prepared Conv transpose allocation of {expected_len} values failed: {error}"
+        ))
+    })?;
+    output.resize(expected_len, 0.0);
+    for row in 0..m {
+        let source_row = row.checked_mul(k).ok_or_else(|| {
+            BackendError::Dispatch("prepared Conv transpose source index overflows".into())
+        })?;
+        for column in 0..k {
+            let source_index = source_row.checked_add(column).ok_or_else(|| {
+                BackendError::Dispatch("prepared Conv transpose source index overflows".into())
+            })?;
+            let destination_index = column
+                .checked_mul(m)
+                .and_then(|value| value.checked_add(row))
+                .ok_or_else(|| {
+                    BackendError::Dispatch(
+                        "prepared Conv transpose destination index overflows".into(),
+                    )
+                })?;
+            output[destination_index] = data[source_index];
         }
     }
-    out
+    Ok(output)
 }
 
 fn materialize_transposed_fp32_conv_weights(
     arena: &mut PreparedConstantArena,
     instructions: &mut [PreparedInstruction],
-) {
-    let candidates: Vec<(usize, PackedWeightId, usize, usize, usize)> = instructions
-        .iter()
-        .enumerate()
-        .filter_map(|(prepared_index, inst)| match inst {
-            PreparedInstruction::Conv2d(conv) if should_materialize_transposed_fp32_conv(conv) => {
-                let id = conv.packed_weight?;
-                let m = conv.f;
-                let k = (conv.c / conv.groups.max(1)) * conv.kh * conv.kw;
-                Some((prepared_index, id, m, k, conv.instruction_index))
-            }
-            _ => None,
-        })
-        .collect();
-
-    for (prepared_index, id, m, k, instruction_index) in candidates {
-        let Some(src) = arena.get(id) else {
+    limits: &PreparedPlanResourceLimits,
+) -> Result<(), BackendError> {
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(instructions.len())
+        .map_err(|error| {
+            BackendError::Dispatch(format!(
+                "prepared Conv candidate allocation failed: {error}"
+            ))
+        })?;
+    for (prepared_index, instruction) in instructions.iter().enumerate() {
+        let PreparedInstruction::Conv2d(conv) = instruction else {
             continue;
         };
-        if src.len() != m * k {
+        if !should_materialize_transposed_fp32_conv(conv)? {
             continue;
         }
-        let transposed = transpose_row_major_mk_to_km(src, m, k);
+        let Some(id) = conv.packed_weight else {
+            continue;
+        };
+        candidates.push((
+            prepared_index,
+            id,
+            conv.f,
+            prepared_conv_contraction(conv)?,
+            conv.instruction_index,
+        ));
+    }
+
+    for (prepared_index, id, m, k, instruction_index) in candidates {
+        let Some(source) = arena.get(id) else {
+            continue;
+        };
+        let expected_len = m.checked_mul(k).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "prepared Conv instruction {instruction_index} payload size overflows"
+            ))
+        })?;
+        if source.len() != expected_len {
+            continue;
+        }
+        let byte_len = source
+            .len()
+            .checked_mul(PackedWeightKind::Fp32.element_bytes())
+            .ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "prepared Conv instruction {instruction_index} byte size overflows"
+                ))
+            })?;
         let name = format!("conv_transposed_fp32_i{}", instruction_index);
+        if arena.id_for(&name).is_none() {
+            let next_entry_count = arena.len().checked_add(1).ok_or_else(|| {
+                BackendError::Dispatch("prepared constant entry count overflows".into())
+            })?;
+            if next_entry_count > limits.max_constant_entries {
+                return Err(BackendError::Dispatch(format!(
+                    "prepared constant arena would have {next_entry_count} entries, exceeding limit {}",
+                    limits.max_constant_entries
+                )));
+            }
+            let next_total_bytes = arena
+                .entries
+                .iter()
+                .try_fold(0usize, |total, entry| total.checked_add(entry.byte_len))
+                .and_then(|total| total.checked_add(byte_len))
+                .ok_or_else(|| {
+                    BackendError::Dispatch("prepared constant arena size overflows".into())
+                })?;
+            if next_total_bytes > limits.max_constant_bytes {
+                return Err(BackendError::Dispatch(format!(
+                    "prepared constant arena would use {next_total_bytes} bytes, exceeding limit {}",
+                    limits.max_constant_bytes
+                )));
+            }
+        }
+        let transposed = transpose_row_major_mk_to_km(source, m, k)?;
         let transposed_id = arena.insert_store(
             name,
             PackedWeightKind::Fp32,
             transposed.len(),
-            transposed.len() * PackedWeightKind::Fp32.element_bytes(),
+            byte_len,
             PackedWeightStore::TransposedFp32 {
                 data: transposed,
                 m,
@@ -1150,6 +1467,7 @@ fn materialize_transposed_fp32_conv_weights(
             conv.transposed_weight = Some(transposed_id);
         }
     }
+    Ok(())
 }
 
 // ── PreparedInstruction helpers ──────────────────────────────
@@ -1427,7 +1745,11 @@ impl PersistentPreparedWeights {
     /// the first payload — the same dedupe-at-registration
     /// contract used by [`PreparedConstantArena::insert`].
     pub fn insert(&mut self, key: PreparedWeightKey, payload: Arc<Vec<f32>>) -> bool {
-        if self.by_key.contains_key(&key) {
+        let payload_bytes = payload.len().checked_mul(std::mem::size_of::<f32>());
+        if !key.0.is_multiple_of(std::mem::align_of::<f32>())
+            || payload_bytes != Some(key.1)
+            || self.by_key.contains_key(&key)
+        {
             return false;
         }
         self.by_key.insert(key, payload);
@@ -1447,7 +1769,7 @@ impl PersistentPreparedWeights {
     /// Duplicate inserts for the same key return `false` and keep
     /// the first payload.
     pub fn insert_u8(&mut self, key: PreparedWeightKey, payload: Arc<Vec<u8>>) -> bool {
-        if self.by_key_u8.contains_key(&key) {
+        if payload.len() != key.1 || self.by_key_u8.contains_key(&key) {
             return false;
         }
         self.by_key_u8.insert(key, payload);
@@ -1728,9 +2050,38 @@ mod tests {
     // ── prepare_executable_plan ────────────────────────────────
 
     #[test]
+    fn prepared_conv_overflow_is_recoverable() {
+        let plan = ExecutablePlan {
+            instructions: vec![
+                Instruction::WriteConst {
+                    dst: BufferSlice::new(0, 4),
+                    data: vec![0; 4],
+                },
+                Instruction::CallKernel {
+                    kernel_name: "conv2d_silu".into(),
+                    input_slices: vec![BufferSlice::new(4, 4), BufferSlice::new(0, 4)],
+                    output_slice: BufferSlice::new(8, 4),
+                    secondary_output_slice: None,
+                    params: vec![1, 0, 1, 1, usize::MAX, 1, 1, 3, 3],
+                    param_dims: None,
+                    node_id: Some(1),
+                    weight_meta: None,
+                },
+            ],
+            arena_size: 12,
+            levels: vec![0, 1],
+        };
+        let error =
+            prepare_executable_plan(&plan).expect_err("prepared Conv overflow must be recoverable");
+        assert!(error.to_string().contains("Conv"));
+        assert!(error.to_string().contains("overflow"));
+    }
+
+    #[test]
     fn prepare_empty_plan() {
         let plan = empty_plan();
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert!(prepared.instructions.is_empty());
         assert_eq!(prepared.arena_size, 1024);
         assert_eq!(prepared.scratch_size, 0);
@@ -1752,7 +2103,8 @@ mod tests {
             arena_size: 2048,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.instructions.len(), 2);
         match &prepared.instructions[0] {
             PreparedInstruction::Generic { instruction_index } => {
@@ -1781,7 +2133,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.instructions.len(), 2);
         assert!(matches!(
             &prepared.instructions[0],
@@ -2376,9 +2729,10 @@ mod tests {
                 conv,
             ],
             arena_size: output_offset + f * h * w * 4,
-            levels: vec![],
+            levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_binding_count(), 1);
@@ -2446,10 +2800,11 @@ mod tests {
                 },
                 conv,
             ],
-            arena_size: 8192,
-            levels: vec![],
+            arena_size: 1_000_000,
+            levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.static_weight_binding_count(), 1);
         assert_eq!(prepared.transposed_fp32_conv_entry_count(), 0);
         assert_eq!(prepared.transposed_fp32_conv_binding_count(), 0);
@@ -2472,7 +2827,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.len(), 3);
         let order = prepared.original_instruction_order();
         assert_eq!(order, vec![0, 1, 2]);
@@ -2490,7 +2846,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.len(), 2);
         // Conv2d at original index 0
         assert_eq!(prepared.instructions[0].instruction_index(), 0);
@@ -2523,7 +2880,8 @@ mod tests {
             arena_size: 1024,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let order = prepared.original_instruction_order();
         assert_eq!(order, vec![0, 1]);
     }
@@ -2544,7 +2902,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let generic_indices = prepared.generic_instruction_indices();
         // Only fill (index 1) and memcopy (index 2) are generic
         assert_eq!(generic_indices, vec![1, 2]);
@@ -2701,7 +3060,8 @@ mod tests {
 
     #[test]
     fn plan_holds_constant_arena() {
-        let mut prepared = prepare_executable_plan(&empty_plan());
+        let mut prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         // prepare_executable_plan always attaches an (initially empty)
         // arena so callers can introspect the static-weight bindings
         // without a follow-up registration.
@@ -2743,7 +3103,8 @@ mod tests {
 
     #[test]
     fn prepare_executable_plan_attaches_empty_arena_by_default() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         // The static-weight detection pass always populates an arena,
         // even when no Conv2d / MatMul was found. The arena is just
         // empty in that case.
@@ -2781,7 +3142,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // The conv at plan index 1 must carry a packed_weight binding.
         match &prepared.instructions[1] {
@@ -2830,7 +3192,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         match &prepared.instructions[1] {
             PreparedInstruction::MatMul(m) => {
@@ -2875,7 +3238,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         match &prepared.instructions[1] {
             PreparedInstruction::Conv2d(c) => {
@@ -2923,7 +3287,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1, 2],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let arena = prepared
             .constant_arena()
@@ -2974,7 +3339,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let arena = prepared
             .constant_arena()
@@ -3030,7 +3396,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         let arena = prepared
             .constant_arena()
@@ -3061,33 +3428,53 @@ mod tests {
     #[test]
     fn detect_static_weights_empty_plan() {
         let mut arena = PreparedConstantArena::new();
-        let bindings = detect_static_weights(&empty_plan(), &mut arena);
+        let bindings = detect_static_weights(&empty_plan(), &mut arena).unwrap();
         assert!(bindings.is_empty());
         assert!(arena.is_empty());
     }
 
-    /// Helper sanity check: `bytes_to_f32_vec` reads little-endian
-    /// f32 payloads and drops trailing partial elements.
+    #[test]
+    fn static_weight_limits_are_checked_before_payload_allocation() {
+        let weight_payload: Vec<f32> = (0..6).map(|i| i as f32).collect();
+        let wc_weight = make_write_const(BufferSlice::new(0, 24), &weight_payload);
+        let mut mm = make_matmul_instruction("matmul", 4, 3, 2, false);
+        if let Instruction::CallKernel { input_slices, .. } = &mut mm {
+            input_slices[1] = BufferSlice::new(0, 24);
+        }
+        let plan = ExecutablePlan {
+            instructions: vec![wc_weight, mm],
+            arena_size: 4096,
+            levels: vec![0, 1],
+        };
+        let limits = PreparedPlanResourceLimits {
+            max_constant_bytes: 23,
+            ..PreparedPlanResourceLimits::default()
+        };
+        let mut arena = PreparedConstantArena::new();
+        assert!(detect_static_weights_with_limits(&plan, &mut arena, &limits).is_err());
+        assert!(arena.is_empty());
+    }
+
+    /// Helper sanity check: `bytes_to_f32_vec` reads exact little-endian
+    /// f32 payloads and rejects trailing partial elements.
     #[test]
     fn bytes_to_f32_vec_round_trip() {
         let payload: Vec<f32> = vec![1.5, -2.25, 3.125, 4.0];
         let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let recovered = bytes_to_f32_vec(&bytes);
+        let recovered = bytes_to_f32_vec(&bytes).unwrap();
         assert_eq!(recovered, payload);
 
-        // A trailing partial chunk (1 byte after a single f32) is
-        // dropped: only the first 4 bytes survive as 1 f32.
         let mut partial = payload[0].to_le_bytes().to_vec();
         partial.push(0xff);
-        let recovered_partial = bytes_to_f32_vec(&partial);
-        assert_eq!(recovered_partial, vec![payload[0]]);
+        assert!(bytes_to_f32_vec(&partial).is_err());
     }
 
     // ── introspection helpers: static_weight_binding_count ────
 
     #[test]
     fn static_weight_binding_count_empty_plan() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         assert_eq!(prepared.static_weight_binding_count(), 0);
     }
 
@@ -3111,7 +3498,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // The conv was promoted but never bound to a static weight.
         assert_eq!(prepared.static_weight_binding_count(), 0);
     }
@@ -3155,7 +3543,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 0, 1, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // Two weight bindings: the conv and the fused matmul.
         // Bias bindings are still metadata-only and not counted.
@@ -3249,7 +3638,8 @@ mod tests {
 
     #[test]
     fn constant_arena_entry_count_empty_plan_starts_at_zero() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         assert_eq!(prepared.constant_arena_entry_count(), 0);
     }
 
@@ -3272,10 +3662,11 @@ mod tests {
                 dst: BufferSlice::new(0, 4),
                 value: 0.0,
             }],
-            arena_size: 0,
+            arena_size: 4,
             levels: vec![0],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // No static weights were detected, so the auto-attached arena
         // stays empty.
         assert_eq!(prepared.constant_arena_entry_count(), 0);
@@ -3304,7 +3695,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         // Two WriteConsts (weight + weight); the bias slot is dynamic
         // so it is NOT registered in the arena.
         assert_eq!(prepared.constant_arena_entry_count(), 2);
@@ -3314,7 +3706,8 @@ mod tests {
 
     #[test]
     fn constant_arena_total_bytes_empty_plan_starts_at_zero() {
-        let prepared = prepare_executable_plan(&empty_plan());
+        let prepared = prepare_executable_plan(&empty_plan())
+            .expect("prepared plan construction must succeed");
         assert_eq!(prepared.constant_arena_total_bytes(), 0);
     }
 
@@ -3353,7 +3746,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         assert_eq!(prepared.constant_arena_total_bytes(), 32 + 24);
     }
 
@@ -3374,7 +3768,8 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         let arena = prepared
             .constant_arena()
             .expect("plan should carry an arena");
@@ -3404,9 +3799,65 @@ mod tests {
             arena_size: 4096,
             levels: vec![0, 0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
         validate_prepared_against_plan(&prepared, &plan)
             .expect("consistent plan must validate cleanly");
+    }
+
+    #[test]
+    fn prepared_validation_enforces_resource_limits() {
+        let plan = ExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            levels: vec![],
+        };
+        let prepared = PreparedExecutablePlan {
+            instructions: vec![],
+            arena_size: 0,
+            scratch_size: 1,
+            constant_arena: None,
+        };
+        let limits = PreparedPlanResourceLimits {
+            max_scratch_bytes: 0,
+            ..PreparedPlanResourceLimits::default()
+        };
+        assert!(validate_prepared_against_plan_with_limits(&prepared, &plan, &limits).is_err());
+
+        let nonempty_plan = ExecutablePlan {
+            instructions: vec![Instruction::Fill {
+                dst: BufferSlice::new(0, 4),
+                value: 0.0,
+            }],
+            arena_size: 4,
+            levels: vec![0],
+        };
+        let construction_limits = PreparedPlanResourceLimits {
+            max_instructions: 0,
+            ..PreparedPlanResourceLimits::default()
+        };
+        assert!(prepare_executable_plan_with_limits(&nonempty_plan, &construction_limits).is_err());
+    }
+
+    #[test]
+    fn validate_prepared_against_plan_rejects_arena_and_payload_mismatches() {
+        let plan = ExecutablePlan {
+            instructions: vec![make_conv2d_instruction("conv2d", Conv2dParams::default())],
+            arena_size: 4096,
+            levels: vec![0],
+        };
+        let mut wrong_arena =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
+        wrong_arena.arena_size = plan.arena_size - 1;
+        assert!(validate_prepared_against_plan(&wrong_arena, &plan).is_err());
+
+        let mut wrong_payload =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
+        let PreparedInstruction::Conv2d(conv) = &mut wrong_payload.instructions[0] else {
+            panic!("expected prepared conv2d");
+        };
+        conv.stride += 1;
+        assert!(validate_prepared_against_plan(&wrong_payload, &plan).is_err());
     }
 
     /// `validate_prepared_against_plan` returns `Err` when the prepared
@@ -3429,7 +3880,8 @@ mod tests {
             arena_size: 1024,
             levels: vec![0, 1],
         };
-        let prepared = prepare_executable_plan(&plan);
+        let prepared =
+            prepare_executable_plan(&plan).expect("prepared plan construction must succeed");
 
         // Truncate the plan to a single instruction; the prepared plan
         // (still holding the full two-instruction order) must now
@@ -3527,6 +3979,10 @@ mod tests {
         let got = view.get(&(128, 16)).expect("entry must be present");
         assert_eq!(got, &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(view.get(&(0, 0)), None);
+        assert!(!view.insert((1, 4), Arc::new(vec![1.0])));
+        assert!(!view.insert((32, 8), Arc::new(vec![1.0])));
+        assert!(!view.insert_u8((32, 2), Arc::new(vec![1])));
+        assert_eq!(view.len(), 1);
     }
 
     /// `iter` yields all `(key, value)` pairs without consuming the
