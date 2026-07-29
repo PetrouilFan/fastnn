@@ -1329,7 +1329,43 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                Opcode::Reshape | Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
+                Opcode::Reshape => {
+                    if node.inputs.len() == 2 {
+                        let output_dims = node.output_type.shape.clone();
+                        let compile_time_dims = output_dims
+                            .iter()
+                            .map(|dimension| {
+                                dimension.evaluate().unwrap_or_else(|| {
+                                    crate::ir::SYMBOL_DIM_MAX
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                }) as usize
+                            })
+                            .collect();
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "runtime_reshape_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: compile_time_dims,
+                            param_dims: Some(output_dims),
+                            weight_meta: None,
+                        });
+                    } else if let Some(&input_id) = node.inputs.first() {
+                        if let (Some(in_slot), Some(out_slot)) = (
+                            memory_plan.slots.get(&input_id),
+                            memory_plan.slots.get(&node_id),
+                        ) {
+                            if in_slot.offset != out_slot.offset || in_slot.size != out_slot.size {
+                                instructions.push(Instruction::MemCopy {
+                                    dst: output_slice,
+                                    src: BufferSlice::new(in_slot.offset, in_slot.size),
+                                });
+                            }
+                        }
+                    }
+                }
+                Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
                     if let Some(&input_id) = node.inputs.first() {
                         if let (Some(in_slot), Some(out_slot)) = (
                             memory_plan.slots.get(&input_id),
@@ -3734,6 +3770,70 @@ impl Backend for CpuBackend {
                     }
 
                     match kernel_name.as_str() {
+                        "runtime_reshape_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "runtime_reshape_f32: missing runtime dimensions".into(),
+                                )
+                            })?;
+                            if input_slices.len() != 2
+                                || input_slices[1].size != dimensions.len() * 4
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_reshape_f32: invalid contract (inputs={}, shape_bytes={}, rank={})",
+                                    input_slices.len(),
+                                    input_slices.get(1).map_or(0, |slice| slice.size),
+                                    dimensions.len()
+                                )));
+                            }
+                            let resolved_dims: Vec<u64> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "runtime_reshape_f32: {error}"
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let data_slice = input_slices[0];
+                            if data_slice.size != output_slice.size {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_reshape_f32: input bytes {} do not match output bytes {}",
+                                    data_slice.size, output_slice.size
+                                )));
+                            }
+                            let shape_slice = input_slices[1];
+                            let shape_bytes = arena.data_mut()
+                                [shape_slice.offset..shape_slice.offset + shape_slice.size]
+                                .to_vec();
+                            for (index, (&expected, bytes)) in resolved_dims
+                                .iter()
+                                .zip(shape_bytes.chunks_exact(4))
+                                .enumerate()
+                            {
+                                let actual =
+                                    f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "runtime_reshape_f32: malformed shape payload".into(),
+                                        )
+                                    })?);
+                                let valid = actual.is_finite()
+                                    && actual.fract() == 0.0
+                                    && ((actual > 0.0 && actual as u64 == expected)
+                                        || actual == -1.0
+                                        || actual == 0.0);
+                                if !valid {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "runtime_reshape_f32: shape[{index}]={actual} is incompatible with resolved dimension {expected}"
+                                    )));
+                                }
+                            }
+                            let source = arena.data_mut()
+                                [data_slice.offset..data_slice.offset + data_slice.size]
+                                .to_vec();
+                            arena.data_mut()[out_start..out_end].copy_from_slice(&source);
+                        }
                         "constant_of_shape_f32" => {
                             let dimensions = param_dims.as_ref().ok_or_else(|| {
                                 BackendError::Dispatch(

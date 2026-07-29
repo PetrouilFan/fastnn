@@ -199,6 +199,7 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
     # Extract input shapes from Input nodes BEFORE optimization passes
     # (dead node elimination removes Input nodes since they have no outputs)
     input_shapes: Dict[str, List[int]] = {}
+    symbolic_input_shapes: Dict[str, List[str]] = {}
     symbolic_dimension_ids: Dict[str, int] = {}
     next_symbolic_id = 1
     for nd in onnx_nodes:
@@ -208,27 +209,33 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
             shape_list = shape_info.get("shape", [])
             if node_name and shape_list:
                 dims = []
+                symbolic_dims = []
                 for axis, dim in enumerate(shape_list):
                     if isinstance(dim, str) and dim.startswith("Known("):
                         dims.append(int(dim[6:-1]))
+                        symbolic_dims.append(dim)
                     elif isinstance(dim, str) and dim.startswith("Symbol("):
                         symbol_name = dim[7:-1]
                         if symbol_name not in symbolic_dimension_ids:
                             symbolic_dimension_ids[symbol_name] = next_symbolic_id
                             next_symbolic_id += 1
                         dims.append(-symbolic_dimension_ids[symbol_name])
+                        symbolic_dims.append(dim)
                     elif dim == "Unknown":
                         unknown_name = f"{node_name}:axis:{axis}"
                         symbolic_dimension_ids[unknown_name] = next_symbolic_id
                         dims.append(-next_symbolic_id)
+                        symbolic_dims.append(f"Symbol({unknown_name})")
                         next_symbolic_id += 1
                     elif isinstance(dim, (int, float)):
                         dims.append(int(dim))
+                        symbolic_dims.append(str(int(dim)))
                     else:
                         raise ValueError(
                             f"input {node_name!r} has unsupported dimension descriptor {dim!r}"
                         )
                 input_shapes[node_name] = dims
+                symbolic_input_shapes[node_name] = symbolic_dims
 
     # Build param name mapping: ONNX initializer names -> {node_name}.{param_type}
     # Bridges the gap between ONNX node input references and how import_onnx stores params.
@@ -357,28 +364,7 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                 continue
             if isinstance(value, dict):
                 for sub_key, sub_value in value.items():
-                    if sub_key == "shape" and isinstance(sub_value, (list, tuple)):
-                        encoded_shape = []
-                        for axis, dimension in enumerate(sub_value):
-                            if isinstance(dimension, str) and dimension.startswith("Known("):
-                                encoded_shape.append(int(dimension[6:-1]))
-                            elif isinstance(dimension, str) and dimension.startswith("Symbol("):
-                                symbol_name = dimension[7:-1]
-                                if symbol_name not in symbolic_dimension_ids:
-                                    symbolic_dimension_ids[symbol_name] = next_symbolic_id
-                                    next_symbolic_id += 1
-                                encoded_shape.append(-symbolic_dimension_ids[symbol_name])
-                            elif dimension == "Unknown":
-                                unknown_name = f"{node.get('name', '')}:output-axis:{axis}"
-                                if unknown_name not in symbolic_dimension_ids:
-                                    symbolic_dimension_ids[unknown_name] = next_symbolic_id
-                                    next_symbolic_id += 1
-                                encoded_shape.append(-symbolic_dimension_ids[unknown_name])
-                            else:
-                                encoded_shape.append(int(dimension))
-                        dag_node[sub_key] = _attr_to_str(encoded_shape)
-                    else:
-                        dag_node[sub_key] = _attr_to_str(sub_value)
+                    dag_node[sub_key] = _attr_to_str(sub_value)
             elif isinstance(value, (list, tuple)):
                 dag_node[key] = str(list(value))
             elif isinstance(value, bool):
@@ -520,6 +506,7 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
     executor = fnn.AotExecutor(
         dag_nodes, fnn_params, input_names, output_names,
         input_shapes=input_shapes if input_shapes else None,
+        symbolic_input_shapes=symbolic_input_shapes if symbolic_input_shapes else None,
         quantize=quantize,
     )
     return executor

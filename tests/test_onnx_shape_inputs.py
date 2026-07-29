@@ -88,6 +88,37 @@ def test_runtime_constant_of_shape_matches_onnxruntime(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_runtime_reshape_matches_onnxruntime_across_live_extents(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Reshape", ["X", "target"], ["Y"], name="reshape")],
+        "runtime_reshape",
+        [
+            helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 4]),
+            helper.make_tensor_value_info("target", TensorProto.INT64, [3]),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["tokens", 2, 2])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-reshape.onnx"
+    fnn_path = tmp_path / "runtime-reshape.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    for tokens in (2, 5):
+        x = np.arange(tokens * 4, dtype=np.float32).reshape(tokens, 4)
+        target = np.asarray([tokens, 2, 2], dtype=np.int64)
+        expected = session.run(["Y"], {"X": x, "target": target})[0]
+        actual = executor.forward(
+            {
+                "X": fnn.tensor(x, list(x.shape)),
+                "target": fnn.tensor(target.astype(np.float32), [3]),
+            }
+        )["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

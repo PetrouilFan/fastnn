@@ -741,6 +741,26 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Reshape using a runtime shape tensor and bounded semantic output shape.
+    pub fn runtime_reshape(
+        &self,
+        input: &GraphTensor,
+        shape_input: &GraphTensor,
+        shape: &[DimExpr],
+    ) -> GraphTensor {
+        let output_type = input.tensor_type.with_shape(shape.to_vec());
+        let mut attrs = HashMap::new();
+        attrs.insert("runtime_shape".to_string(), "1".to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Reshape,
+            vec![input.node_id, shape_input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Transpose (reverses all dimensions).
     pub fn transpose(&self, input: &GraphTensor) -> GraphTensor {
         let mut output_shape = input.shape().to_vec();

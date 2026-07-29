@@ -531,10 +531,19 @@ impl<'a> OnnxConverter<'a> {
                         let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
                         self.out(node, self.graph.reshape(&ins[0], &dims));
                     } else {
-                        return Err(format!(
-                            "Reshape node '{}' uses a runtime shape tensor; dynamic Reshape lowering is not yet supported",
-                            node.name
-                        ));
+                        let dims = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
+                            format!(
+                                "Reshape node '{}' has a runtime shape tensor but no bounded output shape metadata",
+                                node.name
+                            )
+                        })?;
+                        if dims.is_empty() {
+                            return Err(format!(
+                                "Reshape node '{}' has empty bounded output shape metadata",
+                                node.name
+                            ));
+                        }
+                        self.out(node, self.graph.runtime_reshape(&ins[0], &ins[1], &dims));
                     }
                 } else {
                     return Err(format!(
@@ -1813,18 +1822,13 @@ fn reduce_axes_from_attr_or_input(
 }
 
 fn parse_shape_attr(attrs: &HashMap<String, String>, key: &str) -> Option<Vec<DimExpr>> {
-    attrs.get(key).map(|s| {
-        s.split(',')
-            .filter_map(|v| v.trim().parse::<i64>().ok())
-            .map(|d| {
-                if d < 0 {
-                    DimExpr::Symbol(format!("d{}", -d))
-                } else {
-                    DimExpr::Known(d as u64)
-                }
-            })
-            .collect()
-    })
+    let value = attrs.get(key)?;
+    value
+        .trim_matches(|character| character == '[' || character == ']')
+        .split(',')
+        .map(|dimension| crate::ir::parse_dimension_descriptor(dimension.trim()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
 fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Vec<DimExpr> {
@@ -1910,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_reshape_is_rejected_instead_of_passthrough() {
+    fn runtime_reshape_without_bounded_metadata_is_rejected() {
         let nodes = [node("Reshape", &["x", "shape"], &["y"])];
         let params = HashMap::new();
         let inputs = vec!["x".to_string(), "shape".to_string()];
@@ -1926,9 +1930,9 @@ mod tests {
         let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
             .with_input_shapes(&shapes)
             .to_compute_graph()
-            .expect_err("runtime Reshape must fail until it has real lowering");
+            .expect_err("runtime Reshape without bounded metadata must fail");
 
-        assert!(error.contains("dynamic Reshape lowering is not yet supported"));
+        assert!(error.contains("no bounded output shape metadata"));
     }
 
     #[test]

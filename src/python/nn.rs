@@ -1219,7 +1219,7 @@ pub struct AotExecutor {
 #[pymethods]
 impl AotExecutor {
     #[new]
-    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, quantize=None))]
+    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, symbolic_input_shapes=None, quantize=None))]
     fn new(
         _py: pyo3::Python<'_>,
         nodes: Vec<std::collections::HashMap<String, String>>,
@@ -1227,6 +1227,7 @@ impl AotExecutor {
         input_names: Vec<String>,
         output_names: Vec<String>,
         input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
+        symbolic_input_shapes: Option<std::collections::HashMap<String, Vec<String>>>,
         quantize: Option<pyo3::Bound<'_, pyo3::PyAny>>,
     ) -> pyo3::PyResult<Self> {
         // Clear the global f32 weight cache to prevent unbounded memory
@@ -1306,6 +1307,16 @@ impl AotExecutor {
                         }
                     })
                     .collect::<PyResult<Vec<_>>>()?;
+                rust_input_shapes.insert(name, ir_dims);
+            }
+        }
+        if let Some(shapes) = symbolic_input_shapes {
+            for (name, dims) in shapes {
+                let ir_dims = dims
+                    .into_iter()
+                    .map(|dimension| crate::ir::parse_dimension_descriptor(&dimension))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
                 rust_input_shapes.insert(name, ir_dims);
             }
         }
