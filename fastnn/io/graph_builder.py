@@ -143,7 +143,18 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
         raw_params = read_fnn_parameters(f, num_params, version=file_version)
 
     # Unpack v3 format if needed: convert (data, dtype, scales, zeros, shape) tuples -> tensors + packed_params
-    from fastnn.io import DTYPE_F32, DTYPE_I4, DTYPE_I8, DTYPE_F16, DTYPE_F8, DTYPE_F8R, DTYPE_F4
+    from fastnn.io import (
+        DTYPE_F32,
+        DTYPE_I4,
+        DTYPE_I8,
+        DTYPE_F16,
+        DTYPE_F8,
+        DTYPE_F8R,
+        DTYPE_F4,
+        DTYPE_I64,
+        DTYPE_I32,
+        DTYPE_BOOL,
+    )
     params = {}
     packed_params_dict = {}
     for name, value in raw_params.items():
@@ -156,8 +167,8 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
             shape = value[4] if len(value) > 4 else (
                 list(data.shape) if hasattr(data, 'shape') else []
             )
-            if dtype == DTYPE_F32:
-                # F32: data is numpy array
+            if dtype in (DTYPE_F32, DTYPE_I64, DTYPE_I32, DTYPE_BOOL):
+                # Plain scalar tensors preserve their numpy dtype through fnn.tensor.
                 params[name] = fnn.tensor(data, list(data.shape))
             else:
                 # Packed types require Rust-side PackedTensor for dequantization,

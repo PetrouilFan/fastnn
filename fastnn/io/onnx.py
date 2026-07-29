@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -20,49 +21,37 @@ __all__ = ["import_onnx", "import_onnx_to_compute_graph"]
 logger = logging.getLogger(__name__)
 
 ONNX_TO_IR_OP = {
-    # NOTE: IR op names MUST match what the Rust converter (src/onnx/converter.rs)
-    # handles. If a name doesn't match, the converter's fallback silently passes
-    # through ins[0], producing wrong results. When in doubt, use the ONNX name
-    # directly — the Rust converter generally handles ONNX names.
+    # Keep this adapter map limited to operations handled by the Rust converter.
+    # Unmapped ONNX operations retain their original name and are rejected by the
+    # authoritative Rust boundary instead of being silently approximated.
     "Relu": "Relu", "Sigmoid": "Sigmoid", "Tanh": "Tanh",
     "Add": "Add", "Sub": "Sub", "Mul": "Mul", "Div": "Div", "MatMul": "MatMul",
     "Conv": "Conv2d", "BatchNormalization": "BatchNormalization", "Reshape": "Reshape",
     "Transpose": "Transpose", "Gemm": "Gemm", "MaxPool": "MaxPool",
     "AveragePool": "AveragePool", "Softmax": "Softmax", "Concat": "Concat",
     "Flatten": "Flatten", "Slice": "Slice", "Pad": "Pad",
-    "ReduceMean": "ReduceMean", "ReduceSum": "ReduceSum",
+    "ReduceMean": "ReduceMean", "ReduceSum": "ReduceSum", "ReduceMax": "ReduceMax",
     "GlobalAveragePool": "GlobalAveragePool", "Constant": "Constant",
     "LeakyRelu": "LeakyRelu", "Elu": "Elu", "Clip": "Clip",
     "Dropout": "Identity", "InstanceNormalization": "InstanceNormalization",
     "Split": "Split", "Shape": "Shape", "Cast": "Cast",
-    "Gather": "Gather", "Unsqueeze": "Unsqueeze", "Squeeze": "Squeeze",
+    "Gather": "Gather", "GatherElements": "GatherElements",
+    "Unsqueeze": "Unsqueeze", "Squeeze": "Squeeze",
     "Identity": "Identity", "Resize": "Resize", "Tile": "Tile",
-    "Where": "Where", "Compress": "Compress", "CumSum": "CumSum",
-    "DepthToSpace": "DepthToSpace", "SpaceToDepth": "SpaceToDepth",
+    "Where": "Where", "CumSum": "CumSum",
     "LogSoftmax": "LogSoftmax", "Selu": "Selu",
     "HardSigmoid": "HardSigmoid", "HardSwish": "HardSwish",
     "LayerNormalization": "LayerNormalization", "ConvTranspose": "ConvTranspose",
-    "TopK": "TopK", "GatherND": "GatherND", "ScatterND": "ScatterND",
+    "TopK": "TopK", "ScatterND": "ScatterND",
     "Exp": "Exp", "Sqrt": "Sqrt", "Neg": "Neg", "Log": "Log", "Erf": "Erf",
-    "Ceil": "Ceil", "Floor": "Floor", "Round": "Round", "Sign": "Sign",
-    "Reciprocal": "Reciprocal", "IsNaN": "IsNaN", "IsInf": "IsInf",
-    "And": "And", "Or": "Or", "Xor": "Xor", "Not": "Not",
+    "Sign": "Sign", "Not": "Not",
     "Less": "Less", "Greater": "Greater", "Equal": "Equal",
-    "NonMaxSuppression": "NonMaxSuppression", "Pow": "Pow", "Expand": "Expand",
+    "Pow": "Pow", "Expand": "Expand",
     "GRU": "GRU", "LSTM": "LSTM", "Gelu": "Gelu", "Swish": "Swish",
-    "BiasGelu": "BiasGelu", "FastGelu": "FastGelu",
-    "Attention": "Attention", "MultiHeadAttention": "MultiHeadAttention",
-    "GroupQueryAttention": "GroupQueryAttention",
-    "EmbedLayerNormalization": "EmbedLayerNormalization",
     "QuantizeLinear": "QuantizeLinear", "DequantizeLinear": "DequantizeLinear",
     "QLinearMatMul": "QLinearMatMul", "QLinearConv": "QLinearConv",
-    "RMSNormalization": "RMSNormalization", "RotaryEmbedding": "RotaryEmbedding",
-    "SkipLayerNormalization": "SkipLayerNorm",
-    "ConstantOfShape": "ConstantOfShape", "LRN": "LRN",
-    "Tril": "Tril", "Triu": "Triu", "Loop": "Loop", "If": "If",
-    "Einsum": "Einsum", "EyeLike": "EyeLike", "OneHot": "OneHot",
-    "RandomNormal": "RandomNormal", "RandomUniform": "RandomUniform",
-    "Range": "Range", "NonZero": "NonZero", "Unique": "Unique",
+    "RMSNormalization": "RMSNormalization",
+    "ConstantOfShape": "ConstantOfShape", "Range": "Range",
 }
 
 
@@ -95,7 +84,12 @@ def _extract_shape(value_info):
     shape, dtype = [], "F32"
     if value_info.type.tensor_type.HasField("shape"):
         for d in value_info.type.tensor_type.shape.dim:
-            shape.append(f"Known({d.dim_value})" if d.HasField("dim_value") and d.dim_value > 0 else "Unknown")
+            if d.HasField("dim_value"):
+                shape.append(f"Known({d.dim_value})")
+            elif d.HasField("dim_param") and d.dim_param:
+                shape.append(f"Symbol({d.dim_param})")
+            else:
+                shape.append("Unknown")
     dtype = {1: "F32", 9: "BOOL", 7: "I64", 10: "F16", 11: "F64", 6: "I32"}.get(
         value_info.type.tensor_type.elem_type, "F32")
     return shape, dtype
@@ -107,6 +101,70 @@ def _build_vinfo(model) -> Dict[str, Tuple[List[str], str]]:
         for vi in src:
             vinfo[vi.name] = _extract_shape(vi)
     return vinfo
+
+
+def _plain_dtype_name(array: np.ndarray, *, tensor_name: str) -> str:
+    """Return the lossless plain-tensor dtype name supported by .fnn v3."""
+    dtype = np.dtype(array.dtype)
+    names = {
+        np.dtype("float32"): "F32",
+        np.dtype("int64"): "I64",
+        np.dtype("int32"): "I32",
+        np.dtype("bool"): "BOOL",
+    }
+    if dtype not in names:
+        raise ValueError(
+            f"ONNX initializer '{tensor_name}' uses unsupported dtype {dtype}; "
+            "supported plain initializer dtypes are float32, int64, int32, and bool"
+        )
+    return names[dtype]
+
+
+def _constant_param(array: np.ndarray, *, tensor_name: str) -> Dict[str, Any]:
+    contiguous = np.ascontiguousarray(array)
+    return {
+        "data": contiguous.tobytes(),
+        "shape": list(contiguous.shape),
+        "dtype": _plain_dtype_name(contiguous, tensor_name=tensor_name),
+        "is_constant": True,
+    }
+
+
+_MAX_EXTERNAL_DATA_BYTES = 64 * 1024 * 1024 * 1024
+
+
+def _validate_external_data(model, onnx_path: str) -> None:
+    """Validate ONNX external tensor locations and their aggregate file budget."""
+    model_dir = Path(onnx_path).resolve().parent
+    external_files = set()
+    for initializer in model.graph.initializer:
+        if not initializer.external_data:
+            continue
+        metadata = {entry.key: entry.value for entry in initializer.external_data}
+        location = metadata.get("location")
+        if not location:
+            raise ValueError(
+                f"ONNX initializer '{initializer.name}' has external data without a location"
+            )
+        candidate = (model_dir / location).resolve()
+        try:
+            candidate.relative_to(model_dir)
+        except ValueError as error:
+            raise ValueError(
+                f"ONNX initializer '{initializer.name}' external data escapes the model directory: {location!r}"
+            ) from error
+        if not candidate.is_file():
+            raise ValueError(
+                f"ONNX initializer '{initializer.name}' external data file is missing: {location!r}"
+            )
+        external_files.add(candidate)
+
+    aggregate_size = sum(path.stat().st_size for path in external_files)
+    if aggregate_size > _MAX_EXTERNAL_DATA_BYTES:
+        raise ValueError(
+            f"ONNX external data totals {aggregate_size} bytes, exceeding the "
+            f"{_MAX_EXTERNAL_DATA_BYTES}-byte import budget"
+        )
 
 
 _OP_ATTRS = {
@@ -278,7 +336,9 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
     import onnx.numpy_helper
     import onnx.shape_inference
 
-    model = onnx.load(onnx_path)
+    metadata_model = onnx.load(onnx_path, load_external_data=False)
+    _validate_external_data(metadata_model, onnx_path)
+    model = onnx.load(onnx_path, load_external_data=True)
     # Run ONNX shape inference to populate intermediate tensor shapes (value_info)
     try:
         model = onnx.shape_inference.infer_shapes(model)
@@ -311,7 +371,7 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         nid += 1
 
     for name, arr in init_map.items():
-        params[name] = {"data": arr.tobytes(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
+        params[name] = _constant_param(arr, tensor_name=name)
 
     out_to_nid: Dict[str, int] = {}
     onnx_nodes: List[Tuple[int, Any]] = []
@@ -337,32 +397,13 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         for suffix, idx in _OP_PARAM_SLOTS.get(onn.op_type, []):
             if idx < len(onn.input) and onn.input[idx] in init_map:
                 arr = init_map[onn.input[idx]]
-                params[f"{oname}.{suffix}"] = {"data": arr.tobytes(), "shape": list(arr.shape), "dtype": "F32", "is_constant": True}
+                param_name = f"{oname}.{suffix}"
+                params[param_name] = _constant_param(arr, tensor_name=param_name)
 
         if onn.op_type == "Gemm":
-            # Create intermediate tensor name for MatMul output
-            matmul_out_name = f"{oname}_matmul_out"
-            nodes.append({"id": oid, "opcode": "MatMul", "inputs": ins_names, "output_shape": osd, "attrs": {"alpha": attrs.get("alpha", 1.0), "transB": attrs.get("transB", 0)}, "name": f"{oname}_matmul", "outputs": [matmul_out_name]})
-            weight = init_map.get(onn.input[1])
-            if weight is not None:
-                if _get_attr(onn, "transB", 0):
-                    weight = weight.T
-                alpha = _get_attr(onn, "alpha", 1.0)
-                if alpha != 1.0:
-                    weight = (weight * alpha).astype(weight.dtype)
-                params[f"{oname}.weight"] = {"data": weight.tobytes(), "shape": list(weight.shape), "dtype": "F32", "is_constant": True}
-            if len(onn.input) > 2 and onn.input[2] in init_map:
-                bias = init_map[onn.input[2]]
-                beta = _get_attr(onn, "beta", 1.0)
-                if beta != 1.0:
-                    bias = (bias * beta).astype(bias.dtype)
-                bid = nid
-                nid += 1
-                nodes.append({"id": bid, "opcode": "BiasAdd", "inputs": [matmul_out_name], "output_shape": osd, "attrs": {}, "name": f"{oname}_bias"})
-                out_to_nid[onn.output[0]] = bid
-                params[f"{oname}.bias"] = {"data": bias.tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
-            # Ensure the intermediate tensor maps to the MatMul node
-            out_to_nid[matmul_out_name] = oid
+            # Preserve Gemm as an ONNX operation. The Rust converter owns its
+            # MatMul/alpha/bias decomposition and validates the complete input contract.
+            nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type in ("Conv", "ConvTranspose"):
             data_inputs = [n for n in ins_names if n not in init_names]
@@ -373,17 +414,9 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                     conv_ins.append(param_name)
             nodes.append({"id": oid, "opcode": ir_op, "inputs": conv_ins, "output_shape": osd, "attrs": attrs, "name": oname})
 
-        elif onn.op_type == "Add":
-            bias = init_map.get(onn.input[1])
-            if bias is not None:
-                params[f"{oname}.bias"] = {"data": bias.tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
-            nodes.append({"id": oid, "opcode": "BiasAdd" if bias is not None else "Add", "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
-
-        elif onn.op_type == "Sub":
-            bias = init_map.get(onn.input[1])
-            if bias is not None:
-                params[f"{oname}.bias"] = {"data": (-bias).tobytes(), "shape": list(bias.shape), "dtype": "F32", "is_constant": True}
-            nodes.append({"id": oid, "opcode": "BiasSub" if bias is not None else "Sub", "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
+        elif onn.op_type in ("Add", "Sub"):
+            # Preserve elementwise semantics and the original initializer input.
+            nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Constant":
             value = _get_attr(onn, "value", None)
@@ -396,8 +429,8 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
                     except Exception:
                         const_arr = None
                 if const_arr is not None:
-                    f32_arr = const_arr.astype(np.float32, copy=False)
-                    params[f"{oname}.value"] = {"data": f32_arr.tobytes(), "shape": list(f32_arr.shape), "dtype": "F32", "is_constant": True}
+                    param_name = f"{oname}.value"
+                    params[param_name] = _constant_param(const_arr, tensor_name=param_name)
             nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
         elif onn.op_type == "Reshape":
@@ -545,6 +578,21 @@ def _compute_graph_to_layers(cg: Dict[str, Any]) -> List[Dict[str, Any]]:
             out_shape = node.get("output_shape", {}).get("shape", [])
             if "out_channels" not in layer and out_shape and len(out_shape) >= 2:
                 layer["out_channels"] = int(out_shape[-1].replace("Known(", "").replace(")", ""))
+        elif opcode == "Gemm":
+            # Gemm remains a single executable ONNX op; expose it as a Linear
+            # layer only in this compatibility summary.
+            layer["type"] = "Linear"
+            inputs = node.get("inputs", [])
+            if len(inputs) >= 2 and inputs[1] in params:
+                weight_shape = params[inputs[1]].get("shape", [])
+                if len(weight_shape) == 2:
+                    trans_b = bool(attrs.get("transB", 0))
+                    if trans_b:
+                        layer["in_features"] = weight_shape[1]
+                        layer["out_features"] = weight_shape[0]
+                    else:
+                        layer["in_features"] = weight_shape[0]
+                        layer["out_features"] = weight_shape[1]
         elif opcode == "MatMul":
             # Check if next node is BiasAdd for the same op
             if i + 1 < len(nodes):
@@ -646,7 +694,14 @@ def import_onnx(onnx_path: str, fnn_path: str, config: Optional[Any] = None) -> 
     }
 
     # Write .fnn file in proper binary format using write_fnn_file_v3
-    from fastnn.io import write_fnn_file_v3, MODEL_MAGIC, DTYPE_F32
+    from fastnn.io import (
+        write_fnn_file_v3,
+        MODEL_MAGIC,
+        DTYPE_F32,
+        DTYPE_I64,
+        DTYPE_I32,
+        DTYPE_BOOL,
+    )
 
     # Build header with layers format for test compatibility
     fnn_header = {
@@ -669,7 +724,18 @@ def import_onnx(onnx_path: str, fnn_path: str, config: Optional[Any] = None) -> 
                 # base64 encoded bytes
                 import base64
                 data = base64.b64decode(data)
-            params_v3.append((name, data, DTYPE_F32, [], [], shape))
+            dtype_name = p.get("dtype", "F32")
+            dtype_tag = {
+                "F32": DTYPE_F32,
+                "I64": DTYPE_I64,
+                "I32": DTYPE_I32,
+                "BOOL": DTYPE_BOOL,
+            }.get(dtype_name)
+            if dtype_tag is None:
+                raise ValueError(
+                    f"Parameter '{name}' has unsupported .fnn scalar dtype {dtype_name!r}"
+                )
+            params_v3.append((name, data, dtype_tag, [], [], shape))
 
     # Build graph nodes with op_type alias for test compatibility
     # Use the original cg nodes with numeric IDs for fnn header

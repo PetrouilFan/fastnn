@@ -14,8 +14,9 @@
 //!
 //! # Supported Ops
 //!
-//! All common ONNX ops are supported either directly or via decomposition into
-//! simpler IR ops. Unsupported ops pass through their first input.
+//! Supported ONNX ops are lowered directly or decomposed into simpler IR ops.
+//! Unsupported ops are rejected: silently substituting an input would create a
+//! structurally valid graph with incorrect numerical semantics.
 
 use std::collections::HashMap;
 
@@ -530,11 +531,16 @@ impl<'a> OnnxConverter<'a> {
                         let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
                         self.out(node, self.graph.reshape(&ins[0], &dims));
                     } else {
-                        // Shape is dynamic; keep as pass-through for now.
-                        self.out(node, ins[0].clone());
+                        return Err(format!(
+                            "Reshape node '{}' uses a runtime shape tensor; dynamic Reshape lowering is not yet supported",
+                            node.name
+                        ));
                     }
                 } else {
-                    self.out(node, ins[0].clone());
+                    return Err(format!(
+                        "Reshape node '{}' has neither a static shape attribute nor a shape tensor input",
+                        node.name
+                    ));
                 }
             }
             "Flatten" => self.out(node, self.graph.flatten(&ins[0])),
@@ -547,8 +553,12 @@ impl<'a> OnnxConverter<'a> {
                     // General N-D permute: use perm-aware transpose
                     self.out(node, self.graph.transpose_with_perm(&ins[0], &perm));
                 } else {
-                    // Perm length doesn't match: fallback to legacy reverse
-                    self.out(node, self.graph.transpose(&ins[0]));
+                    return Err(format!(
+                        "Transpose node '{}' has permutation length {} for input rank {}",
+                        node.name,
+                        perm.len(),
+                        ins[0].shape().len()
+                    ));
                 }
             }
             "Concat" => {
@@ -563,14 +573,22 @@ impl<'a> OnnxConverter<'a> {
                 let axis = if raw_axis < 0 {
                     let r = rank as i64;
                     if raw_axis < -r {
-                        0usize // fallback: should not happen
+                        return Err(format!(
+                            "Concat node '{}' axis {raw_axis} is out of range for rank {rank}",
+                            node.name
+                        ));
                     } else {
                         (r + raw_axis) as usize
                     }
                 } else {
                     raw_axis as usize
                 };
-                let axis = axis.min(rank.saturating_sub(1));
+                if axis >= rank {
+                    return Err(format!(
+                        "Concat node '{}' axis {raw_axis} is out of range for rank {rank}",
+                        node.name
+                    ));
+                }
                 let refs: Vec<&GraphTensor> = ins.iter().collect();
                 self.out(node, self.graph.concat(&refs, axis));
             }
@@ -596,6 +614,12 @@ impl<'a> OnnxConverter<'a> {
                 };
                 let axis = axis.min(rank.saturating_sub(1));
                 let n_outputs = node.outputs.len().max(1);
+                if ins.len() > 1 && !node.attrs.contains_key("split") {
+                    return Err(format!(
+                        "Split node '{}' supplies split sizes as a tensor input; tensor-input Split lowering is not yet supported",
+                        node.name
+                    ));
+                }
                 let split_sizes: Vec<usize> = if let Some(s) = node.attrs.get("split") {
                     s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
                 } else {
@@ -636,21 +660,26 @@ impl<'a> OnnxConverter<'a> {
                                 start = end;
                             }
                         } else {
-                            // Part is 0 (dim smaller than n_outputs): passthrough
-                            for out_name in &node.outputs {
-                                self.name_to_id.insert(out_name.clone(), ins[0].clone());
-                            }
+                            return Err(format!(
+                                "Split node '{}' cannot divide axis extent {dim_size} across {n_outputs} outputs",
+                                node.name
+                            ));
                         }
                     } else {
-                        // Symbolic dimension: can't compute split at converter time
-                        // Fallback: all outputs get the full input (approximate)
-                        for out_name in &node.outputs {
-                            self.name_to_id.insert(out_name.clone(), ins[0].clone());
-                        }
+                        return Err(format!(
+                            "Split node '{}' has a symbolic axis extent and no explicit static split sizes; dynamic Split lowering is not yet supported",
+                            node.name
+                        ));
                     }
                 }
             }
             "Slice" => {
+                if !node.attrs.contains_key("starts") || !node.attrs.contains_key("ends") {
+                    return Err(format!(
+                        "Slice node '{}' supplies starts/ends as tensor inputs; tensor-input Slice lowering is not yet supported",
+                        node.name
+                    ));
+                }
                 let starts: Vec<i64> = parse_ints_i64(&node.attrs, "starts", &[0]);
                 let ends: Vec<i64> = parse_ints_i64(&node.attrs, "ends", &[1]);
                 let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
@@ -743,6 +772,9 @@ impl<'a> OnnxConverter<'a> {
                 };
                 self.out(node, self.graph.argmax(&ins[0], a));
             }
+            // Input/Parameter entries may be present in the Python graph adapter.
+            // Their graph tensors were registered before node processing.
+            "Input" | "Parameter" => {}
             "Constant" => {
                 // Already handled in Phase 2; check if still missing
                 let out_name = node.outputs.first().cloned().unwrap_or_default();
@@ -1546,13 +1578,12 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
 
-            // ── Fallback ────────────────────────────────────────────
+            // ── Unsupported operation ──────────────────────────────
             _ => {
-                if !ins.is_empty() {
-                    self.out(node, ins[0].clone());
-                } else {
-                    self.out(node, self.scalar(0.0));
-                }
+                return Err(format!(
+                    "unsupported ONNX operation '{}' at node '{}'",
+                    node.op_type, node.name
+                ));
             }
         }
         Ok(())
@@ -1748,5 +1779,76 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         DType::F4 => IrDType::F4,
         DType::U4Scaled => IrDType::U4Scaled,
         DType::U8Scaled => IrDType::U8Scaled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(op_type: &str, inputs: &[&str], outputs: &[&str]) -> OnnxNode {
+        OnnxNode {
+            name: format!("{op_type}_node"),
+            op_type: op_type.to_string(),
+            inputs: inputs.iter().map(|value| (*value).to_string()).collect(),
+            outputs: outputs.iter().map(|value| (*value).to_string()).collect(),
+            attrs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn unsupported_operation_is_rejected_instead_of_passthrough() {
+        let nodes = [node("RotaryEmbedding", &["x"], &["y"])];
+        let params = HashMap::new();
+        let inputs = vec!["x".to_string()];
+        let outputs = vec!["y".to_string()];
+
+        let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
+            .to_compute_graph()
+            .expect_err("unsupported operation must fail conversion");
+
+        assert!(error.contains("unsupported ONNX operation 'RotaryEmbedding'"));
+        assert!(error.contains("RotaryEmbedding_node"));
+    }
+
+    #[test]
+    fn runtime_reshape_is_rejected_instead_of_passthrough() {
+        let nodes = [node("Reshape", &["x", "shape"], &["y"])];
+        let params = HashMap::new();
+        let inputs = vec!["x".to_string(), "shape".to_string()];
+        let outputs = vec!["y".to_string()];
+        let shapes = HashMap::from([
+            (
+                "x".to_string(),
+                vec![DimExpr::Symbol("sequence".to_string())],
+            ),
+            ("shape".to_string(), vec![DimExpr::Known(2)]),
+        ]);
+
+        let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
+            .with_input_shapes(&shapes)
+            .to_compute_graph()
+            .expect_err("runtime Reshape must fail until it has real lowering");
+
+        assert!(error.contains("dynamic Reshape lowering is not yet supported"));
+    }
+
+    #[test]
+    fn symbolic_split_is_rejected_instead_of_duplicating_input() {
+        let nodes = [node("Split", &["x"], &["left", "right"])];
+        let params = HashMap::new();
+        let inputs = vec!["x".to_string()];
+        let outputs = vec!["left".to_string(), "right".to_string()];
+        let shapes = HashMap::from([(
+            "x".to_string(),
+            vec![DimExpr::Symbol("sequence".to_string())],
+        )]);
+
+        let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
+            .with_input_shapes(&shapes)
+            .to_compute_graph()
+            .expect_err("symbolic Split must fail until it has real lowering");
+
+        assert!(error.contains("dynamic Split lowering is not yet supported"));
     }
 }
