@@ -2856,6 +2856,7 @@ pub fn build_backward_graph(
             | Opcode::LionUpdate
             | Opcode::RmspropUpdate
             | Opcode::Shape
+            | Opcode::ConstantOfShape
             | Opcode::Range
             | Opcode::FusedResidualAddNorm => {}
             Opcode::Transpose => {

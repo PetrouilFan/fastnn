@@ -454,6 +454,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                     vec![DimExpr::Known(rank as u64)]
                 })
             }
+            Opcode::ConstantOfShape => Some(node.output_type.shape.clone()),
             Opcode::Cast => {
                 // Cast preserves shape, changes dtype (handled by output_type)
                 inputs.first().map(|i| i.output_type.shape.clone())

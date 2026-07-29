@@ -1243,6 +1243,29 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Create a runtime-filled tensor whose live shape is supplied by `shape_input`.
+    ///
+    /// `output_shape` describes bounded allocation and semantic dimensions; the
+    /// runtime validates the shape tensor against those resolved dimensions.
+    pub fn constant_of_shape(
+        &self,
+        shape_input: &GraphTensor,
+        output_shape: Vec<DimExpr>,
+        fill_value: f32,
+    ) -> GraphTensor {
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("value".to_string(), fill_value.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::ConstantOfShape,
+            vec![shape_input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Cast tensor to a target dtype.
     pub fn cast_op(&self, input: &GraphTensor, to: IrDType) -> GraphTensor {
         let output_shape = input.shape().to_vec();

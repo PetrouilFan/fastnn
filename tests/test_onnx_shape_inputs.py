@@ -33,6 +33,61 @@ def _run_ort_and_fastnn(tmp_path, nodes, initializers, input_array, output_names
     return expected, [actual[name].numpy() for name in output_names]
 
 
+def test_runtime_shape_uses_each_input_extent(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Shape", ["X"], ["Y"], name="shape")],
+        "runtime_shape",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.INT64, [2])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-shape.onnx"
+    fnn_path = tmp_path / "runtime-shape.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+
+    for tokens in (2, 5):
+        x = np.arange(tokens * 4, dtype=np.float32).reshape(tokens, 4)
+        expected = ort.InferenceSession(
+            str(onnx_path), providers=["CPUExecutionProvider"]
+        ).run(["Y"], {"X": x})[0]
+        actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual.astype(np.int64), expected)
+
+
+def test_runtime_constant_of_shape_matches_onnxruntime(tmp_path):
+    fill = numpy_helper.from_array(np.asarray([2.5], dtype=np.float32))
+    graph = helper.make_graph(
+        [
+            helper.make_node("Shape", ["X"], ["shape"], name="shape"),
+            helper.make_node(
+                "ConstantOfShape",
+                ["shape"],
+                ["Y"],
+                name="constant_of_shape",
+                value=fill,
+            ),
+        ],
+        "runtime_constant_of_shape",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["tokens", 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-constant-of-shape.onnx"
+    fnn_path = tmp_path / "runtime-constant-of-shape.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    for tokens in (2, 5):
+        x = np.arange(tokens * 4, dtype=np.float32).reshape(tokens, 4)
+        expected = session.run(["Y"], {"X": x})[0]
+        actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

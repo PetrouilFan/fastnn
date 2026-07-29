@@ -81,6 +81,7 @@ pub enum Opcode {
     /// Fused Top-K producing values and indices.
     TopK,
     Shape,
+    ConstantOfShape,
     Cast,
     Quantize,
     Dequantize,

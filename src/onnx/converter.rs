@@ -935,10 +935,33 @@ impl<'a> OnnxConverter<'a> {
                     let gt = self.graph.constant(&full_data, tt);
                     self.out(node, gt);
                 } else {
-                    // Dynamic shape: can't evaluate at converter time
-                    return Err(
-                        "ConstantOfShape with runtime shape is not yet supported".to_string()
-                    );
+                    let output_shape = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
+                        format!(
+                            "ConstantOfShape node '{}' has a runtime shape input but no bounded output shape metadata",
+                            node.name
+                        )
+                    })?;
+                    if output_shape.is_empty() {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' has empty bounded output shape metadata",
+                            node.name
+                        ));
+                    }
+                    let fill_value: f32 = node
+                        .attrs
+                        .get("value")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0.0);
+                    if !fill_value.is_finite() {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' has non-finite fill value",
+                            node.name
+                        ));
+                    }
+                    let output = self
+                        .graph
+                        .constant_of_shape(&ins[0], output_shape, fill_value);
+                    self.out(node, output);
                 }
             }
             "Range" => {

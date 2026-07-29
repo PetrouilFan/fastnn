@@ -2790,20 +2790,55 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::ConstantOfShape => {
+                    let output_dims = node.output_type.shape.clone();
+                    if output_dims.is_empty() {
+                        return Err(BackendError::Compilation(format!(
+                            "ConstantOfShape node {node_id} has empty output rank"
+                        )));
+                    }
+                    let fill_value = node
+                        .required_attr::<f32>("value")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                    if !fill_value.is_finite() {
+                        return Err(BackendError::Compilation(format!(
+                            "ConstantOfShape node {node_id} has non-finite fill value"
+                        )));
+                    }
+                    let mut compile_time_dims: Vec<usize> = output_dims
+                        .iter()
+                        .map(|dimension| {
+                            dimension.evaluate().unwrap_or_else(|| {
+                                crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed)
+                            }) as usize
+                        })
+                        .collect();
+                    compile_time_dims.push(fill_value.to_bits() as usize);
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: "constant_of_shape_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: compile_time_dims,
+                        param_dims: Some(output_dims),
+                        weight_meta: None,
+                    });
+                }
                 Opcode::Shape => {
-                    // Write the shape of the input tensor as F32 values.
-                    // The arena stores all data as f32 (4 bytes/element), so we
-                    // write f32-le bytes.  Downstream ops (Gather, Concat, etc.)
-                    // read from the arena as f32 slices and get correct values.
-                    // Resolve input shape at compile time (known dims directly,
-                    // symbolic dims use SYMBOL_DIM_MAX â€” they'll be resolved
-                    // at dispatch by param_dims).
-                    let in_shape = input_shapes.first().ok_or_else(|| {
-                        BackendError::Compilation(format!(
-                            "shape node {node_id} has no resolved input shape"
-                        ))
-                    })?;
-                    let byte_len = in_shape.len().checked_mul(4).ok_or_else(|| {
+                    // Shape is runtime data: symbolic dimensions must be resolved from
+                    // the current ShapeEnv rather than frozen to compile-time capacity.
+                    let input_node = node
+                        .inputs
+                        .first()
+                        .and_then(|input_id| graph.get_node(*input_id))
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "shape node {node_id} has no typed input"
+                            ))
+                        })?;
+                    let input_dims = input_node.output_type.shape.clone();
+                    let byte_len = input_dims.len().checked_mul(4).ok_or_else(|| {
                         BackendError::Compilation(format!(
                             "shape node {node_id} output size overflows"
                         ))
@@ -2814,26 +2849,23 @@ impl Backend for CpuBackend {
                             output_slice.size
                         )));
                     }
-                    let mut shape_bytes = Vec::new();
-                    shape_bytes.try_reserve_exact(byte_len).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "shape node {node_id} output allocation failed"
-                        ))
-                    })?;
-                    for &dimension in in_shape {
-                        // Shape values currently use the legacy f32 tensor contract. Reject
-                        // dimensions that cannot round-trip instead of silently changing them.
-                        let encoded = dimension as f32;
-                        if encoded as u64 != dimension {
-                            return Err(BackendError::Compilation(format!(
-                                "shape node {node_id} dimension {dimension} is not exactly representable as f32"
-                            )));
-                        }
-                        shape_bytes.extend_from_slice(&encoded.to_le_bytes());
-                    }
-                    instructions.push(Instruction::WriteConst {
-                        dst: output_slice,
-                        data: shape_bytes,
+                    let compile_time_dims = input_dims
+                        .iter()
+                        .map(|dimension| {
+                            dimension.evaluate().unwrap_or_else(|| {
+                                crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed)
+                            }) as usize
+                        })
+                        .collect();
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: "shape_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: compile_time_dims,
+                        param_dims: Some(input_dims),
+                        weight_meta: None,
                     });
                 }
                 Opcode::Cast => {
@@ -3702,6 +3734,137 @@ impl Backend for CpuBackend {
                     }
 
                     match kernel_name.as_str() {
+                        "constant_of_shape_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "constant_of_shape_f32: missing runtime dimensions".into(),
+                                )
+                            })?;
+                            if input_slices.len() != 1
+                                || input_slices[0].size != dimensions.len() * 4
+                                || params.len() != dimensions.len() + 1
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "constant_of_shape_f32: invalid contract (inputs={}, input_bytes={}, params={}, dims={})",
+                                    input_slices.len(),
+                                    input_slices.first().map_or(0, |slice| slice.size),
+                                    params.len(),
+                                    dimensions.len()
+                                )));
+                            }
+                            let resolved_dims: Vec<u64> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "constant_of_shape_f32: {error}"
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let live_elements =
+                                resolved_dims
+                                    .iter()
+                                    .try_fold(1usize, |product, &dimension| {
+                                        let dimension =
+                                            usize::try_from(dimension).map_err(|_| {
+                                                BackendError::Dispatch(
+                                            "constant_of_shape_f32: dimension exceeds usize".into(),
+                                        )
+                                            })?;
+                                        product.checked_mul(dimension).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "constant_of_shape_f32: element count overflows"
+                                                    .into(),
+                                            )
+                                        })
+                                    })?;
+                            let live_bytes = live_elements.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "constant_of_shape_f32: byte count overflows".into(),
+                                )
+                            })?;
+                            const MAX_RUNTIME_CONSTANT_OF_SHAPE_BYTES: usize = 256 * 1024 * 1024;
+                            if live_bytes > output_slice.size
+                                || live_bytes > MAX_RUNTIME_CONSTANT_OF_SHAPE_BYTES
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "constant_of_shape_f32: live output {live_bytes} bytes exceeds capacity {} or budget {MAX_RUNTIME_CONSTANT_OF_SHAPE_BYTES}",
+                                    output_slice.size
+                                )));
+                            }
+
+                            let shape_slice = input_slices[0];
+                            let shape_bytes = arena.data_mut()
+                                [shape_slice.offset..shape_slice.offset + shape_slice.size]
+                                .to_vec();
+                            for (index, (&expected, bytes)) in resolved_dims
+                                .iter()
+                                .zip(shape_bytes.chunks_exact(4))
+                                .enumerate()
+                            {
+                                let actual =
+                                    f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "constant_of_shape_f32: malformed shape payload".into(),
+                                        )
+                                    })?);
+                                if !actual.is_finite()
+                                    || actual < 0.0
+                                    || actual.fract() != 0.0
+                                    || actual as u64 != expected
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "constant_of_shape_f32: shape[{index}]={actual} does not match resolved dimension {expected}"
+                                    )));
+                                }
+                            }
+
+                            let fill_value = f32::from_bits(params[dimensions.len()] as u32);
+                            if !fill_value.is_finite() {
+                                return Err(BackendError::Dispatch(
+                                    "constant_of_shape_f32: non-finite fill value".into(),
+                                ));
+                            }
+                            let output_bytes = &mut arena.data_mut()[out_start..out_end];
+                            output_bytes.fill(0);
+                            for chunk in output_bytes[..live_bytes].chunks_exact_mut(4) {
+                                chunk.copy_from_slice(&fill_value.to_le_bytes());
+                            }
+                        }
+                        "shape_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "shape_f32: missing runtime dimension expressions".into(),
+                                )
+                            })?;
+                            if dimensions.len() != params.len()
+                                || output_slice.size != dimensions.len() * 4
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "shape_f32: invalid contract (params={}, dims={}, output_bytes={})",
+                                    params.len(),
+                                    dimensions.len(),
+                                    output_slice.size
+                                )));
+                            }
+                            let output_bytes = &mut arena.data_mut()[out_start..out_end];
+                            for (chunk, dimension) in
+                                output_bytes.chunks_exact_mut(4).zip(dimensions)
+                            {
+                                let resolved =
+                                    dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                        BackendError::Dispatch(format!("shape_f32: {error}"))
+                                    })?;
+                                let encoded = resolved as f32;
+                                if encoded as u64 != resolved {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "shape_f32: dimension {resolved} is not exactly representable as f32"
+                                    )));
+                                }
+                                chunk.copy_from_slice(&encoded.to_le_bytes());
+                            }
+                        }
                         "add_f32" => {
                             fused_binary_activation_dispatch(
                                 "add_f32",
