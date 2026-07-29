@@ -167,6 +167,62 @@ def test_runtime_slice_bounds_match_onnxruntime(tmp_path):
             np.testing.assert_array_equal(actual, expected)
 
 
+def test_nd_symbolic_broadcast_matches_onnxruntime(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Add", ["X", "mask"], ["Y"], name="broadcast_add")],
+        "nd_symbolic_broadcast",
+        [
+            helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3, "tokens", 4]),
+            helper.make_tensor_value_info("mask", TensorProto.FLOAT, [2, 1, "tokens", 4]),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 3, "tokens", 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "nd-symbolic-broadcast.onnx"
+    fnn_path = tmp_path / "nd-symbolic-broadcast.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    for tokens in (2, 5):
+        x = np.arange(2 * 3 * tokens * 4, dtype=np.float32).reshape(2, 3, tokens, 4)
+        mask = np.arange(2 * tokens * 4, dtype=np.float32).reshape(2, 1, tokens, 4)
+        expected = session.run(["Y"], {"X": x, "mask": mask})[0]
+        actual = executor.forward(
+            {
+                "X": fnn.tensor(x, list(x.shape)),
+                "mask": fnn.tensor(mask, list(mask.shape)),
+            }
+        )["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_f32_bool_cast_roundtrip_matches_onnxruntime(tmp_path):
+    graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["X"], ["condition"], name="to_bool", to=TensorProto.BOOL),
+            helper.make_node("Cast", ["condition"], ["Y"], name="to_float", to=TensorProto.FLOAT),
+        ],
+        "bool_cast_roundtrip",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["tokens", 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "bool-cast-roundtrip.onnx"
+    fnn_path = tmp_path / "bool-cast-roundtrip.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    for tokens in (2, 5):
+        x = np.asarray([0.0, -2.0, 3.5, np.nan] * tokens, dtype=np.float32).reshape(tokens, 4)
+        expected = session.run(["Y"], {"X": x})[0]
+        actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

@@ -130,6 +130,89 @@ fn fused_binary_activation_dispatch_slices(
     }
 }
 
+pub(super) fn broadcast_binary_dispatch(
+    input_slices: &[BufferSlice],
+    arena: &CpuBuffer,
+    output_slice: BufferSlice,
+    lhs_shape: &[usize],
+    rhs_shape: &[usize],
+    output_shape: &[usize],
+    op: impl Fn(f32, f32) -> f32,
+) -> Result<(), String> {
+    let [lhs_slice, rhs_slice] = input_slices else {
+        return Err("broadcast binary op requires exactly two inputs".into());
+    };
+    let product = |shape: &[usize]| {
+        shape
+            .iter()
+            .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+            .ok_or_else(|| "broadcast shape product overflows".to_string())
+    };
+    let lhs_elements = product(lhs_shape)?;
+    let rhs_elements = product(rhs_shape)?;
+    let output_elements = product(output_shape)?;
+    let scalar_bytes = std::mem::size_of::<f32>();
+    if lhs_slice.size != lhs_elements * scalar_bytes
+        || rhs_slice.size != rhs_elements * scalar_bytes
+        || output_slice.size != output_elements * scalar_bytes
+    {
+        return Err("broadcast semantic shapes disagree with storage".into());
+    }
+    for input_shape in [lhs_shape, rhs_shape] {
+        if input_shape.len() > output_shape.len() {
+            return Err("broadcast input rank exceeds output rank".into());
+        }
+        let rank_offset = output_shape.len() - input_shape.len();
+        for (axis, &dimension) in input_shape.iter().enumerate() {
+            let output_dimension = output_shape[rank_offset + axis];
+            if dimension != 1 && dimension != output_dimension {
+                return Err(format!(
+                    "broadcast dimension {dimension} is incompatible with output dimension {output_dimension} at axis {}",
+                    rank_offset + axis
+                ));
+            }
+        }
+    }
+
+    arena::with_binary_f32_slices(
+        arena,
+        *lhs_slice,
+        *rhs_slice,
+        output_slice,
+        |lhs, rhs, output| {
+            for (flat_output_index, destination) in output.iter_mut().enumerate() {
+                let mut remaining = flat_output_index;
+                let mut lhs_index = 0usize;
+                let mut rhs_index = 0usize;
+                let mut lhs_stride = 1usize;
+                let mut rhs_stride = 1usize;
+                for output_axis in (0..output_shape.len()).rev() {
+                    let coordinate = remaining % output_shape[output_axis];
+                    remaining /= output_shape[output_axis];
+                    if let Some(lhs_axis) =
+                        output_axis.checked_sub(output_shape.len() - lhs_shape.len())
+                    {
+                        if lhs_shape[lhs_axis] != 1 {
+                            lhs_index += coordinate * lhs_stride;
+                        }
+                        lhs_stride *= lhs_shape[lhs_axis];
+                    }
+                    if let Some(rhs_axis) =
+                        output_axis.checked_sub(output_shape.len() - rhs_shape.len())
+                    {
+                        if rhs_shape[rhs_axis] != 1 {
+                            rhs_index += coordinate * rhs_stride;
+                        }
+                        rhs_stride *= rhs_shape[rhs_axis];
+                    }
+                }
+                *destination = op(lhs[lhs_index], rhs[rhs_index]);
+            }
+        },
+    );
+    Ok(())
+}
+
 /// Helper: extract two f32 slices from the arena, broadcast-loop with a binary op
 /// and activation function, and write the result to the output slice.
 ///

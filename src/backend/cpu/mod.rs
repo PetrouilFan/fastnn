@@ -226,7 +226,7 @@ mod dispatch_helpers;
 use dispatch_helpers::*;
 
 mod elementwise;
-use elementwise::fused_binary_activation_dispatch;
+use elementwise::{broadcast_binary_dispatch, fused_binary_activation_dispatch};
 mod scalar;
 use scalar::{scalar_kernel_instruction, scalar_op_dispatch, unary_op_dispatch};
 #[cfg(feature = "parallel")]
@@ -1230,14 +1230,43 @@ impl Backend for CpuBackend {
                         }
                         _ => {}
                     }
+                    let mut params = vec![];
+                    let mut param_dims = None;
+                    if !node.attrs.contains_key("fused_op") && node.inputs.len() == 2 {
+                        let lhs_shape = graph
+                            .get_node(node.inputs[0])
+                            .map(|input| input.output_type.shape.clone())
+                            .unwrap_or_default();
+                        let rhs_shape = graph
+                            .get_node(node.inputs[1])
+                            .map(|input| input.output_type.shape.clone())
+                            .unwrap_or_default();
+                        let output_shape = node.output_type.shape.clone();
+                        if lhs_shape != output_shape || rhs_shape != output_shape {
+                            kernel = match node.opcode {
+                                Opcode::Add => "add_broadcast_f32",
+                                Opcode::Sub => "sub_broadcast_f32",
+                                Opcode::Mul => "mul_broadcast_f32",
+                                Opcode::Div => "div_broadcast_f32",
+                                Opcode::Maximum => "max_broadcast_f32",
+                                Opcode::Minimum => "min_broadcast_f32",
+                                _ => unreachable!(),
+                            };
+                            params = vec![lhs_shape.len(), rhs_shape.len(), output_shape.len()];
+                            let mut dimensions = lhs_shape;
+                            dimensions.extend(rhs_shape);
+                            dimensions.extend(output_shape);
+                            param_dims = Some(dimensions);
+                        }
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
+                        params,
+                        param_dims,
                         weight_meta: None,
                     });
                 }
@@ -2960,6 +2989,8 @@ impl Backend for CpuBackend {
                         let kernel_name = match (&in_type, &out_type) {
                             (IrDType::F32, IrDType::I64) => "cast_f32_i64",
                             (IrDType::I64, IrDType::F32) => "cast_i64_f32",
+                            (IrDType::F32, IrDType::Bool) => "cast_f32_bool",
+                            (IrDType::Bool, IrDType::F32) => "cast_bool_f32",
                             _ => {
                                 return Err(BackendError::Compilation(format!(
                                     "Cast node {node_id} does not support {} -> {}",
@@ -4172,6 +4203,70 @@ impl Backend for CpuBackend {
                                 }
                                 chunk.copy_from_slice(&encoded.to_le_bytes());
                             }
+                        }
+                        kernel @ ("add_broadcast_f32" | "sub_broadcast_f32"
+                        | "mul_broadcast_f32" | "div_broadcast_f32"
+                        | "max_broadcast_f32" | "min_broadcast_f32") => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "{kernel}: missing runtime broadcast dimensions"
+                                ))
+                            })?;
+                            if params.len() != 3 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel}: expected three rank parameters, got {}",
+                                    params.len()
+                                )));
+                            }
+                            let (lhs_rank, rhs_rank, output_rank) =
+                                (params[0], params[1], params[2]);
+                            if dimensions.len() != lhs_rank + rhs_rank + output_rank {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel}: rank metadata disagrees with {} dimensions",
+                                    dimensions.len()
+                                )));
+                            }
+                            let resolved: Vec<usize> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension
+                                        .evaluate_with_env(shape_env)
+                                        .map_err(|error| {
+                                            BackendError::Dispatch(format!("{kernel}: {error}"))
+                                        })
+                                        .and_then(|value| {
+                                            usize::try_from(value).map_err(|_| {
+                                                BackendError::Dispatch(format!(
+                                                    "{kernel}: dimension exceeds usize"
+                                                ))
+                                            })
+                                        })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let lhs_shape = &resolved[..lhs_rank];
+                            let rhs_shape = &resolved[lhs_rank..lhs_rank + rhs_rank];
+                            let output_shape = &resolved[lhs_rank + rhs_rank..];
+                            let op: fn(f32, f32) -> f32 = match kernel {
+                                "add_broadcast_f32" => |a, b| a + b,
+                                "sub_broadcast_f32" => |a, b| a - b,
+                                "mul_broadcast_f32" => |a, b| a * b,
+                                "div_broadcast_f32" => |a, b| a / b,
+                                "max_broadcast_f32" => f32::max,
+                                "min_broadcast_f32" => f32::min,
+                                _ => unreachable!(),
+                            };
+                            broadcast_binary_dispatch(
+                                input_slices,
+                                arena,
+                                *output_slice,
+                                lhs_shape,
+                                rhs_shape,
+                                output_shape,
+                                op,
+                            )
+                            .map_err(|error| {
+                                BackendError::Dispatch(format!("{kernel}: {error}"))
+                            })?;
                         }
                         "add_f32" => {
                             fused_binary_activation_dispatch(
@@ -10340,7 +10435,7 @@ impl Backend for CpuBackend {
                                 chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
                             }
                         }
-                        "cast_f32_i64" | "cast_i64_f32" => {
+                        "cast_f32_i64" | "cast_i64_f32" | "cast_f32_bool" | "cast_bool_f32" => {
                             if input_slices.len() != 1 || !params.is_empty() {
                                 return Err(BackendError::Dispatch(
                                     "cast: expected one input and no untyped width parameters"
@@ -10420,6 +10515,50 @@ impl Backend for CpuBackend {
                                     );
                                     for (output, input) in output.iter_mut().zip(input) {
                                         *output = input as f32;
+                                    }
+                                }
+                                "cast_f32_bool" => {
+                                    let numel = input_slice.size / 4;
+                                    if !input_slice.offset.is_multiple_of(4)
+                                        || !input_slice.size.is_multiple_of(4)
+                                        || output_size != numel
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "cast: invalid f32-to-bool storage contract".into(),
+                                        ));
+                                    }
+                                    let input = unsafe {
+                                        arena.view_f32(input_slice.offset, input_slice.size)
+                                    }
+                                    .to_vec();
+                                    let output = &mut arena.data_mut()[out_start..out_end];
+                                    for (output, input) in output.iter_mut().zip(input) {
+                                        *output = u8::from(input != 0.0);
+                                    }
+                                }
+                                "cast_bool_f32" => {
+                                    let numel = input_slice.size;
+                                    let expected_output =
+                                        numel.checked_mul(4).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "cast: bool-to-f32 output size overflows".into(),
+                                            )
+                                        })?;
+                                    if !out_start.is_multiple_of(4)
+                                        || output_size != expected_output
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "cast: invalid bool-to-f32 storage contract".into(),
+                                        ));
+                                    }
+                                    let input = arena.data_mut()
+                                        [input_slice.offset..input_slice.offset + input_slice.size]
+                                        .to_vec();
+                                    let output = bytemuck::cast_slice_mut::<_, f32>(
+                                        &mut arena.data_mut()[out_start..out_end],
+                                    );
+                                    for (output, input) in output.iter_mut().zip(input) {
+                                        *output = f32::from(input != 0);
                                     }
                                 }
                                 _ => {

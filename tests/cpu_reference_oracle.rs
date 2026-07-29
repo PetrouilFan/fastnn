@@ -459,8 +459,8 @@ fn broadcast_add_reference_oracle_covers_negative_values() {
     let expected = naive_broadcast_add(&lhs_values, &rhs_values, batch, channels, width);
 
     assert!(
-        kernels.iter().any(|name| name == "add_f32"),
-        "expected add_f32 kernel, got {kernels:?}"
+        kernels.iter().any(|name| name == "add_broadcast_f32"),
+        "expected add_broadcast_f32 kernel, got {kernels:?}"
     );
     assert_close(
         "broadcast add",

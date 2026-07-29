@@ -591,12 +591,12 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, Fastnn
                     (Some(1), _) => db.clone(),
                     (_, Some(1)) => da.clone(),
                     _ if da == db => da.clone(),
-                    _ => {
-                        return Err(FastnnError::compilation(format!(
-                            "Cannot broadcast dimensions: {} vs {}",
-                            da, db
-                        )));
-                    }
+                    // Symbolic dimensions may only become broadcast-compatible after
+                    // ShapeEnv resolution (for example S versus S+0, or a model
+                    // constraint that resolves one side to 1). Preserve the lhs
+                    // semantic extent here and require the runtime broadcast kernel
+                    // to validate the concrete dimensions before reading data.
+                    _ => da.clone(),
                 }
             }
         };
