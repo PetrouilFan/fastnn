@@ -129,17 +129,27 @@ shapes, and report missing payloads before compilation.
 - **M1 complete:** strict unsupported-operation errors, exact F32/I64/I32/Bool
   initializer round trips, external-data validation, symbolic-name preservation,
   and structural reload tests.
-- **M2 in progress:** static opset-13/14 Slice, Split, Squeeze, and Unsqueeze
-  tensor inputs are promoted exactly and differentially tested. Runtime Shape and
-  bounded ConstantOfShape now execute against live ShapeEnv dimensions and match
-  ONNX Runtime across multiple token lengths.
-- The current GPT-2 frontier is the causal-mask Slice whose end is produced by
-  `Shape -> Gather -> Unsqueeze`. Its output extent is derived at runtime
-  (`past_sequence_length + 1`); it must not be represented as an unrelated symbol
-  or processed at maximum capacity. The next contract is value-derived semantic
-  extents, followed by tensor-driven Reshape, Expand, and Range.
-- Whole-model F32 parity, persistent KV state, prefill/decode, session APIs, and
-  W4A8 remain gated behind completion of M2 and M3.
+- **M2 substantially complete for the GPT-2 path:** static opset-13/14 Slice,
+  Split, Squeeze, and Unsqueeze inputs; live Shape and ConstantOfShape; bounded
+  tensor-driven Reshape and Slice; per-symbol allocation capacities; symbolic and
+  affine extent resolution; runtime Expand; and N-D Add/Where broadcasting are
+  implemented and differentially tested.
+- The tiny random GPT-2 cached-decode fixture now converts, builds, and executes
+  end-to-end. Logits and returned K/V tensors match ONNX Runtime: one-step logits
+  have maximum absolute error `5.96e-7`, and three successive externally-fed cache
+  steps retain the same `5.96e-7` maximum logit error while cache lengths grow from
+  1 to 4.
+- This establishes whole-model F32 numerical parity for an externally-managed
+  GPT-2 cache, but it is **not** yet the persistent KV/session API. The caller still
+  feeds every layer's past K/V tensors and receives every present K/V tensor on each
+  invocation.
+- **M3 is now active:** validate modern Llama/GQA primitives and importer paths.
+  TinyLlama currently fails preflight because its external payload
+  `model.onnx_data` is missing from the audit artifact. The weightless optimized
+  Qwen explorer graph remains structural reconnaissance only and exposes fused GQA
+  and simplified-normalization boundaries; it is not numerical execution evidence.
+- Persistent runtime-owned KV state, prefill/decode session APIs, modern-model
+  reference parity, and W4A8 remain subsequent gates.
 
 ### M1: Honest, typed ONNX boundary
 
