@@ -963,6 +963,20 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Slice using runtime starts/ends/axes/steps tensors and bounded output shape.
+    pub fn runtime_slice(&self, inputs: &[GraphTensor], shape: &[DimExpr]) -> GraphTensor {
+        let output_type = inputs[0].tensor_type.with_shape(shape.to_vec());
+        let mut attrs = HashMap::new();
+        attrs.insert("runtime_bounds".to_string(), "1".to_string());
+        let input_ids = inputs.iter().map(|input| input.node_id).collect();
+        let mut inner = self.inner.borrow_mut();
+        let node_id =
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::Slice, input_ids, output_type.clone(), attrs);
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Squeeze (remove) a dimension.
     pub fn squeeze(&self, input: &GraphTensor, dim: usize) -> GraphTensor {
         let mut output_shape = input.shape().to_vec();

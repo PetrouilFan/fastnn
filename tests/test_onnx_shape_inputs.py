@@ -119,6 +119,54 @@ def test_runtime_reshape_matches_onnxruntime_across_live_extents(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_runtime_slice_bounds_match_onnxruntime(tmp_path):
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "Slice",
+                ["X", "starts", "ends", "axes", "steps"],
+                ["Y"],
+                name="runtime_slice",
+            )
+        ],
+        "runtime_slice",
+        [
+            helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 6]),
+            helper.make_tensor_value_info("starts", TensorProto.INT64, [1]),
+            helper.make_tensor_value_info("ends", TensorProto.INT64, [1]),
+            helper.make_tensor_value_info("axes", TensorProto.INT64, [1]),
+            helper.make_tensor_value_info("steps", TensorProto.INT64, [1]),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["tokens", 3])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-slice.onnx"
+    fnn_path = tmp_path / "runtime-slice.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    for raw_start, raw_end in ((1, 4), (-4, -1)):
+        ort_bounds = {
+            "starts": np.asarray([raw_start], dtype=np.int64),
+            "ends": np.asarray([raw_end], dtype=np.int64),
+            "axes": np.asarray([1], dtype=np.int64),
+            "steps": np.asarray([1], dtype=np.int64),
+        }
+        fastnn_bounds = {
+            name: fnn.tensor(value.astype(np.float32), [1])
+            for name, value in ort_bounds.items()
+        }
+        for tokens in (2, 5):
+            x = np.arange(tokens * 6, dtype=np.float32).reshape(tokens, 6)
+            expected = session.run(["Y"], {"X": x, **ort_bounds})[0]
+            actual = executor.forward(
+                {"X": fnn.tensor(x, list(x.shape)), **fastnn_bounds}
+            )["Y"].numpy()
+            np.testing.assert_array_equal(actual, expected)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

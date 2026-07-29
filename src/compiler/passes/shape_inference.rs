@@ -279,7 +279,9 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 }
             }
             Opcode::Slice => {
-                if !inputs.is_empty() {
+                if node.inputs.len() > 1 {
+                    Some(node.output_type.shape.clone())
+                } else if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
                     let dim = node.required_attr::<usize>("dim")?;

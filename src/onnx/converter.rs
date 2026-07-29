@@ -684,10 +684,28 @@ impl<'a> OnnxConverter<'a> {
             }
             "Slice" => {
                 if !node.attrs.contains_key("starts") || !node.attrs.contains_key("ends") {
-                    return Err(format!(
-                        "Slice node '{}' supplies runtime starts/ends; dynamic Slice lowering is not yet supported",
-                        node.name
-                    ));
+                    if ins.len() < 3 || ins.len() > 5 {
+                        return Err(format!(
+                            "Slice node '{}' supplies runtime bounds but has {} inputs; expected data, starts, ends, and optional axes/steps",
+                            node.name,
+                            ins.len()
+                        ));
+                    }
+                    let shape = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
+                        format!(
+                            "Slice node '{}' supplies runtime bounds but no bounded output shape metadata",
+                            node.name
+                        )
+                    })?;
+                    if shape.is_empty() {
+                        return Err(format!(
+                            "Slice node '{}' has empty bounded output shape metadata",
+                            node.name
+                        ));
+                    }
+                    let output = self.graph.runtime_slice(&ins, &shape);
+                    self.out(node, output);
+                    return Ok(());
                 }
                 let starts = parse_ints_i64(&node.attrs, "starts", &[]);
                 let ends = parse_ints_i64(&node.attrs, "ends", &[]);

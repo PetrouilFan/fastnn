@@ -1896,89 +1896,120 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Slice => {
-                    let parse_attr = |name: &str| -> Result<i64, BackendError> {
-                        node.required_attr(name)
-                            .map_err(|error| BackendError::Compilation(error.to_string()))
-                    };
-                    let dim_value = parse_attr("dim")?;
-                    let start_value = parse_attr("start")?;
-                    let end_value = parse_attr("end")?;
-                    if dim_value < 0 || start_value < 0 {
-                        return Err(BackendError::Compilation(format!(
-                            "slice node {node_id} requires non-negative dim and start"
-                        )));
-                    }
-                    let dim = usize::try_from(dim_value).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} dimension does not fit usize"
-                        ))
-                    })?;
-                    let input_shape = input_shapes.first().ok_or_else(|| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} is missing its input shape"
-                        ))
-                    })?;
-                    if dim >= input_shape.len() {
-                        return Err(BackendError::Compilation(format!(
-                            "slice node {node_id} dimension {dim} is out of range for rank {}",
-                            input_shape.len()
-                        )));
-                    }
-                    let dimension_size = i64::try_from(input_shape[dim]).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} dimension size does not fit i64"
-                        ))
-                    })?;
-                    let normalized_end = if end_value < 0 {
-                        dimension_size
-                            .checked_add(end_value)
-                            .and_then(|value| value.checked_add(1))
+                    if node.inputs.len() > 1 {
+                        let input_dims = graph
+                            .get_node(node.inputs[0])
                             .ok_or_else(|| {
                                 BackendError::Compilation(format!(
-                                    "slice node {node_id} negative end overflows"
+                                    "runtime slice node {node_id} is missing data input"
                                 ))
                             })?
+                            .output_type
+                            .shape
+                            .clone();
+                        if input_dims.is_empty() || input_dims.len() != node.output_type.shape.len()
+                        {
+                            return Err(BackendError::Compilation(format!(
+                                "runtime slice node {node_id} requires equal non-zero input/output rank"
+                            )));
+                        }
+                        let mut runtime_dims = input_dims;
+                        runtime_dims.extend(node.output_type.shape.clone());
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "runtime_slice_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![node.output_type.shape.len()],
+                            param_dims: Some(runtime_dims),
+                            weight_meta: None,
+                        });
                     } else {
-                        end_value
-                    };
-                    if start_value >= dimension_size
-                        || normalized_end > dimension_size
-                        || start_value >= normalized_end
-                    {
-                        return Err(BackendError::Compilation(format!(
+                        let parse_attr = |name: &str| -> Result<i64, BackendError> {
+                            node.required_attr(name)
+                                .map_err(|error| BackendError::Compilation(error.to_string()))
+                        };
+                        let dim_value = parse_attr("dim")?;
+                        let start_value = parse_attr("start")?;
+                        let end_value = parse_attr("end")?;
+                        if dim_value < 0 || start_value < 0 {
+                            return Err(BackendError::Compilation(format!(
+                                "slice node {node_id} requires non-negative dim and start"
+                            )));
+                        }
+                        let dim = usize::try_from(dim_value).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} dimension does not fit usize"
+                            ))
+                        })?;
+                        let input_shape = input_shapes.first().ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} is missing its input shape"
+                            ))
+                        })?;
+                        if dim >= input_shape.len() {
+                            return Err(BackendError::Compilation(format!(
+                                "slice node {node_id} dimension {dim} is out of range for rank {}",
+                                input_shape.len()
+                            )));
+                        }
+                        let dimension_size = i64::try_from(input_shape[dim]).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} dimension size does not fit i64"
+                            ))
+                        })?;
+                        let normalized_end = if end_value < 0 {
+                            dimension_size
+                                .checked_add(end_value)
+                                .and_then(|value| value.checked_add(1))
+                                .ok_or_else(|| {
+                                    BackendError::Compilation(format!(
+                                        "slice node {node_id} negative end overflows"
+                                    ))
+                                })?
+                        } else {
+                            end_value
+                        };
+                        if start_value >= dimension_size
+                            || normalized_end > dimension_size
+                            || start_value >= normalized_end
+                        {
+                            return Err(BackendError::Compilation(format!(
                             "slice node {node_id} has invalid range [{start_value}, {normalized_end}) for dimension size {dimension_size}"
                         )));
-                    }
-                    let start = usize::try_from(start_value).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} start does not fit usize"
-                        ))
-                    })?;
-                    let end = usize::try_from(normalized_end).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} end does not fit usize"
-                        ))
-                    })?;
-                    let mut slice_params = Vec::with_capacity(input_shape.len() + 4);
-                    slice_params.push(input_shape.len());
-                    for &size in input_shape {
-                        slice_params.push(usize::try_from(size).map_err(|_| {
+                        }
+                        let start = usize::try_from(start_value).map_err(|_| {
                             BackendError::Compilation(format!(
-                                "slice node {node_id} input dimension does not fit usize"
+                                "slice node {node_id} start does not fit usize"
                             ))
-                        })?);
+                        })?;
+                        let end = usize::try_from(normalized_end).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} end does not fit usize"
+                            ))
+                        })?;
+                        let mut slice_params = Vec::with_capacity(input_shape.len() + 4);
+                        slice_params.push(input_shape.len());
+                        for &size in input_shape {
+                            slice_params.push(usize::try_from(size).map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "slice node {node_id} input dimension does not fit usize"
+                                ))
+                            })?);
+                        }
+                        slice_params.extend([dim, start, end]);
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "slice_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: slice_params,
+                            param_dims: None,
+                            weight_meta: None,
+                        });
                     }
-                    slice_params.extend([dim, start, end]);
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "slice_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: slice_params,
-                        param_dims: None,
-                        weight_meta: None,
-                    });
                 }
                 Opcode::ScatterNd => {
                     let data_shape: Vec<u64> = input_shapes.first().cloned().unwrap_or_default();
@@ -3770,6 +3801,183 @@ impl Backend for CpuBackend {
                     }
 
                     match kernel_name.as_str() {
+                        "runtime_slice_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "runtime_slice_f32: missing runtime dimensions".into(),
+                                )
+                            })?;
+                            if input_slices.len() < 3 || input_slices.len() > 5 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: expected 3..=5 inputs, got {}",
+                                    input_slices.len()
+                                )));
+                            }
+                            if dimensions.is_empty() || dimensions.len() % 2 != 0 {
+                                return Err(BackendError::Dispatch(
+                                    "runtime_slice_f32: malformed input/output dimensions".into(),
+                                ));
+                            }
+                            let rank = dimensions.len() / 2;
+                            let resolved: Vec<usize> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension
+                                        .evaluate_with_env(shape_env)
+                                        .map_err(|error| {
+                                            BackendError::Dispatch(format!(
+                                                "runtime_slice_f32: {error}"
+                                            ))
+                                        })
+                                        .and_then(|value| {
+                                            usize::try_from(value).map_err(|_| {
+                                                BackendError::Dispatch(
+                                                    "runtime_slice_f32: dimension exceeds usize"
+                                                        .into(),
+                                                )
+                                            })
+                                        })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let input_shape = &resolved[..rank];
+                            let output_shape = &resolved[rank..];
+
+                            let read_scalar = |slice: BufferSlice| -> Result<i64, BackendError> {
+                                if slice.size != 4 {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "runtime_slice_f32: expected scalar auxiliary input, got {} bytes",
+                                        slice.size
+                                    )));
+                                }
+                                let bytes = &arena.data_mut()[slice.offset..slice.offset + 4];
+                                let value = f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                    BackendError::Dispatch(
+                                        "runtime_slice_f32: malformed scalar input".into(),
+                                    )
+                                })?);
+                                if !value.is_finite()
+                                    || value.fract() != 0.0
+                                    || value < i64::MIN as f32
+                                    || value > i64::MAX as f32
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "runtime_slice_f32: invalid integer scalar {value}"
+                                    )));
+                                }
+                                Ok(value as i64)
+                            };
+
+                            let raw_start = read_scalar(input_slices[1])?;
+                            let raw_end = read_scalar(input_slices[2])?;
+                            let raw_axis = if input_slices.len() >= 4 {
+                                read_scalar(input_slices[3])?
+                            } else {
+                                0
+                            };
+                            let step = if input_slices.len() >= 5 {
+                                read_scalar(input_slices[4])?
+                            } else {
+                                1
+                            };
+                            if step != 1 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: only step=1 is supported, got {step}"
+                                )));
+                            }
+                            let rank_i64 = i64::try_from(rank).map_err(|_| {
+                                BackendError::Dispatch("runtime_slice_f32: rank exceeds i64".into())
+                            })?;
+                            let axis = if raw_axis < 0 {
+                                rank_i64.checked_add(raw_axis)
+                            } else {
+                                Some(raw_axis)
+                            }
+                            .filter(|axis| *axis >= 0 && *axis < rank_i64)
+                            .ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: axis {raw_axis} is out of range for rank {rank}"
+                                ))
+                            })? as usize;
+                            let extent = i64::try_from(input_shape[axis]).map_err(|_| {
+                                BackendError::Dispatch(
+                                    "runtime_slice_f32: axis extent exceeds i64".into(),
+                                )
+                            })?;
+                            let normalize = |value: i64| -> usize {
+                                let value = if value < 0 {
+                                    extent.saturating_add(value)
+                                } else {
+                                    value
+                                };
+                                value.clamp(0, extent) as usize
+                            };
+                            let start = normalize(raw_start);
+                            let end = normalize(raw_end);
+                            if end < start || output_shape[axis] != end - start {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: bounds {start}..{end} disagree with output extent {}",
+                                    output_shape[axis]
+                                )));
+                            }
+                            for dimension in 0..rank {
+                                if dimension != axis
+                                    && input_shape[dimension] != output_shape[dimension]
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "runtime_slice_f32: non-sliced dimension {dimension} changed from {} to {}",
+                                        input_shape[dimension], output_shape[dimension]
+                                    )));
+                                }
+                            }
+                            let input_elements = input_shape
+                                .iter()
+                                .try_fold(1usize, |product, &dimension| {
+                                    product.checked_mul(dimension)
+                                })
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "runtime_slice_f32: input element count overflows".into(),
+                                    )
+                                })?;
+                            let output_elements = output_shape
+                                .iter()
+                                .try_fold(1usize, |product, &dimension| {
+                                    product.checked_mul(dimension)
+                                })
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "runtime_slice_f32: output element count overflows".into(),
+                                    )
+                                })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if input_slices[0].size != input_elements * scalar_bytes
+                                || output_slice.size != output_elements * scalar_bytes
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "runtime_slice_f32: semantic shapes disagree with storage"
+                                        .into(),
+                                ));
+                            }
+                            let inner = input_shape[axis + 1..].iter().product::<usize>();
+                            let outer = input_shape[..axis].iter().product::<usize>();
+                            let axis_size = input_shape[axis];
+                            let copy_elements = (end - start) * inner;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slices[0],
+                                *output_slice,
+                                |input, output| {
+                                    for outer_index in 0..outer {
+                                        let source = (outer_index * axis_size + start) * inner;
+                                        let destination = outer_index * copy_elements;
+                                        output[destination..destination + copy_elements]
+                                            .copy_from_slice(
+                                                &input[source..source + copy_elements],
+                                            );
+                                    }
+                                },
+                            );
+                        }
                         "runtime_reshape_f32" => {
                             let dimensions = param_dims.as_ref().ok_or_else(|| {
                                 BackendError::Dispatch(
