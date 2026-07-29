@@ -676,17 +676,92 @@ impl<'a> OnnxConverter<'a> {
             "Slice" => {
                 if !node.attrs.contains_key("starts") || !node.attrs.contains_key("ends") {
                     return Err(format!(
-                        "Slice node '{}' supplies starts/ends as tensor inputs; tensor-input Slice lowering is not yet supported",
+                        "Slice node '{}' supplies runtime starts/ends; dynamic Slice lowering is not yet supported",
                         node.name
                     ));
                 }
-                let starts: Vec<i64> = parse_ints_i64(&node.attrs, "starts", &[0]);
-                let ends: Vec<i64> = parse_ints_i64(&node.attrs, "ends", &[1]);
-                let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
-                let dim = *axes.first().unwrap_or(&0);
-                let start = *starts.first().unwrap_or(&0).max(&0) as usize;
-                let end = *ends.first().unwrap_or(&1) as usize;
-                let mut out = self.graph.slice(&ins[0], dim, start, end);
+                let starts = parse_ints_i64(&node.attrs, "starts", &[]);
+                let ends = parse_ints_i64(&node.attrs, "ends", &[]);
+                let axes = parse_ints_i64(
+                    &node.attrs,
+                    "axes",
+                    &(0..starts.len())
+                        .map(|axis| axis as i64)
+                        .collect::<Vec<_>>(),
+                );
+                let steps = parse_ints_i64(&node.attrs, "steps", &vec![1; starts.len()]);
+                if starts.len() != 1
+                    || starts.len() != ends.len()
+                    || starts.len() != axes.len()
+                    || starts.len() != steps.len()
+                {
+                    return Err(format!(
+                        "Slice node '{}' currently requires exactly one start/end/axis/step tuple (got {}/{}/{}/{})",
+                        node.name,
+                        starts.len(),
+                        ends.len(),
+                        axes.len(),
+                        steps.len()
+                    ));
+                }
+
+                let mut out = ins[0].clone();
+                for (((&raw_start, &raw_end), &raw_axis), &step) in
+                    starts.iter().zip(&ends).zip(&axes).zip(&steps)
+                {
+                    if step != 1 {
+                        return Err(format!(
+                            "Slice node '{}' uses unsupported step {step}; only step=1 is currently supported",
+                            node.name
+                        ));
+                    }
+                    let rank = out.shape().len() as i64;
+                    let axis = if raw_axis < 0 {
+                        rank.checked_add(raw_axis)
+                    } else {
+                        Some(raw_axis)
+                    }
+                    .filter(|&axis| axis >= 0 && axis < rank)
+                    .ok_or_else(|| {
+                        format!(
+                            "Slice node '{}' axis {raw_axis} is out of range for rank {rank}",
+                            node.name
+                        )
+                    })? as usize;
+                    let extent = out.shape()[axis].evaluate();
+                    let normalize = |index: i64, is_end: bool| -> Result<usize, String> {
+                        if let Some(extent) = extent {
+                            let extent = i64::try_from(extent).map_err(|_| {
+                                format!("Slice node '{}' axis extent exceeds i64", node.name)
+                            })?;
+                            let normalized = if index < 0 {
+                                extent.saturating_add(index)
+                            } else {
+                                index
+                            }
+                            .clamp(0, extent);
+                            Ok(normalized as usize)
+                        } else if index < 0 || (is_end && index == i64::MAX) {
+                            Err(format!(
+                                "Slice node '{}' requires a known axis extent for bound {index}",
+                                node.name
+                            ))
+                        } else {
+                            usize::try_from(index).map_err(|_| {
+                                format!("Slice node '{}' bound {index} exceeds usize", node.name)
+                            })
+                        }
+                    };
+                    let start = normalize(raw_start, false)?;
+                    let end = normalize(raw_end, true)?;
+                    if end <= start {
+                        return Err(format!(
+                            "Slice node '{}' has empty or reversed interval {start}..{end}",
+                            node.name
+                        ));
+                    }
+                    out = self.graph.slice(&out, axis, start, end);
+                }
                 if let Some(shape) = parse_shape_attr(&node.attrs, "output_shape") {
                     out = self.graph.reshape(&out, &shape);
                 }

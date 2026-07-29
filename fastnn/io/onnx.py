@@ -389,6 +389,31 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
 
         ir_op = ONNX_TO_IR_OP.get(onn.op_type, onn.op_type)
         attrs = _extract_attrs(onn)
+
+        # Modern ONNX opsets move several shape/axis attributes into tensor
+        # inputs. Preserve constant forms as explicit attributes for the Rust
+        # converter; runtime-produced forms remain graph inputs and must use
+        # genuine dynamic lowering.
+        constant_input_attrs = {
+            "Slice": ((1, "starts"), (2, "ends"), (3, "axes"), (4, "steps")),
+            "Split": ((1, "split"),),
+            "Squeeze": ((1, "axes"),),
+            "Unsqueeze": ((1, "axes"),),
+        }
+        for input_index, attr_name in constant_input_attrs.get(onn.op_type, ()):
+            if input_index >= len(onn.input):
+                continue
+            initializer = init_map.get(onn.input[input_index])
+            if initializer is None:
+                continue
+            values = np.asarray(initializer)
+            if values.dtype.kind not in ("i", "u"):
+                raise ValueError(
+                    f"ONNX node '{oname}' {attr_name} input must be an integer tensor, "
+                    f"got {values.dtype}"
+                )
+            attrs[attr_name] = [int(value) for value in values.reshape(-1)]
+
         ins_ids = _resolve_input_ids(list(onn.input), out_to_nid, gin_to_nid, init_names)
         ins_names = _resolve_input_names(list(onn.input), out_to_nid, gin_to_nid, init_names)
         out_shape = vinfo.get(onn.output[0], ([], "F32")) if onn.output else ([], "F32")
@@ -442,7 +467,6 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
         else:
             nodes.append({"id": oid, "opcode": ir_op, "inputs": ins_names, "output_shape": osd, "attrs": attrs, "name": oname})
 
-    nid_map = {n["id"]: n for n in nodes}
     # Map from node ID to its output tensor names (from ONNX)
     node_output_names: Dict[int, List[str]] = {}
     for onn in model.graph.node:
@@ -476,29 +500,29 @@ def import_onnx_to_compute_graph(onnx_path: str, config: Optional[Any] = None) -
             node["outputs"] = []
 
     # For graph outputs, ensure the output node has the graph output tensor name
-    out_name_to_nid = {}
     out_ids = []
+    graph_output_names = []
     for out in model.graph.output:
         if out.name in out_to_nid:
             nid = out_to_nid[out.name]
             out_ids.append(nid)
-            out_name_to_nid[nid] = out.name
+            graph_output_names.append(out.name)
         elif out.name in gin_to_nid:
             nid = gin_to_nid[out.name]
             out_ids.append(nid)
-            out_name_to_nid[nid] = out.name
+            graph_output_names.append(out.name)
 
-    # Add graph output names to the corresponding nodes' outputs
-    for nid, name in out_name_to_nid.items():
-        if nid in nid_map:
-            # The output node's outputs should include the graph output tensor name
-            # (overwrite any previously inferred names for final output)
-            nid_map[nid]["outputs"] = [name]
+    return {
+        "nodes": nodes,
+        "inputs": gin_ids,
+        "outputs": out_ids,
+        "output_names": graph_output_names,
+        "params": params,
+        "out_to_nid": out_to_nid,
+    }
 
-    return {"nodes": nodes, "inputs": gin_ids, "outputs": out_ids, "params": params, "out_to_nid": out_to_nid}
 
-
-def _convert_bytes(obj):
+def _convert_bytes(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _convert_bytes(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -799,16 +823,15 @@ def import_onnx(onnx_path: str, fnn_path: str, config: Optional[Any] = None) -> 
     
     # Map output node IDs to their names
     output_nodes_info = []
-    for out_id in cg.get("outputs", []):
+    graph_output_names = cg.get("output_names", [])
+    for output_index, out_id in enumerate(cg.get("outputs", [])):
+        if output_index < len(graph_output_names):
+            output_nodes_info.append({"name": graph_output_names[output_index], "id": out_id})
+            continue
         for node in graph_nodes:
             if node.get("id") == out_id:
-                # Use the output tensor name from the node's outputs field
-                # (set by import_onnx_to_compute_graph to the graph output tensor name)
                 outputs = node.get("outputs", [])
-                if outputs and isinstance(outputs, list) and len(outputs) > 0:
-                    tensor_name = outputs[0]
-                else:
-                    tensor_name = node.get("name", "")
+                tensor_name = outputs[0] if outputs else node.get("name", "")
                 output_nodes_info.append({"name": tensor_name, "id": out_id})
                 break
         else:

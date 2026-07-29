@@ -452,14 +452,14 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
             ends_val = const_values.get(inputs[2]) if len(inputs) > 2 else None
             axes_val = const_values.get(inputs[3]) if len(inputs) > 3 else None
             steps_val = const_values.get(inputs[4]) if len(inputs) > 4 else None
-            if starts_val is not None:
-                dag["starts"] = str(int(np.asarray(starts_val).reshape(-1)[0]))
-            if ends_val is not None:
-                dag["ends"] = str(int(np.asarray(ends_val).reshape(-1)[0]))
-            if axes_val is not None:
-                dag["axes"] = str(int(np.asarray(axes_val).reshape(-1)[0]))
-            if steps_val is not None:
-                dag["steps"] = str(int(np.asarray(steps_val).reshape(-1)[0]))
+            if starts_val is not None and "starts" not in dag:
+                dag["starts"] = _attr_to_str(np.asarray(starts_val).reshape(-1).tolist())
+            if ends_val is not None and "ends" not in dag:
+                dag["ends"] = _attr_to_str(np.asarray(ends_val).reshape(-1).tolist())
+            if axes_val is not None and "axes" not in dag:
+                dag["axes"] = _attr_to_str(np.asarray(axes_val).reshape(-1).tolist())
+            if steps_val is not None and "steps" not in dag:
+                dag["steps"] = _attr_to_str(np.asarray(steps_val).reshape(-1).tolist())
 
         elif op_type == "Resize" and len(inputs) >= 3:
             dag = next((d for d in dag_nodes if d.get("name") == node_name), None)
