@@ -124,6 +124,23 @@ shapes, and report missing payloads before compilation.
 
 ## Dependency-ordered milestones
 
+### Current implementation status
+
+- **M1 complete:** strict unsupported-operation errors, exact F32/I64/I32/Bool
+  initializer round trips, external-data validation, symbolic-name preservation,
+  and structural reload tests.
+- **M2 in progress:** static opset-13/14 Slice, Split, Squeeze, and Unsqueeze
+  tensor inputs are promoted exactly and differentially tested. Runtime Shape and
+  bounded ConstantOfShape now execute against live ShapeEnv dimensions and match
+  ONNX Runtime across multiple token lengths.
+- The current GPT-2 frontier is the causal-mask Slice whose end is produced by
+  `Shape -> Gather -> Unsqueeze`. Its output extent is derived at runtime
+  (`past_sequence_length + 1`); it must not be represented as an unrelated symbol
+  or processed at maximum capacity. The next contract is value-derived semantic
+  extents, followed by tensor-driven Reshape, Expand, and Range.
+- Whole-model F32 parity, persistent KV state, prefill/decode, session APIs, and
+  W4A8 remain gated behind completion of M2 and M3.
+
 ### M1: Honest, typed ONNX boundary
 
 1. Reject unsupported ops instead of pass-through.
