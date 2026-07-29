@@ -3578,25 +3578,27 @@ impl Backend for CpuBackend {
                     let data_rank = data_shape_dims.len();
                     let max_rank = out_rank.max(data_rank);
 
-                    // Resolve to concrete values (Known dims, safe in YOLO pipeline)
-                    let resolve = |d: &DimExpr| d.evaluate().unwrap_or(1) as usize;
-
-                    // Build params: [max_rank, padded_in_dims..., padded_out_dims...]
-                    let mut params = vec![max_rank];
+                    // Build params and runtime-resolvable metadata:
+                    // [max_rank, padded_in_dims..., padded_out_dims...].
+                    let mut param_dims = vec![DimExpr::Known(max_rank as u64)];
                     for i in 0..max_rank {
                         if i < max_rank - data_rank {
-                            params.push(1);
+                            param_dims.push(DimExpr::Known(1));
                         } else {
-                            params.push(resolve(&data_shape_dims[i - (max_rank - data_rank)]));
+                            param_dims.push(data_shape_dims[i - (max_rank - data_rank)].clone());
                         }
                     }
                     for i in 0..max_rank {
                         if i < max_rank - out_rank {
-                            params.push(1);
+                            param_dims.push(DimExpr::Known(1));
                         } else {
-                            params.push(resolve(&out_shape_dims[i - (max_rank - out_rank)]));
+                            param_dims.push(out_shape_dims[i - (max_rank - out_rank)].clone());
                         }
                     }
+                    let params = param_dims
+                        .iter()
+                        .map(|dimension| dimension.evaluate().unwrap_or(1) as usize)
+                        .collect();
 
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -3605,7 +3607,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         secondary_output_slice: None,
                         params,
-                        param_dims: None,
+                        param_dims: Some(param_dims),
                         weight_meta: None,
                     });
                 }
@@ -10641,7 +10643,37 @@ impl Backend for CpuBackend {
                                 params[1 + max_rank..1 + max_rank * 2].to_vec();
 
                             let data_slice = &input_slices[0];
-                            let _shape_slice = &input_slices[1];
+                            let shape_slice = &input_slices[1];
+                            if !shape_slice.offset.is_multiple_of(4)
+                                || !shape_slice.size.is_multiple_of(4)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "expand_f32: shape tensor must use aligned F32 storage".into(),
+                                ));
+                            }
+                            let target_rank = shape_slice.size / 4;
+                            if target_rank == 0 || target_rank > max_rank {
+                                return Err(BackendError::Dispatch(format!(
+                                    "expand_f32: runtime target rank {target_rank} is incompatible with rank {max_rank}"
+                                )));
+                            }
+                            let shape_values =
+                                unsafe { arena.view_f32(shape_slice.offset, shape_slice.size) };
+                            for (axis, (&value, expected)) in shape_values
+                                .iter()
+                                .zip(&out_dims[max_rank - target_rank..])
+                                .enumerate()
+                            {
+                                if !value.is_finite()
+                                    || value < 0.0
+                                    || value.fract() != 0.0
+                                    || value as usize != *expected
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "expand_f32: runtime target dimension {axis} value {value} does not match resolved extent {expected}"
+                                    )));
+                                }
+                            }
                             for (input_dim, output_dim) in in_dims.iter().zip(&out_dims) {
                                 if input_dim != output_dim && *input_dim != 1 {
                                     return Err(BackendError::Dispatch(format!(

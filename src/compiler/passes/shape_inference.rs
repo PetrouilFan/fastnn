@@ -503,13 +503,12 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                             }
                             Some(broadcast_shape)
                         } else {
-                            // Fallback: use data shape
-                            Some(inputs[0].output_type.shape.clone())
+                            Some(node.output_type.shape.clone())
                         }
                     } else {
-                        // No expand_shape attr: fallback to data shape.
-                        // The expand kernel will read the target shape at runtime.
-                        Some(inputs[0].output_type.shape.clone())
+                        // Runtime shape tensor: preserve the bounded semantic output
+                        // metadata supplied by the ONNX graph.
+                        Some(node.output_type.shape.clone())
                     }
                 } else {
                     inputs.first().map(|i| i.output_type.shape.clone())

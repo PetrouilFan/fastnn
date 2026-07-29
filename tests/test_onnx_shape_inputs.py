@@ -243,6 +243,39 @@ def test_per_symbol_capacities_allow_smaller_live_inputs(tmp_path):
     np.testing.assert_array_equal(actual, x)
 
 
+def test_runtime_expand_matches_onnxruntime_at_multiple_live_extents(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Expand", ["X", "shape"], ["Y"], name="runtime_expand")],
+        "runtime_expand",
+        [
+            helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 1]),
+            helper.make_tensor_value_info("shape", TensorProto.INT64, [2]),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["tokens", 3])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-expand.onnx"
+    fnn_path = tmp_path / "runtime-expand.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"tokens": 8}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    for tokens in (2, 5):
+        x = np.arange(tokens, dtype=np.float32).reshape(tokens, 1)
+        shape = np.array([tokens, 3], dtype=np.int64)
+        expected = session.run(None, {"X": x, "shape": shape})[0]
+        actual = executor.forward(
+            {
+                "X": fnn.tensor(x, list(x.shape)),
+                "shape": fnn.tensor(shape.astype(np.float32), list(shape.shape)),
+            }
+        )["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

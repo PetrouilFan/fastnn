@@ -432,6 +432,29 @@ impl MemoryPlan {
                     params.extend([axis, is_mean, is_max]);
                     params
                 }
+                Opcode::Expand => {
+                    let input_shape = resolved_input_shapes.first().ok_or_else(|| {
+                        format!("expand node {node_id} is missing its data input")
+                    })?;
+                    let mut output_shape = Vec::with_capacity(node.output_type.shape.len());
+                    for dimension in &node.output_type.shape {
+                        output_shape.push(dimension.evaluate_with_env(shape_env).map_err(
+                            |error| format!("expand node {node_id} output shape: {error}"),
+                        )?);
+                    }
+                    let max_rank = input_shape.len().max(output_shape.len());
+                    let mut params = Vec::with_capacity(1 + max_rank * 2);
+                    params.push(max_rank);
+                    params.extend(std::iter::repeat_n(1, max_rank - input_shape.len()));
+                    for &dimension in input_shape {
+                        params.push(to_usize(dimension, "expand input dimension")?);
+                    }
+                    params.extend(std::iter::repeat_n(1, max_rank - output_shape.len()));
+                    for dimension in output_shape {
+                        params.push(to_usize(dimension, "expand output dimension")?);
+                    }
+                    params
+                }
                 Opcode::Conv2d => {
                     let get_attr = |name: &str| -> Result<usize, String> {
                         node.required_attr(name).map_err(|error| error.to_string())

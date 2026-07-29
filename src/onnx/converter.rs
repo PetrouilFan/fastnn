@@ -1052,7 +1052,16 @@ impl<'a> OnnxConverter<'a> {
                     expand_attrs.insert("expand_shape".to_string(), shape_str.clone());
                 }
                 let gt = if ins.len() >= 2 {
-                    self.graph.expand_op(&ins[0], &ins[1], expand_attrs)
+                    if let Some(output_shape) = parse_shape_attr(&node.attrs, "shape") {
+                        self.graph.expand_op_with_shape(
+                            &ins[0],
+                            &ins[1],
+                            expand_attrs,
+                            output_shape,
+                        )
+                    } else {
+                        self.graph.expand_op(&ins[0], &ins[1], expand_attrs)
+                    }
                 } else {
                     ins[0].clone()
                 };

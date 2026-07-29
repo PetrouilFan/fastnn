@@ -1496,6 +1496,25 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Expand with caller-supplied bounded semantic output metadata.
+    pub fn expand_op_with_shape(
+        &self,
+        input: &GraphTensor,
+        shape: &GraphTensor,
+        attrs: HashMap<String, String>,
+        output_shape: Vec<DimExpr>,
+    ) -> GraphTensor {
+        let output_type = input.tensor_type.with_shape(output_shape);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Expand,
+            vec![input.node_id, shape.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Set attributes on an existing graph node (e.g. for shape-inference hints).
     pub fn set_node_attrs(&self, node_id: NodeId, attrs: HashMap<String, String>) {
         let mut inner = self.inner.borrow_mut();
