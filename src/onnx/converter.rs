@@ -1232,7 +1232,15 @@ impl<'a> OnnxConverter<'a> {
                 if ins.len() < 3 {
                     return Err("Where needs 3 inputs: cond, x, y".to_string());
                 }
-                self.out(node, self.graph.where_tensor(&ins[0], &ins[1], &ins[2]));
+                if let Some(output_shape) = parse_shape_attr(&node.attrs, "shape") {
+                    self.out(
+                        node,
+                        self.graph
+                            .where_tensor_with_shape(&ins[0], &ins[1], &ins[2], output_shape),
+                    );
+                } else {
+                    self.out(node, self.graph.where_tensor(&ins[0], &ins[1], &ins[2]));
+                }
             }
             "CumSum" => {
                 let dim: usize = node

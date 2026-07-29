@@ -302,14 +302,10 @@ fn read_execution_outputs<B: Backend>(
             .shape
             .iter()
             .map(|dimension| {
-                let value = match dimension {
-                    crate::ir::DimExpr::Known(value) => Some(*value),
-                    crate::ir::DimExpr::Symbol(name) => shape_env.resolve(name),
-                    crate::ir::DimExpr::Bounded { sym, .. } => shape_env.resolve(sym),
-                }
-                .ok_or_else(|| {
+                let value = dimension.evaluate_with_env(shape_env).map_err(|error| {
                     BackendError::Dispatch(format!(
-                        "output node {output_node_id} has an unresolved dimension"
+                        "output node {output_node_id} name='{}' dimension {dimension:?}: {error}",
+                        node.name
                     ))
                 })?;
                 usize::try_from(value).map_err(|_| {

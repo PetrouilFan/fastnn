@@ -276,6 +276,42 @@ def test_runtime_expand_matches_onnxruntime_at_multiple_live_extents(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_runtime_where_bool_broadcast_matches_onnxruntime(tmp_path):
+    graph = helper.make_graph(
+        [
+            helper.make_node("Cast", ["condition_source"], ["condition"], to=TensorProto.BOOL),
+            helper.make_node("Where", ["condition", "X", "Y"], ["Z"], name="runtime_where"),
+        ],
+        "runtime_where",
+        [
+            helper.make_tensor_value_info("condition_source", TensorProto.FLOAT, ["tokens", 1]),
+            helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3]),
+            helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 1]),
+        ],
+        [helper.make_tensor_value_info("Z", TensorProto.FLOAT, ["tokens", 3])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-where.onnx"
+    fnn_path = tmp_path / "runtime-where.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"tokens": 8}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    x = np.array([[10.0, 20.0, 30.0]], dtype=np.float32)
+    y = np.array([[-1.0]], dtype=np.float32)
+
+    for tokens in (2, 5):
+        condition = (np.arange(tokens) % 2).astype(np.float32).reshape(tokens, 1)
+        feeds = {"condition_source": condition, "X": x, "Y": y}
+        expected = session.run(None, feeds)[0]
+        actual = executor.forward(
+            {name: fnn.tensor(value, list(value.shape)) for name, value in feeds.items()}
+        )["Z"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

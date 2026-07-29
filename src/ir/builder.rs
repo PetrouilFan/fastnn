@@ -2073,6 +2073,25 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, out_tt)
     }
 
+    pub fn where_tensor_with_shape(
+        &self,
+        condition: &GraphTensor,
+        x: &GraphTensor,
+        y: &GraphTensor,
+        output_shape: Vec<DimExpr>,
+    ) -> GraphTensor {
+        let out_tt = TensorType::new(output_shape, x.dtype());
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node(
+                Opcode::Where,
+                vec![condition.node_id, x.node_id, y.node_id],
+                out_tt.clone(),
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, out_tt)
+    }
+
     /// Scale a gradient by a constant factor (for loss scaling / gradient unscaling).
     /// Backward: d_input = d_output * scale (correctly scales the gradient).
     pub fn gradient_scale(&self, input: &GraphTensor, scale: f32) -> GraphTensor {

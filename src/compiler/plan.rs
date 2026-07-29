@@ -432,6 +432,32 @@ impl MemoryPlan {
                     params.extend([axis, is_mean, is_max]);
                     params
                 }
+                Opcode::Where => {
+                    if resolved_input_shapes.len() != 3 {
+                        return Err(format!("where node {node_id} requires three inputs"));
+                    }
+                    let mut output_shape = Vec::with_capacity(node.output_type.shape.len());
+                    for dimension in &node.output_type.shape {
+                        output_shape.push(dimension.evaluate_with_env(shape_env).map_err(
+                            |error| format!("where node {node_id} output shape: {error}"),
+                        )?);
+                    }
+                    let mut params = vec![
+                        resolved_input_shapes[0].len(),
+                        resolved_input_shapes[1].len(),
+                        resolved_input_shapes[2].len(),
+                        output_shape.len(),
+                    ];
+                    for shape in &resolved_input_shapes {
+                        for &dimension in shape {
+                            params.push(to_usize(dimension, "where input dimension")?);
+                        }
+                    }
+                    for dimension in output_shape {
+                        params.push(to_usize(dimension, "where output dimension")?);
+                    }
+                    params
+                }
                 Opcode::Expand => {
                     let input_shape = resolved_input_shapes.first().ok_or_else(|| {
                         format!("expand node {node_id} is missing its data input")

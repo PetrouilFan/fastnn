@@ -558,9 +558,16 @@ impl DimExpr {
                     Ok(resolved)
                 }
             }
-            DimExpr::Symbol(s) => env
-                .resolve(s)
-                .ok_or_else(|| format!("DimExpr::Symbol '{}' is not bound in the ShapeEnv", s)),
+            DimExpr::Symbol(symbol) => env.resolve(symbol).map(Ok).unwrap_or_else(|| {
+                if contains_expression_operator(symbol) {
+                    evaluate_dimension_expression(symbol, |name| env.resolve(name))
+                } else {
+                    Err(format!(
+                        "DimExpr::Symbol '{}' is not bound in the ShapeEnv",
+                        symbol
+                    ))
+                }
+            }),
         }
     }
 }
