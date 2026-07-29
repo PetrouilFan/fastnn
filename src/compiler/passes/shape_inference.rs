@@ -521,11 +521,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 inputs.first().map(|i| i.output_type.shape.clone())
             }
             Opcode::Range => {
-                // Range(start, limit, step) — always produces a 1D F32 tensor.
-                // The length is dynamic (set by the builder as Symbol("N")).
-                inputs
-                    .first()
-                    .map(|_| vec![DimExpr::Symbol("N".to_string())])
+                // Runtime length is carried by the declared bounded semantic shape.
+                Some(node.output_type.shape.clone())
             }
             Opcode::Constant(_)
             | Opcode::Input

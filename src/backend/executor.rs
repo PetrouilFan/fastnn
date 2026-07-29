@@ -843,8 +843,10 @@ impl<B: Backend> GraphExecutor<B> {
                 })?;
             if input_bytes.len() != slot.size {
                 return Err(BackendError::Dispatch(format!(
-                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}",
-                    input_bytes.len(), slot.size
+                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}; declared shape {:?}, shape env {:?}",
+                    input_bytes.len(), slot.size,
+                    graph.get_node(input_node_id).map(|node| &node.output_type.shape),
+                    shape_env
                 )));
             }
             let input_end = slot.offset.checked_add(input_bytes.len()).ok_or_else(|| {

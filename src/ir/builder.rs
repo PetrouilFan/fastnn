@@ -1531,7 +1531,17 @@ impl GraphBuilder {
         limit: &GraphTensor,
         step: &GraphTensor,
     ) -> GraphTensor {
-        let output_type = TensorType::new(vec![DimExpr::Symbol("N".to_string())], IrDType::F32);
+        self.range_op_with_shape(start, limit, step, vec![DimExpr::Symbol("N".to_string())])
+    }
+
+    pub fn range_op_with_shape(
+        &self,
+        start: &GraphTensor,
+        limit: &GraphTensor,
+        step: &GraphTensor,
+        shape: Vec<DimExpr>,
+    ) -> GraphTensor {
+        let output_type = TensorType::new(shape, IrDType::F32);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Range,

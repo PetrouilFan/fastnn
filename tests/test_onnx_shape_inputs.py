@@ -223,6 +223,26 @@ def test_f32_bool_cast_roundtrip_matches_onnxruntime(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_per_symbol_capacities_allow_smaller_live_inputs(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Identity", ["X"], ["Y"], name="identity")],
+        "bounded_live_input",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", "past", 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", "past", 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "bounded-live-input.onnx"
+    fnn_path = tmp_path / "bounded-live-input.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"batch": 1, "past": 8}
+    )
+    x = np.arange(8, dtype=np.float32).reshape(1, 2, 4)
+    actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+    np.testing.assert_array_equal(actual, x)
+
+
 def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     initializers = {

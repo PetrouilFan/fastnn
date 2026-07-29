@@ -4,9 +4,10 @@ Supports both Sequential models (from PyTorch export) and
 DAG models (from ONNX import).
 """
 
+import ast
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -25,7 +26,54 @@ def _attr_to_str(value: Any) -> str:
     return str(value)
 
 
-def build_model_from_fnn(path: str) -> Any:
+def _expression_capacity(expression: str, bounds: Mapping[str, int]) -> int:
+    def evaluate(node: ast.AST) -> int:
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id not in bounds:
+                raise ValueError(f"missing capacity for symbolic dimension '{node.id}'")
+            return bounds[node.id]
+        if isinstance(node, ast.BinOp):
+            lhs, rhs = evaluate(node.left), evaluate(node.right)
+            if isinstance(node.op, ast.Add):
+                return lhs + rhs
+            if isinstance(node.op, ast.Sub):
+                return max(0, lhs - rhs)
+            if isinstance(node.op, ast.Mult):
+                return lhs * rhs
+            if isinstance(node.op, (ast.Div, ast.FloorDiv)):
+                if rhs == 0:
+                    raise ValueError("symbolic dimension capacity divides by zero")
+                return lhs // rhs
+            if isinstance(node.op, ast.Pow):
+                return lhs**rhs
+        raise ValueError(f"unsupported symbolic dimension expression: {expression}")
+
+    capacity = evaluate(ast.parse(expression.replace("^", "**"), mode="eval"))
+    if capacity < 0 or capacity > (1 << 64) - 1:
+        raise ValueError(f"symbolic dimension capacity is outside u64: {capacity}")
+    return capacity
+
+
+def _bound_dimension_descriptor(descriptor: str, bounds: Mapping[str, int]) -> str:
+    if not (descriptor.startswith("Symbol(") and descriptor.endswith(")")):
+        return descriptor
+    expression = descriptor[7:-1].strip()
+    try:
+        capacity = _expression_capacity(expression, bounds)
+    except ValueError as error:
+        if "missing capacity" in str(error):
+            return descriptor
+        raise
+    return f"Bounded({expression};{capacity})"
+
+
+def build_model_from_fnn(
+    path: str, *, symbolic_dim_bounds: Optional[Mapping[str, int]] = None
+) -> Any:
     """Build a runnable model from a .fnn file.
 
     Automatically detects whether the file contains a sequential
@@ -33,17 +81,25 @@ def build_model_from_fnn(path: str) -> Any:
 
     Args:
         path: Path to .fnn file.
+        symbolic_dim_bounds: Optional allocation capacities keyed by ONNX symbolic
+            dimension name. Live dimensions remain dynamic and are validated against
+            these bounds.
 
     Returns:
         A fastnn model (Sequential for PyTorch-exported, AotExecutor for ONNX-imported).
     """
+    bounds = dict(symbolic_dim_bounds or {})
+    for name, capacity in bounds.items():
+        if not isinstance(name, str) or not name or not isinstance(capacity, int) or capacity <= 0:
+            raise ValueError("symbolic_dim_bounds must map non-empty names to positive integers")
+
     with open(path, "rb") as f:
         magic, file_version, header, num_params = read_fnn_header(f)
         if magic != MODEL_MAGIC:
             raise SerializationError("Invalid .fnn file: missing magic bytes")
 
         if "graph" in header:
-            return build_dag_model(header, path)
+            return build_dag_model(header, path, symbolic_dim_bounds=bounds)
         elif "layers" in header:
             return build_sequential_model(path)
         else:
@@ -123,7 +179,12 @@ def fuse_silu(graph: dict) -> dict:
     return graph
 
 
-def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any:
+def build_dag_model(
+    header: dict,
+    path: str,
+    quantize: int | None = None,
+    symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
+) -> Any:
     """Build a Rust AotExecutor from an ONNX-imported .fnn file.
 
     Uses the high-performance Rust AotExecutor for graph execution.
@@ -136,6 +197,8 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
             None means no quantization (default f32).
     """
     import fastnn as fnn
+
+    dimension_bounds = dict(symbolic_dim_bounds or {})
 
     # Load parameters from file (version-aware)
     with open(path, "rb") as f:
@@ -220,7 +283,9 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                             symbolic_dimension_ids[symbol_name] = next_symbolic_id
                             next_symbolic_id += 1
                         dims.append(-symbolic_dimension_ids[symbol_name])
-                        symbolic_dims.append(dim)
+                        symbolic_dims.append(
+                            _bound_dimension_descriptor(dim, dimension_bounds)
+                        )
                     elif dim == "Unknown":
                         unknown_name = f"{node_name}:axis:{axis}"
                         symbolic_dimension_ids[unknown_name] = next_symbolic_id
@@ -364,6 +429,13 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                 continue
             if isinstance(value, dict):
                 for sub_key, sub_value in value.items():
+                    if sub_key == "shape" and isinstance(sub_value, (list, tuple)):
+                        sub_value = [
+                            _bound_dimension_descriptor(dimension, dimension_bounds)
+                            if isinstance(dimension, str)
+                            else dimension
+                            for dimension in sub_value
+                        ]
                     dag_node[sub_key] = _attr_to_str(sub_value)
             elif isinstance(value, (list, tuple)):
                 dag_node[key] = str(list(value))
@@ -373,6 +445,9 @@ def build_dag_model(header: dict, path: str, quantize: int | None = None) -> Any
                 dag_node[key] = str(value)
             elif isinstance(value, str):
                 dag_node[key] = value
+        output_shape = node.get("output_shape", {})
+        if isinstance(output_shape, dict) and isinstance(output_shape.get("shape"), (list, tuple)):
+            dag_node["output_rank"] = str(len(output_shape["shape"]))
         dag_nodes.append(dag_node)
 
     # Replicate _make_fastnn_executor's constant folding for Shape→Gather→Add/Sub/Mul/Div chains

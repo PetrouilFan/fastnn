@@ -1385,10 +1385,16 @@ impl Backend for CpuBackend {
                             memory_plan.slots.get(&input_id),
                             memory_plan.slots.get(&node_id),
                         ) {
-                            if in_slot.offset != out_slot.offset || in_slot.size != out_slot.size {
-                                instructions.push(Instruction::MemCopy {
-                                    dst: output_slice,
-                                    src: BufferSlice::new(in_slot.offset, in_slot.size),
+                            if in_slot.offset != out_slot.offset {
+                                instructions.push(Instruction::CallKernel {
+                                    node_id: Some(node_id),
+                                    kernel_name: "view_copy_f32".to_string(),
+                                    input_slices,
+                                    output_slice,
+                                    secondary_output_slice: None,
+                                    params: vec![],
+                                    param_dims: None,
+                                    weight_meta: None,
                                 });
                             }
                         }
@@ -1400,10 +1406,16 @@ impl Backend for CpuBackend {
                             memory_plan.slots.get(&input_id),
                             memory_plan.slots.get(&node_id),
                         ) {
-                            if in_slot.offset != out_slot.offset || in_slot.size != out_slot.size {
-                                instructions.push(Instruction::MemCopy {
-                                    dst: output_slice,
-                                    src: BufferSlice::new(in_slot.offset, in_slot.size),
+                            if in_slot.offset != out_slot.offset {
+                                instructions.push(Instruction::CallKernel {
+                                    node_id: Some(node_id),
+                                    kernel_name: "view_copy_f32".to_string(),
+                                    input_slices,
+                                    output_slice,
+                                    secondary_output_slice: None,
+                                    params: vec![],
+                                    param_dims: None,
+                                    weight_meta: None,
                                 });
                             }
                         }
@@ -4203,6 +4215,28 @@ impl Backend for CpuBackend {
                                 }
                                 chunk.copy_from_slice(&encoded.to_le_bytes());
                             }
+                        }
+                        "view_copy_f32" => {
+                            let [input] = input_slices.as_slice() else {
+                                return Err(BackendError::Dispatch(
+                                    "view_copy_f32 requires exactly one input".into(),
+                                ));
+                            };
+                            if input.size != output_slice.size {
+                                return Err(BackendError::Dispatch(format!(
+                                    "view_copy_f32 semantic size mismatch: input {} bytes, output {} bytes",
+                                    input.size, output_slice.size
+                                )));
+                            }
+                            let source_end =
+                                input.offset.checked_add(input.size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "view_copy_f32 source range overflows".into(),
+                                    )
+                                })?;
+                            arena
+                                .data_mut()
+                                .copy_within(input.offset..source_end, output_slice.offset);
                         }
                         kernel @ ("add_broadcast_f32" | "sub_broadcast_f32"
                         | "mul_broadcast_f32" | "div_broadcast_f32"

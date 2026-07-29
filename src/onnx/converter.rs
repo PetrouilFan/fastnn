@@ -856,7 +856,16 @@ impl<'a> OnnxConverter<'a> {
                     .get("axis")
                     .and_then(|a| a.parse().ok())
                     .unwrap_or(0);
-                self.out(node, self.graph.gather(&ins[0], &ins[1], axis));
+                let gathered = self.graph.gather(&ins[0], &ins[1], axis);
+                let output_rank = node
+                    .attrs
+                    .get("output_rank")
+                    .and_then(|rank| rank.parse::<usize>().ok());
+                if output_rank == Some(0) {
+                    self.out(node, self.graph.reshape(&gathered, &[]));
+                } else {
+                    self.out(node, gathered);
+                }
             }
             "ScatterND" => {
                 self.out(node, self.graph.scatter_nd(&ins[0], &ins[1], &ins[2]));
@@ -995,8 +1004,13 @@ impl<'a> OnnxConverter<'a> {
                 // Range(start, limit, step) — produces a 1D F32 tensor.
                 // All 3 inputs are 0D scalars in the ONNX model.
                 if ins.len() >= 3 {
-                    let gt = self.graph.range_op(&ins[0], &ins[1], &ins[2]);
-                    self.out(node, gt);
+                    let range = if let Some(shape) = parse_shape_attr(&node.attrs, "shape") {
+                        self.graph
+                            .range_op_with_shape(&ins[0], &ins[1], &ins[2], shape)
+                    } else {
+                        self.graph.range_op(&ins[0], &ins[1], &ins[2])
+                    };
+                    self.out(node, range);
                 } else {
                     return Err("Range needs 3 inputs (start, limit, step)".to_string());
                 }

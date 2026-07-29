@@ -16,7 +16,12 @@ pub(crate) fn node_output_byte_size(
         return node
             .output_type
             .try_byte_size_with_env(shape_env)
-            .ok_or_else(|| format!("node {} output storage size overflows", node.id));
+            .ok_or_else(|| {
+                format!(
+                    "node {} name='{}' op='{:?}' output storage size overflows for shape {:?}",
+                    node.id, node.name, node.opcode, node.output_type.shape
+                )
+            });
     }
 
     let mut dimensions = Vec::with_capacity(node.output_type.shape.len());

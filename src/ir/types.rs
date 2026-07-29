@@ -71,6 +71,29 @@ pub fn parse_dimension_descriptor(value: &str) -> Result<DimExpr, String> {
         }
         return Ok(DimExpr::Symbol(symbol.to_string()));
     }
+    if let Some(inner) = value
+        .strip_prefix("Bounded(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        let (symbol, maximum) = inner
+            .rsplit_once(';')
+            .ok_or_else(|| format!("bounded dimension is missing its maximum: {value:?}"))?;
+        let symbol = symbol.trim();
+        if symbol.is_empty() {
+            return Err("bounded dimension expression is empty".to_string());
+        }
+        let max = maximum
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| format!("invalid bounded dimension maximum {value:?}: {error}"))?;
+        if max == 0 {
+            return Err("bounded dimension maximum must be positive".to_string());
+        }
+        return Ok(DimExpr::Bounded {
+            sym: symbol.to_string(),
+            max,
+        });
+    }
     value
         .parse::<u64>()
         .map(DimExpr::Known)
@@ -397,6 +420,21 @@ impl ShapeEnv {
     pub fn from_graph_inputs(graph: &ComputeGraph, inputs: &[&[u8]]) -> Result<Self, String> {
         let mut env = ShapeEnv::new();
         let mut input_infos: Vec<(NodeId, usize, usize, Vec<String>)> = Vec::new();
+
+        // A capacity of one is also an exact live extent. Seed these symbols so
+        // multi-symbol inputs such as [batch, sequence] can resolve the remaining
+        // dimensions without guessing.
+        for &input_id in &graph.inputs {
+            if let Some(node) = graph.get_node(input_id) {
+                for dimension in &node.output_type.shape {
+                    if let DimExpr::Bounded { sym, max: 1 } = dimension {
+                        if !contains_expression_operator(sym) {
+                            env.try_bind(sym, 1)?;
+                        }
+                    }
+                }
+            }
+        }
 
         // Pass 1: collect shape info, bind single-symbol inputs
         for (i, &input_id) in graph.inputs.iter().enumerate() {
@@ -811,7 +849,12 @@ impl TensorType {
             .map(|dimension| {
                 Some(match dimension {
                     DimExpr::Known(value) => usize::try_from(*value).ok()?,
-                    DimExpr::Bounded { max, .. } => usize::try_from(*max).ok()?,
+                    DimExpr::Bounded { max, .. } => match env {
+                        Some(env) => {
+                            usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?
+                        }
+                        None => usize::try_from(*max).ok()?,
+                    },
                     DimExpr::Symbol(_) => match env {
                         Some(env) => {
                             usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?
