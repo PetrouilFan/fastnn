@@ -301,6 +301,8 @@ pub fn plan_memory_with_env(
         Opcode::LogSoftmax,
         Opcode::Mish,
         Opcode::Erf,
+        Opcode::Sin,
+        Opcode::Cos,
         Opcode::ToF16,
         Opcode::ToF32,
         Opcode::Cast,

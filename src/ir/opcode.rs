@@ -75,6 +75,9 @@ pub enum Opcode {
     Repeat,
     CumSum,
     Erf,
+    Sin,
+    Cos,
+    Trilu,
     Flip,
     /// Element-wise where(condition, x, y).
     Where,

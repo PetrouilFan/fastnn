@@ -3448,6 +3448,9 @@ pub fn build_backward_graph(
             | Opcode::AdaptiveAvgPool2d
             | Opcode::CumSum
             | Opcode::Erf
+            | Opcode::Sin
+            | Opcode::Cos
+            | Opcode::Trilu
             | Opcode::Flip
             | Opcode::TopK
             | Opcode::Cast

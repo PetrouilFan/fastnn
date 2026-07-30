@@ -2632,6 +2632,52 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::Sin | Opcode::Cos => {
+                    let kernel_name = if matches!(node.opcode, Opcode::Sin) {
+                        "sin_f32"
+                    } else {
+                        "cos_f32"
+                    };
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: kernel_name.to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Trilu => {
+                    let dimensions = input_shape_dims.first().cloned().unwrap_or_default();
+                    if dimensions.len() < 2 {
+                        return Err(BackendError::Compilation(format!(
+                            "Trilu node {node_id} requires rank >= 2"
+                        )));
+                    }
+                    let upper = node
+                        .optional_attr::<usize>("upper")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or(1);
+                    let mut param_dims = vec![DimExpr::Known(dimensions.len() as u64)];
+                    param_dims.extend(dimensions);
+                    param_dims.push(DimExpr::Known(upper as u64));
+                    let params = param_dims
+                        .iter()
+                        .map(|dimension| dimension.evaluate().unwrap_or(1) as usize)
+                        .collect();
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: "trilu_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params,
+                        param_dims: Some(param_dims),
+                        weight_meta: None,
+                    });
+                }
                 Opcode::Flip => {
                     let dims = node
                         .optional_attr_list::<usize>("dims")
@@ -3784,6 +3830,8 @@ impl Backend for CpuBackend {
                             | "log_softmax_f32"
                             | "mish_f32"
                             | "erf_f32"
+                            | "sin_f32"
+                            | "cos_f32"
                     );
                     if is_unary_f32 {
                         let input = input_slices.first().copied();
@@ -9482,6 +9530,110 @@ impl Backend for CpuBackend {
                                 );
                             }
                         }
+                        kernel @ ("sin_f32" | "cos_f32") => {
+                            if !params.is_empty() {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel}: expected no parameters"
+                                )));
+                            }
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, output| {
+                                    for (source, destination) in input.iter().zip(output.iter_mut())
+                                    {
+                                        *destination = if kernel == "sin_f32" {
+                                            source.sin()
+                                        } else {
+                                            source.cos()
+                                        };
+                                    }
+                                },
+                            );
+                        }
+                        "trilu_f32" => {
+                            if !(1..=2).contains(&input_slices.len()) || params.len() < 4 {
+                                return Err(BackendError::Dispatch(
+                                    "trilu_f32: expected data, optional k, and shape metadata"
+                                        .into(),
+                                ));
+                            }
+                            let rank = params[0];
+                            if rank < 2 || params.len() != rank + 2 {
+                                return Err(BackendError::Dispatch(
+                                    "trilu_f32: malformed rank/shape metadata".into(),
+                                ));
+                            }
+                            let shape = &params[1..1 + rank];
+                            let upper = params[1 + rank] != 0;
+                            let elements = shape.iter().try_fold(1usize, |count, dimension| {
+                                count.checked_mul(*dimension).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "trilu_f32: element count overflows".into(),
+                                    )
+                                })
+                            })?;
+                            let data_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if data_slice.size != elements.saturating_mul(4)
+                                || output_slice.size != data_slice.size
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "trilu_f32: live shape disagrees with f32 storage".into(),
+                                ));
+                            }
+                            let diagonal = if let Some(diagonal_slice) = input_slices.get(1) {
+                                let bytes = &arena.data_mut()[diagonal_slice.offset
+                                    ..diagonal_slice.offset + diagonal_slice.size];
+                                match bytes.len() {
+                                    8 => i64::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "trilu_f32: invalid i64 diagonal".into(),
+                                        )
+                                    })?),
+                                    4 => f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "trilu_f32: invalid f32 diagonal".into(),
+                                        )
+                                    })?) as i64,
+                                    _ => {
+                                        return Err(BackendError::Dispatch(
+                                            "trilu_f32: diagonal must be scalar i64 or f32".into(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                0
+                            };
+                            let rows = shape[rank - 2];
+                            let columns = shape[rank - 1];
+                            let matrix_elements = rows.checked_mul(columns).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "trilu_f32: matrix element count overflows".into(),
+                                )
+                            })?;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                data_slice,
+                                output_slice,
+                                |input, output| {
+                                    for index in 0..elements {
+                                        let matrix_index = index % matrix_elements;
+                                        let row = (matrix_index / columns) as i64;
+                                        let column = (matrix_index % columns) as i64;
+                                        let keep = if upper {
+                                            column - row >= diagonal
+                                        } else {
+                                            column - row <= diagonal
+                                        };
+                                        output[index] = if keep { input[index] } else { 0.0 };
+                                    }
+                                },
+                            );
+                        }
                         "flip" => {
                             if input_slices.len() != 1 || params.is_empty() {
                                 return Err(BackendError::Dispatch(
@@ -10781,10 +10933,10 @@ impl Backend for CpuBackend {
                                 if !value.is_finite()
                                     || value < 0.0
                                     || value.fract() != 0.0
-                                    || value as usize != *expected
+                                    || (value as usize != *expected && value != 1.0)
                                 {
                                     return Err(BackendError::Dispatch(format!(
-                                        "expand_f32: runtime target dimension {axis} value {value} does not match resolved extent {expected}"
+                                        "expand_f32: runtime target dimension {axis} value {value} cannot broadcast to resolved extent {expected}"
                                     )));
                                 }
                             }

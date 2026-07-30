@@ -256,6 +256,14 @@ def build_dag_model(
 
     graph = header.get("graph", {})
     onnx_nodes = graph.get("nodes", [])
+    # Serialized DAG edges use comma-delimited strings. Normalize them before
+    # graph optimization; optimizer passes operate on tensor-name lists and must
+    # never iterate individual characters from a serialized edge name.
+    for node in onnx_nodes:
+        for edge_key in ("inputs", "outputs"):
+            edges = node.get(edge_key, [])
+            if isinstance(edges, str):
+                node[edge_key] = [edge.strip() for edge in edges.split(",") if edge.strip()]
     input_names = [inp.get("name", "") if isinstance(inp, dict) else inp for inp in graph.get("inputs", [])]
     output_names = [out.get("name", "") if isinstance(out, dict) else out for out in graph.get("outputs", [])]
 

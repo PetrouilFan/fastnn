@@ -695,7 +695,7 @@ impl Default for PlanResourceLimits {
             max_total_params: 16_000_000,
             max_total_param_dims: 16_000_000,
             max_total_kernel_name_bytes: 64_000_000,
-            max_total_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_total_constant_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
             max_total_quant_metadata: 16_000_000,
         }
     }

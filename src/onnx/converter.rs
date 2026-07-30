@@ -1227,6 +1227,21 @@ impl<'a> OnnxConverter<'a> {
             "Erf" => {
                 self.out(node, self.graph.erf(&ins[0]));
             }
+            "Sin" => {
+                self.out(node, self.graph.sin(&ins[0]));
+            }
+            "Cos" => {
+                self.out(node, self.graph.cos(&ins[0]));
+            }
+            "Trilu" => {
+                let upper = node
+                    .attrs
+                    .get("upper")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(1)
+                    != 0;
+                self.out(node, self.graph.trilu(&ins[0], ins.get(1), upper));
+            }
             "Where" => {
                 // ONNX Where: cond (bool), x (T), y (T) → output elementwise select
                 if ins.len() < 3 {

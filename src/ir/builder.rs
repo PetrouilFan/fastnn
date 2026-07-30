@@ -2036,6 +2036,54 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, tt)
     }
 
+    /// Element-wise sine.
+    pub fn sin(&self, input: &GraphTensor) -> GraphTensor {
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
+        let node_id =
+            self.inner
+                .borrow_mut()
+                .graph
+                .add_node(Opcode::Sin, vec![input.node_id], tt.clone());
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Element-wise cosine.
+    pub fn cos(&self, input: &GraphTensor) -> GraphTensor {
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
+        let node_id =
+            self.inner
+                .borrow_mut()
+                .graph
+                .add_node(Opcode::Cos, vec![input.node_id], tt.clone());
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// ONNX Trilu over the innermost two dimensions.
+    pub fn trilu(
+        &self,
+        input: &GraphTensor,
+        diagonal: Option<&GraphTensor>,
+        upper: bool,
+    ) -> GraphTensor {
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
+        let mut inputs = vec![input.node_id];
+        if let Some(diagonal) = diagonal {
+            inputs.push(diagonal.node_id);
+        }
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert(
+            "upper".to_string(),
+            if upper { "1" } else { "0" }.to_string(),
+        );
+        let node_id = self.inner.borrow_mut().graph.add_node_with_attrs(
+            Opcode::Trilu,
+            inputs,
+            tt.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
     /// Flip (reverse) tensor along specified dimensions.
     pub fn flip(&self, input: &GraphTensor, dims: &[usize]) -> GraphTensor {
         let mut attrs = std::collections::HashMap::new();

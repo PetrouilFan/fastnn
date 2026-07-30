@@ -182,6 +182,11 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
             })
         }),
 
+        Opcode::Sin => unary_float_op(&input_vals, |x| x.sin())
+            .or_else(|| unary_f32_data_op(&input_vals, |x| x.sin())),
+        Opcode::Cos => unary_float_op(&input_vals, |x| x.cos())
+            .or_else(|| unary_f32_data_op(&input_vals, |x| x.cos())),
+
         Opcode::Reshape => {
             // Reshape of constant data: change the TensorType shape metadata
             if let Some(TensorValue::Data {

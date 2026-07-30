@@ -531,6 +531,9 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             | Opcode::Repeat
             | Opcode::CumSum
             | Opcode::Erf
+            | Opcode::Sin
+            | Opcode::Cos
+            | Opcode::Trilu
             | Opcode::Flip
             | Opcode::Where
             | Opcode::SgdUpdate

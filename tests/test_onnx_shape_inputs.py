@@ -276,6 +276,72 @@ def test_runtime_expand_matches_onnxruntime_at_multiple_live_extents(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_sin_cos_match_onnxruntime(tmp_path):
+    graph = helper.make_graph(
+        [
+            helper.make_node("Sin", ["X"], ["sin_x"], name="sin"),
+            helper.make_node("Cos", ["X"], ["cos_x"], name="cos"),
+        ],
+        "sin_cos",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])],
+        [
+            helper.make_tensor_value_info("sin_x", TensorProto.FLOAT, [2, 4]),
+            helper.make_tensor_value_info("cos_x", TensorProto.FLOAT, [2, 4]),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "sin-cos.onnx"
+    fnn_path = tmp_path / "sin-cos.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    x = np.array(
+        [[-100.0, -np.pi, -0.0, 0.25], [1.0, np.pi / 2, np.pi, 100.0]],
+        dtype=np.float32,
+    )
+    expected_sin, expected_cos = session.run(None, {"X": x})
+    outputs = executor.forward({"X": fnn.tensor(x, list(x.shape))})
+    np.testing.assert_allclose(outputs["sin_x"].numpy(), expected_sin, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(outputs["cos_x"].numpy(), expected_cos, rtol=1e-6, atol=1e-7)
+
+
+def test_trilu_matches_onnxruntime_for_batched_matrices(tmp_path):
+    graph = helper.make_graph(
+        [
+            helper.make_node("Trilu", ["X", "k_neg"], ["upper"], name="upper"),
+            helper.make_node(
+                "Trilu", ["X", "k_pos"], ["lower"], name="lower", upper=0
+            ),
+        ],
+        "trilu",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, "cols"])],
+        [
+            helper.make_tensor_value_info("upper", TensorProto.FLOAT, [1, 3, "cols"]),
+            helper.make_tensor_value_info("lower", TensorProto.FLOAT, [1, 3, "cols"]),
+        ],
+        initializer=[
+            numpy_helper.from_array(np.array(-1, dtype=np.int64), name="k_neg"),
+            numpy_helper.from_array(np.array(1, dtype=np.int64), name="k_pos"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "trilu.onnx"
+    fnn_path = tmp_path / "trilu.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path),
+        symbolic_dim_bounds={"cols": 8},
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    x = np.arange(12, dtype=np.float32).reshape(1, 3, 4)
+    expected_upper, expected_lower = session.run(None, {"X": x})
+    outputs = executor.forward({"X": fnn.tensor(x, list(x.shape))})
+    np.testing.assert_array_equal(outputs["upper"].numpy(), expected_upper)
+    np.testing.assert_array_equal(outputs["lower"].numpy(), expected_lower)
+
+
 def test_runtime_where_bool_broadcast_matches_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

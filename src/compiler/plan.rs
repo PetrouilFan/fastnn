@@ -432,6 +432,25 @@ impl MemoryPlan {
                     params.extend([axis, is_mean, is_max]);
                     params
                 }
+                Opcode::Trilu => {
+                    let input_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("trilu node {node_id} requires one data input"))?;
+                    if input_shape.len() < 2 {
+                        return Err(format!("trilu node {node_id} requires rank >= 2"));
+                    }
+                    let upper = node
+                        .attrs
+                        .get("upper")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let mut params = vec![input_shape.len()];
+                    for &dimension in input_shape {
+                        params.push(to_usize(dimension, "trilu input dimension")?);
+                    }
+                    params.push(upper);
+                    params
+                }
                 Opcode::Where => {
                     if resolved_input_shapes.len() != 3 {
                         return Err(format!("where node {node_id} requires three inputs"));

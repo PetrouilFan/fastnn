@@ -31,7 +31,7 @@ impl Default for PreparedPlanResourceLimits {
             max_scratch_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
             max_instructions: 1_000_000,
             max_constant_entries: 1_000_000,
-            max_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_constant_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
         }
     }
 }
