@@ -342,6 +342,37 @@ def test_trilu_matches_onnxruntime_for_batched_matrices(tmp_path):
     np.testing.assert_array_equal(outputs["lower"].numpy(), expected_lower)
 
 
+def test_concat_uses_live_symbolic_outer_extent(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Concat", ["A", "B"], ["Y"], name="concat", axis=2)],
+        "concat_live_outer",
+        [
+            helper.make_tensor_value_info("A", TensorProto.FLOAT, [1, "outer", 2]),
+            helper.make_tensor_value_info("B", TensorProto.FLOAT, [1, "outer", 1]),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, "outer", 3])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "concat-live.onnx"
+    fnn_path = tmp_path / "concat-live.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"outer": 8}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    a = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+    b = np.arange(100, 103, dtype=np.float32).reshape(1, 3, 1)
+    expected = session.run(None, {"A": a, "B": b})[0]
+    output = executor.forward(
+        {
+            "A": fnn.tensor(a, list(a.shape)),
+            "B": fnn.tensor(b, list(b.shape)),
+        }
+    )["Y"].numpy()
+    np.testing.assert_array_equal(output, expected)
+
+
 def test_runtime_where_bool_broadcast_matches_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

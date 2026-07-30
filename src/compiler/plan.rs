@@ -432,6 +432,55 @@ impl MemoryPlan {
                     params.extend([axis, is_mean, is_max]);
                     params
                 }
+                Opcode::Concat => {
+                    let first = resolved_input_shapes.first().ok_or_else(|| {
+                        format!("concat node {node_id} requires at least one input")
+                    })?;
+                    let rank = first.len();
+                    let axis = node
+                        .attrs
+                        .get("axis")
+                        .ok_or_else(|| format!("concat node {node_id} is missing axis"))?
+                        .parse::<usize>()
+                        .map_err(|error| {
+                            format!("concat node {node_id} has invalid axis: {error}")
+                        })?;
+                    if axis >= rank {
+                        return Err(format!(
+                            "concat node {node_id} axis {axis} is out of range for rank {rank}"
+                        ));
+                    }
+                    for (input_index, shape) in resolved_input_shapes.iter().enumerate() {
+                        if shape.len() != rank {
+                            return Err(format!(
+                                "concat node {node_id} input {input_index} rank {} differs from {rank}",
+                                shape.len()
+                            ));
+                        }
+                        for dimension in 0..rank {
+                            if dimension != axis && shape[dimension] != first[dimension] {
+                                return Err(format!(
+                                    "concat node {node_id} input {input_index} dimension {dimension} value {} differs from {}",
+                                    shape[dimension], first[dimension]
+                                ));
+                            }
+                        }
+                    }
+                    let checked_product = |dimensions: &[u64], label: &str| {
+                        dimensions.iter().try_fold(1u64, |product, dimension| {
+                            product
+                                .checked_mul(*dimension)
+                                .ok_or_else(|| format!("concat node {node_id} {label} overflows"))
+                        })
+                    };
+                    let inner_stride = checked_product(&first[axis + 1..], "inner stride")?;
+                    let outer_count = checked_product(&first[..axis], "outer count")?;
+                    vec![
+                        axis,
+                        to_usize(inner_stride, "concat inner stride")?,
+                        to_usize(outer_count, "concat outer count")?,
+                    ]
+                }
                 Opcode::Trilu => {
                     let input_shape = resolved_input_shapes
                         .first()
