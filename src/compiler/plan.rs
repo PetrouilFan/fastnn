@@ -481,6 +481,29 @@ impl MemoryPlan {
                         to_usize(outer_count, "concat outer count")?,
                     ]
                 }
+                Opcode::ScatterNd => {
+                    let data_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("scatter_nd node {node_id} is missing data"))?;
+                    let indices_shape = resolved_input_shapes
+                        .get(1)
+                        .ok_or_else(|| format!("scatter_nd node {node_id} is missing indices"))?;
+                    let index_depth = match indices_shape.len() {
+                        0 | 1 => 1,
+                        rank => to_usize(indices_shape[rank - 1], "scatter_nd index depth")?,
+                    };
+                    if index_depth == 0 || index_depth > data_shape.len() {
+                        return Err(format!(
+                            "scatter_nd node {node_id} index depth {index_depth} is invalid for data rank {}",
+                            data_shape.len()
+                        ));
+                    }
+                    let mut params = vec![index_depth];
+                    for &dimension in data_shape {
+                        params.push(to_usize(dimension, "scatter_nd data dimension")?);
+                    }
+                    params
+                }
                 Opcode::Trilu => {
                     let input_shape = resolved_input_shapes
                         .first()

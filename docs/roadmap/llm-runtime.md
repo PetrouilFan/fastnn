@@ -267,6 +267,38 @@ do not cherry-pick them mechanically.
 
 These reuse the same typed importer, dynamic-shape, state, and session foundations.
 
+## Modern weighted-model checkpoint
+
+On 2026-07-30 the complete `onnx-community/TinyLlama-1.1B-Chat-v1.0-ONNX`
+artifact, including its 4.4 GB external-data payload, converted, reconstructed, and
+executed end to end on CPU. This checkpoint added generic `Sin`, `Cos`, and batched
+`Trilu`, corrected ONNX `Expand` when the target shape contains singleton dimensions,
+and tightened `Concat` and `ScatterND` geometry from live `ShapeEnv` extents. The
+prepared and executable constant budgets are 8 GiB so this 4.4 GB F32 graph remains
+inside an explicit resource limit.
+
+For a one-token decode with past length 1, all 45 outputs matched ONNX Runtime:
+
+```text
+logits max absolute error: 7.724761962890625e-05
+maximum K/V error:         2.193450927734375e-05
+present cache length:      2
+```
+
+A second recurrent decode step, feeding each runtime's returned K/V tensors back into
+that runtime, also matched:
+
+```text
+step 2 logits max absolute error: 6.455183029174805e-05
+step 2 maximum K/V error:         2.193450927734375e-05
+present cache length:             3
+```
+
+This establishes weighted F32 execution for RMSNorm, RoPE, SwiGLU, and 32-query/4-KV
+GQA decomposition, plus externally managed cached-decode recurrence. It still does
+not establish runtime-owned persistent KV state, cache reset/isolation, or a session
+API; those remain M4 work.
+
 ## Immediate implementation boundary
 
 Start with M1, specifically a typed ONNX artifact round-trip test using the tiny
