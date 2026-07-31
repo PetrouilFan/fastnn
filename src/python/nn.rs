@@ -1712,9 +1712,11 @@ impl AotExecutor {
 
     /// Execute while sourcing configured state inputs from Rust-owned buffers
     /// and atomically replacing them with their bound output values on success.
+    #[pyo3(signature = (inputs, include_state_outputs=false))]
     fn forward_stateful(
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
+        include_state_outputs: bool,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         if self.state_bindings.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -1919,33 +1921,43 @@ impl AotExecutor {
         self.stateful_steps = self.stateful_steps.checked_add(1).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")
         })?;
-        self.decode_outputs(output_data)
+        let mut result = self.decode_outputs(output_data)?;
+        if !include_state_outputs {
+            for descriptor in &self.state_bindings {
+                result.remove(&descriptor.output_name);
+            }
+        }
+        Ok(result)
     }
 
     /// Initialize an empty stateful session. A second prefill requires reset.
+    #[pyo3(signature = (inputs, include_state_outputs=false))]
     fn prefill(
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
+        include_state_outputs: bool,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         if self.stateful_steps != 0 {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "session is already initialized; reset before prefill",
             ));
         }
-        self.forward_stateful(inputs)
+        self.forward_stateful(inputs, include_state_outputs)
     }
 
     /// Advance an initialized stateful session.
+    #[pyo3(signature = (inputs, include_state_outputs=false))]
     fn decode(
         &mut self,
         inputs: std::collections::HashMap<String, PyTensor>,
+        include_state_outputs: bool,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         if self.stateful_steps == 0 {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "session is empty; prefill before decode",
             ));
         }
-        self.forward_stateful(inputs)
+        self.forward_stateful(inputs, include_state_outputs)
     }
 
     /// Number of successful stateful invocations since configuration or reset.

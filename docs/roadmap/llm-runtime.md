@@ -335,8 +335,11 @@ capacity, and an explicit `Replace` or `Append { axis }` update policy;
 shape separately from bounded capacity, validates all non-append extents, rejects
 overflow transactionally, and performs checked outer-block relocation for
 non-innermost layouts such as `[B, H, S, D]`. Reset restores the initial bytes and
-live shape without replacing the allocation. Direct state-backed output writes remain
-subsequent copy-elimination work.
+live shape without replacing the allocation. Stateful execution now suppresses bound
+state-writer outputs from normal results by default; callers can opt into diagnostics
+with `include_state_outputs=True`. This prevents Python tensor materialization for the
+44 TinyLlama K/V writer outputs during normal prefill/decode. Direct state-backed
+output writes remain subsequent arena-to-state copy-elimination work.
 
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful

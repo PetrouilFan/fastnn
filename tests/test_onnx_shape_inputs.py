@@ -404,9 +404,11 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
             "capacity_bytes": "4",
         }
     ]
-    out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])})
-    out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
-    isolated = second.forward_stateful({"delta": fnn.tensor([1.0], [1])})
+    assert first.forward_stateful({"delta": fnn.tensor([0.0], [1])}) == {}
+    first.reset_state()
+    out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])}, True)
+    out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])}, True)
+    isolated = second.forward_stateful({"delta": fnn.tensor([1.0], [1])}, True)
     np.testing.assert_array_equal(out1["next_state"].numpy(), np.array([1.0], np.float32))
     np.testing.assert_array_equal(out2["next_state"].numpy(), np.array([3.0], np.float32))
     np.testing.assert_array_equal(
@@ -421,7 +423,7 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
             }
         )
     first.reset_state()
-    reset = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
+    reset = first.forward_stateful({"delta": fnn.tensor([2.0], [1])}, True)
     np.testing.assert_array_equal(reset["next_state"].numpy(), np.array([2.0], np.float32))
 
     first.reset_state()
@@ -429,7 +431,7 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     assert not first.session_initialized
     with pytest.raises(RuntimeError, match="prefill before decode"):
         first.decode({"delta": fnn.tensor([1.0], [1])})
-    prefill = first.prefill({"delta": fnn.tensor([1.0], [1])})
+    prefill = first.prefill({"delta": fnn.tensor([1.0], [1])}, True)
     np.testing.assert_array_equal(
         prefill["next_state"].numpy(), np.array([1.0], np.float32)
     )
@@ -437,7 +439,7 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     assert first.session_initialized
     with pytest.raises(RuntimeError, match="reset before prefill"):
         first.prefill({"delta": fnn.tensor([1.0], [1])})
-    decoded = first.decode({"delta": fnn.tensor([2.0], [1])})
+    decoded = first.decode({"delta": fnn.tensor([2.0], [1])}, True)
     np.testing.assert_array_equal(
         decoded["next_state"].numpy(), np.array([3.0], np.float32)
     )
