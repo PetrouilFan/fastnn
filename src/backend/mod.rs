@@ -1541,4 +1541,15 @@ pub trait Backend {
     ) -> Result<Vec<u8>, BackendError> {
         Ok(self.read_arena(arena, offset, size))
     }
+
+    fn try_read_arena_into(
+        &self,
+        arena: &Self::Buffer,
+        offset: usize,
+        size: usize,
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        *destination = self.try_read_arena(arena, offset, size)?;
+        Ok(())
+    }
 }

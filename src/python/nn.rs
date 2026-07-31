@@ -1234,6 +1234,7 @@ pub struct AotExecutor {
     state_capacities: std::collections::HashMap<String, usize>,
     state_shapes: std::collections::HashMap<String, Vec<usize>>,
     initial_state_shapes: std::collections::HashMap<String, Vec<usize>>,
+    reusable_outputs: Vec<Vec<u8>>,
     stateful_steps: usize,
 }
 
@@ -1429,6 +1430,7 @@ impl AotExecutor {
             state_capacities: std::collections::HashMap::new(),
             state_shapes: std::collections::HashMap::new(),
             initial_state_shapes: std::collections::HashMap::new(),
+            reusable_outputs: Vec::new(),
             stateful_steps: 0,
         })
     }
@@ -1484,7 +1486,7 @@ impl AotExecutor {
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     /// Create an independent mutable inference session that shares immutable
@@ -1523,6 +1525,7 @@ impl AotExecutor {
             state_capacities: self.state_capacities.clone(),
             state_shapes: self.initial_state_shapes.clone(),
             initial_state_shapes: self.initial_state_shapes.clone(),
+            reusable_outputs: Vec::new(),
             stateful_steps: 0,
         })
     }
@@ -1683,6 +1686,14 @@ impl AotExecutor {
             .collect()
     }
 
+    /// Return reusable output-buffer capacities for allocation diagnostics.
+    fn output_buffer_capacities(&self) -> Vec<usize> {
+        self.reusable_outputs
+            .iter()
+            .map(Vec::capacity)
+            .collect()
+    }
+
     /// Return immutable state descriptor metadata.
     fn state_descriptors(&self) -> Vec<std::collections::HashMap<String, String>> {
         self.state_bindings
@@ -1757,26 +1768,39 @@ impl AotExecutor {
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
         #[cfg(feature = "prepared-plan")]
-        let output_data = if self.prepared_plan.static_weight_binding_count() > 0 {
+        let mut output_data = if self.prepared_plan.static_weight_binding_count() > 0 {
             self.executor
-                .execute_prepared_no_copy(
+                .execute_prepared_no_copy_reusing_outputs(
                     &self.graph,
                     &mut self.plan,
                     &self.memory_plan,
                     &input_refs,
                     &self.prepared_plan,
+                    std::mem::take(&mut self.reusable_outputs),
                 )
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
         } else {
             self.executor
-                .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+                .execute_reusing_outputs(
+                    &self.graph,
+                    &mut self.plan,
+                    &self.memory_plan,
+                    &input_refs,
+                    std::mem::take(&mut self.reusable_outputs),
+                )
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
         };
 
         #[cfg(not(feature = "prepared-plan"))]
-        let output_data = self
+        let mut output_data = self
             .executor
-            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .execute_reusing_outputs(
+                &self.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                std::mem::take(&mut self.reusable_outputs),
+            )
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
         // Validate every update before mutating any state so overflow and shape
@@ -1881,7 +1905,6 @@ impl AotExecutor {
         }
         for descriptor in &self.state_bindings {
             let input_name = &descriptor.input_name;
-            let output = &output_data[descriptor.output_index];
             let state = self.state_values.get_mut(input_name).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "state buffer for '{input_name}' is missing"
@@ -1889,12 +1912,23 @@ impl AotExecutor {
             })?;
             match descriptor.update {
                 StateUpdatePolicy::Replace => {
-                    state.clear();
-                    state.extend_from_slice(output);
-                    let shape = self.executor.last_output_shapes()[descriptor.output_index].clone();
+                    let output_index = descriptor.output_index;
+                    let shape = self.executor.last_output_shapes()[output_index].clone();
+                    if include_state_outputs {
+                        state.clear();
+                        state.extend_from_slice(&output_data[output_index]);
+                    } else {
+                        let capacity = self.state_capacities[input_name];
+                        let output = &mut output_data[output_index];
+                        if output.capacity() < capacity {
+                            output.reserve_exact(capacity - output.capacity());
+                        }
+                        std::mem::swap(state, output);
+                    }
                     self.state_shapes.insert(input_name.clone(), shape);
                 }
                 StateUpdatePolicy::Append { axis } => {
+                    let output = &output_data[descriptor.output_index];
                     let old_shape = self.state_shapes[input_name].clone();
                     let (new_shape, element_bytes) = &append_shapes[input_name];
                     let inner_elements = old_shape[axis + 1..].iter().product::<usize>();
@@ -1927,7 +1961,9 @@ impl AotExecutor {
                 .map(|descriptor| descriptor.output_name.clone())
                 .collect::<std::collections::HashSet<_>>()
         });
-        self.decode_outputs_filtered(output_data, hidden_outputs.as_ref())
+        let result = self.decode_outputs_filtered(&output_data, hidden_outputs.as_ref())?;
+        self.reusable_outputs = output_data;
+        Ok(result)
     }
 
     /// Initialize an empty stateful session. A second prefill requires reset.
@@ -2070,7 +2106,7 @@ impl AotExecutor {
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -2125,7 +2161,7 @@ impl AotExecutor {
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -2186,7 +2222,7 @@ impl AotExecutor {
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -2231,7 +2267,7 @@ impl AotExecutor {
             .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.encode_profile_result(py, output_data, profile_entries)
+        self.encode_profile_result(py, &output_data, profile_entries)
     }
 
     #[cfg(feature = "prepared-plan")]
@@ -2273,7 +2309,7 @@ impl AotExecutor {
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.encode_profile_result(py, output_data, profile_entries)
+        self.encode_profile_result(py, &output_data, profile_entries)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -2806,7 +2842,7 @@ impl AotExecutor {
     fn encode_profile_result(
         &self,
         py: pyo3::Python<'_>,
-        output_data: Vec<Vec<u8>>,
+        output_data: &[Vec<u8>],
         profile_entries: Vec<crate::backend::ProfileEntry>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         use pyo3::types::{PyDict, PyList};
@@ -2846,14 +2882,14 @@ impl AotExecutor {
     /// bytes.
     fn decode_outputs(
         &self,
-        output_data: Vec<Vec<u8>>,
+        output_data: &[Vec<u8>],
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         self.decode_outputs_filtered(output_data, None)
     }
 
     fn decode_outputs_filtered(
         &self,
-        output_data: Vec<Vec<u8>>,
+        output_data: &[Vec<u8>],
         hidden_outputs: Option<&std::collections::HashSet<String>>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         if output_data.len() != self.graph.outputs.len()

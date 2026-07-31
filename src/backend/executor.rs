@@ -365,10 +365,12 @@ fn read_execution_outputs<B: Backend>(
     shape_env: &ShapeEnv,
     backend: &B,
     arena: &B::Buffer,
+    reuse: Option<Vec<Vec<u8>>>,
 ) -> Result<RuntimeOutputs, BackendError> {
-    let mut outputs = Vec::with_capacity(graph.outputs.len());
+    let mut outputs = reuse.unwrap_or_default();
+    outputs.resize_with(graph.outputs.len(), Vec::new);
     let mut shapes = Vec::with_capacity(graph.outputs.len());
-    for &output_node_id in graph.outputs.iter() {
+    for (output_index, &output_node_id) in graph.outputs.iter().enumerate() {
         let slot = tightened_memory_plan
             .slots
             .get(&output_node_id)
@@ -415,8 +417,7 @@ fn read_execution_outputs<B: Backend>(
                 slot.offset, tightened_memory_plan.total_size
             )));
         }
-        let data = backend.try_read_arena(arena, slot.offset, actual_size)?;
-        outputs.push(data);
+        backend.try_read_arena_into(arena, slot.offset, actual_size, &mut outputs[output_index])?;
         shapes.push(shape);
     }
     Ok(RuntimeOutputs {
@@ -569,8 +570,29 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, false, None, None)
+        self.execute_internal(graph, plan, memory_plan, inputs, false, None, None, None)
             .map(|(outputs, _profile)| outputs)
+    }
+
+    pub fn execute_reusing_outputs(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        reusable_outputs: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            None,
+            None,
+            Some(reusable_outputs),
+        )
+        .map(|(outputs, _profile)| outputs)
     }
 
     pub fn execute_profile(
@@ -580,7 +602,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, true, None, None)
+        self.execute_internal(graph, plan, memory_plan, inputs, true, None, None, None)
     }
 
     /// Profile the opt-in prepared arena fallback path.
@@ -604,7 +626,16 @@ impl<B: Backend> GraphExecutor<B> {
             plan,
             &self.resource_limits.prepared,
         )?;
-        self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared), None)
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            true,
+            Some(prepared),
+            None,
+            None,
+        )
     }
 
     /// Opt-in prepared-execution fallback path.
@@ -687,6 +718,7 @@ impl<B: Backend> GraphExecutor<B> {
             false,
             Some(prepared),
             None,
+            None,
         )
         .map(|(outputs, _profile)| outputs)
     }
@@ -748,6 +780,35 @@ impl<B: Backend> GraphExecutor<B> {
         .map(|(outputs, _profile)| outputs)
     }
 
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_no_copy_reusing_outputs(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+        reusable_outputs: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
+        let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            None,
+            Some(&view),
+            Some(reusable_outputs),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
     /// Profile the no-copy prepared path. Mirrors
     /// [`Self::execute_prepared_no_copy`] but preserves per-instruction
     /// [`ProfileEntry`] rows so callers can quantify the saved
@@ -788,6 +849,7 @@ impl<B: Backend> GraphExecutor<B> {
         prepared_preload: Option<&crate::backend::prepared::PreparedExecutablePlan>,
         #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
+        mut reusable_outputs: Option<Vec<Vec<u8>>>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
         validate_compiled_artifacts(graph, plan, memory_plan, &self.resource_limits)?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
@@ -1048,6 +1110,7 @@ impl<B: Backend> GraphExecutor<B> {
                 &shape_env,
                 &self.backend,
                 arena,
+                reusable_outputs.take(),
             )?;
             self.last_output_shapes = runtime_outputs.shapes;
             return Ok((runtime_outputs.data, profile_entries));
@@ -1089,6 +1152,7 @@ impl<B: Backend> GraphExecutor<B> {
             &shape_env,
             &self.backend,
             arena,
+            reusable_outputs.take(),
         )?;
         self.last_output_shapes = runtime_outputs.shapes;
         Ok((runtime_outputs.data, profile_entries))
@@ -1113,6 +1177,7 @@ impl<B: Backend> GraphExecutor<B> {
             profile,
             None,
             persistent_view,
+            None,
         )
     }
 

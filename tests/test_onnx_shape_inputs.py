@@ -478,6 +478,7 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
         }
     ]
     assert first.forward_stateful({"delta": fnn.tensor([0.0], [1])}) == {}
+    assert first.output_buffer_capacities() == [4]
     first.reset_state()
     out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])}, True)
     out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])}, True)

@@ -341,8 +341,13 @@ live shape without replacing the allocation. Stateful execution now suppresses b
 state-writer outputs from normal results by default; callers can opt into diagnostics
 with `include_state_outputs=True`. Filtering now happens before dtype conversion and
 `PyTensor` construction, so normal prefill/decode does not materialize the 44
-TinyLlama K/V writer outputs in Python. Direct state-backed output writes remain
-subsequent arena-to-state copy-elimination work.
+TinyLlama K/V writer outputs in Python. Backend output extraction now refills reusable
+session-owned vectors rather than allocating a fresh `Vec` per output on every step.
+Hidden `Replace` state writers commit transactionally by swapping validated output and
+state buffers, removing the second arena-output-to-state copy while retaining the old
+state allocation as the next reusable destination. Diagnostic state outputs preserve
+copy semantics, and `Append { axis }` still performs the required capacity-strided
+placement from a reusable delta buffer.
 
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful
