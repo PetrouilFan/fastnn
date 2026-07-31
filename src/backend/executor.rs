@@ -2587,7 +2587,7 @@ mod prepared_fallback_tests {
             .expect("small test arena must not overflow");
         plan.instructions.push(Instruction::WriteConst {
             dst: BufferSlice::new(unowned_offset, 4),
-            data: vec![0; 4],
+            data: vec![0; 4].into(),
         });
         plan.levels.push(plan.levels.last().copied().unwrap_or(0));
 
@@ -4363,7 +4363,7 @@ mod execution_storage_size_tests {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(0, 8),
-                data: vec![1, 2, 3, 4],
+                data: vec![1, 2, 3, 4].into(),
             }],
             arena_size: 8,
             levels: vec![0],

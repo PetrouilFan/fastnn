@@ -647,7 +647,7 @@ pub enum Instruction {
     /// that carry [`TensorValue::Data`](crate::ir::TensorValue::Data).
     WriteConst {
         dst: BufferSlice,
-        data: Vec<u8>,
+        data: std::sync::Arc<[u8]>,
     },
 }
 
@@ -939,7 +939,7 @@ impl ExecutablePlan {
                         )));
                     }
                 }
-                Instruction::WriteConst { dst, data } => {
+                Instruction::WriteConst { data, dst } => {
                     total_constant_bytes = total_constant_bytes
                         .checked_add(data.len())
                         .ok_or_else(|| {
@@ -1011,6 +1011,27 @@ fn decode_executable_plan(
 #[cfg(test)]
 mod executable_plan_validation_tests {
     use super::*;
+
+    #[test]
+    fn executable_plan_clone_shares_constant_payloads() {
+        let data: std::sync::Arc<[u8]> = vec![1, 2, 3, 4].into();
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(0, data.len()),
+                data: data.clone(),
+            }],
+            arena_size: data.len(),
+            levels: vec![0],
+        };
+        let cloned = plan.clone();
+        let Instruction::WriteConst {
+            data: cloned_data, ..
+        } = &cloned.instructions[0]
+        else {
+            panic!("expected WriteConst")
+        };
+        assert!(std::sync::Arc::ptr_eq(&data, cloned_data));
+    }
 
     fn matmul_capability(decode: DecodeFamily) -> QuantizedKernelCapability {
         QuantizedKernelCapability {
@@ -1267,7 +1288,7 @@ mod executable_plan_validation_tests {
         let out_of_bounds = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(usize::MAX, 4),
-                data: vec![0; 4],
+                data: vec![0; 4].into(),
             }],
             arena_size: 4,
             levels: vec![0],
@@ -1277,7 +1298,7 @@ mod executable_plan_validation_tests {
         let oversized_constant = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(0, 4),
-                data: vec![0; 8],
+                data: vec![0; 8].into(),
             }],
             arena_size: 8,
             levels: vec![0],
@@ -1310,7 +1331,7 @@ mod executable_plan_validation_tests {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(0, 4),
-                data: vec![0; 4],
+                data: vec![0; 4].into(),
             }],
             arena_size: 4,
             levels: vec![0],

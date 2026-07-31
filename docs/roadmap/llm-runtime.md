@@ -314,6 +314,12 @@ and leaves every live state unchanged. `state_sizes()` exposes live byte lengths
 lifecycle diagnostics. TinyLlama retains two decode steps and byte-identical reset
 logits with all 44 buffers staying within their fixed capacities.
 
+The first ownership prerequisite is now in place: executable `WriteConst` payloads
+use reference-counted immutable byte slices. Cloning a mutable per-session executable
+plan therefore shares multi-gigabyte constant payloads rather than deep-copying them;
+serialization remains byte-compatible at the payload level. Compute-graph constants
+and runtime/prepared arenas still need the corresponding shared ownership split.
+
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful
 stateful calls advance a checked session-step counter, while configuration and reset

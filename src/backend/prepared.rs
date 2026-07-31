@@ -2044,7 +2044,10 @@ mod tests {
     fn make_write_const(dst: BufferSlice, f32_payload: &[f32]) -> Instruction {
         let data: Vec<u8> = f32_payload.iter().flat_map(|v| v.to_le_bytes()).collect();
         assert_eq!(data.len(), dst.size, "write_const payload size mismatch");
-        Instruction::WriteConst { dst, data }
+        Instruction::WriteConst {
+            data: data.into(),
+            dst,
+        }
     }
 
     // ── prepare_executable_plan ────────────────────────────────
@@ -2055,7 +2058,7 @@ mod tests {
             instructions: vec![
                 Instruction::WriteConst {
                     dst: BufferSlice::new(0, 4),
-                    data: vec![0; 4],
+                    data: vec![0; 4].into(),
                 },
                 Instruction::CallKernel {
                     kernel_name: "conv2d_silu".into(),
@@ -2724,7 +2727,7 @@ mod tests {
             instructions: vec![
                 Instruction::WriteConst {
                     dst: BufferSlice::new(weight_offset, weight_size),
-                    data,
+                    data: data.into(),
                 },
                 conv,
             ],
@@ -2796,7 +2799,7 @@ mod tests {
             instructions: vec![
                 Instruction::WriteConst {
                     dst: weight,
-                    data: vec![0u8; weight.size],
+                    data: vec![0u8; weight.size].into(),
                 },
                 conv,
             ],
