@@ -319,8 +319,11 @@ and graph `TensorValue::Data` payloads use reference-counted immutable byte slic
 Cloning a mutable per-session executable plan or compiled graph therefore shares
 multi-gigabyte tensor storage instead of deep-copying it. `AotExecutor` retains its
 compiled graph behind an `Arc`; calibration recompilation explicitly replaces it.
-Serialization continues to write owned bytes. Runtime/prepared arenas still need the
-corresponding shared ownership split.
+Serialization continues to write owned bytes. Prepared f32, transposed-f32, and raw
+packed-weight payloads are now immutable `Arc` slices as well, and `AotExecutor`
+retains its complete prepared plan behind an `Arc`. Cloned sessions can therefore
+share all prepared weight storage. The mutable runtime arena and execution caches
+remain session-local and still need extraction behind a model/session factory.
 
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful

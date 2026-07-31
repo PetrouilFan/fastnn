@@ -225,16 +225,20 @@ impl PackedWeightKind {
 pub enum PackedWeightStore {
     /// Reference `fp32` payload — the layout the current CPU backend
     /// consumes directly via `WriteConst`.
-    Unpacked(Vec<f32>),
+    Unpacked(Arc<[f32]>),
     /// Pretransposed fp32 matrix payload for future prepared Conv GEMM paths.
     ///
     /// The source Conv weight is interpreted as row-major `[M, K]`; this
     /// variant stores a row-major `[K, M]` transpose. It is metadata/storage
     /// only until an opt-in prepared runtime path consumes it.
-    TransposedFp32 { data: Vec<f32>, m: usize, k: usize },
+    TransposedFp32 {
+        data: Arc<[f32]>,
+        m: usize,
+        k: usize,
+    },
     /// Raw byte payload for packed quantized weights (I4, I8, F8, F4, F8R).
     /// The caller knows the bit width and unpacking scheme.
-    PackedRaw(Vec<u8>),
+    PackedRaw(Arc<[u8]>),
     /// Reserved discriminant for future packed precision variants. Carries
     /// no payload and is never produced by the current code paths.
     Reserved,
@@ -254,7 +258,7 @@ pub struct TransposedFp32WeightRef<'a> {
 impl PackedWeightStore {
     /// Build an [`PackedWeightStore::Unpacked`] entry holding `data`.
     pub fn unpacked(data: Vec<f32>) -> Self {
-        PackedWeightStore::Unpacked(data)
+        PackedWeightStore::Unpacked(data.into())
     }
 
     /// View the stored runtime `f32` payload when the store is
@@ -263,7 +267,7 @@ impl PackedWeightStore {
     /// layout.
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         match self {
-            PackedWeightStore::Unpacked(data) => Some(data.as_slice()),
+            PackedWeightStore::Unpacked(data) => Some(data.as_ref()),
             PackedWeightStore::TransposedFp32 { .. }
             | PackedWeightStore::PackedRaw(_)
             | PackedWeightStore::Reserved => None,
@@ -441,7 +445,7 @@ impl PreparedConstantArena {
                         && data.len() == *m * *k =>
                 {
                     Some(TransposedFp32WeightRef {
-                        data: data.as_slice(),
+                        data: data.as_ref(),
                         m: *m,
                         k: *k,
                     })
@@ -470,7 +474,7 @@ impl PreparedConstantArena {
         self.entries
             .get(id.index)
             .and_then(|entry| match &entry.store {
-                PackedWeightStore::PackedRaw(data) => Some(data.as_slice()),
+                PackedWeightStore::PackedRaw(data) => Some(data.as_ref()),
                 _ => None,
             })
     }
@@ -498,7 +502,7 @@ impl PreparedConstantArena {
             kind,
             numel,
             byte_len,
-            store: PackedWeightStore::PackedRaw(data),
+            store: PackedWeightStore::PackedRaw(data.into()),
         });
         self.name_to_id.insert(name, id);
         id
@@ -1458,7 +1462,7 @@ fn materialize_transposed_fp32_conv_weights(
             transposed.len(),
             byte_len,
             PackedWeightStore::TransposedFp32 {
-                data: transposed,
+                data: transposed.into(),
                 m,
                 k,
             },
@@ -2956,6 +2960,23 @@ mod tests {
     }
 
     #[test]
+    fn arena_clone_shares_immutable_payloads() {
+        let mut arena = PreparedConstantArena::new();
+        let unpacked = arena.insert("weight", vec![1.0_f32, 2.0, 3.0]);
+        let packed = arena.insert_raw("packed", vec![0x21_u8, 0x43], PackedWeightKind::U4);
+        let cloned = arena.clone();
+
+        assert_eq!(
+            arena.get(unpacked).unwrap().as_ptr(),
+            cloned.get(unpacked).unwrap().as_ptr()
+        );
+        assert_eq!(
+            arena.get_raw(packed).unwrap().as_ptr(),
+            cloned.get_raw(packed).unwrap().as_ptr()
+        );
+    }
+
+    #[test]
     fn arena_duplicate_name_reuses_slot() {
         let mut arena = PreparedConstantArena::new();
         let first = arena.insert("matmul_weight", vec![1.0_f32, 2.0, 3.0]);
@@ -3003,7 +3024,7 @@ mod tests {
             4,
             4 * std::mem::size_of::<f32>(),
             PackedWeightStore::TransposedFp32 {
-                data: vec![1.0_f32, 3.0, 2.0, 4.0],
+                data: vec![1.0_f32, 3.0, 2.0, 4.0].into(),
                 m: 2,
                 k: 2,
             },

@@ -1213,7 +1213,7 @@ pub struct AotExecutor {
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
-    prepared_plan: crate::backend::prepared::PreparedExecutablePlan,
+    prepared_plan: std::sync::Arc<crate::backend::prepared::PreparedExecutablePlan>,
     state_bindings: Vec<(String, usize)>,
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
@@ -1406,7 +1406,7 @@ impl AotExecutor {
             executor,
             input_names,
             output_map,
-            prepared_plan,
+            prepared_plan: std::sync::Arc::new(prepared_plan),
             state_bindings: Vec::new(),
             state_values: std::collections::HashMap::new(),
             initial_state_values: std::collections::HashMap::new(),
@@ -1768,7 +1768,7 @@ impl AotExecutor {
         self.plan = plan;
         self.memory_plan = memory_plan;
         self.graph = std::sync::Arc::new(graph);
-        self.prepared_plan = prepared_plan;
+        self.prepared_plan = std::sync::Arc::new(prepared_plan);
 
         Ok(())
     }
