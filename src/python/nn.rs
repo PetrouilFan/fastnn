@@ -1218,6 +1218,7 @@ pub struct AotExecutor {
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
     state_capacities: std::collections::HashMap<String, usize>,
+    stateful_steps: usize,
 }
 
 #[pymethods]
@@ -1410,6 +1411,7 @@ impl AotExecutor {
             state_values: std::collections::HashMap::new(),
             initial_state_values: std::collections::HashMap::new(),
             state_capacities: std::collections::HashMap::new(),
+            stateful_steps: 0,
         })
     }
 
@@ -1553,6 +1555,7 @@ impl AotExecutor {
         self.state_values = values;
         self.state_capacities = capacities;
         self.state_bindings = configured;
+        self.stateful_steps = 0;
         self.executor.invalidate_runtime_cache();
         Ok(())
     }
@@ -1573,6 +1576,7 @@ impl AotExecutor {
             state.clear();
             state.extend_from_slice(initial);
         }
+        self.stateful_steps = 0;
         self.executor.invalidate_runtime_cache();
         Ok(())
     }
@@ -1680,7 +1684,48 @@ impl AotExecutor {
             state.clear();
             state.extend_from_slice(output);
         }
+        self.stateful_steps = self.stateful_steps.checked_add(1).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")
+        })?;
         self.decode_outputs(output_data)
+    }
+
+    /// Initialize an empty stateful session. A second prefill requires reset.
+    fn prefill(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        if self.stateful_steps != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "session is already initialized; reset before prefill",
+            ));
+        }
+        self.forward_stateful(inputs)
+    }
+
+    /// Advance an initialized stateful session.
+    fn decode(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        if self.stateful_steps == 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "session is empty; prefill before decode",
+            ));
+        }
+        self.forward_stateful(inputs)
+    }
+
+    /// Number of successful stateful invocations since configuration or reset.
+    #[getter]
+    fn session_steps(&self) -> usize {
+        self.stateful_steps
+    }
+
+    /// Whether this executor has completed a successful prefill.
+    #[getter]
+    fn session_initialized(&self) -> bool {
+        self.stateful_steps != 0
     }
 
     /// Apply calibration scales from a JSON file to recompile the model with

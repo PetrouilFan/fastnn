@@ -314,6 +314,12 @@ and leaves every live state unchanged. `state_sizes()` exposes live byte lengths
 lifecycle diagnostics. TinyLlama retains two decode steps and byte-identical reset
 logits with all 44 buffers staying within their fixed capacities.
 
+The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
+Decode-before-prefill and repeated prefill are rejected without execution; successful
+stateful calls advance a checked session-step counter, while configuration and reset
+return the session to the empty state. This is an API/lifecycle boundary on the current
+executor, not yet the final shared-model/independent-session ownership split.
+
 State updates still copy complete returned tensors from execution output storage into
 the stable state buffers. Direct arena-to-state writes, append-only KV updates, and a
 separately instantiable session object remain M4 work.

@@ -419,6 +419,25 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     reset = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
     np.testing.assert_array_equal(reset["next_state"].numpy(), np.array([2.0], np.float32))
 
+    first.reset_state()
+    assert first.session_steps == 0
+    assert not first.session_initialized
+    with pytest.raises(RuntimeError, match="prefill before decode"):
+        first.decode({"delta": fnn.tensor([1.0], [1])})
+    prefill = first.prefill({"delta": fnn.tensor([1.0], [1])})
+    np.testing.assert_array_equal(
+        prefill["next_state"].numpy(), np.array([1.0], np.float32)
+    )
+    assert first.session_steps == 1
+    assert first.session_initialized
+    with pytest.raises(RuntimeError, match="reset before prefill"):
+        first.prefill({"delta": fnn.tensor([1.0], [1])})
+    decoded = first.decode({"delta": fnn.tensor([2.0], [1])})
+    np.testing.assert_array_equal(
+        decoded["next_state"].numpy(), np.array([3.0], np.float32)
+    )
+    assert first.session_steps == 2
+
 
 def test_aot_runtime_owned_state_rejects_capacity_overflow_atomically(tmp_path):
     graph = helper.make_graph(
