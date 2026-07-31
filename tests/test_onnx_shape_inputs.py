@@ -389,23 +389,20 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     onnx.save(model, onnx_path)
     fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
 
-    def configured(initial):
-        executor = fnn.build_model_from_fnn(str(fnn_path))
-        executor.configure_state(
-            {"state": "next_state"},
-            {"state": fnn.tensor([initial], [1])},
-        )
-        return executor
-
-    first = configured(0.0)
-    second = configured(10.0)
+    model = fnn.build_model_from_fnn(str(fnn_path))
+    model.configure_state(
+        {"state": "next_state"},
+        {"state": fnn.tensor([0.0], [1])},
+    )
+    first = model.create_session()
+    second = model.create_session()
     out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])})
     out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
     isolated = second.forward_stateful({"delta": fnn.tensor([1.0], [1])})
     np.testing.assert_array_equal(out1["next_state"].numpy(), np.array([1.0], np.float32))
     np.testing.assert_array_equal(out2["next_state"].numpy(), np.array([3.0], np.float32))
     np.testing.assert_array_equal(
-        isolated["next_state"].numpy(), np.array([11.0], np.float32)
+        isolated["next_state"].numpy(), np.array([1.0], np.float32)
     )
 
     with pytest.raises(ValueError, match="runtime-owned"):

@@ -322,8 +322,13 @@ compiled graph behind an `Arc`; calibration recompilation explicitly replaces it
 Serialization continues to write owned bytes. Prepared f32, transposed-f32, and raw
 packed-weight payloads are now immutable `Arc` slices as well, and `AotExecutor`
 retains its complete prepared plan behind an `Arc`. Cloned sessions can therefore
-share all prepared weight storage. The mutable runtime arena and execution caches
-remain session-local and still need extraction behind a model/session factory.
+share all prepared weight storage. `create_session()` now instantiates a fresh CPU
+executor, runtime arena/cache, bounded recurrent buffers, and lifecycle counter while
+cloning only metadata and `Arc` handles. Configured state bindings and initial snapshots
+become a reusable session template; each session mutates independent buffers. The
+current Python object still combines the compiled-model template and compatibility
+execution methods, so a separately named `CompiledModel` facade remains future API
+cleanup rather than an ownership blocker.
 
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful

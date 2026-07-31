@@ -1469,6 +1469,44 @@ impl AotExecutor {
         self.decode_outputs(output_data)
     }
 
+    /// Create an independent mutable inference session that shares immutable
+    /// compiled graph, executable constants, and prepared weights.
+    fn create_session(&self) -> pyo3::PyResult<Self> {
+        let mut state_values = std::collections::HashMap::with_capacity(self.state_values.len());
+        for (name, initial) in &self.initial_state_values {
+            let capacity = self.state_capacities.get(name).copied().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "configured state {name} is missing its capacity"
+                ))
+            })?;
+            let mut value = Vec::new();
+            value.try_reserve_exact(capacity).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to allocate {capacity} bytes for session state {name}: {error}"
+                ))
+            })?;
+            value.extend_from_slice(initial);
+            state_values.insert(name.clone(), value);
+        }
+
+        Ok(Self {
+            plan: self.plan.clone(),
+            memory_plan: self.memory_plan.clone(),
+            graph: self.graph.clone(),
+            executor: crate::backend::executor::GraphExecutor::new(
+                crate::backend::cpu::CpuBackend,
+            ),
+            input_names: self.input_names.clone(),
+            output_map: self.output_map.clone(),
+            prepared_plan: self.prepared_plan.clone(),
+            state_bindings: self.state_bindings.clone(),
+            state_values,
+            initial_state_values: self.initial_state_values.clone(),
+            state_capacities: self.state_capacities.clone(),
+            stateful_steps: 0,
+        })
+    }
+
     /// Configure graph inputs whose values are retained and replaced by graph
     /// outputs after every successful invocation. This is generic persistent
     /// tensor state; it does not depend on transformer layer or tensor names.
