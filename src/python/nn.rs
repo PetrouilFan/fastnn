@@ -1208,6 +1208,7 @@ impl_nn_module!(PyTransformerEncoder {
 #[derive(Clone, Debug)]
 enum StateUpdatePolicy {
     Replace,
+    Append { axis: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -1231,6 +1232,8 @@ pub struct AotExecutor {
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
     state_capacities: std::collections::HashMap<String, usize>,
+    state_shapes: std::collections::HashMap<String, Vec<usize>>,
+    initial_state_shapes: std::collections::HashMap<String, Vec<usize>>,
     stateful_steps: usize,
 }
 
@@ -1424,6 +1427,8 @@ impl AotExecutor {
             state_values: std::collections::HashMap::new(),
             initial_state_values: std::collections::HashMap::new(),
             state_capacities: std::collections::HashMap::new(),
+            state_shapes: std::collections::HashMap::new(),
+            initial_state_shapes: std::collections::HashMap::new(),
             stateful_steps: 0,
         })
     }
@@ -1516,6 +1521,8 @@ impl AotExecutor {
             state_values,
             initial_state_values: self.initial_state_values.clone(),
             state_capacities: self.state_capacities.clone(),
+            state_shapes: self.initial_state_shapes.clone(),
+            initial_state_shapes: self.initial_state_shapes.clone(),
             stateful_steps: 0,
         })
     }
@@ -1523,10 +1530,12 @@ impl AotExecutor {
     /// Configure graph inputs whose values are retained and replaced by graph
     /// outputs after every successful invocation. This is generic persistent
     /// tensor state; it does not depend on transformer layer or tensor names.
+    #[pyo3(signature = (bindings, initial_state, append_axes=None))]
     fn configure_state(
         &mut self,
         bindings: std::collections::HashMap<String, String>,
         initial_state: std::collections::HashMap<String, PyTensor>,
+        append_axes: Option<std::collections::HashMap<String, usize>>,
     ) -> pyo3::PyResult<()> {
         if bindings.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1541,6 +1550,8 @@ impl AotExecutor {
         let mut configured = Vec::with_capacity(bindings.len());
         let mut values = std::collections::HashMap::with_capacity(bindings.len());
         let mut capacities = std::collections::HashMap::with_capacity(bindings.len());
+        let mut shapes = std::collections::HashMap::with_capacity(bindings.len());
+        let append_axes = append_axes.unwrap_or_default();
         for (input_name, output_name) in bindings {
             if !self.input_names.iter().any(|name| name == &input_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -1597,19 +1608,45 @@ impl AotExecutor {
             }
             let mut storage = Vec::with_capacity(capacity);
             storage.extend_from_slice(bytes);
+            let shape = initial
+                .inner
+                .shape()
+                .into_iter()
+                .map(|dimension| {
+                    usize::try_from(dimension).map_err(|_| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "initial state '{input_name}' has a negative dimension"
+                        ))
+                    })
+                })
+                .collect::<pyo3::PyResult<Vec<_>>>()?;
+            let update = if let Some(axis) = append_axes.get(&input_name).copied() {
+                if axis >= shape.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "append axis {axis} is out of range for state '{input_name}' rank {}",
+                        shape.len()
+                    )));
+                }
+                StateUpdatePolicy::Append { axis }
+            } else {
+                StateUpdatePolicy::Replace
+            };
             values.insert(input_name.clone(), storage);
+            shapes.insert(input_name.clone(), shape);
             capacities.insert(input_name.clone(), capacity);
             configured.push(StateDescriptor {
                 input_name,
                 output_name,
                 output_index,
-                update: StateUpdatePolicy::Replace,
+                update,
             });
         }
         configured.sort_by(|left, right| left.input_name.cmp(&right.input_name));
         self.initial_state_values = values.clone();
         self.state_values = values;
         self.state_capacities = capacities;
+        self.initial_state_shapes = shapes.clone();
+        self.state_shapes = shapes;
         self.state_bindings = configured;
         self.stateful_steps = 0;
         self.executor.invalidate_runtime_cache();
@@ -1632,6 +1669,7 @@ impl AotExecutor {
             state.clear();
             state.extend_from_slice(initial);
         }
+        self.state_shapes.clone_from(&self.initial_state_shapes);
         self.stateful_steps = 0;
         self.executor.invalidate_runtime_cache();
         Ok(())
@@ -1657,9 +1695,13 @@ impl AotExecutor {
                     "update".to_string(),
                     match descriptor.update {
                         StateUpdatePolicy::Replace => "replace",
+                        StateUpdatePolicy::Append { .. } => "append",
                     }
                     .to_string(),
                 );
+                if let StateUpdatePolicy::Append { axis } = descriptor.update {
+                    fields.insert("axis".to_string(), axis.to_string());
+                }
                 if let Some(capacity) = self.state_capacities.get(&descriptor.input_name) {
                     fields.insert("capacity_bytes".to_string(), capacity.to_string());
                 }
@@ -1735,7 +1777,9 @@ impl AotExecutor {
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
-        // Validate all replacements before mutating any state so overflow is atomic.
+        // Validate every update before mutating any state so overflow and shape
+        // errors are transactional across all descriptors.
+        let mut append_shapes = std::collections::HashMap::new();
         for descriptor in &self.state_bindings {
             let input_name = &descriptor.input_name;
             let output_index = descriptor.output_index;
@@ -1745,16 +1789,92 @@ impl AotExecutor {
                     descriptor.output_name
                 ))
             })?;
-            let capacity = self.state_capacities.get(input_name).ok_or_else(|| {
+            let capacity = *self.state_capacities.get(input_name).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "state capacity for '{input_name}' is missing"
                 ))
             })?;
-            if output.len() > *capacity {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "state output for '{input_name}' requires {} bytes, exceeding capacity {capacity}",
-                    output.len()
-                )));
+            match descriptor.update {
+                StateUpdatePolicy::Replace => {
+                    if output.len() > capacity {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "state output for '{input_name}' requires {} bytes, exceeding capacity {capacity}",
+                            output.len()
+                        )));
+                    }
+                }
+                StateUpdatePolicy::Append { axis } => {
+                    let old_shape = self.state_shapes.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "live shape for append state '{input_name}' is missing"
+                        ))
+                    })?;
+                    let delta_shape = self
+                        .executor
+                        .last_output_shapes()
+                        .get(output_index)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "runtime shape for append output '{}' is missing",
+                                descriptor.output_name
+                            ))
+                        })?;
+                    if old_shape.len() != delta_shape.len() || axis >= old_shape.len() {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append state '{input_name}' rank/axis is incompatible with output shape"
+                        )));
+                    }
+                    for dimension in 0..old_shape.len() {
+                        if dimension != axis && old_shape[dimension] != delta_shape[dimension] {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "append state '{input_name}' dimension {dimension} differs: {} vs {}",
+                                old_shape[dimension], delta_shape[dimension]
+                            )));
+                        }
+                    }
+                    let delta_elements = delta_shape.iter().try_fold(1usize, |value, dim| {
+                        value.checked_mul(*dim)
+                    }).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                        "append output element count overflows",
+                    ))?;
+                    if delta_elements == 0 || output.len() % delta_elements != 0 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append output '{}' has inconsistent byte geometry",
+                            descriptor.output_name
+                        )));
+                    }
+                    let element_bytes = output.len() / delta_elements;
+                    let old_elements = old_shape.iter().try_fold(1usize, |value, dim| {
+                        value.checked_mul(*dim)
+                    }).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                        "append state element count overflows",
+                    ))?;
+                    let state_len = self.state_values.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "state buffer for '{input_name}' is missing"
+                        ))
+                    })?.len();
+                    if old_elements.checked_mul(element_bytes) != Some(state_len) {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append state '{input_name}' has inconsistent byte geometry"
+                        )));
+                    }
+                    let new_len = state_len.checked_add(output.len()).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("append byte length overflows")
+                    })?;
+                    if new_len > capacity {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "appending state '{input_name}' requires {new_len} bytes, exceeding capacity {capacity}"
+                        )));
+                    }
+                    let mut new_shape = old_shape.clone();
+                    new_shape[axis] = new_shape[axis]
+                        .checked_add(delta_shape[axis])
+                        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                            "append axis extent overflows",
+                        ))?;
+                    append_shapes.insert(input_name.clone(), (new_shape, element_bytes));
+                }
             }
         }
         for descriptor in &self.state_bindings {
@@ -1769,6 +1889,30 @@ impl AotExecutor {
                 StateUpdatePolicy::Replace => {
                     state.clear();
                     state.extend_from_slice(output);
+                    let shape = self.executor.last_output_shapes()[descriptor.output_index].clone();
+                    self.state_shapes.insert(input_name.clone(), shape);
+                }
+                StateUpdatePolicy::Append { axis } => {
+                    let old_shape = self.state_shapes[input_name].clone();
+                    let (new_shape, element_bytes) = &append_shapes[input_name];
+                    let inner_elements = old_shape[axis + 1..].iter().product::<usize>();
+                    let inner_bytes = inner_elements * *element_bytes;
+                    let outer = old_shape[..axis].iter().product::<usize>();
+                    let old_block = old_shape[axis] * inner_bytes;
+                    let delta_axis = new_shape[axis] - old_shape[axis];
+                    let delta_block = delta_axis * inner_bytes;
+                    let new_block = old_block + delta_block;
+                    let old_len = state.len();
+                    state.resize(old_len + output.len(), 0);
+                    for outer_index in (0..outer).rev() {
+                        let old_start = outer_index * old_block;
+                        let new_start = outer_index * new_block;
+                        state.copy_within(old_start..old_start + old_block, new_start);
+                        let delta_start = outer_index * delta_block;
+                        state[new_start + old_block..new_start + new_block]
+                            .copy_from_slice(&output[delta_start..delta_start + delta_block]);
+                    }
+                    self.state_shapes.insert(input_name.clone(), new_shape.clone());
                 }
             }
         }

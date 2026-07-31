@@ -330,8 +330,13 @@ current Python object still combines the compiled-model template and compatibili
 execution methods, so a separately named `CompiledModel` facade remains future API
 cleanup rather than an ownership blocker. Persistent bindings are now retained as
 formal descriptors containing graph input/output identity, output index, bounded byte
-capacity, and an explicit `Replace` update policy; `state_descriptors()` exposes this
-contract for diagnostics. `Append { axis }` remains the next policy extension.
+capacity, and an explicit `Replace` or `Append { axis }` update policy;
+`state_descriptors()` exposes this contract for diagnostics. Append state tracks live
+shape separately from bounded capacity, validates all non-append extents, rejects
+overflow transactionally, and performs checked outer-block relocation for
+non-innermost layouts such as `[B, H, S, D]`. Reset restores the initial bytes and
+live shape without replacing the allocation. Direct state-backed output writes remain
+subsequent copy-elimination work.
 
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful
