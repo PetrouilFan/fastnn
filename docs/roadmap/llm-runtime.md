@@ -328,7 +328,10 @@ cloning only metadata and `Arc` handles. Configured state bindings and initial s
 become a reusable session template; each session mutates independent buffers. The
 current Python object still combines the compiled-model template and compatibility
 execution methods, so a separately named `CompiledModel` facade remains future API
-cleanup rather than an ownership blocker.
+cleanup rather than an ownership blocker. Persistent bindings are now retained as
+formal descriptors containing graph input/output identity, output index, bounded byte
+capacity, and an explicit `Replace` update policy; `state_descriptors()` exposes this
+contract for diagnostics. `Append { axis }` remains the next policy extension.
 
 The executor now also exposes lifecycle-aware `prefill()` and `decode()` entry points.
 Decode-before-prefill and repeated prefill are rejected without execution; successful

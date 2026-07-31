@@ -1205,6 +1205,19 @@ impl_nn_module!(PyTransformerEncoder {
 
 // ---- AotExecutor (ONNX graph execution via AOT compiler pipeline) ----
 
+#[derive(Clone, Debug)]
+enum StateUpdatePolicy {
+    Replace,
+}
+
+#[derive(Clone, Debug)]
+struct StateDescriptor {
+    input_name: String,
+    output_name: String,
+    output_index: usize,
+    update: StateUpdatePolicy,
+}
+
 #[pyclass(unsendable)]
 pub struct AotExecutor {
     plan: crate::backend::ExecutablePlan,
@@ -1214,7 +1227,7 @@ pub struct AotExecutor {
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
     prepared_plan: std::sync::Arc<crate::backend::prepared::PreparedExecutablePlan>,
-    state_bindings: Vec<(String, usize)>,
+    state_bindings: Vec<StateDescriptor>,
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
     state_capacities: std::collections::HashMap<String, usize>,
@@ -1586,9 +1599,14 @@ impl AotExecutor {
             storage.extend_from_slice(bytes);
             values.insert(input_name.clone(), storage);
             capacities.insert(input_name.clone(), capacity);
-            configured.push((input_name, output_index));
+            configured.push(StateDescriptor {
+                input_name,
+                output_name,
+                output_index,
+                update: StateUpdatePolicy::Replace,
+            });
         }
-        configured.sort_by(|left, right| left.0.cmp(&right.0));
+        configured.sort_by(|left, right| left.input_name.cmp(&right.input_name));
         self.initial_state_values = values.clone();
         self.state_values = values;
         self.state_capacities = capacities;
@@ -1627,6 +1645,29 @@ impl AotExecutor {
             .collect()
     }
 
+    /// Return immutable state descriptor metadata.
+    fn state_descriptors(&self) -> Vec<std::collections::HashMap<String, String>> {
+        self.state_bindings
+            .iter()
+            .map(|descriptor| {
+                let mut fields = std::collections::HashMap::new();
+                fields.insert("input".to_string(), descriptor.input_name.clone());
+                fields.insert("output".to_string(), descriptor.output_name.clone());
+                fields.insert(
+                    "update".to_string(),
+                    match descriptor.update {
+                        StateUpdatePolicy::Replace => "replace",
+                    }
+                    .to_string(),
+                );
+                if let Some(capacity) = self.state_capacities.get(&descriptor.input_name) {
+                    fields.insert("capacity_bytes".to_string(), capacity.to_string());
+                }
+                fields
+            })
+            .collect()
+    }
+
     /// Execute while sourcing configured state inputs from Rust-owned buffers
     /// and atomically replacing them with their bound output values on success.
     fn forward_stateful(
@@ -1638,10 +1679,11 @@ impl AotExecutor {
                 "persistent state has not been configured",
             ));
         }
-        for (state_name, _) in &self.state_bindings {
-            if inputs.contains_key(state_name) {
+        for descriptor in &self.state_bindings {
+            if inputs.contains_key(&descriptor.input_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "state input '{state_name}' is runtime-owned and must not be supplied"
+                    "state input '{}' is runtime-owned and must not be supplied",
+                    descriptor.input_name
                 )));
             }
         }
@@ -1694,10 +1736,13 @@ impl AotExecutor {
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
         // Validate all replacements before mutating any state so overflow is atomic.
-        for (input_name, output_index) in &self.state_bindings {
-            let output = output_data.get(*output_index).ok_or_else(|| {
+        for descriptor in &self.state_bindings {
+            let input_name = &descriptor.input_name;
+            let output_index = descriptor.output_index;
+            let output = output_data.get(output_index).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "state output index {output_index} for '{input_name}' is missing"
+                    "state output '{}' at index {output_index} for '{input_name}' is missing",
+                    descriptor.output_name
                 ))
             })?;
             let capacity = self.state_capacities.get(input_name).ok_or_else(|| {
@@ -1712,15 +1757,20 @@ impl AotExecutor {
                 )));
             }
         }
-        for (input_name, output_index) in &self.state_bindings {
-            let output = &output_data[*output_index];
+        for descriptor in &self.state_bindings {
+            let input_name = &descriptor.input_name;
+            let output = &output_data[descriptor.output_index];
             let state = self.state_values.get_mut(input_name).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "state buffer for '{input_name}' is missing"
                 ))
             })?;
-            state.clear();
-            state.extend_from_slice(output);
+            match descriptor.update {
+                StateUpdatePolicy::Replace => {
+                    state.clear();
+                    state.extend_from_slice(output);
+                }
+            }
         }
         self.stateful_steps = self.stateful_steps.checked_add(1).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")

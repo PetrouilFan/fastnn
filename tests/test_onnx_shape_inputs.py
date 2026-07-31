@@ -396,6 +396,14 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     )
     first = model.create_session()
     second = model.create_session()
+    assert model.state_descriptors() == [
+        {
+            "input": "state",
+            "output": "next_state",
+            "update": "replace",
+            "capacity_bytes": "4",
+        }
+    ]
     out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])})
     out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
     isolated = second.forward_stateful({"delta": fnn.tensor([1.0], [1])})
