@@ -420,6 +420,32 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     np.testing.assert_array_equal(reset["next_state"].numpy(), np.array([2.0], np.float32))
 
 
+def test_aot_runtime_owned_state_rejects_capacity_overflow_atomically(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Concat", ["state", "delta"], ["next_state"], axis=0)],
+        "bounded_persistent_state",
+        [
+            helper.make_tensor_value_info("state", TensorProto.FLOAT, [1]),
+            helper.make_tensor_value_info("delta", TensorProto.FLOAT, [1]),
+        ],
+        [helper.make_tensor_value_info("next_state", TensorProto.FLOAT, [2])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "bounded-persistent-state.onnx"
+    fnn_path = tmp_path / "bounded-persistent-state.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    executor.configure_state(
+        {"state": "next_state"}, {"state": fnn.tensor([0.0], [1])}
+    )
+    assert executor.state_sizes() == {"state": 4}
+    with pytest.raises(RuntimeError, match="exceeding capacity"):
+        executor.forward_stateful({"delta": fnn.tensor([1.0], [1])})
+    assert executor.state_sizes() == {"state": 4}
+    executor.reset_state()
+    assert executor.state_sizes() == {"state": 4}
+
 def test_runtime_where_bool_broadcast_matches_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

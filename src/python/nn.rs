@@ -1217,6 +1217,7 @@ pub struct AotExecutor {
     state_bindings: Vec<(String, usize)>,
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
+    state_capacities: std::collections::HashMap<String, usize>,
 }
 
 #[pymethods]
@@ -1408,6 +1409,7 @@ impl AotExecutor {
             state_bindings: Vec::new(),
             state_values: std::collections::HashMap::new(),
             initial_state_values: std::collections::HashMap::new(),
+            state_capacities: std::collections::HashMap::new(),
         })
     }
 
@@ -1485,6 +1487,7 @@ impl AotExecutor {
         }
         let mut configured = Vec::with_capacity(bindings.len());
         let mut values = std::collections::HashMap::with_capacity(bindings.len());
+        let mut capacities = std::collections::HashMap::with_capacity(bindings.len());
         for (input_name, output_name) in bindings {
             if !self.input_names.iter().any(|name| name == &input_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -1510,12 +1513,45 @@ impl AotExecutor {
                     "initial state {input_name} cannot be passed to AOT execution: {error}"
                 ))
             })?;
-            values.insert(input_name.clone(), bytes.to_vec());
+            let input_position = self
+                .input_names
+                .iter()
+                .position(|name| name == &input_name)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "state input '{input_name}' lost its graph position"
+                    ))
+                })?;
+            let input_node_id = *self.graph.inputs.get(input_position).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state input '{input_name}' has no graph input node"
+                ))
+            })?;
+            let capacity = self
+                .graph
+                .get_node(input_node_id)
+                .and_then(|node| node.output_type.try_byte_size_with_env(None))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "state input '{input_name}' does not have a bounded storage capacity"
+                    ))
+                })?;
+            if bytes.len() > capacity {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "initial state '{input_name}' requires {} bytes, exceeding capacity {capacity}",
+                    bytes.len()
+                )));
+            }
+            let mut storage = Vec::with_capacity(capacity);
+            storage.extend_from_slice(bytes);
+            values.insert(input_name.clone(), storage);
+            capacities.insert(input_name.clone(), capacity);
             configured.push((input_name, output_index));
         }
         configured.sort_by(|left, right| left.0.cmp(&right.0));
         self.initial_state_values = values.clone();
         self.state_values = values;
+        self.state_capacities = capacities;
         self.state_bindings = configured;
         self.executor.invalidate_runtime_cache();
         Ok(())
@@ -1528,9 +1564,25 @@ impl AotExecutor {
                 "persistent state has not been configured",
             ));
         }
-        self.state_values.clone_from(&self.initial_state_values);
+        for (name, initial) in &self.initial_state_values {
+            let state = self.state_values.get_mut(name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "persistent state buffer '{name}' is missing"
+                ))
+            })?;
+            state.clear();
+            state.extend_from_slice(initial);
+        }
         self.executor.invalidate_runtime_cache();
         Ok(())
+    }
+
+    /// Return live byte lengths for configured state tensors.
+    fn state_sizes(&self) -> std::collections::HashMap<String, usize> {
+        self.state_values
+            .iter()
+            .map(|(name, value)| (name.clone(), value.len()))
+            .collect()
     }
 
     /// Execute while sourcing configured state inputs from Rust-owned buffers
@@ -1599,20 +1651,34 @@ impl AotExecutor {
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
-        let next_state: Vec<(String, Vec<u8>)> = self
-            .state_bindings
-            .iter()
-            .map(|(input_name, output_index)| {
-                let output = output_data.get(*output_index).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "state output index {output_index} for '{input_name}' is missing"
-                    ))
-                })?;
-                Ok((input_name.clone(), output.clone()))
-            })
-            .collect::<pyo3::PyResult<_>>()?;
-        for (name, value) in next_state {
-            self.state_values.insert(name, value);
+        // Validate all replacements before mutating any state so overflow is atomic.
+        for (input_name, output_index) in &self.state_bindings {
+            let output = output_data.get(*output_index).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state output index {output_index} for '{input_name}' is missing"
+                ))
+            })?;
+            let capacity = self.state_capacities.get(input_name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state capacity for '{input_name}' is missing"
+                ))
+            })?;
+            if output.len() > *capacity {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state output for '{input_name}' requires {} bytes, exceeding capacity {capacity}",
+                    output.len()
+                )));
+            }
+        }
+        for (input_name, output_index) in &self.state_bindings {
+            let output = &output_data[*output_index];
+            let state = self.state_values.get_mut(input_name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state buffer for '{input_name}' is missing"
+                ))
+            })?;
+            state.clear();
+            state.extend_from_slice(output);
         }
         self.decode_outputs(output_data)
     }

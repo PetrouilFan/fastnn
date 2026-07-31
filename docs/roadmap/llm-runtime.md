@@ -307,10 +307,16 @@ inputs can now remain behind this API with no Python-mediated per-layer recurren
 Two stateful decode steps and reset reproduce the numerical errors above, and reset
 reproduces the first-step logits byte-for-byte.
 
-This boundary still copies each returned state tensor into a Rust-owned `Vec<u8>`
-after execution. Stable capacity-backed append buffers, direct arena-to-state writes,
-maximum-context rejection at the state boundary, and a separately instantiable
-session object remain M4 work.
+The second M4 boundary preallocates each state tensor to the bounded graph-input
+capacity and reuses that allocation across forward and reset. All bound output sizes
+are validated before any state buffer is mutated, so a capacity overflow is atomic
+and leaves every live state unchanged. `state_sizes()` exposes live byte lengths for
+lifecycle diagnostics. TinyLlama retains two decode steps and byte-identical reset
+logits with all 44 buffers staying within their fixed capacities.
+
+State updates still copy complete returned tensors from execution output storage into
+the stable state buffers. Direct arena-to-state writes, append-only KV updates, and a
+separately instantiable session object remain M4 work.
 
 ## Immediate implementation boundary
 
