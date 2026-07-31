@@ -1921,13 +1921,13 @@ impl AotExecutor {
         self.stateful_steps = self.stateful_steps.checked_add(1).ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")
         })?;
-        let mut result = self.decode_outputs(output_data)?;
-        if !include_state_outputs {
-            for descriptor in &self.state_bindings {
-                result.remove(&descriptor.output_name);
-            }
-        }
-        Ok(result)
+        let hidden_outputs = (!include_state_outputs).then(|| {
+            self.state_bindings
+                .iter()
+                .map(|descriptor| descriptor.output_name.clone())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        self.decode_outputs_filtered(output_data, hidden_outputs.as_ref())
     }
 
     /// Initialize an empty stateful session. A second prefill requires reset.
@@ -2848,6 +2848,14 @@ impl AotExecutor {
         &self,
         output_data: Vec<Vec<u8>>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        self.decode_outputs_filtered(output_data, None)
+    }
+
+    fn decode_outputs_filtered(
+        &self,
+        output_data: Vec<Vec<u8>>,
+        hidden_outputs: Option<&std::collections::HashSet<String>>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         if output_data.len() != self.graph.outputs.len()
             || self.executor.last_output_shapes().len() != output_data.len()
             || self.output_map.len() != output_data.len()
@@ -2862,6 +2870,9 @@ impl AotExecutor {
         }
         let mut result = std::collections::HashMap::new();
         for (name, idx) in &self.output_map {
+            if hidden_outputs.is_some_and(|hidden| hidden.contains(name)) {
+                continue;
+            }
             let data = output_data.get(*idx).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "AotExecutor: output index {idx} is out of range"
