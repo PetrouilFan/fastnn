@@ -44,6 +44,63 @@ pub struct OnnxNode {
     pub attrs: HashMap<String, String>,
 }
 
+fn split_sizes_from_tensor(tensor: &Tensor, node_name: &str) -> Result<Vec<usize>, String> {
+    let bytes = tensor
+        .try_as_bytes()
+        .map_err(|error| format!("Split node '{node_name}' cannot read split sizes: {error}"))?;
+    let values: Vec<i64> = match tensor.dtype() {
+        DType::I64 => bytes
+            .chunks_exact(8)
+            .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("exact I64 chunk")))
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("exact I32 chunk")) as i64)
+            .collect(),
+        DType::F32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("exact F32 chunk")))
+            .map(|value| {
+                if value.is_finite()
+                    && value > 0.0
+                    && value.fract() == 0.0
+                    && value <= i64::MAX as f32
+                {
+                    Ok(value as i64)
+                } else {
+                    Err(format!(
+                        "Split node '{node_name}' has invalid promoted split size {value}"
+                    ))
+                }
+            })
+            .collect::<Result<_, _>>()?,
+        dtype => {
+            return Err(format!(
+                "Split node '{node_name}' requires I32 or I64 split sizes, got {dtype:?}"
+            ));
+        }
+    };
+    values
+        .into_iter()
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                format!("Split node '{node_name}' has non-positive split size {value}")
+            })
+        })
+        .map(|result| {
+            result.and_then(|value| {
+                if value == 0 {
+                    Err(format!(
+                        "Split node '{node_name}' has non-positive split size 0"
+                    ))
+                } else {
+                    Ok(value)
+                }
+            })
+        })
+        .collect()
+}
+
 /// Converts parsed ONNX model data into an AOT ComputeGraph.
 pub struct OnnxConverter<'a> {
     nodes: &'a [OnnxNode],
@@ -612,74 +669,105 @@ impl<'a> OnnxConverter<'a> {
                     .unwrap_or(0);
                 let rank = ins.first().map(|t| t.shape().len()).unwrap_or(1);
                 let axis = if raw_axis < 0 {
-                    let r = rank as i64;
-                    if raw_axis < -r {
-                        0usize
-                    } else {
-                        (r + raw_axis) as usize
-                    }
-                } else {
-                    raw_axis as usize
-                };
-                let axis = axis.min(rank.saturating_sub(1));
-                let n_outputs = node.outputs.len().max(1);
-                if ins.len() > 1 && !node.attrs.contains_key("split") {
-                    return Err(format!(
-                        "Split node '{}' supplies split sizes as a tensor input; tensor-input Split lowering is not yet supported",
-                        node.name
-                    ));
-                }
-                let split_sizes: Vec<usize> = if let Some(s) = node.attrs.get("split") {
-                    s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
-                } else {
-                    vec![]
-                };
-                if split_sizes.len() == n_outputs && split_sizes.iter().all(|&s| s > 0) {
-                    // Explicit split sizes from attribute
-                    let mut start = 0usize;
-                    for (i, out_name) in node.outputs.iter().enumerate() {
-                        if i < split_sizes.len() {
-                            let end = start + split_sizes[i];
-                            let output = self.graph.slice(&ins[0], axis, start, end);
-                            if !node.name.is_empty() {
-                                self.graph.set_node_name(output.node_id, &node.name);
-                            }
-                            self.name_to_id.insert(out_name.clone(), output);
-                            start = end;
-                        }
-                    }
-                } else {
-                    // Equal split: each output gets dim_size / n_outputs.
-                    let dim_size_opt = ins[0].shape().get(axis).and_then(|d| d.evaluate());
-                    if let Some(dim_size) = dim_size_opt {
-                        let part = dim_size as usize / n_outputs.max(1);
-                        if part > 0 {
-                            let mut start = 0usize;
-                            for (i, out_name) in node.outputs.iter().enumerate() {
-                                let end = if i == n_outputs - 1 {
-                                    dim_size as usize // last output gets remainder
-                                } else {
-                                    start + part
-                                };
-                                let output = self.graph.slice(&ins[0], axis, start, end);
-                                if !node.name.is_empty() {
-                                    self.graph.set_node_name(output.node_id, &node.name);
-                                }
-                                self.name_to_id.insert(out_name.clone(), output);
-                                start = end;
-                            }
-                        } else {
-                            return Err(format!(
-                                "Split node '{}' cannot divide axis extent {dim_size} across {n_outputs} outputs",
-                                node.name
-                            ));
-                        }
-                    } else {
+                    let normalized = rank as i64 + raw_axis;
+                    if normalized < 0 {
                         return Err(format!(
-                            "Split node '{}' has a symbolic axis extent and no explicit static split sizes; dynamic Split lowering is not yet supported",
+                            "Split node '{}' axis {raw_axis} is out of range for rank {rank}",
                             node.name
                         ));
                     }
+                    normalized as usize
+                } else {
+                    raw_axis as usize
+                };
+                if axis >= rank {
+                    return Err(format!(
+                        "Split node '{}' axis {raw_axis} is out of range for rank {rank}",
+                        node.name
+                    ));
+                }
+                let n_outputs = node.outputs.len();
+                if n_outputs == 0 {
+                    return Err(format!("Split node '{}' has no outputs", node.name));
+                }
+                let split_sizes: Vec<usize> = if ins.len() > 1 {
+                    let split_name = node.inputs.get(1).ok_or_else(|| {
+                        format!(
+                            "Split node '{}' is missing its split-size input name",
+                            node.name
+                        )
+                    })?;
+                    let split_tensor = self.params.get(split_name).ok_or_else(|| {
+                        format!(
+                            "Split node '{}' supplies runtime split sizes; only constant tensor split sizes are currently supported",
+                            node.name
+                        )
+                    })?;
+                    split_sizes_from_tensor(split_tensor, &node.name)?
+                } else if let Some(s) = node.attrs.get("split") {
+                    s.split(',')
+                        .map(|value| {
+                            value.trim().parse::<usize>().map_err(|_| {
+                                format!(
+                                    "Split node '{}' has invalid split size {value:?}",
+                                    node.name
+                                )
+                            })
+                        })
+                        .collect::<Result<_, _>>()?
+                } else {
+                    Vec::new()
+                };
+                let dim_size = ins[0]
+                    .shape()
+                    .get(axis)
+                    .and_then(|dimension| dimension.evaluate())
+                    .ok_or_else(|| {
+                        format!(
+                            "Split node '{}' has a symbolic axis extent; live dynamic Split lowering is not yet supported",
+                            node.name
+                        )
+                    })? as usize;
+                let split_sizes = if split_sizes.is_empty() {
+                    if !dim_size.is_multiple_of(n_outputs) {
+                        return Err(format!(
+                            "Split node '{}' cannot equally divide axis extent {dim_size} across {n_outputs} outputs",
+                            node.name
+                        ));
+                    }
+                    vec![dim_size / n_outputs; n_outputs]
+                } else {
+                    if split_sizes.len() != n_outputs {
+                        return Err(format!(
+                            "Split node '{}' has {} split sizes for {n_outputs} outputs",
+                            node.name,
+                            split_sizes.len()
+                        ));
+                    }
+                    let total = split_sizes.iter().try_fold(0usize, |sum, size| {
+                        sum.checked_add(*size).ok_or_else(|| {
+                            format!("Split node '{}' split-size sum overflows", node.name)
+                        })
+                    })?;
+                    if total != dim_size {
+                        return Err(format!(
+                            "Split node '{}' split sizes sum to {total}, but axis extent is {dim_size}",
+                            node.name
+                        ));
+                    }
+                    split_sizes
+                };
+                let mut start = 0usize;
+                for (out_name, size) in node.outputs.iter().zip(split_sizes) {
+                    let end = start.checked_add(size).ok_or_else(|| {
+                        format!("Split node '{}' slice bound overflows", node.name)
+                    })?;
+                    let output = self.graph.slice(&ins[0], axis, start, end);
+                    if !node.name.is_empty() {
+                        self.graph.set_node_name(output.node_id, &node.name);
+                    }
+                    self.name_to_id.insert(out_name.clone(), output);
+                    start = end;
                 }
             }
             "Slice" => {
