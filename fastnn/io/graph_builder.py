@@ -375,6 +375,10 @@ def build_dag_model(
             continue
         value_key = f"{node_name}.value"
         if value_key not in params:
+            # v3 ONNX Constant payloads are stored under the node name itself.
+            # Keep accepting the older `.value` convention for legacy artifacts.
+            value_key = node_name
+        if value_key not in params:
             continue
         raw_outputs = node.get("outputs", [])
         if isinstance(raw_outputs, str):
@@ -467,6 +471,12 @@ def build_dag_model(
             const_values[pname] = np.asarray(pval.numpy())
         elif isinstance(pval, np.ndarray):
             const_values[pname] = pval
+    # Optimization can eliminate Constant nodes while consumers retain their
+    # tensor-edge names. Preserve those aliases so static shape inputs remain
+    # promotable after the optimized graph is re-read.
+    for tensor_name, param_name in initializer_to_param.items():
+        if param_name in const_values:
+            const_values[tensor_name] = const_values[param_name]
 
     known_shapes: Dict[str, List[int]] = {}
     for nd in onnx_nodes:
@@ -514,6 +524,8 @@ def build_dag_model(
 
         if op_type == "Constant":
             value_key = f"{node_name}.value"
+            if value_key not in const_values:
+                value_key = node_name
             if value_key in const_values and out_name:
                 const_values[out_name] = const_values[value_key]
         elif op_type == "Shape" and inputs and inputs[0] in known_shapes:
@@ -559,6 +571,7 @@ def build_dag_model(
                     raise ValueError(f"Reshape node {node_name!r} has a non-integral constant target")
                 dag["target_shape"] = _attr_to_str([int(value) for value in target])
 
+
         elif op_type == "Slice" and len(inputs) >= 3:
             dag = next((d for d in dag_nodes if d.get("name") == node_name), None)
             if dag is None:
@@ -567,14 +580,20 @@ def build_dag_model(
             ends_val = const_values.get(inputs[2]) if len(inputs) > 2 else None
             axes_val = const_values.get(inputs[3]) if len(inputs) > 3 else None
             steps_val = const_values.get(inputs[4]) if len(inputs) > 4 else None
+            def _slice_ints(value, label):
+                array = np.asarray(value).reshape(-1)
+                if not np.all(np.isfinite(array)) or not np.all(array == np.trunc(array)):
+                    raise ValueError(f"Slice node {node_name!r} has non-integral {label}")
+                return _attr_to_str([int(item) for item in array])
+
             if starts_val is not None and "starts" not in dag:
-                dag["starts"] = _attr_to_str(np.asarray(starts_val).reshape(-1).tolist())
+                dag["starts"] = _slice_ints(starts_val, "starts")
             if ends_val is not None and "ends" not in dag:
-                dag["ends"] = _attr_to_str(np.asarray(ends_val).reshape(-1).tolist())
+                dag["ends"] = _slice_ints(ends_val, "ends")
             if axes_val is not None and "axes" not in dag:
-                dag["axes"] = _attr_to_str(np.asarray(axes_val).reshape(-1).tolist())
+                dag["axes"] = _slice_ints(axes_val, "axes")
             if steps_val is not None and "steps" not in dag:
-                dag["steps"] = _attr_to_str(np.asarray(steps_val).reshape(-1).tolist())
+                dag["steps"] = _slice_ints(steps_val, "steps")
 
         elif op_type == "Resize" and len(inputs) >= 3:
             dag = next((d for d in dag_nodes if d.get("name") == node_name), None)
