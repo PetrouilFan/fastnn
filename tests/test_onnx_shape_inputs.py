@@ -119,6 +119,36 @@ def test_runtime_reshape_matches_onnxruntime_across_live_extents(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_static_multi_axis_slice_matches_onnxruntime(tmp_path):
+    data = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
+    graph = helper.make_graph(
+        [
+            helper.make_node(
+                "Slice",
+                ["X"],
+                ["Y"],
+                starts=[1, 1],
+                ends=[3, 4],
+                axes=[0, 2],
+            )
+        ],
+        "static_multi_axis_slice",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4, 5])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4, 3])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 9)])
+    onnx_path = tmp_path / "multi-axis-slice.onnx"
+    fnn_path = tmp_path / "multi-axis-slice.fnn"
+    onnx.save(model, onnx_path)
+    expected = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"]
+    ).run(["Y"], {"X": data})[0]
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    actual = executor.forward({"X": fnn.tensor(data, list(data.shape))})["Y"].numpy()
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_runtime_slice_bounds_match_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [
@@ -595,7 +625,7 @@ def test_slice_constant_tensor_inputs_match_onnxruntime(tmp_path):
     np.testing.assert_array_equal(actual[0], expected[0])
 
 
-def test_slice_multiple_axes_fails_explicitly(tmp_path):
+def test_slice_multiple_axes_tensor_inputs_match_onnxruntime(tmp_path):
     x_shape = [2, 3, 4]
     initializers = {
         "starts": np.asarray([0, 1], dtype=np.int64),
@@ -626,8 +656,14 @@ def test_slice_multiple_axes_fails_explicitly(tmp_path):
     onnx.save(model, onnx_path)
     fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
 
-    with pytest.raises(RuntimeError, match="requires exactly one start/end/axis/step tuple"):
-        fnn.build_model_from_fnn(str(fnn_path))
+    expected = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"]
+    ).run(["Y"], {"X": np.arange(24, dtype=np.float32).reshape(x_shape)})[0]
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    actual = executor.forward(
+        {"X": fnn.tensor(np.arange(24, dtype=np.float32).reshape(x_shape), x_shape)}
+    )["Y"].numpy()
+    np.testing.assert_array_equal(actual, expected)
 
 
 def test_squeeze_unsqueeze_constant_axes_match_onnxruntime(tmp_path):

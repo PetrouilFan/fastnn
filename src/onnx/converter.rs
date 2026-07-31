@@ -717,13 +717,13 @@ impl<'a> OnnxConverter<'a> {
                         .collect::<Vec<_>>(),
                 );
                 let steps = parse_ints_i64(&node.attrs, "steps", &vec![1; starts.len()]);
-                if starts.len() != 1
+                if starts.is_empty()
                     || starts.len() != ends.len()
                     || starts.len() != axes.len()
                     || starts.len() != steps.len()
                 {
                     return Err(format!(
-                        "Slice node '{}' currently requires exactly one start/end/axis/step tuple (got {}/{}/{}/{})",
+                        "Slice node '{}' requires matching non-empty start/end/axis/step tuples (got {}/{}/{}/{})",
                         node.name,
                         starts.len(),
                         ends.len(),
