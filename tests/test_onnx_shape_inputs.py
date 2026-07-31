@@ -192,6 +192,41 @@ def test_runtime_range_negative_step_empty_and_zero_rejection(tmp_path):
         run(0, 17, 1)
 
 
+def test_runtime_range_resolves_derived_shape_scalars(tmp_path):
+    initializers = {
+        "shape_index": np.asarray(0, dtype=np.int64),
+        "start": np.asarray(0.0, dtype=np.float32),
+        "step": np.asarray(1.0, dtype=np.float32),
+    }
+    nodes = [
+        helper.make_node("Shape", ["X"], ["shape"]),
+        helper.make_node("Gather", ["shape", "shape_index"], ["extent_i64"], axis=0),
+        helper.make_node("Cast", ["extent_i64"], ["extent"], to=TensorProto.FLOAT),
+        helper.make_node("Range", ["start", "extent", "step"], ["Y"]),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "derived_runtime_range",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 2])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["range_length"])],
+        initializer=[numpy_helper.from_array(value, name) for name, value in initializers.items()],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "derived-runtime-range.onnx"
+    fnn_path = tmp_path / "derived-runtime-range.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"tokens": 8, "range_length": 8}
+    )
+    ort_session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    for tokens in (1, 5):
+        x = np.zeros((tokens, 2), dtype=np.float32)
+        expected = ort_session.run(["Y"], {"X": x})[0]
+        actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_runtime_slice_bounds_match_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

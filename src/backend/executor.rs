@@ -23,9 +23,7 @@ use crate::backend::{
 use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::{MemoryPlan, MemoryPlanResourceLimits};
-#[cfg(test)]
-use crate::ir::IrDType;
-use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
 
@@ -276,6 +274,164 @@ struct RuntimeOutputs {
     shapes: Vec<Vec<usize>>,
 }
 
+fn constant_scalar_f32(value: &TensorValue, node_id: NodeId) -> Result<f32, BackendError> {
+    match value {
+        TensorValue::Float(value) => Ok(*value),
+        TensorValue::Int(value) => Ok(*value as f32),
+        TensorValue::Data { bytes, tensor_type } => match tensor_type.dtype() {
+            IrDType::F32 if bytes.len() == 4 => Ok(f32::from_le_bytes(
+                bytes[..4].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!("constant node {node_id} has invalid F32 bytes"))
+                })?,
+            )),
+            IrDType::I32 if bytes.len() == 4 => Ok(i32::from_le_bytes(
+                bytes[..4].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!("constant node {node_id} has invalid I32 bytes"))
+                })?,
+            ) as f32),
+            IrDType::I64 if bytes.len() == 8 => Ok(i64::from_le_bytes(
+                bytes[..8].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!("constant node {node_id} has invalid I64 bytes"))
+                })?,
+            ) as f32),
+            dtype => Err(BackendError::Dispatch(format!(
+                "constant node {node_id} is not one scalar supported by Range ({dtype:?}, {} bytes)",
+                bytes.len()
+            ))),
+        },
+    }
+}
+
+fn evaluate_runtime_scalar(
+    graph: &ComputeGraph,
+    node_id: NodeId,
+    positions: &HashMap<NodeId, usize>,
+    inputs: &[&[u8]],
+    shape_env: &ShapeEnv,
+    visiting: &mut std::collections::HashSet<NodeId>,
+) -> Result<f32, BackendError> {
+    if !visiting.insert(node_id) {
+        return Err(BackendError::Dispatch(format!(
+            "runtime scalar expression contains a cycle at node {node_id}"
+        )));
+    }
+    let result = (|| {
+        if let Some(position) = positions.get(&node_id) {
+            let bytes = inputs.get(*position).ok_or_else(|| {
+                BackendError::Dispatch(format!("runtime scalar input node {node_id} is missing"))
+            })?;
+            if bytes.len() != 4 {
+                return Err(BackendError::Dispatch(format!(
+                    "runtime scalar input node {node_id} must contain one F32 value"
+                )));
+            }
+            return Ok(f32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
+                BackendError::Dispatch("runtime scalar byte conversion failed".into())
+            })?));
+        }
+        let node = graph.get_node(node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!("runtime scalar node {node_id} is missing"))
+        })?;
+        match &node.opcode {
+            Opcode::Constant(value) => constant_scalar_f32(value, node_id),
+            Opcode::Cast | Opcode::Reshape => {
+                let input = *node.inputs.first().ok_or_else(|| {
+                    BackendError::Dispatch(format!("{:?} node {node_id} has no input", node.opcode))
+                })?;
+                evaluate_runtime_scalar(graph, input, positions, inputs, shape_env, visiting)
+            }
+            Opcode::Add | Opcode::Sub | Opcode::Mul => {
+                if node.inputs.len() != 2 {
+                    return Err(BackendError::Dispatch(format!(
+                        "scalar {:?} node {node_id} requires two inputs",
+                        node.opcode
+                    )));
+                }
+                let left = evaluate_runtime_scalar(
+                    graph,
+                    node.inputs[0],
+                    positions,
+                    inputs,
+                    shape_env,
+                    visiting,
+                )?;
+                let right = evaluate_runtime_scalar(
+                    graph,
+                    node.inputs[1],
+                    positions,
+                    inputs,
+                    shape_env,
+                    visiting,
+                )?;
+                Ok(match node.opcode {
+                    Opcode::Add => left + right,
+                    Opcode::Sub => left - right,
+                    Opcode::Mul => left * right,
+                    _ => unreachable!(),
+                })
+            }
+            Opcode::Gather => {
+                if node.inputs.len() < 2 {
+                    return Err(BackendError::Dispatch(format!(
+                        "Gather node {node_id} requires data and indices"
+                    )));
+                }
+                let shape_node = graph.get_node(node.inputs[0]).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Gather node {node_id} data input is missing"))
+                })?;
+                let source_id = match shape_node.opcode {
+                    Opcode::Shape => *shape_node.inputs.first().ok_or_else(|| {
+                        BackendError::Dispatch(format!("Shape node {} has no input", shape_node.id))
+                    })?,
+                    _ => {
+                        return Err(BackendError::Dispatch(format!(
+                            "runtime scalar Gather node {node_id} does not read a Shape result"
+                        )))
+                    }
+                };
+                let index = evaluate_runtime_scalar(
+                    graph,
+                    node.inputs[1],
+                    positions,
+                    inputs,
+                    shape_env,
+                    visiting,
+                )?;
+                if !index.is_finite() || index.fract() != 0.0 {
+                    return Err(BackendError::Dispatch(format!(
+                        "Gather node {node_id} index must be a finite integer"
+                    )));
+                }
+                let source = graph.get_node(source_id).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Shape source node {source_id} is missing"))
+                })?;
+                let rank = source.output_type.shape.len() as i64;
+                let raw_index = index as i64;
+                let normalized = if raw_index < 0 {
+                    rank.checked_add(raw_index)
+                } else {
+                    Some(raw_index)
+                }
+                .filter(|value| *value >= 0 && *value < rank)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "Gather node {node_id} index {raw_index} is out of range for Shape rank {rank}"
+                    ))
+                })? as usize;
+                source.output_type.shape[normalized]
+                    .evaluate_with_env(shape_env)
+                    .map(|value| value as f32)
+                    .map_err(BackendError::Dispatch)
+            }
+            opcode => Err(BackendError::Dispatch(format!(
+                "Range scalar node {node_id} uses unsupported derived opcode {opcode:?}"
+            ))),
+        }
+    })();
+    visiting.remove(&node_id);
+    result
+}
+
 fn bind_runtime_range_shapes(
     graph: &ComputeGraph,
     inputs: &[&[u8]],
@@ -292,25 +448,16 @@ fn bind_runtime_range_shapes(
             continue;
         }
         let mut values = [0.0f32; 3];
+        let mut visiting = std::collections::HashSet::new();
         for (index, input_id) in node.inputs.iter().enumerate() {
-            let position = positions.get(input_id).ok_or_else(|| {
-                BackendError::Dispatch(format!(
-                    "Range node {} requires runtime scalar graph inputs",
-                    node.id
-                ))
-            })?;
-            let bytes = inputs
-                .get(*position)
-                .filter(|bytes| bytes.len() == 4)
-                .ok_or_else(|| {
-                    BackendError::Dispatch(format!(
-                        "Range node {} input {index} must be one F32 scalar",
-                        node.id
-                    ))
-                })?;
-            values[index] = f32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
-                BackendError::Dispatch("Range scalar byte conversion failed".into())
-            })?);
+            values[index] = evaluate_runtime_scalar(
+                graph,
+                *input_id,
+                &positions,
+                inputs,
+                shape_env,
+                &mut visiting,
+            )?;
         }
         let [start, limit, step] = values;
         if !start.is_finite() || !limit.is_finite() || !step.is_finite() || step == 0.0 {
