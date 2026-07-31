@@ -88,6 +88,32 @@ def test_runtime_constant_of_shape_matches_onnxruntime(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_constant_inferred_reshape_preserves_live_symbolic_extent(tmp_path):
+    target = numpy_helper.from_array(np.asarray([-1, 1], dtype=np.int64), "target")
+    graph = helper.make_graph(
+        [helper.make_node("Reshape", ["X", "target"], ["Y"], name="reshape")],
+        "constant_inferred_reshape",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens"])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["tokens", 1])],
+        initializer=[target],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "constant-inferred-reshape.onnx"
+    fnn_path = tmp_path / "constant-inferred-reshape.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"tokens": 16}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    for tokens in (1, 5):
+        x = np.arange(tokens, dtype=np.float32)
+        expected = session.run(["Y"], {"X": x})[0]
+        actual = executor.forward({"X": fnn.tensor(x, [tokens])})["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+        assert actual.shape == (tokens, 1)
+
+
 def test_runtime_reshape_matches_onnxruntime_across_live_extents(tmp_path):
     graph = helper.make_graph(
         [helper.make_node("Reshape", ["X", "target"], ["Y"], name="reshape")],

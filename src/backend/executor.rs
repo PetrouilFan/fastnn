@@ -2025,43 +2025,24 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 if input_shapes.is_empty() {
                     continue;
                 }
-                let in_numel: u64 = input_shapes[0].iter().product();
-                // For reshape, compute expected numel from attrs or output shape
-                if let Some(out_shape) = node.attrs.get("shape") {
-                    // Split the shape attr into tokens. Each token is either a
-                    // concrete u64 dim ("42") or a symbolic dim ("N", "-1", etc.)
-                    // that will be resolved at runtime.
-                    let tokens: Vec<&str> = out_shape
-                        .trim_matches(|c| c == '[' || c == ']')
-                        .split(',')
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    // Collect only the concrete (u64-parseable) dims.
-                    let concrete: Vec<u64> = tokens.iter().filter_map(|s| s.parse().ok()).collect();
-                    let symbol_count = tokens.len() - concrete.len();
-                    if symbol_count == 0 {
-                        // All dims are concrete: the total element count must
-                        // match exactly.
-                        let out_numel: u64 = concrete.iter().product();
-                        if in_numel != out_numel {
-                            return Err(format!(
-                                "Reshape node {}: element count mismatch {} vs {} (in {:?} -> {:?})",
-                                node_id, in_numel, out_numel, input_shapes[0], concrete
-                            ));
-                        }
-                    } else if symbol_count == 1 {
-                        // Exactly one symbolic dim: the runtime will compute it
-                        // as in_numel / product(concrete_dims).  Validate that
-                        // the division is exact.
-                        let known_product: u64 = concrete.iter().product();
-                        if known_product == 0 || !in_numel.is_multiple_of(known_product) {
-                            return Err(format!(
-                                "Reshape node {}: element count {} not divisible by known dims product {} (shape={:?})",
-                                node_id, in_numel, known_product, tokens
-                            ));
-                        }
-                    } // Multiple symbolic dims: cannot validate statically, skip.
+                let in_numel = input_shapes[0]
+                    .iter()
+                    .try_fold(1u64, |product, dimension| product.checked_mul(*dimension))
+                    .ok_or_else(|| {
+                        format!("Reshape node {node_id}: input element count overflows")
+                    })?;
+                let live_output = resolve_shape_lenient(&node.output_type.shape, shape_env);
+                let out_numel = live_output
+                    .iter()
+                    .try_fold(1u64, |product, dimension| product.checked_mul(*dimension))
+                    .ok_or_else(|| {
+                        format!("Reshape node {node_id}: output element count overflows")
+                    })?;
+                if in_numel != out_numel {
+                    return Err(format!(
+                        "Reshape node {node_id}: live element count mismatch {in_numel} vs {out_numel} (in {:?} -> {:?})",
+                        input_shapes[0], live_output
+                    ));
                 }
             }
             Opcode::Softmax if !input_shapes.is_empty() => {

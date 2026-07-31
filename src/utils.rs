@@ -17,13 +17,12 @@ pub fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
     inner
         .split(',')
         .map(|part| {
-            let p = part.trim();
-            if let Ok(v) = p.parse::<u64>() {
-                DimExpr::Known(v)
-            } else if p.is_empty() {
+            let value = part.trim();
+            if value.is_empty() {
                 DimExpr::Known(1)
             } else {
-                DimExpr::Symbol(p.to_string())
+                crate::ir::parse_dimension_descriptor(value)
+                    .unwrap_or_else(|_| DimExpr::Symbol(value.to_string()))
             }
         })
         .collect()

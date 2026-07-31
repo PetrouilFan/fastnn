@@ -7388,9 +7388,12 @@ impl Backend for CpuBackend {
                                     .offset
                                     .is_multiple_of(std::mem::align_of::<f32>())
                             {
-                                return Err(BackendError::Dispatch(
-                                    "gather: geometry and f32 storage disagree".into(),
-                                ));
+                                return Err(BackendError::Dispatch(format!(
+                                    "gather: geometry and f32 storage disagree: data shape {data_shape:?}, indices numel {indices_numel}, actual bytes [{}, {}] -> {}, expected [{expected_data}, {expected_indices}] -> {expected_output}",
+                                    input_slices[0].size,
+                                    input_slices[1].size,
+                                    output_slice.size,
+                                )));
                             }
                             let indices = unsafe {
                                 arena.view_f32(input_slices[1].offset, input_slices[1].size)

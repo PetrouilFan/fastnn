@@ -504,6 +504,74 @@ impl MemoryPlan {
                     }
                     params
                 }
+                Opcode::Slice if node.inputs.len() == 1 => {
+                    let input_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("slice node {node_id} is missing data"))?;
+                    let dim: usize = node
+                        .required_attr("dim")
+                        .map_err(|error| error.to_string())?;
+                    let start: usize = node
+                        .required_attr("start")
+                        .map_err(|error| error.to_string())?;
+                    let raw_end: i64 = node
+                        .required_attr("end")
+                        .map_err(|error| error.to_string())?;
+                    if dim >= input_shape.len() {
+                        return Err(format!("slice node {node_id} axis {dim} is out of range"));
+                    }
+                    let dimension = i64::try_from(input_shape[dim])
+                        .map_err(|_| format!("slice node {node_id} dimension does not fit i64"))?;
+                    let end = if raw_end < 0 {
+                        dimension
+                            .checked_add(raw_end)
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or_else(|| format!("slice node {node_id} negative end overflows"))?
+                    } else {
+                        raw_end
+                    };
+                    let end = usize::try_from(end)
+                        .map_err(|_| format!("slice node {node_id} end does not fit usize"))?;
+                    let mut params = Vec::with_capacity(input_shape.len() + 4);
+                    params.push(input_shape.len());
+                    for &dimension in input_shape {
+                        params.push(to_usize(dimension, "slice input dimension")?);
+                    }
+                    params.extend([dim, start, end]);
+                    params
+                }
+                Opcode::Gather => {
+                    let data_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("gather node {node_id} is missing data"))?;
+                    let indices_shape = resolved_input_shapes
+                        .get(1)
+                        .ok_or_else(|| format!("gather node {node_id} is missing indices"))?;
+                    let axis: usize = node
+                        .optional_attr("axis")
+                        .map_err(|error| error.to_string())?
+                        .unwrap_or(0);
+                    if axis >= data_shape.len() {
+                        return Err(format!("gather node {node_id} axis {axis} is out of range"));
+                    }
+                    let indices_numel =
+                        indices_shape
+                            .iter()
+                            .try_fold(1usize, |product, &dimension| {
+                                product
+                                    .checked_mul(to_usize(dimension, "gather indices dimension")?)
+                                    .ok_or_else(|| {
+                                        format!("gather node {node_id} indices size overflows")
+                                    })
+                            })?;
+                    let mut params = Vec::with_capacity(data_shape.len() + 3);
+                    params.push(data_shape.len());
+                    for &dimension in data_shape {
+                        params.push(to_usize(dimension, "gather data dimension")?);
+                    }
+                    params.extend([indices_numel, axis]);
+                    params
+                }
                 Opcode::Trilu => {
                     let input_shape = resolved_input_shapes
                         .first()

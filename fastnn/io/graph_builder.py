@@ -548,7 +548,18 @@ def build_dag_model(
         if isinstance(inputs, str):
             inputs = [s.strip() for s in inputs.split(",") if s.strip()]
 
-        if op_type == "Slice" and len(inputs) >= 3:
+        if op_type == "Reshape" and len(inputs) >= 2:
+            dag = next((d for d in dag_nodes if d.get("name") == node_name), None)
+            if dag is None:
+                continue
+            target_val = const_values.get(inputs[1])
+            if target_val is not None:
+                target = np.asarray(target_val).reshape(-1)
+                if not np.all(np.isfinite(target)) or not np.all(target == np.trunc(target)):
+                    raise ValueError(f"Reshape node {node_name!r} has a non-integral constant target")
+                dag["target_shape"] = _attr_to_str([int(value) for value in target])
+
+        elif op_type == "Slice" and len(inputs) >= 3:
             dag = next((d for d in dag_nodes if d.get("name") == node_name), None)
             if dag is None:
                 continue

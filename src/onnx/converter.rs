@@ -573,19 +573,21 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Shape ops ───────────────────────────────────────────
             "Reshape" => {
-                let shape: Vec<i64> = parse_ints_i64(&node.attrs, "shape", &[]);
-                if !shape.is_empty() {
-                    let dims = resolve_reshape_dims(&shape, &ins[0]);
+                let promoted_target = parse_ints_i64(&node.attrs, "target_shape", &[]);
+                if !promoted_target.is_empty() {
+                    let dims = resolve_reshape_dims(&promoted_target, &ins[0])?;
                     self.out(node, self.graph.reshape(&ins[0], &dims));
                 } else if ins.len() >= 2 {
-                    // Opset 11+: shape comes from a tensor input (ins[1]).
-                    // Try to resolve it from params first (compile-time constant).
+                    // Opset 11+: shape comes from a tensor input. Preserve -1/0
+                    // semantics from the tensor instead of treating bounded output
+                    // metadata as a concrete target.
                     let shape_name = &node.inputs[1];
                     if let Some(shape_tensor) = self.params.get(shape_name) {
                         let shape_data: Vec<f32> =
                             shape_tensor.to_numpy().map_err(|error| error.to_string())?;
-                        let shape_i64: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
-                        let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
+                        let shape_i64: Vec<i64> =
+                            shape_data.iter().map(|&value| value as i64).collect();
+                        let dims = resolve_reshape_dims(&shape_i64, &ins[0])?;
                         self.out(node, self.graph.reshape(&ins[0], &dims));
                     } else {
                         let dims = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
@@ -603,10 +605,15 @@ impl<'a> OnnxConverter<'a> {
                         self.out(node, self.graph.runtime_reshape(&ins[0], &ins[1], &dims));
                     }
                 } else {
-                    return Err(format!(
-                        "Reshape node '{}' has neither a static shape attribute nor a shape tensor input",
-                        node.name
-                    ));
+                    let shape: Vec<i64> = parse_ints_i64(&node.attrs, "shape", &[]);
+                    if shape.is_empty() {
+                        return Err(format!(
+                            "Reshape node '{}' has neither a static shape attribute nor a shape tensor input",
+                            node.name
+                        ));
+                    }
+                    let dims = resolve_reshape_dims(&shape, &ins[0])?;
+                    self.out(node, self.graph.reshape(&ins[0], &dims));
                 }
             }
             "Flatten" => self.out(node, self.graph.flatten(&ins[0])),
@@ -1983,32 +1990,65 @@ fn parse_shape_attr(attrs: &HashMap<String, String>, key: &str) -> Option<Vec<Di
         .ok()
 }
 
-fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Vec<DimExpr> {
+fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Result<Vec<DimExpr>, String> {
+    if shape.iter().filter(|&&dimension| dimension == -1).count() > 1 {
+        return Err("Reshape shape contains more than one inferred dimension".into());
+    }
+    if shape.iter().any(|&dimension| dimension < -1) {
+        return Err("Reshape shape contains a dimension below -1".into());
+    }
     let input_shape = input.shape();
-    let input_numel = input_shape
-        .iter()
-        .try_fold(1u64, |acc, d| d.evaluate().map(|v| acc.saturating_mul(v)));
+    let static_input_numel =
+        input_shape
+            .iter()
+            .try_fold(1u64, |product, dimension| match dimension {
+                DimExpr::Known(value) => product.checked_mul(*value),
+                _ => None,
+            });
     let known_product = shape
         .iter()
-        .filter(|&&d| d > 0)
-        .fold(1u64, |acc, &d| acc.saturating_mul(d as u64));
-    let infer_idx = shape.iter().position(|&d| d == -1);
+        .filter(|&&dimension| dimension > 0)
+        .try_fold(1u64, |product, &dimension| {
+            product.checked_mul(dimension as u64)
+        })
+        .ok_or_else(|| "Reshape known-dimension product overflows".to_string())?;
+    let symbolic_input_dims: Vec<&DimExpr> = input_shape
+        .iter()
+        .filter(|dimension| !matches!(dimension, DimExpr::Known(_)))
+        .collect();
+    let input_known_product = input_shape
+        .iter()
+        .filter_map(|dimension| match dimension {
+            DimExpr::Known(value) => Some(*value),
+            _ => None,
+        })
+        .try_fold(1u64, |product, dimension| product.checked_mul(dimension))
+        .ok_or_else(|| "Reshape input known-dimension product overflows".to_string())?;
 
     shape
         .iter()
         .enumerate()
-        .map(|(idx, &d)| {
-            if d == -1 {
-                if let (Some(numel), Some(_)) = (input_numel, infer_idx) {
-                    if known_product != 0 && numel % known_product == 0 {
-                        return DimExpr::Known(numel / known_product);
+        .map(|(index, &dimension)| {
+            if dimension == -1 {
+                if let Some(numel) = static_input_numel {
+                    if known_product == 0 || !numel.is_multiple_of(known_product) {
+                        return Err(format!(
+                            "Reshape cannot infer dimension from {numel} elements and known product {known_product}"
+                        ));
                     }
+                    return Ok(DimExpr::Known(numel / known_product));
                 }
-                DimExpr::Symbol("N".to_string())
-            } else if d == 0 {
-                input_shape.get(idx).cloned().unwrap_or(DimExpr::Known(0))
+                if symbolic_input_dims.len() == 1 && input_known_product == known_product {
+                    return Ok(symbolic_input_dims[0].clone());
+                }
+                Err("Reshape inferred dimension requires unsupported symbolic division".into())
+            } else if dimension == 0 {
+                input_shape
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("Reshape zero dimension {index} exceeds input rank"))
             } else {
-                DimExpr::Known(d as u64)
+                Ok(DimExpr::Known(dimension as u64))
             }
         })
         .collect()

@@ -1210,7 +1210,20 @@ pub fn validate_prepared_against_plan_with_limits(
                 };
                 expected.packed_weight = actual.packed_weight;
                 expected.packed_bias = actual.packed_bias;
-                if actual != &expected {
+                if actual.instruction_index != expected.instruction_index
+                    || actual.node_id != expected.node_id
+                    || actual.b != expected.b
+                    || actual.bias != expected.bias
+                    || actual.activation != expected.activation
+                    || actual.k != expected.k
+                    || actual.n != expected.n
+                    || actual.packed_weight != expected.packed_weight
+                    || actual.packed_bias != expected.packed_bias
+                    || actual.a.offset != expected.a.offset
+                    || actual.output.offset != expected.output.offset
+                    || actual.a.size < expected.a.size
+                    || actual.output.size < expected.output.size
+                {
                     return Err(BackendError::Dispatch(format!(
                         "prepared fallback: matmul payload mismatch at slot {i}"
                     )));

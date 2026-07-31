@@ -729,7 +729,14 @@ impl GraphBuilder {
     pub fn reshape(&self, input: &GraphTensor, shape: &[DimExpr]) -> GraphTensor {
         let output_type = input.tensor_type.with_shape(shape.to_vec());
         let mut attrs = HashMap::new();
-        let shape_str: Vec<String> = shape.iter().map(|d| format!("{}", d)).collect();
+        let shape_str: Vec<String> = shape
+            .iter()
+            .map(|dimension| match dimension {
+                DimExpr::Known(value) => value.to_string(),
+                DimExpr::Symbol(symbol) => format!("Symbol({symbol})"),
+                DimExpr::Bounded { sym, max } => format!("Bounded({sym};{max})"),
+            })
+            .collect();
         attrs.insert("shape".to_string(), shape_str.join(","));
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(

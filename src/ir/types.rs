@@ -439,9 +439,6 @@ impl ShapeEnv {
         // Pass 1: collect shape info, bind single-symbol inputs
         for (i, &input_id) in graph.inputs.iter().enumerate() {
             let data_bytes = inputs.get(i).map(|b| b.len()).unwrap_or(0);
-            if data_bytes == 0 {
-                continue;
-            }
             if let Some(node) = graph.get_node(input_id) {
                 let elem_size = node
                     .output_type
@@ -472,9 +469,6 @@ impl ShapeEnv {
                 }
                 let total_numel = data_bytes / elem_size;
                 let unknown_numel = total_numel / known_numel;
-                if unknown_numel == 0 {
-                    continue;
-                }
                 let symbolic: Vec<String> = node
                     .output_type
                     .shape
@@ -514,9 +508,7 @@ impl ShapeEnv {
                     ));
                 }
                 let val = total_numel / known_product;
-                if val > 0 {
-                    env.try_bind(unbound[0], val as u64)?;
-                }
+                env.try_bind(unbound[0], val as u64)?;
             }
         }
 
