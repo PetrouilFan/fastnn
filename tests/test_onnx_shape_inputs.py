@@ -373,6 +373,53 @@ def test_concat_uses_live_symbolic_outer_extent(tmp_path):
     np.testing.assert_array_equal(output, expected)
 
 
+def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Add", ["state", "delta"], ["next_state"], name="advance")],
+        "persistent_state",
+        [
+            helper.make_tensor_value_info("state", TensorProto.FLOAT, [1]),
+            helper.make_tensor_value_info("delta", TensorProto.FLOAT, [1]),
+        ],
+        [helper.make_tensor_value_info("next_state", TensorProto.FLOAT, [1])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "persistent-state.onnx"
+    fnn_path = tmp_path / "persistent-state.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+
+    def configured(initial):
+        executor = fnn.build_model_from_fnn(str(fnn_path))
+        executor.configure_state(
+            {"state": "next_state"},
+            {"state": fnn.tensor([initial], [1])},
+        )
+        return executor
+
+    first = configured(0.0)
+    second = configured(10.0)
+    out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])})
+    out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
+    isolated = second.forward_stateful({"delta": fnn.tensor([1.0], [1])})
+    np.testing.assert_array_equal(out1["next_state"].numpy(), np.array([1.0], np.float32))
+    np.testing.assert_array_equal(out2["next_state"].numpy(), np.array([3.0], np.float32))
+    np.testing.assert_array_equal(
+        isolated["next_state"].numpy(), np.array([11.0], np.float32)
+    )
+
+    with pytest.raises(ValueError, match="runtime-owned"):
+        first.forward_stateful(
+            {
+                "state": fnn.tensor([100.0], [1]),
+                "delta": fnn.tensor([1.0], [1]),
+            }
+        )
+    first.reset_state()
+    reset = first.forward_stateful({"delta": fnn.tensor([2.0], [1])})
+    np.testing.assert_array_equal(reset["next_state"].numpy(), np.array([2.0], np.float32))
+
+
 def test_runtime_where_bool_broadcast_matches_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

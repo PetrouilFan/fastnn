@@ -295,9 +295,22 @@ present cache length:             3
 ```
 
 This establishes weighted F32 execution for RMSNorm, RoPE, SwiGLU, and 32-query/4-KV
-GQA decomposition, plus externally managed cached-decode recurrence. It still does
-not establish runtime-owned persistent KV state, cache reset/isolation, or a session
-API; those remain M4 work.
+GQA decomposition, plus externally managed cached-decode recurrence.
+
+The first M4 boundary adds generic Rust-owned recurrent tensor bindings to
+`AotExecutor`: `configure_state({input: output}, initial_state)`,
+`forward_stateful(non_state_inputs)`, and `reset_state()`. State inputs cannot be
+injected by the caller after configuration; bound outputs replace all state tensors
+only after a successful invocation. Two independently configured executors preserve
+isolation, and reset restores the complete initial snapshot. TinyLlama's 44 K/V
+inputs can now remain behind this API with no Python-mediated per-layer recurrence.
+Two stateful decode steps and reset reproduce the numerical errors above, and reset
+reproduces the first-step logits byte-for-byte.
+
+This boundary still copies each returned state tensor into a Rust-owned `Vec<u8>`
+after execution. Stable capacity-backed append buffers, direct arena-to-state writes,
+maximum-context rejection at the state boundary, and a separately instantiable
+session object remain M4 work.
 
 ## Immediate implementation boundary
 

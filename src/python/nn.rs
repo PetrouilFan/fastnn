@@ -1214,6 +1214,9 @@ pub struct AotExecutor {
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
     prepared_plan: crate::backend::prepared::PreparedExecutablePlan,
+    state_bindings: Vec<(String, usize)>,
+    state_values: std::collections::HashMap<String, Vec<u8>>,
+    initial_state_values: std::collections::HashMap<String, Vec<u8>>,
 }
 
 #[pymethods]
@@ -1402,6 +1405,9 @@ impl AotExecutor {
             input_names,
             output_map,
             prepared_plan,
+            state_bindings: Vec::new(),
+            state_values: std::collections::HashMap::new(),
+            initial_state_values: std::collections::HashMap::new(),
         })
     }
 
@@ -1456,6 +1462,158 @@ impl AotExecutor {
             .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+        self.decode_outputs(output_data)
+    }
+
+    /// Configure graph inputs whose values are retained and replaced by graph
+    /// outputs after every successful invocation. This is generic persistent
+    /// tensor state; it does not depend on transformer layer or tensor names.
+    fn configure_state(
+        &mut self,
+        bindings: std::collections::HashMap<String, String>,
+        initial_state: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<()> {
+        if bindings.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "state bindings cannot be empty",
+            ));
+        }
+        if bindings.len() != initial_state.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "every state binding requires exactly one initial tensor",
+            ));
+        }
+        let mut configured = Vec::with_capacity(bindings.len());
+        let mut values = std::collections::HashMap::with_capacity(bindings.len());
+        for (input_name, output_name) in bindings {
+            if !self.input_names.iter().any(|name| name == &input_name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "state input '{input_name}' is not a graph input"
+                )));
+            }
+            let output_index = self
+                .output_map
+                .iter()
+                .find_map(|(name, index)| (name == &output_name).then_some(*index))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "state output '{output_name}' is not a graph output"
+                    ))
+                })?;
+            let initial = initial_state.get(&input_name).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "initial state for '{input_name}' is missing"
+                ))
+            })?;
+            let bytes = initial.inner.try_as_bytes().map_err(|error| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "initial state {input_name} cannot be passed to AOT execution: {error}"
+                ))
+            })?;
+            values.insert(input_name.clone(), bytes.to_vec());
+            configured.push((input_name, output_index));
+        }
+        configured.sort_by(|left, right| left.0.cmp(&right.0));
+        self.initial_state_values = values.clone();
+        self.state_values = values;
+        self.state_bindings = configured;
+        self.executor.invalidate_runtime_cache();
+        Ok(())
+    }
+
+    /// Restore every configured persistent tensor to its initial value.
+    fn reset_state(&mut self) -> pyo3::PyResult<()> {
+        if self.state_bindings.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "persistent state has not been configured",
+            ));
+        }
+        self.state_values.clone_from(&self.initial_state_values);
+        self.executor.invalidate_runtime_cache();
+        Ok(())
+    }
+
+    /// Execute while sourcing configured state inputs from Rust-owned buffers
+    /// and atomically replacing them with their bound output values on success.
+    fn forward_stateful(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        if self.state_bindings.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "persistent state has not been configured",
+            ));
+        }
+        for (state_name, _) in &self.state_bindings {
+            if inputs.contains_key(state_name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "state input '{state_name}' is runtime-owned and must not be supplied"
+                )));
+            }
+        }
+        let input_refs: Vec<&[u8]> = self
+            .input_names
+            .iter()
+            .map(|name| {
+                if let Some(state) = self.state_values.get(name) {
+                    Ok(state.as_slice())
+                } else {
+                    inputs
+                        .get(name)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "required non-state input '{name}' not found"
+                            ))
+                        })
+                        .and_then(|tensor| {
+                            tensor.inner.try_as_bytes().map_err(|error| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "input {name} cannot be passed to AOT execution: {error}"
+                                ))
+                            })
+                        })
+                }
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        #[cfg(feature = "prepared-plan")]
+        let output_data = if self.prepared_plan.static_weight_binding_count() > 0 {
+            self.executor
+                .execute_prepared_no_copy(
+                    &self.graph,
+                    &mut self.plan,
+                    &self.memory_plan,
+                    &input_refs,
+                    &self.prepared_plan,
+                )
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
+        } else {
+            self.executor
+                .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
+        };
+
+        #[cfg(not(feature = "prepared-plan"))]
+        let output_data = self
+            .executor
+            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+
+        let next_state: Vec<(String, Vec<u8>)> = self
+            .state_bindings
+            .iter()
+            .map(|(input_name, output_index)| {
+                let output = output_data.get(*output_index).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "state output index {output_index} for '{input_name}' is missing"
+                    ))
+                })?;
+                Ok((input_name.clone(), output.clone()))
+            })
+            .collect::<pyo3::PyResult<_>>()?;
+        for (name, value) in next_state {
+            self.state_values.insert(name, value);
+        }
         self.decode_outputs(output_data)
     }
 
