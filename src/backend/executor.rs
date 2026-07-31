@@ -276,6 +276,87 @@ struct RuntimeOutputs {
     shapes: Vec<Vec<usize>>,
 }
 
+fn bind_runtime_range_shapes(
+    graph: &ComputeGraph,
+    inputs: &[&[u8]],
+    shape_env: &mut ShapeEnv,
+) -> Result<(), BackendError> {
+    let positions: HashMap<NodeId, usize> = graph
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(index, &id)| (id, index))
+        .collect();
+    for node in &graph.nodes {
+        if !matches!(node.opcode, Opcode::Range) || node.inputs.len() != 3 {
+            continue;
+        }
+        let mut values = [0.0f32; 3];
+        for (index, input_id) in node.inputs.iter().enumerate() {
+            let position = positions.get(input_id).ok_or_else(|| {
+                BackendError::Dispatch(format!(
+                    "Range node {} requires runtime scalar graph inputs",
+                    node.id
+                ))
+            })?;
+            let bytes = inputs
+                .get(*position)
+                .filter(|bytes| bytes.len() == 4)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "Range node {} input {index} must be one F32 scalar",
+                        node.id
+                    ))
+                })?;
+            values[index] = f32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
+                BackendError::Dispatch("Range scalar byte conversion failed".into())
+            })?);
+        }
+        let [start, limit, step] = values;
+        if !start.is_finite() || !limit.is_finite() || !step.is_finite() || step == 0.0 {
+            return Err(BackendError::Dispatch(
+                "range_f32: start, limit, and nonzero step must be finite".into(),
+            ));
+        }
+        let span = if step > 0.0 {
+            (limit - start) / step
+        } else {
+            (start - limit) / -step
+        };
+        if !span.is_finite() || span > u64::MAX as f32 {
+            return Err(BackendError::Dispatch(
+                "range_f32: element count is invalid".into(),
+            ));
+        }
+        let count = span.ceil().max(0.0) as u64;
+        let dimension = node.output_type.shape.first().ok_or_else(|| {
+            BackendError::Dispatch(format!("Range node {} output must have rank one", node.id))
+        })?;
+        if node.output_type.shape.len() != 1 {
+            return Err(BackendError::Dispatch(format!(
+                "Range node {} output must have rank one",
+                node.id
+            )));
+        }
+        match dimension {
+            DimExpr::Symbol(symbol) | DimExpr::Bounded { sym: symbol, .. } => shape_env
+                .try_bind(symbol, count)
+                .map_err(BackendError::Dispatch)?,
+            _ if dimension
+                .evaluate_with_env(shape_env)
+                .map_err(BackendError::Dispatch)?
+                == count => {}
+            _ => {
+                return Err(BackendError::Dispatch(format!(
+                    "Range node {} live extent disagrees with its declared shape",
+                    node.id
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read output tensors from the arena using the tightened memory plan
 /// and runtime-resolved shapes.
 fn read_execution_outputs<B: Backend>(
@@ -727,8 +808,9 @@ impl<B: Backend> GraphExecutor<B> {
                     Some(filtered_plan.clone()),
                 )
             } else {
-                let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
+                let mut shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
                     .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
+                bind_runtime_range_shapes(graph, inputs, &mut shape_env)?;
                 validate_shapes(graph, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 

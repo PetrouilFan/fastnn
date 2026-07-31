@@ -149,6 +149,49 @@ def test_static_multi_axis_slice_matches_onnxruntime(tmp_path):
     np.testing.assert_array_equal(actual, expected)
 
 
+def _build_runtime_range_executor(tmp_path, capacity=16):
+    graph = helper.make_graph(
+        [helper.make_node("Range", ["start", "limit", "step"], ["Y"])],
+        "runtime_range",
+        [
+            helper.make_tensor_value_info("start", TensorProto.FLOAT, []),
+            helper.make_tensor_value_info("limit", TensorProto.FLOAT, []),
+            helper.make_tensor_value_info("step", TensorProto.FLOAT, []),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["range_length"])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-range.onnx"
+    fnn_path = tmp_path / "runtime-range.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    return fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"range_length": capacity}
+    )
+
+
+def test_runtime_range_negative_step_empty_and_zero_rejection(tmp_path):
+    executor = _build_runtime_range_executor(tmp_path)
+
+    def run(start, limit, step):
+        values = {
+            "start": fnn.tensor([float(start)], []),
+            "limit": fnn.tensor([float(limit)], []),
+            "step": fnn.tensor([float(step)], []),
+        }
+        return executor.forward(values)["Y"]
+
+    np.testing.assert_array_equal(
+        run(5, -1, -2).numpy(), np.asarray([5, 3, 1], np.float32)
+    )
+    np.testing.assert_array_equal(run(1, 1, 1).numpy(), np.asarray([], np.float32))
+    np.testing.assert_array_equal(run(1, 5, -1).numpy(), np.asarray([], np.float32))
+    with pytest.raises(RuntimeError, match="nonzero step"):
+        run(0, 4, 0)
+    with pytest.raises(RuntimeError, match="capacity|bound|maximum|exceeds|overflows"):
+        run(0, 17, 1)
+
+
 def test_runtime_slice_bounds_match_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

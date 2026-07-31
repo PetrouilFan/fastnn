@@ -656,6 +656,9 @@ impl Tensor {
     }
 
     pub fn to_numpy(&self) -> FastnnResult<Vec<f32>> {
+        if self.inner.numel() == 0 {
+            return Ok(Vec::new());
+        }
         Ok(match &self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => {
                 // Fast path: contiguous F32 tensor - SIMD-accelerated copy

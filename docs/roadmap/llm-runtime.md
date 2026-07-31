@@ -132,9 +132,10 @@ shapes, and report missing payloads before compilation.
 - **M2 substantially complete for the GPT-2 path:** static opset-13/14 Slice,
   Split, Squeeze, and Unsqueeze inputs; live Shape and ConstantOfShape; bounded
   tensor-driven Reshape and Slice; chained multi-axis static Slice with normalized
-  negative axes and bounds; per-symbol allocation capacities; symbolic and affine
-  extent resolution; runtime Expand; and N-D Add/Where broadcasting are implemented
-  and differentially tested.
+  negative axes and bounds; runtime Range live extents derived from scalar values,
+  including negative steps, empty outputs, zero-step rejection, and bounded overflow;
+  per-symbol allocation capacities; symbolic and affine extent resolution; runtime
+  Expand; and N-D Add/Where broadcasting are implemented and differentially tested.
 - The tiny random GPT-2 cached-decode fixture now converts, builds, and executes
   end-to-end. Logits and returned K/V tensors match ONNX Runtime: one-step logits
   have maximum absolute error `5.96e-7`, and three successive externally-fed cache
