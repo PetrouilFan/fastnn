@@ -130,7 +130,7 @@ pub fn quantize_matmul_weights_k_grouped_i4(
         );
         let node = graph.get_node_mut(weight_id).unwrap();
         node.opcode = Opcode::Constant(TensorValue::Data {
-            bytes: packed.as_bytes().to_vec(),
+            bytes: packed.as_bytes().to_vec().into(),
             tensor_type: tensor_type.clone(),
         });
         node.output_type = tensor_type;
@@ -336,7 +336,7 @@ pub fn quantize_weights(
                     build_storage_layout(),
                 );
                 let new_value = TensorValue::Data {
-                    bytes,
+                    bytes: bytes.into(),
                     tensor_type: tt.clone(),
                 };
                 if let Some(node_mut) = graph.get_node_mut(const_id) {
@@ -383,7 +383,7 @@ pub fn quantize_weights(
                     build_storage_layout(),
                 );
                 let new_value = TensorValue::Data {
-                    bytes,
+                    bytes: bytes.into(),
                     tensor_type: tt.clone(),
                 };
                 if let Some(node_mut) = graph.get_node_mut(const_id) {
@@ -430,7 +430,7 @@ pub fn quantize_weights(
                 build_storage_layout(),
             );
             let new_value = TensorValue::Data {
-                bytes,
+                bytes: bytes.into(),
                 tensor_type: tt.clone(),
             };
             if let Some(node_mut) = graph.get_node_mut(const_id) {
@@ -475,7 +475,7 @@ pub fn quantize_weights(
                 build_storage_layout(),
             );
             let new_value = TensorValue::Data {
-                bytes,
+                bytes: bytes.into(),
                 tensor_type: tt.clone(),
             };
             if let Some(node_mut) = graph.get_node_mut(const_id) {
@@ -758,7 +758,7 @@ pub fn quantize_weights_fp(
         };
 
         let new_value = TensorValue::Data {
-            bytes: packed_bytes,
+            bytes: packed_bytes.into(),
             tensor_type: new_tensor_type.clone(),
         };
 

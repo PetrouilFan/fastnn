@@ -604,7 +604,7 @@ mod tests {
         let const_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
         let const_id = graph.add_node(
             Opcode::Constant(crate::ir::TensorValue::Data {
-                bytes: const_data,
+                bytes: const_data.into(),
                 tensor_type: const_tt.clone(),
             }),
             vec![],

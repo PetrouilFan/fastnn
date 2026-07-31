@@ -1209,7 +1209,7 @@ impl_nn_module!(PyTransformerEncoder {
 pub struct AotExecutor {
     plan: crate::backend::ExecutablePlan,
     memory_plan: crate::compiler::plan::MemoryPlan,
-    graph: crate::ir::ComputeGraph,
+    graph: std::sync::Arc<crate::ir::ComputeGraph>,
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
@@ -1402,7 +1402,7 @@ impl AotExecutor {
         Ok(AotExecutor {
             plan,
             memory_plan,
-            graph: compiled_graph,
+            graph: std::sync::Arc::new(compiled_graph),
             executor,
             input_names,
             output_map,
@@ -1759,7 +1759,7 @@ impl AotExecutor {
         // after every derived representation has been rebuilt successfully.
         let (plan, memory_plan, graph) = self
             .executor
-            .compile_with_plan_and_quantize(self.graph.clone(), None, Some(calib))
+            .compile_with_plan_and_quantize((*self.graph).clone(), None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
@@ -1767,7 +1767,7 @@ impl AotExecutor {
         self.executor.invalidate_runtime_cache();
         self.plan = plan;
         self.memory_plan = memory_plan;
-        self.graph = graph;
+        self.graph = std::sync::Arc::new(graph);
         self.prepared_plan = prepared_plan;
 
         Ok(())

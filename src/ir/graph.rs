@@ -30,7 +30,7 @@ pub enum TensorValue {
     Float(f32),
     Int(i64),
     Data {
-        bytes: Vec<u8>,
+        bytes: std::sync::Arc<[u8]>,
         tensor_type: TensorType,
     },
 }
@@ -658,9 +658,22 @@ impl ComputeGraph {
 
 #[cfg(test)]
 mod graph_kind_tests {
-    use super::{ComputeGraph, GraphKind, GraphResourceLimits};
+    use super::{ComputeGraph, GraphKind, GraphResourceLimits, TensorValue};
     use crate::ir::{IrDType, Opcode, TensorType};
     use std::collections::HashMap;
+
+    #[test]
+    fn tensor_value_clone_shares_data_payload() {
+        let bytes: std::sync::Arc<[u8]> = vec![1, 2, 3, 4].into();
+        let value = TensorValue::Data {
+            bytes: bytes.clone(),
+            tensor_type: TensorType::new(vec![], IrDType::F32),
+        };
+        let TensorValue::Data { bytes: cloned, .. } = value.clone() else {
+            panic!("expected data tensor")
+        };
+        assert!(std::sync::Arc::ptr_eq(&bytes, &cloned));
+    }
 
     #[test]
     fn typed_attribute_access_rejects_missing_and_malformed_values() {

@@ -904,7 +904,7 @@ impl Backend for CpuBackend {
                     TensorValue::Data { bytes, .. } => {
                         instructions.push(Instruction::WriteConst {
                             dst: output_slice,
-                            data: bytes.clone().into(),
+                            data: bytes.clone(),
                         });
                     }
                 },

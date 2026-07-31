@@ -208,7 +208,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     .product();
                 if output_type.is_native_scalar(crate::types::ScalarType::F32) && n == 1 {
                     Some(TensorValue::Data {
-                        bytes: v.to_le_bytes().to_vec(),
+                        bytes: v.to_le_bytes().to_vec().into(),
                         tensor_type: output_type.clone(),
                     })
                 } else {
@@ -223,7 +223,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                     .product();
                 if output_type.is_native_scalar(crate::types::ScalarType::I64) && n == 1 {
                     Some(TensorValue::Data {
-                        bytes: v.to_le_bytes().to_vec(),
+                        bytes: v.to_le_bytes().to_vec().into(),
                         tensor_type: output_type.clone(),
                     })
                 } else {
@@ -247,7 +247,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                         let dst: Vec<i32> =
                             src.iter().take(elem_count).map(|&x| x as i32).collect();
                         Some(TensorValue::Data {
-                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            bytes: bytemuck::cast_slice(&dst).to_vec().into(),
                             tensor_type: TensorType::new(out_shape, target),
                         })
                     }
@@ -256,7 +256,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                         let dst: Vec<f32> =
                             src.iter().take(elem_count).map(|&x| x as f32).collect();
                         Some(TensorValue::Data {
-                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            bytes: bytemuck::cast_slice(&dst).to_vec().into(),
                             tensor_type: TensorType::new(out_shape, target),
                         })
                     }
@@ -265,7 +265,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                         let dst: Vec<i64> =
                             src.iter().take(elem_count).map(|&x| x as i64).collect();
                         Some(TensorValue::Data {
-                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            bytes: bytemuck::cast_slice(&dst).to_vec().into(),
                             tensor_type: TensorType::new(out_shape, target),
                         })
                     }
@@ -274,7 +274,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                         let dst: Vec<f32> =
                             src.iter().take(elem_count).map(|&x| x as f32).collect();
                         Some(TensorValue::Data {
-                            bytes: bytemuck::cast_slice(&dst).to_vec(),
+                            bytes: bytemuck::cast_slice(&dst).to_vec().into(),
                             tensor_type: TensorType::new(out_shape, target),
                         })
                     }
@@ -299,7 +299,7 @@ fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
                 let shape_data: Vec<f32> = dims.iter().map(|&s| s as f32).collect();
                 let bytes: Vec<u8> = bytemuck::cast_slice(&shape_data).to_vec();
                 Some(TensorValue::Data {
-                    bytes,
+                    bytes: bytes.into(),
                     tensor_type: TensorType::new(vec![DimExpr::Known(rank as u64)], IrDType::F32),
                 })
             } else {
@@ -338,7 +338,7 @@ fn unary_f32_data_op(inputs: &[TensorValue], op: impl Fn(f32) -> f32) -> Option<
                 })
                 .collect();
             Some(TensorValue::Data {
-                bytes: transformed,
+                bytes: transformed.into(),
                 tensor_type: tensor_type.clone(),
             })
         } else {
@@ -405,7 +405,7 @@ fn binary_f32_data_op(inputs: &[TensorValue], op: impl Fn(f32, f32) -> f32) -> O
                     })
                     .collect();
                 Some(TensorValue::Data {
-                    bytes: bytemuck::cast_slice(&result).to_vec(),
+                    bytes: bytemuck::cast_slice(&result).to_vec().into(),
                     tensor_type: a_ty.clone(),
                 })
             } else {

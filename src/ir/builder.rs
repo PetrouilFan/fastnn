@@ -379,7 +379,7 @@ impl GraphBuilder {
     /// Create a constant tensor node with raw byte data.
     pub fn constant(&self, data: &[u8], tensor_type: TensorType) -> GraphTensor {
         let value = TensorValue::Data {
-            bytes: data.to_vec(),
+            bytes: data.to_vec().into(),
             tensor_type: tensor_type.clone(),
         };
         let mut inner = self.inner.borrow_mut();

@@ -496,7 +496,7 @@ fn test_matmul_u8_i8_dispatch_path() {
     let act_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::I8);
     let act_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: payload,
+            bytes: payload.into(),
             tensor_type: act_tt.clone(),
         }),
         vec![],
@@ -511,7 +511,7 @@ fn test_matmul_u8_i8_dispatch_path() {
     let w_tt = TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32);
     let w_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            bytes: bytemuck::cast_slice(&w_data).to_vec().into(),
             tensor_type: w_tt.clone(),
         }),
         vec![],
@@ -574,7 +574,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     let act_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(8)], IrDType::I8);
     let act_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: payload,
+            bytes: payload.into(),
             tensor_type: act_tt.clone(),
         }),
         vec![],
@@ -587,7 +587,7 @@ fn test_matmul_u4_i8_dispatch_path() {
     let w_tt = TensorType::new(vec![DimExpr::Known(8), DimExpr::Known(2)], IrDType::F32);
     let w_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            bytes: bytemuck::cast_slice(&w_data).to_vec().into(),
             tensor_type: w_tt.clone(),
         }),
         vec![],
@@ -928,7 +928,7 @@ fn run_matmul_fp(
     );
     let weight_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: weight_bytes,
+            bytes: weight_bytes.into(),
             tensor_type: weight_tt.clone(),
         }),
         vec![],
@@ -986,7 +986,7 @@ fn test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly() {
     let w_tt = TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32);
     let weight_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            bytes: bytemuck::cast_slice(&w_data).to_vec().into(),
             tensor_type: w_tt.clone(),
         }),
         vec![],
@@ -1076,7 +1076,7 @@ fn assert_dynamic_w4a8_matmul(group_size: usize) {
     );
     let weight_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&weights).to_vec(),
+            bytes: bytemuck::cast_slice(&weights).to_vec().into(),
             tensor_type: weight_type.clone(),
         }),
         vec![],
@@ -1177,7 +1177,7 @@ fn dynamic_w4a8_reuses_one_per_token_activation_for_shared_projections() {
         );
         let weight_id = graph.add_node(
             Opcode::Constant(TensorValue::Data {
-                bytes: bytemuck::cast_slice(&weights).to_vec(),
+                bytes: bytemuck::cast_slice(&weights).to_vec().into(),
                 tensor_type: weight_type.clone(),
             }),
             vec![],
@@ -1237,7 +1237,7 @@ fn dynamic_w4a8_rejects_batched_rank_three_activations() {
     );
     let weight_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&vec![0.25f32; k * n]).to_vec(),
+            bytes: bytemuck::cast_slice(&vec![0.25f32; k * n]).to_vec().into(),
             tensor_type: weight_type.clone(),
         }),
         vec![],
@@ -1283,7 +1283,7 @@ fn dynamic_w4a8_rejects_weight_constants_that_are_graph_outputs() {
     );
     let weight_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&vec![0.5f32; k * n]).to_vec(),
+            bytes: bytemuck::cast_slice(&vec![0.5f32; k * n]).to_vec().into(),
             tensor_type: weight_type.clone(),
         }),
         vec![],

@@ -1335,7 +1335,7 @@ pub fn build_backward_graph(
                 .collect();
             let dtype = dtype_to_ir(tensor.dtype()).map_err(|error| error.to_string())?;
             grad_graph.add_constant(TensorValue::Data {
-                bytes,
+                bytes: bytes.into(),
                 tensor_type: TensorType::new(shape, dtype),
             })
         }
