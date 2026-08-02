@@ -1,4 +1,4 @@
-use crate::ir::{ComputeGraph, IRNode, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::ir::{ComputeGraph, IRNode, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -564,12 +564,36 @@ impl MemoryPlan {
                                         format!("gather node {node_id} indices size overflows")
                                     })
                             })?;
-                    let mut params = Vec::with_capacity(data_shape.len() + 3);
+                    let index_dtype = graph
+                        .get_node(node.inputs[1])
+                        .map(|input| {
+                            let mut source = input;
+                            while matches!(
+                                source.opcode,
+                                Opcode::Reshape | Opcode::Squeeze | Opcode::Unsqueeze
+                            ) {
+                                let Some(parent) = source
+                                    .inputs
+                                    .first()
+                                    .and_then(|parent| graph.get_node(*parent))
+                                else {
+                                    break;
+                                };
+                                source = parent;
+                            }
+                            match input.output_type.dtype() {
+                                IrDType::I32 | IrDType::I64 => 1,
+                                _ if source.opcode == Opcode::Range => 1,
+                                _ => 0,
+                            }
+                        })
+                        .unwrap_or(0);
+                    let mut params = Vec::with_capacity(data_shape.len() + 4);
                     params.push(data_shape.len());
                     for &dimension in data_shape {
                         params.push(to_usize(dimension, "gather data dimension")?);
                     }
-                    params.extend([indices_numel, axis]);
+                    params.extend([indices_numel, axis, index_dtype]);
                     params
                 }
                 Opcode::Trilu => {

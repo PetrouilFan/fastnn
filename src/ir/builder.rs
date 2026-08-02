@@ -1548,9 +1548,10 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Range(start, limit, step) — produces a 1D F32 tensor.
+    /// Range(start, limit, step) — produces a 1D F32 storage tensor.
+    /// Integral ONNX ranges retain integer bit patterns in that storage.
     /// All three inputs must be 0D (scalar) tensors.
-    /// Output is a 1D F32 tensor of dynamic length.
+    /// Output is a 1D tensor of dynamic length.
     pub fn range_op(
         &self,
         start: &GraphTensor,

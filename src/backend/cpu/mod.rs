@@ -1921,10 +1921,34 @@ impl Backend for CpuBackend {
                                 .try_fold(1u64, |count, size| count.checked_mul(*size))
                         })
                         .unwrap_or(0) as usize;
-                    let mut gather_params = Vec::with_capacity(data_shape.len() + 3);
+                    let index_dtype = graph
+                        .get_node(node.inputs[1])
+                        .map(|input| {
+                            let mut source = input;
+                            while matches!(
+                                source.opcode,
+                                Opcode::Reshape | Opcode::Squeeze | Opcode::Unsqueeze
+                            ) {
+                                let Some(parent) = source
+                                    .inputs
+                                    .first()
+                                    .and_then(|parent| graph.get_node(*parent))
+                                else {
+                                    break;
+                                };
+                                source = parent;
+                            }
+                            match input.output_type.dtype() {
+                                IrDType::I32 | IrDType::I64 => 1,
+                                _ if source.opcode == Opcode::Range => 1,
+                                _ => 0,
+                            }
+                        })
+                        .unwrap_or(0);
+                    let mut gather_params = Vec::with_capacity(data_shape.len() + 4);
                     gather_params.push(data_shape.len());
                     gather_params.extend(data_shape.into_iter().map(|size| size as usize));
-                    gather_params.extend([indices_numel, axis]);
+                    gather_params.extend([indices_numel, axis, index_dtype]);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "gather".to_string(),
@@ -7311,7 +7335,7 @@ impl Backend for CpuBackend {
                                 ));
                             }
                             let rank = params[0];
-                            let expected_params = rank.checked_add(3).ok_or_else(|| {
+                            let expected_params = rank.checked_add(4).ok_or_else(|| {
                                 BackendError::Dispatch("gather: parameter count overflows".into())
                             })?;
                             if rank == 0 || params.len() != expected_params {
@@ -7322,6 +7346,7 @@ impl Backend for CpuBackend {
                             let data_shape = &params[1..1 + rank];
                             let indices_numel = params[1 + rank];
                             let axis = params[2 + rank];
+                            let index_dtype = params[3 + rank];
                             if axis >= rank {
                                 return Err(BackendError::Dispatch(
                                     "gather: axis is outside data rank".into(),
@@ -7395,18 +7420,32 @@ impl Backend for CpuBackend {
                                     output_slice.size,
                                 )));
                             }
-                            let indices = unsafe {
+                            let raw_indices = unsafe {
                                 arena.view_f32(input_slices[1].offset, input_slices[1].size)
                             };
-                            if indices.iter().any(|index| {
-                                !index.is_finite()
-                                    || index.fract() != 0.0
-                                    || *index < -(axis_size as f32)
-                                    || *index >= axis_size as f32
-                            }) {
-                                return Err(BackendError::Dispatch(
-                                    "gather: indices must be integral and within the axis".into(),
-                                ));
+                            let mut normalized_indices = Vec::with_capacity(raw_indices.len());
+                            for raw_index in raw_indices {
+                                let index = if index_dtype == 1 {
+                                    raw_index.to_bits() as i32 as i64
+                                } else {
+                                    if !raw_index.is_finite() || raw_index.fract() != 0.0 {
+                                        return Err(BackendError::Dispatch(format!(
+                                            "gather: index {raw_index} must be integral"
+                                        )));
+                                    }
+                                    *raw_index as i64
+                                };
+                                let normalized = if index < 0 {
+                                    axis_size as i64 + index
+                                } else {
+                                    index
+                                };
+                                if normalized < 0 || normalized >= axis_size as i64 {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "gather: index {index} is outside axis extent {axis_size}"
+                                    )));
+                                }
+                                normalized_indices.push(normalized as usize);
                             }
                             arena::with_nary_f32_slices(
                                 arena,
@@ -7414,17 +7453,11 @@ impl Backend for CpuBackend {
                                 output_slice,
                                 |inputs, output| {
                                     let data = inputs[0];
-                                    let indices = inputs[1];
                                     for outer_index in 0..outer {
-                                        for (index_position, index) in indices.iter().enumerate() {
-                                            let normalized_index = if *index < 0.0 {
-                                                (axis_size as i64 + *index as i64) as usize
-                                            } else {
-                                                *index as usize
-                                            };
-                                            let source = (outer_index * axis_size
-                                                + normalized_index)
-                                                * inner;
+                                        for (index_position, index) in
+                                            normalized_indices.iter().enumerate()
+                                        {
+                                            let source = (outer_index * axis_size + *index) * inner;
                                             let destination = (outer_index * indices_numel
                                                 + index_position)
                                                 * inner;

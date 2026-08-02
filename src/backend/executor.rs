@@ -3420,7 +3420,7 @@ mod execution_storage_size_tests {
                 ],
                 output_slice: crate::backend::BufferSlice::new(32, 16),
                 secondary_output_slice: None,
-                params: vec![2, 2, 3, 2, 1],
+                params: vec![2, 2, 3, 2, 1, 0],
                 param_dims: None,
                 node_id: Some(0),
                 weight_meta: None,

@@ -796,7 +796,19 @@ def build_dag_model(
             elif op_type in {"Add", "Sub", "Mul", "Div", "Pow", "Max", "Min", "Greater", "Less", "Equal", "Where"}:
                 known = [tensor_shapes[name] for name in inputs if name in tensor_shapes]
                 if known:
-                    tensor_candidate = list(max(known, key=len))
+                    rank = max(map(len, known))
+                    tensor_candidate = ["Known(1)"] * rank
+                    for shape in known:
+                        offset = rank - len(shape)
+                        for axis, dimension in enumerate(shape):
+                            target_axis = offset + axis
+                            current = tensor_candidate[target_axis]
+                            if _dimension_expression(current) == "1":
+                                tensor_candidate[target_axis] = dimension
+                            elif _dimension_expression(dimension) == "1":
+                                continue
+                            elif _dimension_expression(current) != _dimension_expression(dimension):
+                                continue
             elif op_type == "Concat" and inputs and all(name in tensor_shapes for name in inputs):
                 shapes = [tensor_shapes[name] for name in inputs]
                 axis = int(attrs.get("axis", 0))
