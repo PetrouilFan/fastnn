@@ -114,6 +114,16 @@ def test_constant_inferred_reshape_preserves_live_symbolic_extent(tmp_path):
         assert actual.shape == (tokens, 1)
 
 
+def test_symbolic_runtime_reshape_capacity_is_derived_from_shape_values():
+    from fastnn.io.graph_builder import _reshape_descriptors
+
+    assert _reshape_descriptors(
+        ["Bounded(batch;1)", "Bounded(tokens;8)"],
+        [-1, "Bounded(tokens;8)"],
+        {"batch": 1, "tokens": 8},
+    ) == ["Bounded(((batch)*(tokens))/((tokens));1)", "Bounded(tokens;8)"]
+
+
 def test_runtime_reshape_matches_onnxruntime_across_live_extents(tmp_path):
     graph = helper.make_graph(
         [helper.make_node("Reshape", ["X", "target"], ["Y"], name="reshape")],

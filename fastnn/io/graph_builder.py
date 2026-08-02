@@ -71,6 +71,50 @@ def _bound_dimension_descriptor(descriptor: str, bounds: Mapping[str, int]) -> s
     return f"Bounded({expression};{capacity})"
 
 
+def _dimension_expression(descriptor: Any) -> str:
+    """Return the semantic integer expression carried by a shape descriptor."""
+    if isinstance(descriptor, (int, np.integer)):
+        return str(int(descriptor))
+    if not isinstance(descriptor, str):
+        raise ValueError(f"unsupported shape descriptor {descriptor!r}")
+    if descriptor.startswith("Known(") and descriptor.endswith(")"):
+        return descriptor[6:-1]
+    if descriptor.startswith("Symbol(") and descriptor.endswith(")"):
+        return descriptor[7:-1]
+    if descriptor.startswith("Bounded(") and descriptor.endswith(")"):
+        return descriptor[8:-1].rsplit(";", 1)[0]
+    raise ValueError(f"unsupported shape descriptor {descriptor!r}")
+
+
+def _reshape_descriptors(input_shape: List[Any], target: List[Any], bounds: Mapping[str, int]) -> List[str]:
+    """Resolve ONNX 0/-1 reshape semantics without freezing runtime dimensions."""
+    resolved: List[Any] = []
+    inferred_axis: Optional[int] = None
+    for axis, value in enumerate(target):
+        if isinstance(value, (int, np.integer)):
+            value = int(value)
+            if value == 0:
+                if axis >= len(input_shape):
+                    raise ValueError("Reshape target 0 refers past the input rank")
+                resolved.append(input_shape[axis])
+            elif value == -1:
+                if inferred_axis is not None:
+                    raise ValueError("Reshape target contains more than one -1")
+                inferred_axis = axis
+                resolved.append(None)
+            elif value > 0:
+                resolved.append(f"Known({value})")
+            else:
+                raise ValueError(f"unsupported Reshape target dimension {value}")
+        else:
+            resolved.append(value)
+    if inferred_axis is not None:
+        input_product = "*".join(f"({_dimension_expression(d)})" for d in input_shape) or "1"
+        known_product = "*".join(f"({_dimension_expression(d)})" for d in resolved if d is not None) or "1"
+        resolved[inferred_axis] = f"Symbol(({input_product})/({known_product}))"
+    return [_bound_dimension_descriptor(d, bounds) if isinstance(d, str) else d for d in resolved]
+
+
 def build_model_from_fnn(
     path: str, *, symbolic_dim_bounds: Optional[Mapping[str, int]] = None
 ) -> Any:
@@ -339,7 +383,12 @@ def build_dag_model(
         op_type = node.get("op_type", "")
 
         suffixes = OP_PARAM_MAP.get(op_type, [])
-        if suffixes and len(inputs) >= 2:
+        if op_type == "Constant":
+            outputs = node.get("outputs", [])
+            value_name = node_name + ".value"
+            if outputs and value_name in params:
+                initializer_to_param[outputs[0]] = value_name
+        elif suffixes and len(inputs) >= 2:
             for i, input_name in enumerate(inputs[1:], 1):
                 if input_name in params or input_name in graph_input_names:
                     continue
@@ -393,11 +442,13 @@ def build_dag_model(
 
     # Run graph optimization passes (Sigmoid+Mul -> SiLU fusion, constant folding, dead node elimination, Conv+BN fusion)
     numpy_params = {}
-    for pname, pval in params.items():
-        if hasattr(pval, 'numpy'):
-            numpy_params[pname] = np.asarray(pval.numpy())
-        elif isinstance(pval, np.ndarray):
-            numpy_params[pname] = pval
+    for pname, raw_value in raw_params.items():
+        if isinstance(raw_value, tuple) and raw_value:
+            numpy_params[pname] = np.asarray(raw_value[0])
+        elif isinstance(raw_value, np.ndarray):
+            numpy_params[pname] = raw_value
+        elif pname in params and hasattr(params[pname], "numpy"):
+            numpy_params[pname] = np.asarray(params[pname].numpy())
 
     from fastnn.io.graph_optimizer import optimize_graph
     graph = fuse_silu(graph)
@@ -479,6 +530,9 @@ def build_dag_model(
             const_values[tensor_name] = const_values[param_name]
 
     known_shapes: Dict[str, List[int]] = {}
+    tensor_shapes: Dict[str, List[Any]] = {
+        name: list(shape) for name, shape in symbolic_input_shapes.items()
+    }
     for nd in onnx_nodes:
         node_name = nd.get("name", "")
         shape_info = nd.get("output_shape", {})
@@ -502,8 +556,20 @@ def build_dag_model(
         else:
             out_names = []
         for out_name in out_names:
+            if out_name and shape_list:
+                tensor_shapes[out_name] = [
+                    _bound_dimension_descriptor(dimension, dimension_bounds)
+                    if isinstance(dimension, str) else dimension
+                    for dimension in shape_list
+                ]
             if out_name and dims and all(d > 0 for d in dims):
                 known_shapes[out_name] = dims
+
+    shape_values: Dict[str, List[Any]] = {}
+    for name, value in const_values.items():
+        constant = np.asarray(value).reshape(-1)
+        if np.issubdtype(constant.dtype, np.integer):
+            shape_values[name] = [int(item) for item in constant]
 
     for nd in onnx_nodes:
         op_type = nd.get("op_type", "")
@@ -531,6 +597,9 @@ def build_dag_model(
         elif op_type == "Shape" and inputs and inputs[0] in known_shapes:
             if out_name:
                 const_values[out_name] = np.asarray(known_shapes[inputs[0]], dtype=np.int64)
+        elif op_type == "Shape" and inputs and inputs[0] in tensor_shapes:
+            if out_name:
+                shape_values[out_name] = list(tensor_shapes[inputs[0]])
         elif op_type == "Gather" and len(inputs) >= 2:
             if inputs[0] in const_values and inputs[1] in const_values:
                 axis = int(attrs.get("axis", 0))
@@ -552,6 +621,52 @@ def build_dag_model(
                         const_values[out_name] = a * b
                     elif op_type == "Div":
                         const_values[out_name] = np.floor_divide(a, b)
+
+    # Resolve symbolic shape-value chains to a fixed point. Runtime Reshape may
+    # feed Shape/Gather/Concat into a later runtime Reshape.
+    changed = True
+    while changed:
+        changed = False
+        for node in onnx_nodes:
+            op_type = node.get("op_type", "")
+            node_name = node.get("name", "")
+            inputs = node.get("inputs", [])
+            if isinstance(inputs, str):
+                inputs = [value.strip() for value in inputs.split(",") if value.strip()]
+            outputs = node.get("outputs", [])
+            if isinstance(outputs, str):
+                outputs = [value.strip() for value in outputs.split(",") if value.strip()]
+            out_name = outputs[0] if outputs else ""
+            attrs = node.get("attrs", {}) if isinstance(node.get("attrs", {}), dict) else {}
+            candidate = None
+            if op_type == "Shape" and inputs and inputs[0] in tensor_shapes:
+                candidate = list(tensor_shapes[inputs[0]])
+            elif op_type == "Gather" and len(inputs) >= 2 and inputs[0] in shape_values and inputs[1] in const_values and int(attrs.get("axis", 0)) == 0:
+                source = shape_values[inputs[0]]
+                candidate = []
+                for raw_index in np.asarray(const_values[inputs[1]]).astype(np.int64).reshape(-1):
+                    index = int(raw_index)
+                    if index < 0:
+                        index += len(source)
+                    if index < 0 or index >= len(source):
+                        raise ValueError(f"shape-value Gather {node_name!r} index is out of range")
+                    candidate.append(source[index])
+            elif op_type in {"Unsqueeze", "Squeeze", "Cast"} and inputs and inputs[0] in shape_values:
+                candidate = list(shape_values[inputs[0]])
+            elif op_type == "Concat" and int(attrs.get("axis", 0)) == 0 and inputs and all(name in shape_values for name in inputs):
+                candidate = [value for name in inputs for value in shape_values[name]]
+            if out_name and candidate is not None and shape_values.get(out_name) != candidate:
+                shape_values[out_name] = candidate
+                changed = True
+            if op_type == "Reshape" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in shape_values:
+                inferred_shape = _reshape_descriptors(tensor_shapes[inputs[0]], shape_values[inputs[1]], dimension_bounds)
+                dag = next((item for item in dag_nodes if item.get("name") == node_name), None)
+                if dag is not None:
+                    dag["shape"] = _attr_to_str(inferred_shape)
+                for output in outputs:
+                    if tensor_shapes.get(output) != inferred_shape:
+                        tensor_shapes[output] = list(inferred_shape)
+                        changed = True
 
     for node in onnx_nodes:
         op_type = node.get("op_type", "")
