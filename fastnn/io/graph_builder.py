@@ -694,6 +694,25 @@ def build_dag_model(
                 changed = True
 
             tensor_candidate = None
+            if op_type == "Split" and inputs and inputs[0] in tensor_shapes and outputs:
+                source_shape = tensor_shapes[inputs[0]]
+                axis = int(attrs.get("axis", 0))
+                if axis < 0:
+                    axis += len(source_shape)
+                sizes = None
+                if len(inputs) > 1 and inputs[1] in const_values:
+                    sizes = [int(value) for value in np.asarray(const_values[inputs[1]]).reshape(-1)]
+                if sizes is None and 0 <= axis < len(source_shape):
+                    expression = _dimension_expression(source_shape[axis])
+                    if expression.isdigit() and int(expression) % len(outputs) == 0:
+                        sizes = [int(expression) // len(outputs)] * len(outputs)
+                if sizes is not None and len(sizes) == len(outputs):
+                    for output, size in zip(outputs, sizes):
+                        split_shape = list(source_shape)
+                        split_shape[axis] = f"Known({size})"
+                        if tensor_shapes.get(output) != split_shape:
+                            tensor_shapes[output] = split_shape
+                            changed = True
             if op_type == "Gather" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in tensor_shapes:
                 data_shape = tensor_shapes[inputs[0]]
                 index_shape = tensor_shapes[inputs[1]]
@@ -702,11 +721,33 @@ def build_dag_model(
                     axis += len(data_shape)
                 if 0 <= axis < len(data_shape):
                     tensor_candidate = data_shape[:axis] + index_shape + data_shape[axis + 1:]
-            elif op_type in {"Add", "Sub", "Mul", "Div", "Pow", "Max", "Min"}:
+            elif op_type in {"Gemm", "MatMul"} and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in tensor_shapes:
+                lhs, rhs = tensor_shapes[inputs[0]], tensor_shapes[inputs[1]]
+                if len(lhs) >= 2 and len(rhs) >= 2:
+                    output_width = rhs[-2] if op_type == "Gemm" and int(attrs.get("transB", 0)) else rhs[-1]
+                    tensor_candidate = list(lhs[:-1]) + [output_width]
+            elif op_type == "Transpose" and inputs and inputs[0] in tensor_shapes:
+                source = tensor_shapes[inputs[0]]
+                perm = attrs.get("perm", list(reversed(range(len(source)))))
+                if not isinstance(perm, (list, tuple)):
+                    perm = [int(value) for value in str(perm).strip("[]").split(",") if value]
+                if len(perm) == len(source):
+                    tensor_candidate = [source[int(axis)] for axis in perm]
+            elif op_type in {"Add", "Sub", "Mul", "Div", "Pow", "Max", "Min", "Greater", "Less", "Equal", "Where"}:
                 known = [tensor_shapes[name] for name in inputs if name in tensor_shapes]
                 if known:
                     tensor_candidate = list(max(known, key=len))
-            elif op_type in {"Sqrt", "Tanh", "Cast", "Identity", "Dropout"} and inputs and inputs[0] in tensor_shapes:
+            elif op_type == "Concat" and inputs and all(name in tensor_shapes for name in inputs):
+                shapes = [tensor_shapes[name] for name in inputs]
+                axis = int(attrs.get("axis", 0))
+                if axis < 0:
+                    axis += len(shapes[0])
+                if 0 <= axis < len(shapes[0]) and all(len(shape) == len(shapes[0]) for shape in shapes):
+                    tensor_candidate = list(shapes[0])
+                    expressions = [_dimension_expression(shape[axis]) for shape in shapes]
+                    combined = "+".join(f"({expression})" for expression in expressions)
+                    tensor_candidate[axis] = _bound_dimension_descriptor(f"Symbol({combined})", dimension_bounds)
+            elif op_type in {"Sqrt", "Tanh", "Cast", "Identity", "Dropout", "Softmax", "Sigmoid", "Silu", "Gelu"} and inputs and inputs[0] in tensor_shapes:
                 tensor_candidate = list(tensor_shapes[inputs[0]])
             elif op_type == "ReduceMean" and inputs and inputs[0] in tensor_shapes:
                 tensor_candidate = list(tensor_shapes[inputs[0]])
@@ -717,8 +758,16 @@ def build_dag_model(
                     for axis in axes:
                         normalized = int(axis) % len(tensor_candidate)
                         tensor_candidate[normalized] = "Known(1)"
-            if out_name and tensor_candidate is not None and tensor_shapes.get(out_name) != tensor_candidate:
+            current_shape = tensor_shapes.get(out_name) if out_name else None
+            needs_inferred_shape = current_shape is None or any(
+                isinstance(dimension, str) and dimension.startswith("Symbol(")
+                for dimension in (current_shape or [])
+            )
+            if out_name and tensor_candidate is not None and needs_inferred_shape and current_shape != tensor_candidate:
                 tensor_shapes[out_name] = tensor_candidate
+                dag = next((item for item in dag_nodes if item.get("name") == node_name), None)
+                if dag is not None:
+                    dag["shape"] = _attr_to_str(tensor_candidate)
                 changed = True
 
             if op_type == "Reshape" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in shape_values:
@@ -784,8 +833,24 @@ def build_dag_model(
                     dag["scale_h"] = str(int(scales[2]))
                     dag["scale_w"] = str(int(scales[3]))
 
+    # Materialized constants created by graph optimization are added to
+    # numpy_params after the original Rust tensors were constructed.
+    for param_name, value in numpy_params.items():
+        if param_name not in params:
+            array = np.asarray(value)
+            params[param_name] = fnn.tensor(array, list(array.shape))
+
     # params already contains fastnn tensors from the unpacking step above
     fnn_params = dict(params)  # copy, since we'll add aliases
+    for node in onnx_nodes:
+        if node.get("op_type") == "Constant":
+            value_name = f"{node.get('name', '')}.value"
+            outputs = node.get("outputs", [])
+            if isinstance(outputs, str):
+                outputs = [value.strip() for value in outputs.split(",") if value.strip()]
+            if value_name in fnn_params:
+                for output in outputs:
+                    fnn_params.setdefault(output, fnn_params[value_name])
     # Add aliases for ONNX initializer names that differ from storage names
     for init_name, param_name in initializer_to_param.items():
         if init_name not in fnn_params and param_name in fnn_params:
