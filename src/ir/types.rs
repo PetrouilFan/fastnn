@@ -265,13 +265,13 @@ impl DimExpr {
             (DimExpr::Known(va), DimExpr::Known(vb)) => DimExpr::Known(va + vb),
             (DimExpr::Known(v), DimExpr::Bounded { sym, max })
             | (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) => DimExpr::Bounded {
-                sym: sym.clone(),
+                sym: format!("({sym})+({v})"),
                 max: max + v,
             },
             (DimExpr::Known(v), DimExpr::Symbol(s)) | (DimExpr::Symbol(s), DimExpr::Known(v)) => {
                 DimExpr::Bounded {
-                    sym: s.clone(),
-                    max: *v,
+                    sym: format!("({s})+({v})"),
+                    max: SYMBOL_DIM_MAX.load(Ordering::Relaxed) + v,
                 }
             }
             (
@@ -1038,6 +1038,19 @@ mod tests {
         let dimension = parse_dimension_descriptor("Symbol(sequence_length * 2)").unwrap();
         let error = dimension.evaluate_with_env(&ShapeEnv::new()).unwrap_err();
         assert!(error.contains("unresolved dimension symbol"));
+    }
+
+    #[test]
+    fn known_plus_bounded_preserves_live_affine_extent() {
+        let dimension = DimExpr::Known(1).add(&DimExpr::Bounded {
+            sym: "past_sequence_length".into(),
+            max: 8,
+        });
+        let mut env = ShapeEnv::new();
+        env.try_bind("past_sequence_length", 3).unwrap();
+
+        assert_eq!(dimension.evaluate_with_env(&env).unwrap(), 4);
+        assert_eq!(dimension.evaluate(), Some(9));
     }
 
     #[test]

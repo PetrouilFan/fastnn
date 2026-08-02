@@ -334,7 +334,7 @@ fn evaluate_runtime_scalar(
         })?;
         match &node.opcode {
             Opcode::Constant(value) => constant_scalar_f32(value, node_id),
-            Opcode::Cast | Opcode::Reshape => {
+            Opcode::Cast | Opcode::Reshape | Opcode::Squeeze | Opcode::Unsqueeze => {
                 let input = *node.inputs.first().ok_or_else(|| {
                     BackendError::Dispatch(format!("{:?} node {node_id} has no input", node.opcode))
                 })?;
@@ -369,6 +369,67 @@ fn evaluate_runtime_scalar(
                     Opcode::Mul => left * right,
                     _ => unreachable!(),
                 })
+            }
+            Opcode::Slice => {
+                let data_id = *node.inputs.first().ok_or_else(|| {
+                    BackendError::Dispatch(format!("Slice node {node_id} has no data input"))
+                })?;
+                let shape_node = graph.get_node(data_id).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Slice node {node_id} data input is missing"))
+                })?;
+                let source_id = match shape_node.opcode {
+                    Opcode::Shape => *shape_node.inputs.first().ok_or_else(|| {
+                        BackendError::Dispatch(format!("Shape node {} has no input", shape_node.id))
+                    })?,
+                    _ => {
+                        return Err(BackendError::Dispatch(format!(
+                            "runtime scalar Slice node {node_id} does not read a Shape result"
+                        )))
+                    }
+                };
+                let source = graph.get_node(source_id).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Shape source node {source_id} is missing"))
+                })?;
+                let rank = source.output_type.shape.len() as i64;
+                let raw_start = if let Some(value) = node
+                    .attrs
+                    .get("starts")
+                    .or_else(|| node.attrs.get("start"))
+                    .and_then(|value| value.split(',').next())
+                {
+                    value.trim().parse::<i64>().map_err(|error| {
+                        BackendError::Dispatch(format!(
+                            "Slice node {node_id} has invalid start: {error}"
+                        ))
+                    })?
+                } else {
+                    let start_id = *node.inputs.get(1).ok_or_else(|| {
+                        BackendError::Dispatch(format!("Slice node {node_id} has no start input"))
+                    })?;
+                    let value = evaluate_runtime_scalar(
+                        graph, start_id, positions, inputs, shape_env, visiting,
+                    )?;
+                    if !value.is_finite() || value.fract() != 0.0 {
+                        return Err(BackendError::Dispatch(format!(
+                            "Slice node {node_id} start must be a finite integer"
+                        )));
+                    }
+                    value as i64
+                };
+                let index = if raw_start < 0 {
+                    rank + raw_start
+                } else {
+                    raw_start
+                };
+                if index < 0 || index >= rank {
+                    return Err(BackendError::Dispatch(format!(
+                        "Slice node {node_id} index {raw_start} is out of range for Shape rank {rank}"
+                    )));
+                }
+                source.output_type.shape[index as usize]
+                    .evaluate_with_env(shape_env)
+                    .map(|value| value as f32)
+                    .map_err(BackendError::Dispatch)
             }
             Opcode::Gather => {
                 if node.inputs.len() < 2 {

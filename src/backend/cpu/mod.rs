@@ -7400,8 +7400,8 @@ impl Backend for CpuBackend {
                             };
                             if indices.iter().any(|index| {
                                 !index.is_finite()
-                                    || *index < 0.0
                                     || index.fract() != 0.0
+                                    || *index < -(axis_size as f32)
                                     || *index >= axis_size as f32
                             }) {
                                 return Err(BackendError::Dispatch(
@@ -7417,8 +7417,14 @@ impl Backend for CpuBackend {
                                     let indices = inputs[1];
                                     for outer_index in 0..outer {
                                         for (index_position, index) in indices.iter().enumerate() {
-                                            let source =
-                                                (outer_index * axis_size + *index as usize) * inner;
+                                            let normalized_index = if *index < 0.0 {
+                                                (axis_size as i64 + *index as i64) as usize
+                                            } else {
+                                                *index as usize
+                                            };
+                                            let source = (outer_index * axis_size
+                                                + normalized_index)
+                                                * inner;
                                             let destination = (outer_index * indices_numel
                                                 + index_position)
                                                 * inner;

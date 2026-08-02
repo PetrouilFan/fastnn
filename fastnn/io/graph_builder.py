@@ -26,6 +26,14 @@ def _attr_to_str(value: Any) -> str:
     return str(value)
 
 
+def _integer_list(value: Any) -> List[int]:
+    if isinstance(value, np.ndarray):
+        return [int(item) for item in value.reshape(-1)]
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    return [int(item) for item in str(value).strip("[]").split(",") if item]
+
+
 def _expression_capacity(expression: str, bounds: Mapping[str, int]) -> int:
     def evaluate(node: ast.AST) -> int:
         if isinstance(node, ast.Expression):
@@ -36,6 +44,8 @@ def _expression_capacity(expression: str, bounds: Mapping[str, int]) -> int:
             if node.id not in bounds:
                 raise ValueError(f"missing capacity for symbolic dimension '{node.id}'")
             return bounds[node.id]
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -evaluate(node.operand)
         if isinstance(node, ast.BinOp):
             lhs, rhs = evaluate(node.left), evaluate(node.right)
             if isinstance(node.op, ast.Add):
@@ -477,6 +487,14 @@ def build_dag_model(
     onnx_nodes = graph.get("nodes", [])
 
     # Convert ONNX nodes to AotExecutor's node format
+    output_producers = {}
+    for producer in onnx_nodes:
+        producer_outputs = producer.get("outputs", [])
+        if isinstance(producer_outputs, str):
+            producer_outputs = [value.strip() for value in producer_outputs.split(",") if value.strip()]
+        for output in producer_outputs:
+            output_producers[output] = producer
+
     dag_nodes = []
     for node in onnx_nodes:
         if node.get("op_type", "") == "Input" or node.get("opcode", "") == "Input":
@@ -528,6 +546,11 @@ def build_dag_model(
         output_shape = node.get("output_shape", {})
         if isinstance(output_shape, dict) and output_shape.get("shape"):
             dag_node["output_rank"] = str(len(output_shape["shape"]))
+        elif node.get("op_type") == "Gather":
+            gather_input_names = [value.strip() for value in inputs_str.split(",") if value.strip()]
+            index_producer = output_producers.get(gather_input_names[1]) if len(gather_input_names) > 1 else None
+            if index_producer is not None and index_producer.get("op_type") == "Constant":
+                dag_node["output_rank"] = "0"
         dag_nodes.append(dag_node)
 
     # Replicate _make_fastnn_executor's constant folding for Shape→Gather→Add/Sub/Mul/Div chains
@@ -673,16 +696,23 @@ def build_dag_model(
                     if index < 0 or index >= len(source):
                         raise ValueError(f"shape-value Gather {node_name!r} index is out of range")
                     candidate.append(source[index])
+            elif op_type in {"Add", "Sub", "Mul", "Div"} and len(inputs) >= 2 and inputs[0] in shape_values and inputs[1] in shape_values:
+                left, right = shape_values[inputs[0]], shape_values[inputs[1]]
+                if len(left) == len(right):
+                    operator = {"Add": "+", "Sub": "-", "Mul": "*", "Div": "/"}[op_type]
+                    candidate = [
+                        _bound_dimension_descriptor(
+                            f"Symbol(({_dimension_expression(a)}){operator}({_dimension_expression(b)}))",
+                            dimension_bounds,
+                        )
+                        for a, b in zip(left, right)
+                    ]
             elif op_type == "Slice" and inputs and inputs[0] in shape_values:
                 starts = attrs.get("starts", const_values.get(inputs[1]) if len(inputs) > 1 else None)
                 ends = attrs.get("ends", const_values.get(inputs[2]) if len(inputs) > 2 else None)
                 axes = attrs.get("axes", const_values.get(inputs[3]) if len(inputs) > 3 else [0])
                 if starts is not None and ends is not None:
-                    def _shape_ints(value):
-                        if isinstance(value, (list, tuple)):
-                            return [int(item) for item in value]
-                        return [int(item) for item in str(value).strip("[]").split(",") if item]
-                    starts, ends, axes = _shape_ints(starts), _shape_ints(ends), _shape_ints(axes)
+                    starts, ends, axes = _integer_list(starts), _integer_list(ends), _integer_list(axes)
                     if len(starts) == len(ends) == len(axes) == 1 and axes[0] == 0:
                         candidate = list(shape_values[inputs[0]][starts[0]:ends[0]])
             elif op_type in {"Unsqueeze", "Squeeze", "Cast"} and inputs and inputs[0] in shape_values:
@@ -713,7 +743,37 @@ def build_dag_model(
                         if tensor_shapes.get(output) != split_shape:
                             tensor_shapes[output] = split_shape
                             changed = True
-            if op_type == "Gather" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in tensor_shapes:
+            if op_type == "Range" and len(inputs) >= 3 and all(name in shape_values for name in inputs[:3]):
+                start, limit, step = (shape_values[name][0] for name in inputs[:3])
+                expression = (
+                    f"Symbol((({_dimension_expression(limit)})-({_dimension_expression(start)}))"
+                    f"/({_dimension_expression(step)}))"
+                )
+                tensor_candidate = [_bound_dimension_descriptor(expression, dimension_bounds)]
+            elif op_type == "Slice" and inputs and inputs[0] in tensor_shapes:
+                source_shape = tensor_shapes[inputs[0]]
+                axes_value = attrs.get("axes", const_values.get(inputs[3]) if len(inputs) > 3 else [0])
+                if axes_value is None:
+                    axes = []
+                elif isinstance(axes_value, np.ndarray):
+                    axes = [int(value) for value in axes_value.reshape(-1)]
+                elif isinstance(axes_value, (list, tuple)):
+                    axes = [int(value) for value in axes_value]
+                else:
+                    axes = [int(value) for value in str(axes_value).strip("[]").split(",") if value]
+                starts_value = shape_values.get(inputs[1]) if len(inputs) > 1 else None
+                ends_value = shape_values.get(inputs[2]) if len(inputs) > 2 else None
+                if starts_value is None and "starts" in attrs:
+                    starts_value = [f"Known({value})" for value in _integer_list(attrs["starts"])]
+                if ends_value is None and "ends" in attrs:
+                    ends_value = [f"Known({value})" for value in _integer_list(attrs["ends"])]
+                if starts_value is not None and ends_value is not None and len(axes) == len(starts_value) == len(ends_value):
+                    tensor_candidate = list(source_shape)
+                    for axis, start, end in zip(axes, starts_value, ends_value):
+                        axis %= len(source_shape)
+                        extent = f"Symbol(({_dimension_expression(end)})-({_dimension_expression(start)}))"
+                        tensor_candidate[axis] = _bound_dimension_descriptor(extent, dimension_bounds)
+            elif op_type == "Gather" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in tensor_shapes:
                 data_shape = tensor_shapes[inputs[0]]
                 index_shape = tensor_shapes[inputs[1]]
                 axis = int(attrs.get("axis", 0))
@@ -747,6 +807,20 @@ def build_dag_model(
                     expressions = [_dimension_expression(shape[axis]) for shape in shapes]
                     combined = "+".join(f"({expression})" for expression in expressions)
                     tensor_candidate[axis] = _bound_dimension_descriptor(f"Symbol({combined})", dimension_bounds)
+            elif op_type == "Unsqueeze" and inputs and inputs[0] in tensor_shapes:
+                tensor_candidate = list(tensor_shapes[inputs[0]])
+                axes_value = const_values.get(inputs[1]) if len(inputs) > 1 else attrs.get("axes", [0])
+                for axis in sorted(_integer_list(axes_value)):
+                    output_rank = len(tensor_candidate) + 1
+                    tensor_candidate.insert(axis % output_rank, "Known(1)")
+            elif op_type == "Squeeze" and inputs and inputs[0] in tensor_shapes:
+                tensor_candidate = list(tensor_shapes[inputs[0]])
+                axes_value = const_values.get(inputs[1]) if len(inputs) > 1 else attrs.get("axes")
+                if axes_value is not None:
+                    for axis in sorted((_integer_list(axes_value)), reverse=True):
+                        tensor_candidate.pop(axis % len(tensor_candidate))
+                else:
+                    tensor_candidate = [dimension for dimension in tensor_candidate if _dimension_expression(dimension) != "1"]
             elif op_type in {"Sqrt", "Tanh", "Cast", "Identity", "Dropout", "Softmax", "Sigmoid", "Silu", "Gelu"} and inputs and inputs[0] in tensor_shapes:
                 tensor_candidate = list(tensor_shapes[inputs[0]])
             elif op_type == "ReduceMean" and inputs and inputs[0] in tensor_shapes:
