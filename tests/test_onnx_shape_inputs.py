@@ -121,7 +121,7 @@ def test_symbolic_runtime_reshape_capacity_is_derived_from_shape_values():
         ["Bounded(batch;1)", "Bounded(tokens;8)"],
         [-1, "Bounded(tokens;8)"],
         {"batch": 1, "tokens": 8},
-    ) == ["Bounded(((batch)*(tokens))/((tokens));1)", "Bounded(tokens;8)"]
+    ) == ["Bounded((batch);1)", "Bounded(tokens;8)"]
 
 
 def test_runtime_reshape_matches_onnxruntime_across_live_extents(tmp_path):

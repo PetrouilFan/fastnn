@@ -109,8 +109,25 @@ def _reshape_descriptors(input_shape: List[Any], target: List[Any], bounds: Mapp
         else:
             resolved.append(value)
     if inferred_axis is not None:
-        input_product = "*".join(f"({_dimension_expression(d)})" for d in input_shape) or "1"
-        known_product = "*".join(f"({_dimension_expression(d)})" for d in resolved if d is not None) or "1"
+        input_factors = [_dimension_expression(d) for d in input_shape]
+        target_factors = [
+            _dimension_expression(d) for d in resolved if d is not None
+        ]
+        remaining = list(input_factors)
+        for factor in target_factors:
+            if factor in remaining:
+                remaining.remove(factor)
+            else:
+                break
+        else:
+            expression = "*".join(f"({factor})" for factor in remaining) or "1"
+            resolved[inferred_axis] = f"Symbol({expression})"
+            return [
+                _bound_dimension_descriptor(d, bounds) if isinstance(d, str) else d
+                for d in resolved
+            ]
+        input_product = "*".join(f"({factor})" for factor in input_factors) or "1"
+        known_product = "*".join(f"({factor})" for factor in target_factors) or "1"
         resolved[inferred_axis] = f"Symbol(({input_product})/({known_product}))"
     return [_bound_dimension_descriptor(d, bounds) if isinstance(d, str) else d for d in resolved]
 
@@ -509,7 +526,7 @@ def build_dag_model(
             elif isinstance(value, str):
                 dag_node[key] = value
         output_shape = node.get("output_shape", {})
-        if isinstance(output_shape, dict) and isinstance(output_shape.get("shape"), (list, tuple)):
+        if isinstance(output_shape, dict) and output_shape.get("shape"):
             dag_node["output_rank"] = str(len(output_shape["shape"]))
         dag_nodes.append(dag_node)
 
@@ -533,6 +550,11 @@ def build_dag_model(
     tensor_shapes: Dict[str, List[Any]] = {
         name: list(shape) for name, shape in symbolic_input_shapes.items()
     }
+    for name, value in numpy_params.items():
+        tensor_shapes[name] = [f"Known({extent})" for extent in np.asarray(value).shape]
+    for tensor_name, param_name in initializer_to_param.items():
+        if param_name in tensor_shapes:
+            tensor_shapes[tensor_name] = list(tensor_shapes[param_name])
     for nd in onnx_nodes:
         node_name = nd.get("name", "")
         shape_info = nd.get("output_shape", {})
@@ -651,6 +673,18 @@ def build_dag_model(
                     if index < 0 or index >= len(source):
                         raise ValueError(f"shape-value Gather {node_name!r} index is out of range")
                     candidate.append(source[index])
+            elif op_type == "Slice" and inputs and inputs[0] in shape_values:
+                starts = attrs.get("starts", const_values.get(inputs[1]) if len(inputs) > 1 else None)
+                ends = attrs.get("ends", const_values.get(inputs[2]) if len(inputs) > 2 else None)
+                axes = attrs.get("axes", const_values.get(inputs[3]) if len(inputs) > 3 else [0])
+                if starts is not None and ends is not None:
+                    def _shape_ints(value):
+                        if isinstance(value, (list, tuple)):
+                            return [int(item) for item in value]
+                        return [int(item) for item in str(value).strip("[]").split(",") if item]
+                    starts, ends, axes = _shape_ints(starts), _shape_ints(ends), _shape_ints(axes)
+                    if len(starts) == len(ends) == len(axes) == 1 and axes[0] == 0:
+                        candidate = list(shape_values[inputs[0]][starts[0]:ends[0]])
             elif op_type in {"Unsqueeze", "Squeeze", "Cast"} and inputs and inputs[0] in shape_values:
                 candidate = list(shape_values[inputs[0]])
             elif op_type == "Concat" and int(attrs.get("axis", 0)) == 0 and inputs and all(name in shape_values for name in inputs):
@@ -658,6 +692,35 @@ def build_dag_model(
             if out_name and candidate is not None and shape_values.get(out_name) != candidate:
                 shape_values[out_name] = candidate
                 changed = True
+
+            tensor_candidate = None
+            if op_type == "Gather" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in tensor_shapes:
+                data_shape = tensor_shapes[inputs[0]]
+                index_shape = tensor_shapes[inputs[1]]
+                axis = int(attrs.get("axis", 0))
+                if axis < 0:
+                    axis += len(data_shape)
+                if 0 <= axis < len(data_shape):
+                    tensor_candidate = data_shape[:axis] + index_shape + data_shape[axis + 1:]
+            elif op_type in {"Add", "Sub", "Mul", "Div", "Pow", "Max", "Min"}:
+                known = [tensor_shapes[name] for name in inputs if name in tensor_shapes]
+                if known:
+                    tensor_candidate = list(max(known, key=len))
+            elif op_type in {"Sqrt", "Tanh", "Cast", "Identity", "Dropout"} and inputs and inputs[0] in tensor_shapes:
+                tensor_candidate = list(tensor_shapes[inputs[0]])
+            elif op_type == "ReduceMean" and inputs and inputs[0] in tensor_shapes:
+                tensor_candidate = list(tensor_shapes[inputs[0]])
+                axes = attrs.get("axes", [])
+                if not isinstance(axes, (list, tuple)):
+                    axes = [int(value) for value in str(axes).split(",") if value]
+                if int(attrs.get("keepdims", attrs.get("keepdim", 1))):
+                    for axis in axes:
+                        normalized = int(axis) % len(tensor_candidate)
+                        tensor_candidate[normalized] = "Known(1)"
+            if out_name and tensor_candidate is not None and tensor_shapes.get(out_name) != tensor_candidate:
+                tensor_shapes[out_name] = tensor_candidate
+                changed = True
+
             if op_type == "Reshape" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in shape_values:
                 inferred_shape = _reshape_descriptors(tensor_shapes[inputs[0]], shape_values[inputs[1]], dimension_bounds)
                 dag = next((item for item in dag_nodes if item.get("name") == node_name), None)
