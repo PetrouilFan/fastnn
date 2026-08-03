@@ -1025,23 +1025,37 @@ impl Backend for CpuBackend {
                             // Quantized: F32 activation + Signed I8 weight
                             (_, true) => "matmul_i8",
                         };
-                    // Extract M, K, N from input shapes
-                    let m = input_shapes
-                        .first()
-                        .and_then(|s| s.get(s.len().saturating_sub(2)).copied())
-                        .unwrap_or(1) as usize;
-                    let k = input_shapes
-                        .first()
-                        .and_then(|s| s.last().copied())
-                        .unwrap_or(1) as usize;
+                    // Flatten every leading activation dimension into M while
+                    // retaining the final dimension as K. This preserves batched
+                    // MatMul geometry such as [B, T, K] × [K, N].
+                    let activation_shape = input_shapes.first().map(Vec::as_slice).unwrap_or(&[]);
+                    let m = activation_shape
+                        .get(..activation_shape.len().saturating_sub(1))
+                        .unwrap_or(&[])
+                        .iter()
+                        .try_fold(1usize, |product, &dimension| {
+                            product.checked_mul(dimension as usize)
+                        })
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "matmul node {node_id} flattened M dimension overflows"
+                            ))
+                        })?;
+                    let k = activation_shape.last().copied().unwrap_or(1) as usize;
                     let n = input_shapes
                         .get(1)
                         .and_then(|s| s.last().copied())
                         .unwrap_or(1) as usize;
-                    // Capture symbolic dims for runtime resolution
+                    // Capture symbolic dims for runtime resolution.
                     let m_dim = input_shape_dims
                         .first()
-                        .and_then(|s| s.get(s.len().saturating_sub(2)).cloned())
+                        .map(|shape| {
+                            shape[..shape.len().saturating_sub(1)]
+                                .iter()
+                                .fold(DimExpr::Known(1), |product, dimension| {
+                                    product.mul(dimension)
+                                })
+                        })
                         .unwrap_or(DimExpr::Known(m as u64));
                     let k_dim = input_shape_dims
                         .first()

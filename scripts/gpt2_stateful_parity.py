@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--tokens", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--max-context", type=int, default=8)
+    parser.add_argument("--quantize", default=None)
     parser.add_argument("--atol", type=float, default=5e-4)
     return parser.parse_args()
 
@@ -52,6 +53,7 @@ def make_model(args: argparse.Namespace):
     model = fnn.build_model_from_fnn(
         str(args.fnn),
         symbolic_dim_bounds={"batch_size": 1, "past_sequence_length": args.max_context},
+        quantize=args.quantize,
     )
     bindings = dict(state_names())
     initial = {

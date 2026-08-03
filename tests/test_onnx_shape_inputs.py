@@ -683,6 +683,34 @@ def test_aot_runtime_owned_state_rejects_capacity_overflow_atomically(tmp_path):
     executor.reset_state()
     assert executor.state_sizes() == {"state": 4}
 
+def test_dynamic_w4a8_accepts_rank3_matmul_activations(tmp_path):
+    activation = helper.make_tensor_value_info("activation", TensorProto.FLOAT, [1, 3, 32])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3, 4])
+    weights = np.linspace(-1.0, 1.0, 32 * 4, dtype=np.float32).reshape(32, 4)
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["activation", "weights"], ["output"])],
+        "rank3_w4a8",
+        [activation],
+        [output],
+        [numpy_helper.from_array(weights, name="weights")],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "rank3-w4a8.onnx"
+    fnn_path = tmp_path / "rank3-w4a8.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+
+    executor = fnn.build_model_from_fnn(str(fnn_path), quantize="w4a8-g32")
+    values = np.linspace(-0.75, 0.75, 1 * 3 * 32, dtype=np.float32).reshape(1, 3, 32)
+    actual = executor.forward({"activation": fnn.tensor(values, list(values.shape))})[
+        "output"
+    ].numpy()
+    expected = np.matmul(values, weights)
+
+    assert actual.shape == (1, 3, 4)
+    np.testing.assert_allclose(actual, expected, rtol=0.08, atol=0.08)
+
+
 def test_runtime_where_bool_broadcast_matches_onnxruntime(tmp_path):
     graph = helper.make_graph(
         [

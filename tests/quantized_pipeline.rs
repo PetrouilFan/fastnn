@@ -1216,7 +1216,7 @@ fn dynamic_w4a8_reuses_one_per_token_activation_for_shared_projections() {
 }
 
 #[test]
-fn dynamic_w4a8_rejects_batched_rank_three_activations() {
+fn dynamic_w4a8_executes_batched_rank_three_activations() {
     let (batch, m, k, n) = (2usize, 3usize, 64usize, 8usize);
     let mut graph = ComputeGraph::new();
     let input_id = graph.add_node(
@@ -1258,11 +1258,37 @@ fn dynamic_w4a8_rejects_batched_rank_three_activations() {
     graph.set_inputs(vec![input_id]);
     graph.set_outputs(vec![output_id]);
 
-    let executor = GraphExecutor::new(CpuBackend);
-    let error = executor
+    let mut executor = GraphExecutor::new(CpuBackend);
+    let (mut plan, memory, compiled) = executor
         .compile_with_target(graph, CompileTarget::DynamicW4A8 { group_size: 32 }, None)
-        .unwrap_err();
-    assert!(error.to_string().contains("rank-2 activations"));
+        .unwrap();
+    let quantize = compiled
+        .nodes
+        .iter()
+        .find(|node| node.opcode == Opcode::QuantizeActivations)
+        .unwrap();
+    assert_eq!(
+        quantize.attrs.get("num_tokens").map(String::as_str),
+        Some("6")
+    );
+    assert_eq!(
+        quantize.attrs.get("token_size").map(String::as_str),
+        Some("64")
+    );
+
+    let input = vec![1.0f32; batch * m * k];
+    let input_bytes = bytemuck::cast_slice(&input);
+    let outputs = executor
+        .execute(&compiled, &mut plan, &memory, &[input_bytes])
+        .unwrap();
+    let values: &[f32] = bytemuck::cast_slice(&outputs[0]);
+    assert_eq!(values.len(), batch * m * n);
+    for &value in values {
+        assert!(
+            (value - 16.0).abs() <= 1e-5,
+            "unexpected rank-3 W4A8 output {value}"
+        );
+    }
 }
 
 #[test]

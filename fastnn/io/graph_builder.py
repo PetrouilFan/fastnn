@@ -143,7 +143,10 @@ def _reshape_descriptors(input_shape: List[Any], target: List[Any], bounds: Mapp
 
 
 def build_model_from_fnn(
-    path: str, *, symbolic_dim_bounds: Optional[Mapping[str, int]] = None
+    path: str,
+    *,
+    symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
+    quantize: int | str | None = None,
 ) -> Any:
     """Build a runnable model from a .fnn file.
 
@@ -155,6 +158,8 @@ def build_model_from_fnn(
         symbolic_dim_bounds: Optional allocation capacities keyed by ONNX symbolic
             dimension name. Live dimensions remain dynamic and are validated against
             these bounds.
+        quantize: Optional AOT compile target. Grouped dynamic W4A8 accepts
+            ``"w4a8-g32"``, ``"w4a8-g64"``, or ``"w4a8-g128"``.
 
     Returns:
         A fastnn model (Sequential for PyTorch-exported, AotExecutor for ONNX-imported).
@@ -170,8 +175,15 @@ def build_model_from_fnn(
             raise SerializationError("Invalid .fnn file: missing magic bytes")
 
         if "graph" in header:
-            return build_dag_model(header, path, symbolic_dim_bounds=bounds)
+            return build_dag_model(
+                header,
+                path,
+                quantize=quantize,
+                symbolic_dim_bounds=bounds,
+            )
         elif "layers" in header:
+            if quantize is not None:
+                raise ValueError("quantize is only supported for graph .fnn artifacts")
             return build_sequential_model(path)
         else:
             raise ValueError("Unknown .fnn format: header has neither 'graph' nor 'layers'")
@@ -253,7 +265,7 @@ def fuse_silu(graph: dict) -> dict:
 def build_dag_model(
     header: dict,
     path: str,
-    quantize: int | None = None,
+    quantize: int | str | None = None,
     symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
 ) -> Any:
     """Build a Rust AotExecutor from an ONNX-imported .fnn file.

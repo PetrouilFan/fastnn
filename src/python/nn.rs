@@ -1380,9 +1380,12 @@ impl AotExecutor {
                         "f8r" => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
                         "f4" => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
                         "i4cb" => CompileTarget::WeightOnly(QuantTarget::I4Codebook),
+                        "w4a8-g32" => CompileTarget::DynamicW4A8 { group_size: 32 },
+                        "w4a8-g64" => CompileTarget::DynamicW4A8 { group_size: 64 },
+                        "w4a8-g128" => CompileTarget::DynamicW4A8 { group_size: 128 },
                         _ => {
                             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, 4, or 8)",
+                                "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, w4a8-g32, w4a8-g64, w4a8-g128, 4, or 8)",
                                 s
                             )))
                         }
