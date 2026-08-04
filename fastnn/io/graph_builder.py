@@ -7,7 +7,7 @@ DAG models (from ONNX import).
 import ast
 import json
 import logging
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -147,6 +147,7 @@ def build_model_from_fnn(
     *,
     symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
     quantize: int | str | None = None,
+    diagnostic_outputs: Optional[Sequence[str]] = None,
 ) -> Any:
     """Build a runnable model from a .fnn file.
 
@@ -160,6 +161,8 @@ def build_model_from_fnn(
             these bounds.
         quantize: Optional AOT compile target. Grouped dynamic W4A8 accepts
             ``"w4a8-g32"``, ``"w4a8-g64"``, or ``"w4a8-g128"``.
+        diagnostic_outputs: Optional additional graph values to retain and return.
+            This is intended for deterministic intermediate-output audits.
 
     Returns:
         A fastnn model (Sequential for PyTorch-exported, AotExecutor for ONNX-imported).
@@ -180,6 +183,7 @@ def build_model_from_fnn(
                 path,
                 quantize=quantize,
                 symbolic_dim_bounds=bounds,
+                diagnostic_outputs=diagnostic_outputs,
             )
         elif "layers" in header:
             if quantize is not None:
@@ -267,6 +271,7 @@ def build_dag_model(
     path: str,
     quantize: int | str | None = None,
     symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
+    diagnostic_outputs: Optional[Sequence[str]] = None,
 ) -> Any:
     """Build a Rust AotExecutor from an ONNX-imported .fnn file.
 
@@ -282,6 +287,12 @@ def build_dag_model(
     import fastnn as fnn
 
     dimension_bounds = dict(symbolic_dim_bounds or {})
+
+    requested_diagnostics = list(diagnostic_outputs or ())
+    if any(not isinstance(name, str) or not name for name in requested_diagnostics):
+        raise ValueError("diagnostic_outputs must contain non-empty strings")
+    if len(set(requested_diagnostics)) != len(requested_diagnostics):
+        raise ValueError("diagnostic_outputs must not contain duplicates")
 
     # Load parameters from file (version-aware)
     with open(path, "rb") as f:
@@ -349,6 +360,25 @@ def build_dag_model(
                 node[edge_key] = [edge.strip() for edge in edges.split(",") if edge.strip()]
     input_names = [inp.get("name", "") if isinstance(inp, dict) else inp for inp in graph.get("inputs", [])]
     output_names = [out.get("name", "") if isinstance(out, dict) else out for out in graph.get("outputs", [])]
+    produced_values = {
+        value
+        for node in graph.get("nodes", [])
+        for value in node.get("outputs", [])
+    }
+    unknown_diagnostics = sorted(set(requested_diagnostics) - produced_values)
+    if unknown_diagnostics:
+        raise ValueError(
+            "diagnostic_outputs are not produced by the graph: "
+            + ", ".join(unknown_diagnostics)
+        )
+    output_names.extend(name for name in requested_diagnostics if name not in output_names)
+    if requested_diagnostics:
+        graph["outputs"] = [*graph.get("outputs", []), *[
+            {"name": name} for name in requested_diagnostics if name not in {
+                output.get("name", "") if isinstance(output, dict) else output
+                for output in graph.get("outputs", [])
+            }
+        ]]
 
     # Extract input shapes from Input nodes BEFORE optimization passes
     # (dead node elimination removes Input nodes since they have no outputs)

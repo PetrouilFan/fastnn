@@ -847,3 +847,33 @@ def test_split_constant_sizes_match_onnxruntime(tmp_path):
     )
     np.testing.assert_array_equal(actual[0], expected[0])
     np.testing.assert_array_equal(actual[1], expected[1])
+
+
+def test_diagnostic_outputs_retain_intermediate_values(tmp_path):
+    graph = helper.make_graph(
+        [
+            helper.make_node("Relu", ["X"], ["hidden"], name="relu"),
+            helper.make_node("Identity", ["hidden"], ["Y"], name="identity"),
+        ],
+        "diagnostic_outputs",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "diagnostic.onnx"
+    fnn_path = tmp_path / "diagnostic.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+
+    x = np.asarray([-2.0, 3.0], dtype=np.float32)
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), diagnostic_outputs=["hidden"]
+    )
+    outputs = executor.forward({"X": fnn.tensor(x, [2])})
+    np.testing.assert_array_equal(outputs["hidden"].numpy(), [0.0, 3.0])
+    np.testing.assert_array_equal(outputs["Y"].numpy(), [0.0, 3.0])
+
+    with pytest.raises(ValueError, match="not produced by the graph"):
+        fnn.build_model_from_fnn(
+            str(fnn_path), diagnostic_outputs=["missing"]
+        )
