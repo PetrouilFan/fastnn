@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token", type=int, default=42)
     parser.add_argument("--max-context", type=int, default=8)
     parser.add_argument("--threshold", type=float, default=0.10)
+    parser.add_argument("--w4a8-calibration", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -74,11 +75,24 @@ def feeds(token_id: int) -> dict[str, np.ndarray]:
 
 
 def run_fastnn(args: argparse.Namespace, outputs: list[str], quantize: str | None) -> dict[str, np.ndarray]:
+    clip_ratios = None
+    if quantize is not None and args.w4a8_calibration is not None:
+        calibration = json.loads(args.w4a8_calibration.read_text())
+        expected_group_size = int(quantize.removeprefix("w4a8-g"))
+        if calibration.get("group_size") != expected_group_size:
+            raise ValueError("W4A8 calibration group size does not match --quantize")
+        clip_ratios = {
+            layer["name"]: layer["clip_ratios"]
+            for layer in calibration.get("layers", [])
+        }
+        if not clip_ratios:
+            raise ValueError("W4A8 calibration has no projection clip ratios")
     model = fnn.build_model_from_fnn(
         str(args.fnn),
         symbolic_dim_bounds={"batch_size": 1, "past_sequence_length": args.max_context},
         quantize=quantize,
         diagnostic_outputs=outputs,
+        w4a8_clip_ratios=clip_ratios,
     )
     bindings = dict(state_names())
     model.configure_state(
@@ -144,6 +158,7 @@ def main() -> int:
         "quantize": args.quantize,
         "token": args.token,
         "threshold": args.threshold,
+        "w4a8_calibration": str(args.w4a8_calibration) if args.w4a8_calibration else None,
         "matmul_outputs": len(outputs),
         "first_failure": first_failure,
         "worst": worst,
