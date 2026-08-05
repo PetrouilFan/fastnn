@@ -160,7 +160,10 @@ def build_model_from_fnn(
             dimension name. Live dimensions remain dynamic and are validated against
             these bounds.
         quantize: Optional AOT compile target. Grouped dynamic W4A8 accepts
-            ``"w4a8-g32"``, ``"w4a8-g64"``, or ``"w4a8-g128"``.
+            ``"w4a8-g32"``, ``"w4a8-g64"``, or ``"w4a8-g128"``. Sensitive
+            MatMuls can remain in native precision by appending comma-separated
+            node-name substrings, for example
+            ``"w4a8-g128:exclude=attn/c_proj,lm_head"``.
         diagnostic_outputs: Optional additional graph values to retain and return.
             This is intended for deterministic intermediate-output audits.
 

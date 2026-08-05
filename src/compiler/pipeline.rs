@@ -40,14 +40,22 @@ impl CompilerPipeline {
             .validate_with_limits(&GraphResourceLimits::default())
             .map_err(|error| CompilerError::pass("graph validation", error))?;
         report.record("graph validation", graph.nodes.len(), graph.nodes.len());
-        let w4a8_group_size = match &self.target {
-            CompileTarget::DynamicW4A8 { group_size } => {
+        let w4a8_policy = match &self.target {
+            CompileTarget::DynamicW4A8 {
+                group_size,
+                exclude_patterns,
+            } => {
                 if !matches!(*group_size, 32 | 64 | 128) {
                     return Err(CompilerError::InvalidTarget(format!(
                         "dynamic W4A8 requires K-group size 32, 64, or 128, got {group_size}"
                     )));
                 }
-                Some(*group_size)
+                if exclude_patterns.iter().any(|pattern| pattern.is_empty()) {
+                    return Err(CompilerError::InvalidTarget(
+                        "dynamic W4A8 exclusion patterns must not be empty".into(),
+                    ));
+                }
+                Some((*group_size, exclude_patterns.clone()))
             }
             _ => None,
         };
@@ -117,10 +125,14 @@ impl CompilerPipeline {
             report.record("prune qdq pairs", before, graph.nodes.len());
         }
 
-        if let Some(group_size) = w4a8_group_size {
+        if let Some((group_size, exclude_patterns)) = w4a8_policy {
             before = graph.nodes.len();
-            quantization::quantize_matmul_weights_k_grouped_i4(&mut graph, group_size)
-                .map_err(|error| CompilerError::pass("grouped W4 weight quantization", error))?;
+            quantization::quantize_matmul_weights_k_grouped_i4(
+                &mut graph,
+                group_size,
+                &exclude_patterns,
+            )
+            .map_err(|error| CompilerError::pass("grouped W4 weight quantization", error))?;
             activation_quantization::quantize_matmul_activations_per_token(&mut graph)
                 .map_err(|error| CompilerError::pass("per-token activation quantization", error))?;
             report.record("dynamic W4A8 preparation", before, graph.nodes.len());

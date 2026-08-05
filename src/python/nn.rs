@@ -1370,24 +1370,60 @@ impl AotExecutor {
                         }
                     }
                 } else if let Ok(s) = obj.extract::<String>() {
-                    match s.as_str() {
-                        "f32" => CompileTarget::Native,
-                        "i4" => CompileTarget::WeightOnly(QuantTarget::I4),
-                        "i8" => CompileTarget::WeightOnly(QuantTarget::I8),
-                        "u4" => CompileTarget::WeightOnly(QuantTarget::U4),
-                        "u8" => CompileTarget::WeightOnly(QuantTarget::U8),
-                        "f8" => CompileTarget::WeightOnly(QuantTarget::Fp8E4M3),
-                        "f8r" => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
-                        "f4" => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
-                        "i4cb" => CompileTarget::WeightOnly(QuantTarget::I4Codebook),
-                        "w4a8-g32" => CompileTarget::DynamicW4A8 { group_size: 32 },
-                        "w4a8-g64" => CompileTarget::DynamicW4A8 { group_size: 64 },
-                        "w4a8-g128" => CompileTarget::DynamicW4A8 { group_size: 128 },
-                        _ => {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, w4a8-g32, w4a8-g64, w4a8-g128, 4, or 8)",
-                                s
-                            )))
+                    if let Some((base, exclusions)) = s.split_once(":exclude=") {
+                        let group_size = match base {
+                            "w4a8-g32" => 32,
+                            "w4a8-g64" => 64,
+                            "w4a8-g128" => 128,
+                            _ => {
+                                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                    "unsupported selective W4A8 target: '{base}'"
+                                )))
+                            }
+                        };
+                        let exclude_patterns: Vec<String> = exclusions
+                            .split(',')
+                            .map(str::trim)
+                            .map(str::to_string)
+                            .collect();
+                        if exclude_patterns.iter().any(String::is_empty) {
+                            return Err(pyo3::exceptions::PyValueError::new_err(
+                                "selective W4A8 exclusions must be non-empty comma-separated node-name substrings",
+                            ));
+                        }
+                        CompileTarget::DynamicW4A8 {
+                            group_size,
+                            exclude_patterns,
+                        }
+                    } else {
+                        match s.as_str() {
+                            "f32" => CompileTarget::Native,
+                            "i4" => CompileTarget::WeightOnly(QuantTarget::I4),
+                            "i8" => CompileTarget::WeightOnly(QuantTarget::I8),
+                            "u4" => CompileTarget::WeightOnly(QuantTarget::U4),
+                            "u8" => CompileTarget::WeightOnly(QuantTarget::U8),
+                            "f8" => CompileTarget::WeightOnly(QuantTarget::Fp8E4M3),
+                            "f8r" => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
+                            "f4" => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
+                            "i4cb" => CompileTarget::WeightOnly(QuantTarget::I4Codebook),
+                            "w4a8-g32" => CompileTarget::DynamicW4A8 {
+                                group_size: 32,
+                                exclude_patterns: vec![],
+                            },
+                            "w4a8-g64" => CompileTarget::DynamicW4A8 {
+                                group_size: 64,
+                                exclude_patterns: vec![],
+                            },
+                            "w4a8-g128" => CompileTarget::DynamicW4A8 {
+                                group_size: 128,
+                                exclude_patterns: vec![],
+                            },
+                            _ => {
+                                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                    "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, w4a8-g32, w4a8-g64, w4a8-g128, 4, or 8)",
+                                    s
+                                )))
+                            }
                         }
                     }
                 } else {

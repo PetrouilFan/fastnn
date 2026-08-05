@@ -30,6 +30,7 @@ fn optimizer_affine_metadata(tensor_type: &TensorType) -> Option<(usize, Vec<f32
 pub fn quantize_matmul_weights_k_grouped_i4(
     graph: &mut ComputeGraph,
     group_size: usize,
+    exclude_patterns: &[String],
 ) -> Result<(), FastnnError> {
     if !matches!(group_size, 32 | 64 | 128) {
         return Err(FastnnError::compilation(format!(
@@ -40,6 +41,21 @@ pub fn quantize_matmul_weights_k_grouped_i4(
         .nodes
         .iter()
         .filter(|node| matches!(node.opcode, Opcode::MatMul))
+        .filter(|node| {
+            !exclude_patterns.iter().any(|pattern| {
+                node.name.contains(pattern)
+                    || node.inputs.get(1).is_some_and(|weight_id| {
+                        graph
+                            .get_node(*weight_id)
+                            .is_some_and(|weight| weight.name.contains(pattern))
+                    })
+                    || graph.consumers(node.id).into_iter().any(|consumer_id| {
+                        graph
+                            .get_node(consumer_id)
+                            .is_some_and(|consumer| consumer.name.contains(pattern))
+                    })
+            })
+        })
         .filter_map(|node| node.inputs.get(1).copied())
         .filter(|weight_id| {
             graph.get_node(*weight_id).is_some_and(|weight| {

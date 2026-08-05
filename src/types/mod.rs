@@ -618,6 +618,8 @@ pub enum CompileTarget {
     /// per-token signed-I8 activations.
     DynamicW4A8 {
         group_size: usize,
+        /// MatMul node-name substrings retained in native precision.
+        exclude_patterns: Vec<String>,
     },
 }
 
@@ -627,7 +629,10 @@ mod tests {
 
     #[test]
     fn dynamic_w4a8_compile_target_round_trips() {
-        let target = CompileTarget::DynamicW4A8 { group_size: 64 };
+        let target = CompileTarget::DynamicW4A8 {
+            group_size: 64,
+            exclude_patterns: vec!["attn/c_proj".into()],
+        };
         let encoded = bincode::serialize(&target).unwrap();
         let decoded: CompileTarget = bincode::deserialize(&encoded).unwrap();
         assert_eq!(decoded, target);
