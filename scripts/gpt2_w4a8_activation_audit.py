@@ -70,12 +70,18 @@ def grouped_i4_dequantize(weight_kn: np.ndarray, group_size: int) -> np.ndarray:
 
 def activation_weighted_grouped_i4_dequantize(
     weight_kn: np.ndarray,
-    channel_importance: np.ndarray,
+    activation_statistics: np.ndarray,
     group_size: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Choose group clipping that minimizes diagonal activation-weighted weight MSE."""
-    if channel_importance.shape != (weight_kn.shape[0],):
-        raise ValueError("channel importance must have one value per K channel")
+    """Choose group clipping using diagonal importance or full calibration activations."""
+    if activation_statistics.ndim == 1:
+        if activation_statistics.shape != (weight_kn.shape[0],):
+            raise ValueError("channel importance must have one value per K channel")
+    elif activation_statistics.ndim == 2:
+        if activation_statistics.shape[1] != weight_kn.shape[0]:
+            raise ValueError("activation matrix K dimension must match the weight")
+    else:
+        raise ValueError("activation statistics must be [K] or [tokens,K]")
     k, n = weight_kn.shape
     dequantized = np.empty_like(weight_kn, dtype=np.float32)
     selected_ratios = np.empty((n, (k + group_size - 1) // group_size), dtype=np.float32)
@@ -84,7 +90,12 @@ def activation_weighted_grouped_i4_dequantize(
         for start in range(0, k, group_size):
             end = min(start + group_size, k)
             group = weight_kn[start:end, column].astype(np.float32)
-            importance = channel_importance[start:end].astype(np.float64)
+            importance = None
+            activation_group = None
+            if activation_statistics.ndim == 1:
+                importance = activation_statistics[start:end].astype(np.float64)
+            else:
+                activation_group = activation_statistics[:, start:end].astype(np.float64)
             minimum = float(np.min(group))
             maximum = float(np.max(group))
             if maximum == minimum:
@@ -107,7 +118,12 @@ def activation_weighted_grouped_i4_dequantize(
                 codes = np.clip(np.rint((group - offset) / scale), -8.0, 7.0)
                 candidate = codes * scale + offset
                 delta = candidate.astype(np.float64) - group.astype(np.float64)
-                score = float(np.sum(importance * delta * delta))
+                if activation_group is not None:
+                    projected_error = activation_group @ delta
+                    score = float(np.mean(projected_error * projected_error))
+                else:
+                    assert importance is not None
+                    score = float(np.sum(importance * delta * delta))
                 if score < best_score:
                     best_score = score
                     best_values = candidate
@@ -213,10 +229,9 @@ def main() -> int:
                 f"{node.name}: activation K={flat.shape[1]} does not match weight K={weight_kn.shape[0]}"
             )
         quantized_weight = grouped_i4_dequantize(weight_kn, args.group_size)
-        channel_importance = np.mean(flat.astype(np.float64) ** 2, axis=0)
         optimized_weight, clip_ratios = activation_weighted_grouped_i4_dequantize(
             weight_kn,
-            channel_importance,
+            flat,
             args.group_size,
         )
         reference = alpha * (flat @ weight_kn)

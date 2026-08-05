@@ -59,3 +59,26 @@ def test_activation_weighted_clipping_reduces_error_from_inactive_outlier():
     assert optimized_error < baseline_error * 0.9
     assert ratios.shape == (1, 1)
     assert 0.70 <= ratios[0, 0] <= 1.0
+
+
+def test_full_activation_objective_beats_diagonal_approximation_on_correlated_inputs():
+    rng = np.random.default_rng(7)
+    latent = rng.normal(size=(12, 1))
+    activation = np.concatenate(
+        [latent + 0.02 * rng.normal(size=(12, 1)) for _ in range(32)], axis=1
+    ).astype(np.float32)
+    weight = rng.normal(scale=0.4, size=(32, 3)).astype(np.float32)
+    weight[0] *= 8.0
+    importance = np.mean(activation.astype(np.float64) ** 2, axis=0)
+
+    diagonal, _ = AUDIT.activation_weighted_grouped_i4_dequantize(
+        weight, importance, 32
+    )
+    covariance, ratios = AUDIT.activation_weighted_grouped_i4_dequantize(
+        weight, activation, 32
+    )
+    diagonal_error = np.mean((activation @ (diagonal - weight)) ** 2)
+    covariance_error = np.mean((activation @ (covariance - weight)) ** 2)
+
+    assert covariance_error <= diagonal_error
+    assert ratios.shape == (3, 1)
