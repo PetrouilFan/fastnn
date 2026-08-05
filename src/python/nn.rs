@@ -1241,7 +1241,7 @@ pub struct AotExecutor {
 #[pymethods]
 impl AotExecutor {
     #[new]
-    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, symbolic_input_shapes=None, quantize=None))]
+    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, symbolic_input_shapes=None, quantize=None, w4a8_clip_ratios=None))]
     fn new(
         _py: pyo3::Python<'_>,
         nodes: Vec<std::collections::HashMap<String, String>>,
@@ -1251,6 +1251,7 @@ impl AotExecutor {
         input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
         symbolic_input_shapes: Option<std::collections::HashMap<String, Vec<String>>>,
         quantize: Option<pyo3::Bound<'_, pyo3::PyAny>>,
+        w4a8_clip_ratios: Option<std::collections::HashMap<String, Vec<f32>>>,
     ) -> pyo3::PyResult<Self> {
         // Clear the global f32 weight cache to prevent unbounded memory
         // accumulation across executor instances (e.g., when the benchmark
@@ -1355,6 +1356,8 @@ impl AotExecutor {
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         use crate::types::{CompileTarget, QuantTarget};
+        let calibrated_clip_ratios: std::collections::BTreeMap<String, Vec<f32>> =
+            w4a8_clip_ratios.unwrap_or_default().into_iter().collect();
         let target = match quantize {
             None => CompileTarget::Native,
             Some(obj) => {
@@ -1394,6 +1397,7 @@ impl AotExecutor {
                         CompileTarget::DynamicW4A8 {
                             group_size,
                             exclude_patterns,
+                            clip_ratios: calibrated_clip_ratios.clone(),
                         }
                     } else {
                         match s.as_str() {
@@ -1409,14 +1413,17 @@ impl AotExecutor {
                             "w4a8-g32" => CompileTarget::DynamicW4A8 {
                                 group_size: 32,
                                 exclude_patterns: vec![],
+                                clip_ratios: calibrated_clip_ratios.clone(),
                             },
                             "w4a8-g64" => CompileTarget::DynamicW4A8 {
                                 group_size: 64,
                                 exclude_patterns: vec![],
+                                clip_ratios: calibrated_clip_ratios.clone(),
                             },
                             "w4a8-g128" => CompileTarget::DynamicW4A8 {
                                 group_size: 128,
                                 exclude_patterns: vec![],
+                                clip_ratios: calibrated_clip_ratios.clone(),
                             },
                             _ => {
                                 return Err(pyo3::exceptions::PyValueError::new_err(format!(

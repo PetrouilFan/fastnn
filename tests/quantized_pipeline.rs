@@ -1100,6 +1100,7 @@ fn assert_dynamic_w4a8_matmul(group_size: usize) {
             CompileTarget::DynamicW4A8 {
                 group_size,
                 exclude_patterns: vec![],
+                clip_ratios: Default::default(),
             },
             None,
         )
@@ -1211,6 +1212,7 @@ fn dynamic_w4a8_exclusion_keeps_matching_matmul_in_native_precision() {
             CompileTarget::DynamicW4A8 {
                 group_size: 32,
                 exclude_patterns: vec!["sensitive".into()],
+                clip_ratios: Default::default(),
             },
             None,
         )
@@ -1294,6 +1296,7 @@ fn dynamic_w4a8_reuses_one_per_token_activation_for_shared_projections() {
             CompileTarget::DynamicW4A8 {
                 group_size: 32,
                 exclude_patterns: vec![],
+                clip_ratios: Default::default(),
             },
             None,
         )
@@ -1364,6 +1367,7 @@ fn dynamic_w4a8_executes_batched_rank_three_activations() {
             CompileTarget::DynamicW4A8 {
                 group_size: 32,
                 exclude_patterns: vec![],
+                clip_ratios: Default::default(),
             },
             None,
         )
@@ -1439,6 +1443,7 @@ fn dynamic_w4a8_rejects_weight_constants_that_are_graph_outputs() {
             CompileTarget::DynamicW4A8 {
                 group_size: 32,
                 exclude_patterns: vec![],
+                clip_ratios: Default::default(),
             },
             None,
         )

@@ -44,6 +44,7 @@ impl CompilerPipeline {
             CompileTarget::DynamicW4A8 {
                 group_size,
                 exclude_patterns,
+                clip_ratios,
             } => {
                 if !matches!(*group_size, 32 | 64 | 128) {
                     return Err(CompilerError::InvalidTarget(format!(
@@ -55,7 +56,7 @@ impl CompilerPipeline {
                         "dynamic W4A8 exclusion patterns must not be empty".into(),
                     ));
                 }
-                Some((*group_size, exclude_patterns.clone()))
+                Some((*group_size, exclude_patterns.clone(), clip_ratios.clone()))
             }
             _ => None,
         };
@@ -125,12 +126,13 @@ impl CompilerPipeline {
             report.record("prune qdq pairs", before, graph.nodes.len());
         }
 
-        if let Some((group_size, exclude_patterns)) = w4a8_policy {
+        if let Some((group_size, exclude_patterns, clip_ratios)) = w4a8_policy {
             before = graph.nodes.len();
             quantization::quantize_matmul_weights_k_grouped_i4(
                 &mut graph,
                 group_size,
                 &exclude_patterns,
+                &clip_ratios,
             )
             .map_err(|error| CompilerError::pass("grouped W4 weight quantization", error))?;
             activation_quantization::quantize_matmul_activations_per_token(&mut graph)

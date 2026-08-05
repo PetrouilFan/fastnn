@@ -167,9 +167,31 @@ def main() -> int:
     onnx.save(model, str(augmented))
     session = ort.InferenceSession(str(augmented), providers=["CPUExecutionProvider"])
     def collect(tokens: list[int]) -> dict[str, np.ndarray]:
-        runs = [session.run(activation_names, feeds([token])) for token in tokens]
+        state_pairs = [
+            (f"past_key_values.{layer}.{kind}", f"present.{layer}.{kind}")
+            for layer in range(12)
+            for kind in ("key", "value")
+        ]
+        state = {
+            input_name: np.zeros((1, 12, 0, 64), dtype=np.float32)
+            for input_name, _ in state_pairs
+        }
+        requested = activation_names + [output_name for _, output_name in state_pairs]
+        activation_runs = []
+        for step, token in enumerate(tokens, start=1):
+            step_feeds = {
+                "input_ids": np.asarray([[token]], dtype=np.int64),
+                "attention_mask": np.ones((1, step), dtype=np.int64),
+                **state,
+            }
+            values = session.run(requested, step_feeds)
+            activation_runs.append(values[: len(activation_names)])
+            state = {
+                input_name: values[len(activation_names) + index]
+                for index, (input_name, _) in enumerate(state_pairs)
+            }
         return {
-            name: np.concatenate([run[index] for run in runs], axis=0)
+            name: np.concatenate([run[index] for run in activation_runs], axis=0)
             for index, name in enumerate(activation_names)
         }
 

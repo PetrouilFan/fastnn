@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokens", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--max-context", type=int, default=8)
     parser.add_argument("--quantize", default=None)
+    parser.add_argument("--w4a8-calibration", type=Path)
     parser.add_argument("--atol", type=float, default=5e-4)
     return parser.parse_args()
 
@@ -50,10 +52,22 @@ def state_names() -> list[tuple[str, str]]:
 
 
 def make_model(args: argparse.Namespace):
+    clip_ratios = None
+    if args.w4a8_calibration is not None:
+        report = json.loads(args.w4a8_calibration.read_text())
+        if report.get("group_size") != int(str(args.quantize).removeprefix("w4a8-g")):
+            raise ValueError("W4A8 calibration group size does not match --quantize")
+        clip_ratios = {
+            layer["name"]: layer["clip_ratios"]
+            for layer in report.get("layers", [])
+        }
+        if not clip_ratios:
+            raise ValueError("W4A8 calibration has no projection clip ratios")
     model = fnn.build_model_from_fnn(
         str(args.fnn),
         symbolic_dim_bounds={"batch_size": 1, "past_sequence_length": args.max_context},
         quantize=args.quantize,
+        w4a8_clip_ratios=clip_ratios,
     )
     bindings = dict(state_names())
     initial = {

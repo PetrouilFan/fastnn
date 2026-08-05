@@ -31,6 +31,7 @@ pub fn quantize_matmul_weights_k_grouped_i4(
     graph: &mut ComputeGraph,
     group_size: usize,
     exclude_patterns: &[String],
+    clip_ratios: &std::collections::BTreeMap<String, Vec<f32>>,
 ) -> Result<(), FastnnError> {
     if !matches!(group_size, 32 | 64 | 128) {
         return Err(FastnnError::compilation(format!(
@@ -66,6 +67,7 @@ pub fn quantize_matmul_weights_k_grouped_i4(
         .collect();
     candidates.sort_unstable();
     candidates.dedup();
+    let mut matched_calibration_names = std::collections::BTreeSet::new();
 
     for weight_id in candidates {
         let incompatible_consumer = graph.consumers(weight_id).into_iter().find(|consumer_id| {
@@ -78,6 +80,43 @@ pub fn quantize_matmul_weights_k_grouped_i4(
             return Err(FastnnError::compilation(format!(
                 "dynamic W4A8 cannot mutate shared weight constant {weight_id}; clone the weight for non-MatMul consumers"
             )));
+        }
+        let mut provenance_names = Vec::new();
+        if let Some(weight) = graph.get_node(weight_id) {
+            if !weight.name.is_empty() {
+                provenance_names.push(weight.name.clone());
+            }
+        }
+        for matmul_id in graph.consumers(weight_id) {
+            if let Some(matmul) = graph.get_node(matmul_id) {
+                if !matmul.name.is_empty() {
+                    provenance_names.push(matmul.name.clone());
+                }
+            }
+            for consumer_id in graph.consumers(matmul_id) {
+                if let Some(consumer) = graph.get_node(consumer_id) {
+                    if !consumer.name.is_empty() {
+                        provenance_names.push(consumer.name.clone());
+                    }
+                }
+            }
+        }
+        let matched_calibrations: Vec<_> = provenance_names
+            .iter()
+            .filter_map(|name| clip_ratios.get(name).map(|ratios| (name, ratios)))
+            .collect();
+        if matched_calibrations.len() > 1 {
+            return Err(FastnnError::compilation(format!(
+                "dynamic W4A8 weight {weight_id} matches multiple calibration entries: {:?}",
+                matched_calibrations
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+            )));
+        }
+        let calibrated_ratios = matched_calibrations.first().map(|(_, ratios)| *ratios);
+        if let Some((name, _)) = matched_calibrations.first() {
+            matched_calibration_names.insert((*name).clone());
         }
         let weight = graph.get_node(weight_id).unwrap();
         let (values, logical_shape) = match &weight.opcode {
@@ -117,7 +156,35 @@ pub fn quantize_matmul_weights_k_grouped_i4(
                 transposed[column * k + row] = values[row * n + column];
             }
         }
-        let packed = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], group_size);
+        let expected_ratio_count = n.checked_mul(k.div_ceil(group_size)).ok_or_else(|| {
+            FastnnError::compilation("dynamic W4A8 calibration dimensions overflow")
+        })?;
+        if let Some(ratios) = calibrated_ratios {
+            if ratios.len() != expected_ratio_count {
+                return Err(FastnnError::compilation(format!(
+                    "dynamic W4A8 calibration for weight {weight_id} has {} ratios, expected {expected_ratio_count}",
+                    ratios.len()
+                )));
+            }
+            if ratios
+                .iter()
+                .any(|ratio| !ratio.is_finite() || !(0.0..=1.0).contains(ratio))
+            {
+                return Err(FastnnError::compilation(format!(
+                    "dynamic W4A8 calibration for weight {weight_id} contains an invalid clip ratio"
+                )));
+            }
+        }
+        let packed = if let Some(ratios) = calibrated_ratios {
+            PackedTensor::<I4x8>::from_f32_k_grouped_i4_with_clip_ratios(
+                &transposed,
+                &[n, k],
+                group_size,
+                ratios,
+            )
+        } else {
+            PackedTensor::<I4x8>::from_f32_k_grouped_i4(&transposed, &[n, k], group_size)
+        };
         let representation = crate::types::ValueRepresentation::packed_affine_dequantization(
             ScalarType::I4,
             8,
@@ -152,6 +219,16 @@ pub fn quantize_matmul_weights_k_grouped_i4(
         node.output_type = tensor_type;
         node.attrs
             .insert("quant_block_size".into(), group_size.to_string());
+    }
+    let unused: Vec<_> = clip_ratios
+        .keys()
+        .filter(|name| !matched_calibration_names.contains(*name))
+        .cloned()
+        .collect();
+    if !unused.is_empty() {
+        return Err(FastnnError::compilation(format!(
+            "dynamic W4A8 calibration entries did not match quantized MatMuls: {unused:?}"
+        )));
     }
     Ok(())
 }

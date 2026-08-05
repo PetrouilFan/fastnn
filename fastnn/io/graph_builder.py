@@ -148,6 +148,7 @@ def build_model_from_fnn(
     symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
     quantize: int | str | None = None,
     diagnostic_outputs: Optional[Sequence[str]] = None,
+    w4a8_clip_ratios: Optional[Mapping[str, Sequence[float]]] = None,
 ) -> Any:
     """Build a runnable model from a .fnn file.
 
@@ -166,6 +167,8 @@ def build_model_from_fnn(
             ``"w4a8-g128:exclude=attn/c_proj,lm_head"``.
         diagnostic_outputs: Optional additional graph values to retain and return.
             This is intended for deterministic intermediate-output audits.
+        w4a8_clip_ratios: Optional calibrated clipping ratios keyed by exact
+            MatMul/Gemm provenance name.
 
     Returns:
         A fastnn model (Sequential for PyTorch-exported, AotExecutor for ONNX-imported).
@@ -187,6 +190,7 @@ def build_model_from_fnn(
                 quantize=quantize,
                 symbolic_dim_bounds=bounds,
                 diagnostic_outputs=diagnostic_outputs,
+                w4a8_clip_ratios=w4a8_clip_ratios,
             )
         elif "layers" in header:
             if quantize is not None:
@@ -275,6 +279,7 @@ def build_dag_model(
     quantize: int | str | None = None,
     symbolic_dim_bounds: Optional[Mapping[str, int]] = None,
     diagnostic_outputs: Optional[Sequence[str]] = None,
+    w4a8_clip_ratios: Optional[Mapping[str, Sequence[float]]] = None,
 ) -> Any:
     """Build a Rust AotExecutor from an ONNX-imported .fnn file.
 
@@ -290,6 +295,12 @@ def build_dag_model(
     import fastnn as fnn
 
     dimension_bounds = dict(symbolic_dim_bounds or {})
+    calibrated_ratios = {
+        name: [float(value) for value in values]
+        for name, values in (w4a8_clip_ratios or {}).items()
+    }
+    if any(not isinstance(name, str) or not name for name in calibrated_ratios):
+        raise ValueError("w4a8_clip_ratios keys must be non-empty strings")
 
     requested_diagnostics = list(diagnostic_outputs or ())
     if any(not isinstance(name, str) or not name for name in requested_diagnostics):
@@ -995,6 +1006,7 @@ def build_dag_model(
         input_shapes=input_shapes if input_shapes else None,
         symbolic_input_shapes=symbolic_input_shapes if symbolic_input_shapes else None,
         quantize=quantize,
+        w4a8_clip_ratios=calibrated_ratios or None,
     )
     return executor
 

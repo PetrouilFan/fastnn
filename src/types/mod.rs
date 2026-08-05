@@ -620,6 +620,8 @@ pub enum CompileTarget {
         group_size: usize,
         /// MatMul node-name substrings retained in native precision.
         exclude_patterns: Vec<String>,
+        /// Calibrated clipping ratios keyed by MatMul/Gemm provenance name.
+        clip_ratios: std::collections::BTreeMap<String, Vec<f32>>,
     },
 }
 
@@ -632,6 +634,7 @@ mod tests {
         let target = CompileTarget::DynamicW4A8 {
             group_size: 64,
             exclude_patterns: vec!["attn/c_proj".into()],
+            clip_ratios: std::collections::BTreeMap::from([("attn/c_attn".into(), vec![0.8, 0.9])]),
         };
         let encoded = bincode::serialize(&target).unwrap();
         let decoded: CompileTarget = bincode::deserialize(&encoded).unwrap();
