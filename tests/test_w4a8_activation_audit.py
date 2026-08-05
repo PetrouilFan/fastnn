@@ -41,3 +41,19 @@ def test_activation_weighting_distinguishes_equal_weight_error():
     inactive_error = AUDIT.metrics(inactive_output, reference_output)["rmse"]
 
     assert active_error > inactive_error * 100.0
+
+
+def test_activation_weighted_clipping_reduces_error_from_inactive_outlier():
+    weight = np.linspace(-1.0, 1.0, 32, dtype=np.float32).reshape(32, 1)
+    weight[0, 0] = 10.0
+    importance = np.ones(32, dtype=np.float64)
+    importance[0] = 0.0
+
+    baseline = AUDIT.grouped_i4_dequantize(weight, 32)
+    optimized = AUDIT.activation_weighted_grouped_i4_dequantize(
+        weight, importance, 32
+    )
+    baseline_error = np.sum(importance[:, None] * (baseline - weight) ** 2)
+    optimized_error = np.sum(importance[:, None] * (optimized - weight) ** 2)
+
+    assert optimized_error < baseline_error * 0.9

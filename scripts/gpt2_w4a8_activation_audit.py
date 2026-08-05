@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=128)
     parser.add_argument("--tokens", type=int, nargs="+", default=[42])
+    parser.add_argument("--validation-tokens", type=int, nargs="+", default=[50, 51, 52])
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -64,6 +65,51 @@ def grouped_i4_dequantize(weight_kn: np.ndarray, group_size: int) -> np.ndarray:
             offset = low + 8.0 * scale
             codes = np.clip(np.rint((group - offset) / scale), -8.0, 7.0)
             dequantized[start:end, column] = codes * scale + offset
+    return dequantized
+
+
+def activation_weighted_grouped_i4_dequantize(
+    weight_kn: np.ndarray,
+    channel_importance: np.ndarray,
+    group_size: int,
+) -> np.ndarray:
+    """Choose group clipping that minimizes diagonal activation-weighted weight MSE."""
+    if channel_importance.shape != (weight_kn.shape[0],):
+        raise ValueError("channel importance must have one value per K channel")
+    k, n = weight_kn.shape
+    dequantized = np.empty_like(weight_kn, dtype=np.float32)
+    clip_ratios = np.linspace(0.70, 1.0, 31, dtype=np.float32)
+    for column in range(n):
+        for start in range(0, k, group_size):
+            end = min(start + group_size, k)
+            group = weight_kn[start:end, column].astype(np.float32)
+            importance = channel_importance[start:end].astype(np.float64)
+            minimum = float(np.min(group))
+            maximum = float(np.max(group))
+            if maximum == minimum:
+                dequantized[start:end, column] = minimum
+                continue
+            midpoint = 0.5 * (minimum + maximum)
+            half_range = 0.5 * (maximum - minimum)
+            best_score = float("inf")
+            best_values = None
+            for ratio in clip_ratios:
+                clipped_low = midpoint - half_range * float(ratio)
+                clipped_high = midpoint + half_range * float(ratio)
+                initial_scale = (clipped_high - clipped_low) / 15.0
+                low = clipped_low - initial_scale
+                high = clipped_high + initial_scale
+                scale = (high - low) / 15.0
+                offset = low + 8.0 * scale
+                codes = np.clip(np.rint((group - offset) / scale), -8.0, 7.0)
+                candidate = codes * scale + offset
+                delta = candidate.astype(np.float64) - group.astype(np.float64)
+                score = float(np.sum(importance * delta * delta))
+                if score < best_score:
+                    best_score = score
+                    best_values = candidate
+            assert best_values is not None
+            dequantized[start:end, column] = best_values
     return dequantized
 
 
@@ -114,28 +160,51 @@ def main() -> int:
     augmented.parent.mkdir(parents=True, exist_ok=True)
     onnx.save(model, str(augmented))
     session = ort.InferenceSession(str(augmented), providers=["CPUExecutionProvider"])
-    activation_runs = [session.run(activation_names, feeds([token])) for token in args.tokens]
-    activations = {
-        name: np.concatenate(
-            [run[index] for run in activation_runs],
-            axis=0,
-        )
-        for index, name in enumerate(activation_names)
-    }
+    def collect(tokens: list[int]) -> dict[str, np.ndarray]:
+        runs = [session.run(activation_names, feeds([token])) for token in tokens]
+        return {
+            name: np.concatenate([run[index] for run in runs], axis=0)
+            for index, name in enumerate(activation_names)
+        }
+
+    activations = collect(args.tokens)
+    validation_activations = collect(args.validation_tokens)
 
     layers = []
     for node, weight_kn, alpha in projections:
         activation = np.asarray(activations[node.input[0]], dtype=np.float32)
         flat = activation.reshape(-1, activation.shape[-1])
+        validation_activation = np.asarray(
+            validation_activations[node.input[0]], dtype=np.float32
+        )
+        validation_flat = validation_activation.reshape(
+            -1, validation_activation.shape[-1]
+        )
         if flat.shape[1] != weight_kn.shape[0]:
             raise RuntimeError(
                 f"{node.name}: activation K={flat.shape[1]} does not match weight K={weight_kn.shape[0]}"
             )
         quantized_weight = grouped_i4_dequantize(weight_kn, args.group_size)
+        channel_importance = np.mean(flat.astype(np.float64) ** 2, axis=0)
+        optimized_weight = activation_weighted_grouped_i4_dequantize(
+            weight_kn,
+            channel_importance,
+            args.group_size,
+        )
         reference = alpha * (flat @ weight_kn)
         actual = alpha * (flat @ quantized_weight)
+        optimized = alpha * (flat @ optimized_weight)
+        validation_reference = alpha * (validation_flat @ weight_kn)
+        validation_actual = alpha * (validation_flat @ quantized_weight)
+        validation_optimized = alpha * (validation_flat @ optimized_weight)
         layer_metrics = metrics(actual, reference)
+        optimized_layer_metrics = metrics(optimized, reference)
         weight_metrics = metrics(quantized_weight, weight_kn)
+        optimized_weight_metrics = metrics(optimized_weight, weight_kn)
+        validation_layer_metrics = metrics(validation_actual, validation_reference)
+        optimized_validation_layer_metrics = metrics(
+            validation_optimized, validation_reference
+        )
         channel_rms = np.sqrt(np.mean(flat.astype(np.float64) ** 2, axis=0))
         layers.append(
             {
@@ -147,6 +216,10 @@ def main() -> int:
                 "activation_channel_rms_max": float(np.max(channel_rms)),
                 "weight_error": weight_metrics,
                 "activation_weighted_output_error": layer_metrics,
+                "optimized_weight_error": optimized_weight_metrics,
+                "optimized_activation_weighted_output_error": optimized_layer_metrics,
+                "validation_output_error": validation_layer_metrics,
+                "optimized_validation_output_error": optimized_validation_layer_metrics,
             }
         )
     layers.sort(
@@ -156,6 +229,7 @@ def main() -> int:
     report = {
         "group_size": args.group_size,
         "tokens": args.tokens,
+        "validation_tokens": args.validation_tokens,
         "projection_count": len(layers),
         "worst": layers[0],
         "layers": layers,
