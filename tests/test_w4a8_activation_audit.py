@@ -11,6 +11,14 @@ AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 
 
+def test_parse_sequences_supports_multiple_independent_trajectories():
+    assert AUDIT.parse_sequences(["42,43", "50, 51,52"], [1]) == [
+        [42, 43],
+        [50, 51, 52],
+    ]
+    assert AUDIT.parse_sequences([], [7, 8]) == [[7, 8]]
+
+
 def test_grouped_i4_dequantize_preserves_constant_and_partial_groups():
     weight = np.concatenate(
         [

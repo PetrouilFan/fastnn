@@ -20,8 +20,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=128)
     parser.add_argument("--tokens", type=int, nargs="+", default=[42])
     parser.add_argument("--validation-tokens", type=int, nargs="+", default=[50, 51, 52])
+    parser.add_argument(
+        "--calibration-sequence",
+        action="append",
+        default=[],
+        metavar="TOKEN,TOKEN,...",
+    )
+    parser.add_argument(
+        "--validation-sequence",
+        action="append",
+        default=[],
+        metavar="TOKEN,TOKEN,...",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
+
+
+def parse_sequences(values: list[str], fallback: list[int]) -> list[list[int]]:
+    if not values:
+        return [fallback]
+    sequences = []
+    for value in values:
+        try:
+            sequence = [int(token.strip()) for token in value.split(",")]
+        except ValueError as error:
+            raise ValueError(f"invalid token sequence: {value!r}") from error
+        if not sequence or any(token < 0 for token in sequence):
+            raise ValueError("token sequences must contain non-negative token IDs")
+        sequences.append(sequence)
+    return sequences
 
 
 def state_names() -> list[str]:
@@ -182,37 +209,40 @@ def main() -> int:
     augmented.parent.mkdir(parents=True, exist_ok=True)
     onnx.save(model, str(augmented))
     session = ort.InferenceSession(str(augmented), providers=["CPUExecutionProvider"])
-    def collect(tokens: list[int]) -> dict[str, np.ndarray]:
+    def collect(sequences: list[list[int]]) -> dict[str, np.ndarray]:
         state_pairs = [
             (f"past_key_values.{layer}.{kind}", f"present.{layer}.{kind}")
             for layer in range(12)
             for kind in ("key", "value")
         ]
-        state = {
-            input_name: np.zeros((1, 12, 0, 64), dtype=np.float32)
-            for input_name, _ in state_pairs
-        }
         requested = activation_names + [output_name for _, output_name in state_pairs]
         activation_runs = []
-        for step, token in enumerate(tokens, start=1):
-            step_feeds = {
-                "input_ids": np.asarray([[token]], dtype=np.int64),
-                "attention_mask": np.ones((1, step), dtype=np.int64),
-                **state,
-            }
-            values = session.run(requested, step_feeds)
-            activation_runs.append(values[: len(activation_names)])
+        for tokens in sequences:
             state = {
-                input_name: values[len(activation_names) + index]
-                for index, (input_name, _) in enumerate(state_pairs)
+                input_name: np.zeros((1, 12, 0, 64), dtype=np.float32)
+                for input_name, _ in state_pairs
             }
+            for step, token in enumerate(tokens, start=1):
+                step_feeds = {
+                    "input_ids": np.asarray([[token]], dtype=np.int64),
+                    "attention_mask": np.ones((1, step), dtype=np.int64),
+                    **state,
+                }
+                values = session.run(requested, step_feeds)
+                activation_runs.append(values[: len(activation_names)])
+                state = {
+                    input_name: values[len(activation_names) + index]
+                    for index, (input_name, _) in enumerate(state_pairs)
+                }
         return {
             name: np.concatenate([run[index] for run in activation_runs], axis=0)
             for index, name in enumerate(activation_names)
         }
 
-    activations = collect(args.tokens)
-    validation_activations = collect(args.validation_tokens)
+    calibration_sequences = parse_sequences(args.calibration_sequence, args.tokens)
+    validation_sequences = parse_sequences(args.validation_sequence, args.validation_tokens)
+    activations = collect(calibration_sequences)
+    validation_activations = collect(validation_sequences)
 
     layers = []
     for node, weight_kn, alpha in projections:

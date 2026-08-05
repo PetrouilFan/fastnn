@@ -141,6 +141,7 @@ def main() -> None:
     replay = run_sequence(args, session, ort_session)
     independent = run_sequence(args, isolated, ort_session)
 
+    failures = []
     for index, result in enumerate(first, start=1):
         print(
             f"step={index} seconds={result.seconds:.6f} "
@@ -151,11 +152,11 @@ def main() -> None:
             f"state_bytes={result.state_bytes}"
         )
         if result.logits_max_abs > args.atol:
-            raise AssertionError(f"step {index} logits error exceeds {args.atol}")
+            failures.append(f"step {index} logits error exceeds {args.atol}")
         if result.cache_max_abs > args.atol:
-            raise AssertionError(f"step {index} cache error exceeds {args.atol}")
+            failures.append(f"step {index} cache error exceeds {args.atol}")
         if result.argmax_fastnn != result.argmax_ort:
-            raise AssertionError(f"step {index} argmax mismatch")
+            failures.append(f"step {index} argmax mismatch")
 
     replay_error = max(float(np.max(np.abs(a.logits - b.logits))) for a, b in zip(first, replay, strict=True))
     isolation_error = max(float(np.max(np.abs(a.logits - b.logits))) for a, b in zip(first, independent, strict=True))
@@ -163,7 +164,9 @@ def main() -> None:
     print(f"session_isolation_max_abs={isolation_error:.9g}")
     print(f"session_steps={session.session_steps}")
     if replay_error != 0.0 or isolation_error != 0.0:
-        raise AssertionError("session replay or isolation is not deterministic")
+        failures.append("session replay or isolation is not deterministic")
+    if failures:
+        raise AssertionError("; ".join(failures))
 
 
 if __name__ == "__main__":
