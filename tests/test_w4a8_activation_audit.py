@@ -50,10 +50,12 @@ def test_activation_weighted_clipping_reduces_error_from_inactive_outlier():
     importance[0] = 0.0
 
     baseline = AUDIT.grouped_i4_dequantize(weight, 32)
-    optimized = AUDIT.activation_weighted_grouped_i4_dequantize(
+    optimized, ratios = AUDIT.activation_weighted_grouped_i4_dequantize(
         weight, importance, 32
     )
     baseline_error = np.sum(importance[:, None] * (baseline - weight) ** 2)
     optimized_error = np.sum(importance[:, None] * (optimized - weight) ** 2)
 
     assert optimized_error < baseline_error * 0.9
+    assert ratios.shape == (1, 1)
+    assert 0.70 <= ratios[0, 0] <= 1.0

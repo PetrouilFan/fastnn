@@ -72,12 +72,13 @@ def activation_weighted_grouped_i4_dequantize(
     weight_kn: np.ndarray,
     channel_importance: np.ndarray,
     group_size: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Choose group clipping that minimizes diagonal activation-weighted weight MSE."""
     if channel_importance.shape != (weight_kn.shape[0],):
         raise ValueError("channel importance must have one value per K channel")
     k, n = weight_kn.shape
     dequantized = np.empty_like(weight_kn, dtype=np.float32)
+    selected_ratios = np.empty((n, (k + group_size - 1) // group_size), dtype=np.float32)
     clip_ratios = np.linspace(0.70, 1.0, 31, dtype=np.float32)
     for column in range(n):
         for start in range(0, k, group_size):
@@ -88,11 +89,13 @@ def activation_weighted_grouped_i4_dequantize(
             maximum = float(np.max(group))
             if maximum == minimum:
                 dequantized[start:end, column] = minimum
+                selected_ratios[column, start // group_size] = 1.0
                 continue
             midpoint = 0.5 * (minimum + maximum)
             half_range = 0.5 * (maximum - minimum)
             best_score = float("inf")
             best_values = None
+            best_ratio = None
             for ratio in clip_ratios:
                 clipped_low = midpoint - half_range * float(ratio)
                 clipped_high = midpoint + half_range * float(ratio)
@@ -108,9 +111,12 @@ def activation_weighted_grouped_i4_dequantize(
                 if score < best_score:
                     best_score = score
                     best_values = candidate
+                    best_ratio = ratio
             assert best_values is not None
+            assert best_ratio is not None
             dequantized[start:end, column] = best_values
-    return dequantized
+            selected_ratios[column, start // group_size] = best_ratio
+    return dequantized, selected_ratios
 
 
 def metrics(actual: np.ndarray, reference: np.ndarray) -> dict[str, float | int]:
@@ -186,7 +192,7 @@ def main() -> int:
             )
         quantized_weight = grouped_i4_dequantize(weight_kn, args.group_size)
         channel_importance = np.mean(flat.astype(np.float64) ** 2, axis=0)
-        optimized_weight = activation_weighted_grouped_i4_dequantize(
+        optimized_weight, clip_ratios = activation_weighted_grouped_i4_dequantize(
             weight_kn,
             channel_importance,
             args.group_size,
@@ -220,6 +226,7 @@ def main() -> int:
                 "optimized_activation_weighted_output_error": optimized_layer_metrics,
                 "validation_output_error": validation_layer_metrics,
                 "optimized_validation_output_error": optimized_validation_layer_metrics,
+                "clip_ratios": clip_ratios.reshape(-1).tolist(),
             }
         )
     layers.sort(
@@ -235,7 +242,19 @@ def main() -> int:
         "layers": layers,
     }
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    print(json.dumps({"group_size": args.group_size, "projection_count": len(layers), "worst": layers[0]}, indent=2))
+    worst_summary = {
+        key: value for key, value in layers[0].items() if key != "clip_ratios"
+    }
+    print(
+        json.dumps(
+            {
+                "group_size": args.group_size,
+                "projection_count": len(layers),
+                "worst": worst_summary,
+            },
+            indent=2,
+        )
+    )
     print(f"Results written to {args.output}")
     return 0
 
