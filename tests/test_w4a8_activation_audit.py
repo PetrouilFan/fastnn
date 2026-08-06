@@ -90,3 +90,29 @@ def test_full_activation_objective_beats_diagonal_approximation_on_correlated_in
 
     assert covariance_error <= diagonal_error
     assert ratios.shape == (3, 1)
+
+
+def test_gptq_error_feedback_reduces_correlated_output_error():
+    rng = np.random.default_rng(19)
+    latent = rng.normal(size=(64, 4))
+    mixing = rng.normal(size=(4, 32))
+    activation = (latent @ mixing + 0.01 * rng.normal(size=(64, 32))).astype(np.float32)
+    weight = rng.normal(scale=0.5, size=(32, 8)).astype(np.float32)
+
+    baseline = AUDIT.grouped_i4_dequantize(weight, 32)
+    reconstructed = AUDIT.gptq_grouped_i4_dequantize(weight, activation, 32)
+    baseline_error = np.mean((activation @ (baseline - weight)) ** 2)
+    reconstructed_error = np.mean((activation @ (reconstructed - weight)) ** 2)
+
+    assert reconstructed_error < baseline_error
+    assert reconstructed.shape == weight.shape
+    assert np.all(np.isfinite(reconstructed))
+
+
+def test_gptq_rejects_invalid_contracts():
+    weight = np.zeros((32, 2), dtype=np.float32)
+    activation = np.zeros((4, 31), dtype=np.float32)
+    with np.testing.assert_raises_regex(ValueError, "K dimension"):
+        AUDIT.gptq_grouped_i4_dequantize(weight, activation, 32)
+    with np.testing.assert_raises_regex(ValueError, "damping"):
+        AUDIT.gptq_grouped_i4_dequantize(weight, np.zeros((4, 32)), 32, 0.0)

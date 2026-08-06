@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--group-size", type=int, choices=(32, 64, 128), default=128)
+    parser.add_argument("--gptq-damping", type=float, default=0.01)
     parser.add_argument("--tokens", type=int, nargs="+", default=[42])
     parser.add_argument("--validation-tokens", type=int, nargs="+", default=[50, 51, 52])
     parser.add_argument(
@@ -162,6 +163,67 @@ def activation_weighted_grouped_i4_dequantize(
     return dequantized, selected_ratios
 
 
+def gptq_grouped_i4_dequantize(
+    weight_kn: np.ndarray,
+    activations: np.ndarray,
+    group_size: int,
+    damping: float = 0.01,
+) -> np.ndarray:
+    """Quantize fixed affine I4 groups with GPTQ-style sequential error feedback."""
+    if weight_kn.ndim != 2 or activations.ndim != 2:
+        raise ValueError("GPTQ reconstruction requires [K,N] weights and [tokens,K] activations")
+    if activations.shape[1] != weight_kn.shape[0]:
+        raise ValueError("activation matrix K dimension must match the weight")
+    if not np.isfinite(damping) or damping <= 0.0:
+        raise ValueError("GPTQ damping must be finite and positive")
+
+    k, _ = weight_kn.shape
+    reconstructed = np.empty_like(weight_kn, dtype=np.float32)
+    for start in range(0, k, group_size):
+        end = min(start + group_size, k)
+        original = weight_kn[start:end].T.astype(np.float64)
+        working = original.copy()
+        activation_group = activations[:, start:end].astype(np.float64)
+        hessian = activation_group.T @ activation_group / max(activation_group.shape[0], 1)
+        diagonal_mean = float(np.mean(np.diag(hessian)))
+        hessian.flat[:: hessian.shape[0] + 1] += damping * max(diagonal_mean, 1e-12)
+        try:
+            inverse = np.linalg.inv(hessian)
+            feedback = np.linalg.cholesky(inverse).T
+        except np.linalg.LinAlgError:
+            inverse = np.linalg.pinv(hessian)
+            feedback = np.linalg.cholesky(
+                inverse + np.eye(inverse.shape[0], dtype=np.float64) * 1e-12
+            ).T
+
+        minimum = np.min(original, axis=1)
+        maximum = np.max(original, axis=1)
+        value_range = maximum - minimum
+        initial_scale = value_range / 15.0
+        low = minimum - initial_scale
+        high = maximum + initial_scale
+        scale = (high - low) / 15.0
+        constant = value_range == 0.0
+        scale[constant] = 1.0
+        offset = low + 8.0 * scale
+        offset[constant] = minimum[constant]
+
+        quantized = np.empty_like(working)
+        for index in range(end - start):
+            codes = np.clip(
+                np.rint((working[:, index] - offset) / scale), -8.0, 7.0
+            )
+            values = codes * scale + offset
+            values[constant] = minimum[constant]
+            quantized[:, index] = values
+            pivot = float(feedback[index, index])
+            if pivot > 1e-12 and index + 1 < end - start:
+                error = (working[:, index] - values) / pivot
+                working[:, index + 1 :] -= error[:, None] * feedback[index, index + 1 :]
+        reconstructed[start:end] = quantized.T.astype(np.float32)
+    return reconstructed
+
+
 def metrics(actual: np.ndarray, reference: np.ndarray) -> dict[str, float | int]:
     delta = actual.astype(np.float64) - reference.astype(np.float64)
     reference64 = reference.astype(np.float64)
@@ -264,20 +326,28 @@ def main() -> int:
             flat,
             args.group_size,
         )
+        gptq_weight = gptq_grouped_i4_dequantize(
+            weight_kn, flat, args.group_size, args.gptq_damping
+        )
         reference = alpha * (flat @ weight_kn)
         actual = alpha * (flat @ quantized_weight)
         optimized = alpha * (flat @ optimized_weight)
+        gptq = alpha * (flat @ gptq_weight)
         validation_reference = alpha * (validation_flat @ weight_kn)
         validation_actual = alpha * (validation_flat @ quantized_weight)
         validation_optimized = alpha * (validation_flat @ optimized_weight)
+        validation_gptq = alpha * (validation_flat @ gptq_weight)
         layer_metrics = metrics(actual, reference)
         optimized_layer_metrics = metrics(optimized, reference)
+        gptq_layer_metrics = metrics(gptq, reference)
         weight_metrics = metrics(quantized_weight, weight_kn)
         optimized_weight_metrics = metrics(optimized_weight, weight_kn)
+        gptq_weight_metrics = metrics(gptq_weight, weight_kn)
         validation_layer_metrics = metrics(validation_actual, validation_reference)
         optimized_validation_layer_metrics = metrics(
             validation_optimized, validation_reference
         )
+        gptq_validation_layer_metrics = metrics(validation_gptq, validation_reference)
         channel_rms = np.sqrt(np.mean(flat.astype(np.float64) ** 2, axis=0))
         layers.append(
             {
@@ -290,9 +360,12 @@ def main() -> int:
                 "weight_error": weight_metrics,
                 "activation_weighted_output_error": layer_metrics,
                 "optimized_weight_error": optimized_weight_metrics,
+                "gptq_weight_error": gptq_weight_metrics,
                 "optimized_activation_weighted_output_error": optimized_layer_metrics,
+                "gptq_activation_weighted_output_error": gptq_layer_metrics,
                 "validation_output_error": validation_layer_metrics,
                 "optimized_validation_output_error": optimized_validation_layer_metrics,
+                "gptq_validation_output_error": gptq_validation_layer_metrics,
                 "clip_ratios": clip_ratios.reshape(-1).tolist(),
             }
         )
@@ -302,8 +375,11 @@ def main() -> int:
     )
     report = {
         "group_size": args.group_size,
+        "gptq_damping": args.gptq_damping,
         "tokens": args.tokens,
         "validation_tokens": args.validation_tokens,
+        "calibration_sequences": calibration_sequences,
+        "validation_sequences": validation_sequences,
         "projection_count": len(layers),
         "worst": layers[0],
         "layers": layers,
@@ -316,6 +392,7 @@ def main() -> int:
         json.dumps(
             {
                 "group_size": args.group_size,
+                "gptq_damping": args.gptq_damping,
                 "projection_count": len(layers),
                 "worst": worst_summary,
             },
