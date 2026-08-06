@@ -116,3 +116,24 @@ def test_gptq_rejects_invalid_contracts():
         AUDIT.gptq_grouped_i4_dequantize(weight, activation, 32)
     with np.testing.assert_raises_regex(ValueError, "damping"):
         AUDIT.gptq_grouped_i4_dequantize(weight, np.zeros((4, 32)), 32, 0.0)
+
+
+def test_policy_summary_reports_holdout_regressions():
+    def metric(value):
+        return {"normalized_rmse": value}
+
+    layers = [
+        {
+            "activation_weighted_output_error": metric(0.3),
+            "optimized_activation_weighted_output_error": metric(0.2),
+            "gptq_activation_weighted_output_error": metric(0.1),
+            "validation_output_error": metric(0.3),
+            "optimized_validation_output_error": metric(0.1),
+            "gptq_validation_output_error": metric(0.2),
+        }
+    ]
+    summary = AUDIT.policy_summary(layers)
+
+    assert summary["calibration"]["gptq_beats_clipping"] == 1
+    assert summary["validation"]["gptq_beats_clipping"] == 0
+    assert summary["validation"]["projection_count"] == 1

@@ -239,6 +239,36 @@ def metrics(actual: np.ndarray, reference: np.ndarray) -> dict[str, float | int]
     }
 
 
+def policy_summary(layers: list[dict[str, Any]]) -> dict[str, dict[str, float | int]]:
+    """Aggregate calibration and holdout policy comparisons without hiding regressions."""
+    comparisons = {
+        "calibration": (
+            "activation_weighted_output_error",
+            "optimized_activation_weighted_output_error",
+            "gptq_activation_weighted_output_error",
+        ),
+        "validation": (
+            "validation_output_error",
+            "optimized_validation_output_error",
+            "gptq_validation_output_error",
+        ),
+    }
+    summary = {}
+    for split, (baseline_key, clipping_key, gptq_key) in comparisons.items():
+        baseline = [layer[baseline_key]["normalized_rmse"] for layer in layers]
+        clipping = [layer[clipping_key]["normalized_rmse"] for layer in layers]
+        gptq = [layer[gptq_key]["normalized_rmse"] for layer in layers]
+        summary[split] = {
+            "baseline_mean_normalized_rmse": float(np.mean(baseline)),
+            "clipping_mean_normalized_rmse": float(np.mean(clipping)),
+            "gptq_mean_normalized_rmse": float(np.mean(gptq)),
+            "gptq_beats_baseline": sum(x < y for x, y in zip(gptq, baseline, strict=True)),
+            "gptq_beats_clipping": sum(x < y for x, y in zip(gptq, clipping, strict=True)),
+            "projection_count": len(layers),
+        }
+    return summary
+
+
 def main() -> int:
     args = parse_args()
     model = onnx.load(str(args.onnx), load_external_data=True)
@@ -373,6 +403,7 @@ def main() -> int:
         key=lambda layer: layer["activation_weighted_output_error"]["normalized_rmse"],
         reverse=True,
     )
+    summary = policy_summary(layers)
     report = {
         "group_size": args.group_size,
         "gptq_damping": args.gptq_damping,
@@ -381,6 +412,7 @@ def main() -> int:
         "calibration_sequences": calibration_sequences,
         "validation_sequences": validation_sequences,
         "projection_count": len(layers),
+        "policy_summary": summary,
         "worst": layers[0],
         "layers": layers,
     }
@@ -394,6 +426,7 @@ def main() -> int:
                 "group_size": args.group_size,
                 "gptq_damping": args.gptq_damping,
                 "projection_count": len(layers),
+                "policy_summary": summary,
                 "worst": worst_summary,
             },
             indent=2,
