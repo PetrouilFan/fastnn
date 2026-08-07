@@ -877,3 +877,39 @@ def test_diagnostic_outputs_retain_intermediate_values(tmp_path):
         fnn.build_model_from_fnn(
             str(fnn_path), diagnostic_outputs=["missing"]
         )
+
+
+def test_batched_matmul_keeps_rhs_batches_separate(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["Q", "K"], ["Y"], name="attention_scores")],
+        "batched_attention_matmul",
+        [
+            helper.make_tensor_value_info("Q", TensorProto.FLOAT, [1, 3, 1, 4]),
+            helper.make_tensor_value_info("K", TensorProto.FLOAT, [1, 3, 4, "past"]),
+        ],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 1, "past"])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "batched-attention-matmul.onnx"
+    fnn_path = tmp_path / "batched-attention-matmul.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"past": 5}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    q = np.arange(12, dtype=np.float32).reshape(1, 3, 1, 4) / 7.0
+    for past in (1, 2, 5):
+        k = (
+            np.arange(3 * 4 * past, dtype=np.float32).reshape(1, 3, 4, past)
+            + np.arange(3, dtype=np.float32).reshape(1, 3, 1, 1) * 100.0
+        )
+        expected = session.run(["Y"], {"Q": q, "K": k})[0]
+        actual = executor.forward(
+            {
+                "Q": fnn.tensor(q, list(q.shape)),
+                "K": fnn.tensor(k, list(k.shape)),
+            }
+        )["Y"].numpy()
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
