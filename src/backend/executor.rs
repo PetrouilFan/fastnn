@@ -1017,6 +1017,41 @@ impl<B: Backend> GraphExecutor<B> {
         .map(|(outputs, _profile)| outputs)
     }
 
+    #[cfg(feature = "prepared-plan")]
+    pub(crate) fn execute_prepared_no_copy_reusing_outputs_with_view(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+        view: &crate::backend::prepared::PersistentPreparedWeights,
+        reusable_outputs: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
+        if !view.belongs_to(prepared) {
+            return Err(BackendError::Dispatch(
+                "persistent prepared-weight view does not belong to the validated prepared plan"
+                    .into(),
+            ));
+        }
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            None,
+            Some(view),
+            Some(reusable_outputs),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
     /// Profile the no-copy prepared path. Mirrors
     /// [`Self::execute_prepared_no_copy`] but preserves per-instruction
     /// [`ProfileEntry`] rows so callers can quantify the saved

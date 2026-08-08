@@ -1,7 +1,10 @@
 use crate::backend::{BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::ir::NodeId;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static NEXT_PREPARED_PLAN_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default)]
 pub struct PreparedExecutablePlan {
@@ -12,6 +15,7 @@ pub struct PreparedExecutablePlan {
     /// consulted by any runtime dispatch path yet). Populated via
     /// [`PreparedExecutablePlan::register_constant_arena`].
     constant_arena: Option<PreparedConstantArena>,
+    identity: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1341,6 +1345,7 @@ pub fn prepare_executable_plan_with_limits(
         arena_size: plan.arena_size,
         scratch_size: 0,
         constant_arena: None,
+        identity: NEXT_PREPARED_PLAN_IDENTITY.fetch_add(1, Ordering::Relaxed),
     };
     prepared.register_constant_arena(arena);
     validate_prepared_against_plan_with_limits(&prepared, plan, limits)?;
@@ -1778,9 +1783,14 @@ pub struct PersistentPreparedWeights {
     by_key: HashMap<PreparedWeightKey, Arc<Vec<f32>>>,
     /// Raw byte payloads for quantized weight slots.
     by_key_u8: HashMap<PreparedWeightKey, Arc<Vec<u8>>>,
+    prepared_plan_identity: u64,
 }
 
 impl PersistentPreparedWeights {
+    #[cfg(feature = "prepared-plan")]
+    pub(crate) fn belongs_to(&self, prepared: &PreparedExecutablePlan) -> bool {
+        self.prepared_plan_identity != 0 && self.prepared_plan_identity == prepared.identity
+    }
     /// Build an empty view.
     pub fn new() -> Self {
         Self::default()
@@ -1853,6 +1863,7 @@ impl Clone for PersistentPreparedWeights {
         Self {
             by_key: self.by_key.clone(),
             by_key_u8: self.by_key_u8.clone(),
+            prepared_plan_identity: self.prepared_plan_identity,
         }
     }
 }
@@ -1876,11 +1887,11 @@ pub fn build_persistent_prepared_weights(
 ) -> PersistentPreparedWeights {
     use PreparedInstruction::*;
 
-    let Some(arena) = prepared.constant_arena() else {
-        return PersistentPreparedWeights::new();
-    };
-
     let mut view = PersistentPreparedWeights::new();
+    view.prepared_plan_identity = prepared.identity;
+    let Some(arena) = prepared.constant_arena() else {
+        return view;
+    };
     for inst in &prepared.instructions {
         match inst {
             Conv2d(conv) => {
@@ -1971,6 +1982,22 @@ fn register_quantized_slot(
 mod tests {
     use super::*;
     use crate::backend::{BufferSlice, Instruction};
+
+    #[test]
+    fn persistent_weight_view_is_bound_to_its_prepared_plan() {
+        let first = PreparedExecutablePlan {
+            identity: 1,
+            ..PreparedExecutablePlan::default()
+        };
+        let second = PreparedExecutablePlan {
+            identity: 2,
+            ..PreparedExecutablePlan::default()
+        };
+        let view = build_persistent_prepared_weights(&first);
+        assert!(view.belongs_to(&first));
+        assert!(!view.belongs_to(&second));
+        assert!(!PersistentPreparedWeights::new().belongs_to(&first));
+    }
 
     fn empty_plan() -> ExecutablePlan {
         ExecutablePlan {
@@ -2753,6 +2780,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(empty.len(), 0);
         assert!(empty.is_empty());
@@ -2764,6 +2792,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(one.len(), 1);
         assert!(!one.is_empty());
@@ -3696,6 +3725,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.static_weight_binding_count(), 1);
 
@@ -3709,6 +3739,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.static_weight_binding_count(), 2);
 
@@ -3724,6 +3755,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.static_weight_binding_count(), 0);
     }
@@ -3745,6 +3777,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.constant_arena_entry_count(), 0);
     }
@@ -3812,6 +3845,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.constant_arena_total_bytes(), 0);
     }
@@ -3911,6 +3945,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 1,
             constant_arena: None,
+            identity: 0,
         };
         let limits = PreparedPlanResourceLimits {
             max_scratch_bytes: 0,
@@ -4024,6 +4059,7 @@ mod tests {
             arena_size: plan.arena_size,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         let err = validate_prepared_against_plan(&scrambled, &plan)
             .expect_err("scrambled order must be rejected");
@@ -4049,6 +4085,7 @@ mod tests {
             arena_size: plan.arena_size,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         let err = validate_prepared_against_plan(&forged, &plan)
             .expect_err("out-of-bounds index must be rejected");

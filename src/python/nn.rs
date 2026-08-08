@@ -1228,6 +1228,8 @@ pub struct AotExecutor {
     input_names: Vec<String>,
     output_map: Vec<(String, usize)>,
     prepared_plan: std::sync::Arc<crate::backend::prepared::PreparedExecutablePlan>,
+    persistent_prepared_weights:
+        std::sync::Arc<crate::backend::prepared::PersistentPreparedWeights>,
     state_bindings: Vec<StateDescriptor>,
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
@@ -1462,6 +1464,9 @@ impl AotExecutor {
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
+        let persistent_prepared_weights = std::sync::Arc::new(
+            crate::backend::prepared::build_persistent_prepared_weights(&prepared_plan),
+        );
         Ok(AotExecutor {
             plan,
             memory_plan,
@@ -1470,6 +1475,7 @@ impl AotExecutor {
             input_names,
             output_map,
             prepared_plan: std::sync::Arc::new(prepared_plan),
+            persistent_prepared_weights,
             state_bindings: Vec::new(),
             state_values: std::collections::HashMap::new(),
             initial_state_values: std::collections::HashMap::new(),
@@ -1565,6 +1571,7 @@ impl AotExecutor {
             input_names: self.input_names.clone(),
             output_map: self.output_map.clone(),
             prepared_plan: self.prepared_plan.clone(),
+            persistent_prepared_weights: self.persistent_prepared_weights.clone(),
             state_bindings: self.state_bindings.clone(),
             state_values,
             initial_state_values: self.initial_state_values.clone(),
@@ -1816,12 +1823,13 @@ impl AotExecutor {
         #[cfg(feature = "prepared-plan")]
         let mut output_data = if self.prepared_plan.static_weight_binding_count() > 0 {
             self.executor
-                .execute_prepared_no_copy_reusing_outputs(
+                .execute_prepared_no_copy_reusing_outputs_with_view(
                     &self.graph,
                     &mut self.plan,
                     &self.memory_plan,
                     &input_refs,
                     &self.prepared_plan,
+                    &self.persistent_prepared_weights,
                     std::mem::take(&mut self.reusable_outputs),
                 )
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
@@ -2094,6 +2102,9 @@ impl AotExecutor {
         self.plan = plan;
         self.memory_plan = memory_plan;
         self.graph = std::sync::Arc::new(graph);
+        self.persistent_prepared_weights = std::sync::Arc::new(
+            crate::backend::prepared::build_persistent_prepared_weights(&prepared_plan),
+        );
         self.prepared_plan = std::sync::Arc::new(prepared_plan);
 
         Ok(())
