@@ -716,8 +716,10 @@ pub fn try_prepare_conv2d(
 ///
 /// # Required metadata fields from `CallKernel`
 /// - `kernel_name`: must be a matmul-family name.
-/// - `params`: `[m, k, n]`. Concrete element counts baked in by the CPU
-///   backend; symbolic dims are resolved through `param_dims` at runtime.
+/// - `params`: `[m, k, n]` for specialized/quantized kernels and legacy
+///   plans, or `[m, k, n, has_bias, activation]` for the unified plain-fp32
+///   `"matmul"` kernel. Symbolic dims are resolved through `param_dims` at
+///   runtime.
 /// - `input_slices[0]`: left operand `A`.
 /// - `input_slices[1]`: right operand `B` / weight tensor.
 /// - `input_slices[2]` (optional): bias — only present for
@@ -744,7 +746,11 @@ pub fn try_prepare_matmul(
         return None;
     }
 
-    if params.len() != 3 {
+    // Plain fp32 `matmul` carries the unified
+    // [m, k, n, has_bias, activation] contract. Specialized fused and
+    // quantized variants retain the legacy [m, k, n] layout.
+    let valid_params = params.len() == 3 || (kernel_name == "matmul" && params.len() == 5);
+    if !valid_params {
         return None;
     }
     let m = params[0];
@@ -1210,13 +1216,39 @@ pub fn validate_prepared_against_plan_with_limits(
                 };
                 expected.packed_weight = actual.packed_weight;
                 expected.packed_bias = actual.packed_bias;
+                let runtime_tightened = matches!(
+                    &plan.instructions[i],
+                    Instruction::CallKernel { param_dims: Some(dims), .. }
+                        if dims.iter().any(|dim| !matches!(dim, crate::ir::DimExpr::Known(_)))
+                );
+                let allow_capacity_geometry = runtime_tightened && actual.packed_weight.is_none();
+                let b_mismatch = if !allow_capacity_geometry {
+                    actual.b != expected.b
+                } else {
+                    actual.b.offset != expected.b.offset || actual.b.size < expected.b.size
+                };
+                let bias_mismatch = match (actual.bias, expected.bias, actual.packed_bias) {
+                    (Some(actual_bias), Some(expected_bias), Some(_))
+                    | (Some(actual_bias), Some(expected_bias), None)
+                        if !allow_capacity_geometry =>
+                    {
+                        actual_bias != expected_bias
+                    }
+                    (Some(actual_bias), Some(expected_bias), None) => {
+                        actual_bias.offset != expected_bias.offset
+                            || actual_bias.size < expected_bias.size
+                    }
+                    (None, None, _) => false,
+                    _ => true,
+                };
+                let static_geometry_mismatch =
+                    !allow_capacity_geometry && (actual.k != expected.k || actual.n != expected.n);
                 if actual.instruction_index != expected.instruction_index
                     || actual.node_id != expected.node_id
-                    || actual.b != expected.b
-                    || actual.bias != expected.bias
+                    || b_mismatch
+                    || bias_mismatch
                     || actual.activation != expected.activation
-                    || actual.k != expected.k
-                    || actual.n != expected.n
+                    || static_geometry_mismatch
                     || actual.packed_weight != expected.packed_weight
                     || actual.packed_bias != expected.packed_bias
                     || actual.a.offset != expected.a.offset
@@ -2464,6 +2496,31 @@ mod tests {
     }
 
     #[test]
+    fn try_prepare_plain_matmul_accepts_unified_five_param_contract() {
+        let mut inst = make_matmul_instruction("matmul", 4, 8, 16, false);
+        let Instruction::CallKernel { params, .. } = &mut inst else {
+            unreachable!();
+        };
+        params.extend([0, 0]);
+
+        let result = try_prepare_matmul(&inst, 0).expect("should promote unified matmul");
+        let PreparedInstruction::MatMul(matmul) = result else {
+            panic!("expected MatMul");
+        };
+        assert_eq!((matmul.m, matmul.k, matmul.n), (4, 8, 16));
+    }
+
+    #[test]
+    fn try_prepare_specialized_matmul_rejects_unified_five_param_contract() {
+        let mut inst = make_matmul_instruction("matmul_i4", 4, 8, 16, false);
+        let Instruction::CallKernel { params, .. } = &mut inst else {
+            unreachable!();
+        };
+        params.extend([0, 0]);
+        assert!(try_prepare_matmul(&inst, 0).is_none());
+    }
+
+    #[test]
     fn try_prepare_matmul_with_activation() {
         let inst = make_matmul_instruction("matmul_relu", 2, 3, 5, false);
         let result = try_prepare_matmul(&inst, 0).expect("should promote");
@@ -2512,7 +2569,7 @@ mod tests {
             input_slices: vec![BufferSlice::new(0, 16), BufferSlice::new(16, 16)],
             output_slice: BufferSlice::new(32, 16),
             secondary_output_slice: None,
-            params: vec![4, 4], // need 3
+            params: vec![4, 4], // need either 3 or 5
             node_id: None,
             param_dims: None,
             weight_meta: None,
