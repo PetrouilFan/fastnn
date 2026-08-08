@@ -1925,6 +1925,48 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             .get_node(node_id)
             .ok_or_else(|| format!("node {} not found during shape validation", node_id))?;
 
+        // Only these operators have runtime shape constraints below. Avoid
+        // resolving and allocating input-shape vectors for constants and
+        // operators whose shape contract was already checked at compile time.
+        if !matches!(
+            &node.opcode,
+            Opcode::MatMul
+                | Opcode::ReduceSum
+                | Opcode::ReduceMean
+                | Opcode::Concat
+                | Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::Div
+                | Opcode::Conv2d
+                | Opcode::Transpose
+                | Opcode::Reshape
+                | Opcode::Flatten
+                | Opcode::Softmax
+                | Opcode::BatchNorm
+                | Opcode::LayerNorm
+                | Opcode::Slice
+                | Opcode::MaxPool
+                | Opcode::AvgPool
+                | Opcode::Squeeze
+                | Opcode::Unsqueeze
+                | Opcode::Gather
+                | Opcode::Pad
+                | Opcode::Neg
+                | Opcode::Abs
+                | Opcode::Exp
+                | Opcode::Log
+                | Opcode::Sqrt
+                | Opcode::Round
+                | Opcode::Relu
+                | Opcode::Gelu
+                | Opcode::Silu
+                | Opcode::Sigmoid
+                | Opcode::Tanh
+        ) {
+            continue;
+        }
+
         let input_shapes: Vec<Vec<u64>> = node
             .inputs
             .iter()
