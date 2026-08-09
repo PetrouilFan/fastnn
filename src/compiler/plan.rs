@@ -296,7 +296,10 @@ impl MemoryPlan {
             let mut resolved_input_shapes = Vec::with_capacity(node.inputs.len());
             for &input_id in &node.inputs {
                 let input = graph.get_node(input_id).ok_or_else(|| {
-                    format!("node {node_id} references missing input node {input_id}")
+                    format!(
+                        "node {node_id} ({:?} '{}') references missing input node {input_id}",
+                        node.opcode, node.name
+                    )
                 })?;
                 let mut shape = Vec::with_capacity(input.output_type.shape.len());
                 for dimension in &input.output_type.shape {

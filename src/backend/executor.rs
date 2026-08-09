@@ -255,6 +255,55 @@ fn validate_compiled_artifacts(
     Ok(())
 }
 
+fn slices_overlap(left: BufferSlice, right: BufferSlice) -> bool {
+    if left.size == 0 || right.size == 0 {
+        return false;
+    }
+    let left_end = left.offset.saturating_add(left.size);
+    let right_end = right.offset.saturating_add(right.size);
+    left.offset < right_end && right.offset < left_end
+}
+
+fn classify_stable_write_consts(
+    graph: &ComputeGraph,
+    plan: &ExecutablePlan,
+    memory_plan: &MemoryPlan,
+) -> Vec<bool> {
+    let mut runtime_writes = Vec::new();
+    for input_id in &graph.inputs {
+        if let Some(slot) = memory_plan.slots.get(input_id) {
+            runtime_writes.push(BufferSlice::new(slot.offset, slot.size));
+        }
+    }
+    for instruction in &plan.instructions {
+        match instruction {
+            Instruction::CallKernel {
+                output_slice,
+                secondary_output_slice,
+                ..
+            } => {
+                runtime_writes.push(*output_slice);
+                if let Some(secondary) = secondary_output_slice {
+                    runtime_writes.push(*secondary);
+                }
+            }
+            Instruction::MemCopy { dst, .. } | Instruction::Fill { dst, .. } => {
+                runtime_writes.push(*dst);
+            }
+            Instruction::WriteConst { .. } => {}
+        }
+    }
+    plan.instructions
+        .iter()
+        .map(|instruction| match instruction {
+            Instruction::WriteConst { dst, .. } => !runtime_writes
+                .iter()
+                .any(|runtime_dst| slices_overlap(*dst, *runtime_dst)),
+            _ => false,
+        })
+        .collect()
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -266,6 +315,11 @@ pub struct GraphExecutor<B: Backend> {
     /// Populated after the first inference when `graph.has_static_shapes()`
     /// is true. Subsequent calls skip ShapeEnv/tighten/tighten_slices.
     static_shape_cache: Option<StaticShapeCache>,
+    /// WriteConst instructions whose destinations cannot be overwritten by
+    /// graph inputs or runtime instructions. Once one prepared session step
+    /// has materialised them, later steps can retain them in the cached arena.
+    stable_write_const_mask: Option<Vec<bool>>,
+    stable_constants_initialized: bool,
     last_output_shapes: Vec<Vec<usize>>,
 }
 
@@ -657,6 +711,8 @@ impl<B: Backend> GraphExecutor<B> {
             resource_limits,
             cached_arena: None,
             static_shape_cache: None,
+            stable_write_const_mask: None,
+            stable_constants_initialized: false,
             last_output_shapes: Vec::new(),
         }
     }
@@ -676,6 +732,8 @@ impl<B: Backend> GraphExecutor<B> {
     pub fn invalidate_runtime_cache(&mut self) {
         self.cached_arena = None;
         self.static_shape_cache = None;
+        self.stable_write_const_mask = None;
+        self.stable_constants_initialized = false;
     }
 
     /// Run the full compilation pipeline:
@@ -1250,6 +1308,14 @@ impl<B: Backend> GraphExecutor<B> {
             .is_some_and(|(cap, _)| *cap >= arena_size);
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
+            self.stable_constants_initialized = false;
+        }
+        if self.stable_write_const_mask.is_none() {
+            self.stable_write_const_mask = Some(classify_stable_write_consts(
+                graph,
+                plan,
+                &tightened_memory_plan,
+            ));
         }
         let arena = &self
             .cached_arena
@@ -1273,12 +1339,16 @@ impl<B: Backend> GraphExecutor<B> {
         // ── Dispatch: no-copy persistent view path vs standard path ──
         #[cfg(feature = "prepared-plan")]
         if let Some(view) = persistent_view {
-            let dispatch_plan: ExecutablePlan = if view.is_empty() {
+            let dispatch_plan: ExecutablePlan = if view.is_empty()
+                && !self.stable_constants_initialized
+            {
                 plan.clone()
             } else {
                 let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
                 let mut filtered_levels = Vec::with_capacity(plan.levels.len());
-                for (instruction, level) in plan.instructions.iter().zip(&plan.levels) {
+                for (instruction_index, (instruction, level)) in
+                    plan.instructions.iter().zip(&plan.levels).enumerate()
+                {
                     // Only skip WriteConst for fp32 weight slots — the
                     // persistent-view dispatch path (`dispatch_with_persistent_view`)
                     // knows how to satisfy fp32 Conv2d/MatMul weights from the
@@ -1289,7 +1359,13 @@ impl<B: Backend> GraphExecutor<B> {
                         instruction,
                         Instruction::WriteConst { dst, .. }
                             if view.get(&(dst.offset, dst.size)).is_some()
-                    );
+                    ) || (self.stable_constants_initialized
+                        && self
+                            .stable_write_const_mask
+                            .as_ref()
+                            .and_then(|mask| mask.get(instruction_index))
+                            .copied()
+                            .unwrap_or(false));
                     if !drop {
                         filtered.push(instruction.clone());
                         filtered_levels.push(*level);
@@ -1356,6 +1432,7 @@ impl<B: Backend> GraphExecutor<B> {
                 reusable_outputs.take(),
             )?;
             self.last_output_shapes = runtime_outputs.shapes;
+            self.stable_constants_initialized = true;
             return Ok((runtime_outputs.data, profile_entries));
         }
 
@@ -1958,6 +2035,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 | Opcode::Log
                 | Opcode::Sqrt
                 | Opcode::Round
+                | Opcode::IsNaN
                 | Opcode::Relu
                 | Opcode::Gelu
                 | Opcode::Silu
@@ -2232,8 +2310,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     ));
                 }
                 let dim_size = input_shapes[0][dim] as i64;
-                let adjusted_end = if end < 0 { dim_size + end + 1 } else { end };
-                if start >= dim_size || adjusted_end > dim_size || start >= adjusted_end {
+                let adjusted_end = if end < 0 { dim_size + end + 1 } else { end }.min(dim_size);
+                if start >= dim_size || start >= adjusted_end {
                     return Err(format!(
                         "Slice node {}: invalid range [{}, {}) on dim {} with size {}",
                         node_id, start, adjusted_end, dim, dim_size
@@ -2345,6 +2423,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             | Opcode::Log
             | Opcode::Sqrt
             | Opcode::Round
+            | Opcode::IsNaN
             | Opcode::Relu
             | Opcode::Gelu
             | Opcode::Silu
@@ -4989,6 +5068,42 @@ mod execution_storage_size_tests {
         assert!(error
             .to_string()
             .contains("requires activation calibration"));
+    }
+
+    #[test]
+    fn stable_constant_classifier_rejects_runtime_overwrites() {
+        let builder = crate::GraphBuilder::new();
+        let input =
+            builder.input_with_dims(&[crate::ir::DimExpr::Symbol("N".into())], IrDType::F32);
+        let constant = builder.constant(
+            &1.0_f32.to_le_bytes(),
+            crate::ir::TensorType::new(vec![crate::ir::DimExpr::Known(1)], IrDType::F32),
+        );
+        let output = builder.add(&input, &constant);
+        let mut source_graph = builder.to_graph();
+        source_graph.set_outputs(vec![output.node_id]);
+        let executor = GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let (mut plan, memory_plan, graph) = executor
+            .compile_with_plan(source_graph)
+            .expect("compile dynamic add");
+        let write_index = plan
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, Instruction::WriteConst { .. }))
+            .expect("constant write");
+        let mask = classify_stable_write_consts(&graph, &plan, &memory_plan);
+        assert!(mask[write_index]);
+
+        let dst = match plan.instructions[write_index] {
+            Instruction::WriteConst { dst, .. } => dst,
+            _ => unreachable!(),
+        };
+        plan.instructions
+            .push(Instruction::Fill { dst, value: 0.0 });
+        plan.levels
+            .push(plan.levels.last().copied().unwrap_or(0) + 1);
+        let mask = classify_stable_write_consts(&graph, &plan, &memory_plan);
+        assert!(!mask[write_index]);
     }
 
     #[test]

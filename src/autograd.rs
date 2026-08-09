@@ -2264,7 +2264,7 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_input);
                 }
             }
-            Opcode::LogicalNot => {
+            Opcode::LogicalNot | Opcode::IsNaN => {
                 // no gradient needed (boolean op)
             }
             Opcode::LogSoftmax => {

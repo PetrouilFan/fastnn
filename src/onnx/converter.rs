@@ -241,8 +241,8 @@ impl<'a> OnnxConverter<'a> {
             "BatchNormalization" => 5,
             "ScatterND" | "Where" | "QuantizeLinear" | "DequantizeLinear" | "LSTM" | "GRU" => 3,
             "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Max" | "Min" | "Greater" | "Less"
-            | "Equal" | "MatMul" | "Gemm" | "Conv" | "PRelu" | "Embedding" | "Gather"
-            | "GatherElements" => 2,
+            | "Equal" | "GreaterOrEqual" | "LessOrEqual" | "And" | "Or" | "MatMul" | "Gemm"
+            | "Conv" | "PRelu" | "Embedding" | "Gather" | "GatherElements" => 2,
             _ => 1,
         };
         if ins.len() < minimum_inputs {
@@ -284,6 +284,23 @@ impl<'a> OnnxConverter<'a> {
             "Greater" => self.out(node, self.graph.gt_scalar(&ins[0], &ins[1])),
             "Less" => self.out(node, self.graph.lt_scalar(&ins[0], &ins[1])),
             "Equal" => self.out(node, self.graph.eq_scalar(&ins[0], &ins[1])),
+            "GreaterOrEqual" => {
+                let greater = self.graph.gt_scalar(&ins[0], &ins[1]);
+                let equal = self.graph.eq_scalar(&ins[0], &ins[1]);
+                self.out(node, self.graph.add(&greater, &equal))
+            }
+            "LessOrEqual" => {
+                let less = self.graph.lt_scalar(&ins[0], &ins[1]);
+                let equal = self.graph.eq_scalar(&ins[0], &ins[1]);
+                self.out(node, self.graph.add(&less, &equal))
+            }
+            // Comparisons use canonical 0.0/1.0 runtime values. Multiplication
+            // and maximum preserve ONNX boolean And/Or semantics for those
+            // values without introducing a second boolean storage contract.
+            "And" => self.out(node, self.graph.mul(&ins[0], &ins[1])),
+            "Or" => self.out(node, self.graph.maximum(&ins[0], &ins[1])),
+            // IEEE equality is false for NaN, including self-comparison.
+            "IsNaN" => self.out(node, self.graph.is_nan(&ins[0])),
 
             // ── Parametric activations ──────────────────────────────
             "LeakyRelu" => {
@@ -982,9 +999,32 @@ impl<'a> OnnxConverter<'a> {
             // Their graph tensors were registered before node processing.
             "Input" | "Parameter" => {}
             "Constant" => {
-                // Already handled in Phase 2; check if still missing
+                // Phase 2 registers parameter payloads before node processing.
+                // Restore the serialized semantic contract here because scalar
+                // I64/Bool constants are physically carried by the F32 parameter
+                // container and would otherwise become rank-1 F32 tensors.
                 let out_name = node.outputs.first().cloned().unwrap_or_default();
-                if !self.name_to_id.contains_key(&out_name) {
+                if let Some(existing) = self.name_to_id.get(&out_name).cloned() {
+                    let declared_shape =
+                        if node.attrs.get("output_rank").map(String::as_str) == Some("0") {
+                            Some(Vec::new())
+                        } else {
+                            parse_shape_attr(&node.attrs, "shape")
+                        };
+                    if let Some(shape) = declared_shape {
+                        // FNN currently stores ONNX integer shape constants in
+                        // F32 parameter payloads. Correct rank here, but retain
+                        // the physical dtype so gather/shape kernels decode the
+                        // bytes using the representation actually present.
+                        let tensor_type = TensorType::new(shape, existing.dtype());
+                        self.graph
+                            .set_node_output_type(existing.node_id(), tensor_type.clone());
+                        self.out(
+                            node,
+                            GraphTensor::new(self.graph.clone(), existing.node_id(), tensor_type),
+                        );
+                    }
+                } else {
                     let c = self.scalar(0.0);
                     self.out(node, c);
                 }
@@ -2040,6 +2080,37 @@ fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Result<Vec<DimExp
                 }
                 if symbolic_input_dims.len() == 1 && input_known_product == known_product {
                     return Ok(symbolic_input_dims[0].clone());
+                }
+                // Flatten-to-[-1] is a common dynamic mask/indexing pattern. No
+                // division is required when the target's known product is one:
+                // the inferred extent is exactly the product of the input dims.
+                if known_product == 1 {
+                    let mut expression_parts = Vec::with_capacity(input_shape.len());
+                    let mut maximum = 1u64;
+                    for input_dimension in input_shape {
+                        let (expression, bound) = match input_dimension {
+                            DimExpr::Known(value) => (value.to_string(), *value),
+                            DimExpr::Symbol(symbol) => (
+                                symbol.clone(),
+                                SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed),
+                            ),
+                            DimExpr::Bounded { sym, max } => (sym.clone(), *max),
+                        };
+                        maximum = maximum.checked_mul(bound).ok_or_else(|| {
+                            "Reshape inferred symbolic product overflows".to_string()
+                        })?;
+                        if expression != "1" {
+                            expression_parts.push(expression);
+                        }
+                    }
+                    return Ok(DimExpr::Bounded {
+                        sym: if expression_parts.is_empty() {
+                            "1".to_string()
+                        } else {
+                            expression_parts.join("*")
+                        },
+                        max: maximum,
+                    });
                 }
                 Err("Reshape inferred dimension requires unsupported symbolic division".into())
             } else if dimension == 0 {

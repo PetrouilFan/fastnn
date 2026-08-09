@@ -511,8 +511,8 @@ impl ComputeGraph {
             }
             if let Some(missing) = node.inputs.iter().find(|input| !ids.contains(input)) {
                 return Err(FastnnError::compilation(format!(
-                    "node {} references missing input node {missing}",
-                    node.id
+                    "node {} ({:?} '{}') references missing input node {missing}",
+                    node.id, node.opcode, node.name
                 )));
             }
         }

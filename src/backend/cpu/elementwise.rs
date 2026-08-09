@@ -156,7 +156,15 @@ pub(super) fn broadcast_binary_dispatch(
         || rhs_slice.size != rhs_elements * scalar_bytes
         || output_slice.size != output_elements * scalar_bytes
     {
-        return Err("broadcast semantic shapes disagree with storage".into());
+        return Err(format!(
+            "broadcast semantic shapes disagree with storage: lhs {lhs_shape:?} bytes {}, rhs {rhs_shape:?} bytes {}, output {output_shape:?} bytes {}, expected [{}, {}, {}]",
+            lhs_slice.size,
+            rhs_slice.size,
+            output_slice.size,
+            lhs_elements * scalar_bytes,
+            rhs_elements * scalar_bytes,
+            output_elements * scalar_bytes,
+        ));
     }
     for input_shape in [lhs_shape, rhs_shape] {
         if input_shape.len() > output_shape.len() {

@@ -626,6 +626,7 @@ impl GraphBuilder {
     }
 
     impl_unary_op!(round, Round);
+    impl_unary_op!(is_nan, IsNaN);
     impl_unary_op!(sign, Sign);
     impl_unary_op!(logical_not, LogicalNot);
     pub fn log_softmax(&self, input: &GraphTensor, dim: i64) -> GraphTensor {
@@ -2898,6 +2899,14 @@ impl GraphBuilder {
         let mut inner = self.inner.borrow_mut();
         if let Some(node) = inner.graph.get_node_mut(node_id) {
             node.name = name.to_string();
+        }
+    }
+
+    /// Replace the declared output contract of an existing node.
+    pub(crate) fn set_node_output_type(&self, node_id: NodeId, tensor_type: TensorType) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(node) = inner.graph.get_node_mut(node_id) {
+            node.output_type = tensor_type;
         }
     }
 

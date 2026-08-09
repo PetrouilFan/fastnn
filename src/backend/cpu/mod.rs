@@ -821,8 +821,8 @@ impl Backend for CpuBackend {
                 .map(|&input_id| {
                     let input = graph.get_node(input_id).ok_or_else(|| {
                         BackendError::Compilation(format!(
-                            "node {node_id} ({:?}) references missing input node {input_id}",
-                            node.opcode
+                            "node {node_id} ({:?} '{}') references missing input node {input_id}",
+                            node.opcode, node.name
                         ))
                     })?;
                     let slot = memory_plan.slots.get(&input_id).ok_or_else(|| {
@@ -849,8 +849,8 @@ impl Backend for CpuBackend {
                 .map(|&input_id| {
                     graph.get_node(input_id).ok_or_else(|| {
                         BackendError::Compilation(format!(
-                            "node {node_id} ({:?}) references missing input node {input_id}",
-                            node.opcode
+                            "node {node_id} ({:?} '{}') references missing input node {input_id}",
+                            node.opcode, node.name
                         ))
                     })
                 })
@@ -1288,6 +1288,7 @@ impl Backend for CpuBackend {
                 | Opcode::Clamp
                 | Opcode::Sign
                 | Opcode::Round
+                | Opcode::IsNaN
                 | Opcode::LogicalNot
                 | Opcode::LogSoftmax
                 | Opcode::Mish => {
@@ -1309,6 +1310,7 @@ impl Backend for CpuBackend {
                         Opcode::Clamp => "clamp_f32",
                         Opcode::Sign => "sign_f32",
                         Opcode::Round => "round_f32",
+                        Opcode::IsNaN => "is_nan_f32",
                         Opcode::LogicalNot => "logical_not_f32",
                         Opcode::LogSoftmax => "log_softmax_f32",
                         Opcode::Mish => "mish_f32",
@@ -2025,7 +2027,7 @@ impl Backend for CpuBackend {
                                 "slice node {node_id} dimension size does not fit i64"
                             ))
                         })?;
-                        let normalized_end = if end_value < 0 {
+                        let normalized_end = (if end_value < 0 {
                             dimension_size
                                 .checked_add(end_value)
                                 .and_then(|value| value.checked_add(1))
@@ -2036,11 +2038,9 @@ impl Backend for CpuBackend {
                                 })?
                         } else {
                             end_value
-                        };
-                        if start_value >= dimension_size
-                            || normalized_end > dimension_size
-                            || start_value >= normalized_end
-                        {
+                        })
+                        .min(dimension_size);
+                        if start_value >= dimension_size || start_value >= normalized_end {
                             return Err(BackendError::Compilation(format!(
                             "slice node {node_id} has invalid range [{start_value}, {normalized_end}) for dimension size {dimension_size}"
                         )));
@@ -3851,6 +3851,7 @@ impl Backend for CpuBackend {
                             | "clamp_f32"
                             | "sign_f32"
                             | "round_f32"
+                            | "is_nan_f32"
                             | "logical_not_f32"
                             | "log_softmax_f32"
                             | "mish_f32"
@@ -4555,6 +4556,9 @@ impl Backend for CpuBackend {
                         }
                         "round_f32" => {
                             unary_op_dispatch(input_slices, arena, out_start, out_end, round_f32);
+                        }
+                        "is_nan_f32" => {
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, is_nan_f32);
                         }
                         "logical_not_f32" => {
                             unary_op_dispatch(
@@ -7390,13 +7394,21 @@ impl Backend for CpuBackend {
                                         "gather: output geometry overflows".into(),
                                     )
                                 })?;
-                            let scalar_bytes = std::mem::size_of::<f32>();
-                            let expected_data =
-                                data_elements.checked_mul(scalar_bytes).ok_or_else(|| {
-                                    BackendError::Dispatch("gather: data size overflows".into())
-                                })?;
-                            let expected_indices =
-                                indices_numel.checked_mul(scalar_bytes).ok_or_else(|| {
+                            if data_elements == 0 || input_slices[0].size % data_elements != 0 {
+                                return Err(BackendError::Dispatch(
+                                    "gather: data storage is not divisible by its geometry".into(),
+                                ));
+                            }
+                            let scalar_bytes = input_slices[0].size / data_elements;
+                            if !matches!(scalar_bytes, 1 | 2 | 4 | 8) {
+                                return Err(BackendError::Dispatch(format!(
+                                    "gather: unsupported element width {scalar_bytes}"
+                                )));
+                            }
+                            let expected_data = input_slices[0].size;
+                            let expected_indices = indices_numel
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
                                     BackendError::Dispatch("gather: index size overflows".into())
                                 })?;
                             let expected_output =
@@ -7407,15 +7419,12 @@ impl Backend for CpuBackend {
                             if input_slices[0].size != expected_data
                                 || input_slices[1].size != expected_indices
                                 || output_slice.size != expected_output
-                                || input_slices.iter().any(|slice| {
-                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
-                                })
-                                || !output_slice
+                                || !input_slices[1]
                                     .offset
                                     .is_multiple_of(std::mem::align_of::<f32>())
                             {
                                 return Err(BackendError::Dispatch(format!(
-                                    "gather: geometry and f32 storage disagree: data shape {data_shape:?}, indices numel {indices_numel}, actual bytes [{}, {}] -> {}, expected [{expected_data}, {expected_indices}] -> {expected_output}",
+                                    "gather: geometry and storage disagree: data shape {data_shape:?}, indices numel {indices_numel}, element width {scalar_bytes}, actual bytes [{}, {}] -> {}, expected [{expected_data}, {expected_indices}] -> {expected_output}",
                                     input_slices[0].size,
                                     input_slices[1].size,
                                     output_slice.size,
@@ -7448,26 +7457,71 @@ impl Backend for CpuBackend {
                                 }
                                 normalized_indices.push(normalized as usize);
                             }
-                            arena::with_nary_f32_slices(
-                                arena,
-                                input_slices,
-                                output_slice,
-                                |inputs, output| {
-                                    let data = inputs[0];
-                                    for outer_index in 0..outer {
-                                        for (index_position, index) in
-                                            normalized_indices.iter().enumerate()
-                                        {
-                                            let source = (outer_index * axis_size + *index) * inner;
-                                            let destination = (outer_index * indices_numel
-                                                + index_position)
-                                                * inner;
-                                            output[destination..destination + inner]
-                                                .copy_from_slice(&data[source..source + inner]);
+                            if scalar_bytes == std::mem::size_of::<f32>() {
+                                arena::with_nary_f32_slices(
+                                    arena,
+                                    input_slices,
+                                    output_slice,
+                                    |inputs, output| {
+                                        let data = inputs[0];
+                                        for outer_index in 0..outer {
+                                            for (index_position, index) in
+                                                normalized_indices.iter().enumerate()
+                                            {
+                                                let source =
+                                                    (outer_index * axis_size + *index) * inner;
+                                                let destination = (outer_index * indices_numel
+                                                    + index_position)
+                                                    * inner;
+                                                output[destination..destination + inner]
+                                                    .copy_from_slice(&data[source..source + inner]);
+                                            }
                                         }
+                                    },
+                                );
+                            } else {
+                                // Shape/mask graphs commonly Gather Bool or integer-width
+                                // storage. Copy by element bytes while retaining the same
+                                // checked geometry as the F32 path.
+                                let data = unsafe {
+                                    arena
+                                        .view_u8(input_slices[0].offset, input_slices[0].size)
+                                        .to_vec()
+                                };
+                                let output = unsafe {
+                                    arena.view_u8_mut(output_slice.offset, output_slice.size)
+                                };
+                                let inner_bytes =
+                                    inner.checked_mul(scalar_bytes).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "gather: inner byte geometry overflows".into(),
+                                        )
+                                    })?;
+                                for outer_index in 0..outer {
+                                    for (index_position, index) in
+                                        normalized_indices.iter().enumerate()
+                                    {
+                                        let source = (outer_index * axis_size + *index)
+                                            .checked_mul(inner_bytes)
+                                            .ok_or_else(|| {
+                                                BackendError::Dispatch(
+                                                    "gather: source byte offset overflows".into(),
+                                                )
+                                            })?;
+                                        let destination = (outer_index * indices_numel
+                                            + index_position)
+                                            .checked_mul(inner_bytes)
+                                            .ok_or_else(|| {
+                                                BackendError::Dispatch(
+                                                    "gather: destination byte offset overflows"
+                                                        .into(),
+                                                )
+                                            })?;
+                                        output[destination..destination + inner_bytes]
+                                            .copy_from_slice(&data[source..source + inner_bytes]);
                                     }
-                                },
-                            );
+                                }
+                            }
                         }
                         "slice_f32" => {
                             if input_slices.len() != 1 || params.is_empty() {
@@ -7488,9 +7542,14 @@ impl Backend for CpuBackend {
                             }
                             let input_shape = &params[1..1 + rank];
                             let dim = params[1 + rank];
+                            if dim >= rank {
+                                return Err(BackendError::Dispatch(
+                                    "slice_f32: invalid dimension or range".into(),
+                                ));
+                            }
                             let start = params[2 + rank];
-                            let end = params[3 + rank];
-                            if dim >= rank || start > end || end > input_shape[dim] {
+                            let end = params[3 + rank].min(input_shape[dim]);
+                            if start > end {
                                 return Err(BackendError::Dispatch(
                                     "slice_f32: invalid dimension or range".into(),
                                 ));
@@ -7554,9 +7613,10 @@ impl Backend for CpuBackend {
                                     .offset
                                     .is_multiple_of(std::mem::align_of::<f32>())
                             {
-                                return Err(BackendError::Dispatch(
-                                    "slice_f32: shape and f32 storage disagree".into(),
-                                ));
+                                return Err(BackendError::Dispatch(format!(
+                                    "slice_f32: shape and f32 storage disagree (input {} vs {}, output {} vs {})",
+                                    input_slice.size, input_bytes, output_slice.size, output_bytes
+                                )));
                             }
                             let axis_size = input_shape[dim];
                             let copy_elements = range * inner;

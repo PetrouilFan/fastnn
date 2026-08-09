@@ -28,6 +28,7 @@ pub enum Opcode {
     Clamp,
     Sign,
     Round,
+    IsNaN,
     Maximum,
     Minimum,
     LogicalNot,

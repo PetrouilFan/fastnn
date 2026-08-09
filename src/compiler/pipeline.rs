@@ -99,6 +99,9 @@ impl CompilerPipeline {
 
         before = graph.nodes.len();
         dead_code_elimination::eliminate_dead_code(&mut graph);
+        graph
+            .validate_with_limits(&GraphResourceLimits::default())
+            .map_err(|error| CompilerError::pass("post DCE validation", error))?;
         report.record("dead code elimination", before, graph.nodes.len());
 
         if quant_target.is_some() || self.calibration.is_some() {

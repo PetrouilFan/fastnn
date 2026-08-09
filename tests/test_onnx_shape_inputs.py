@@ -56,6 +56,104 @@ def test_runtime_shape_uses_each_input_extent(tmp_path):
         np.testing.assert_array_equal(actual.astype(np.int64), expected)
 
 
+def test_scalar_shape_gather_unsqueeze_concat_matches_onnxruntime(tmp_path):
+    """TinyLlama's RoPE shape chain must keep scalar Gather rank zero."""
+    initializers = [
+        numpy_helper.from_array(np.asarray(1, dtype=np.int64), "index"),
+        numpy_helper.from_array(np.asarray([0], dtype=np.int64), "axes"),
+        numpy_helper.from_array(np.asarray([1], dtype=np.int64), "one"),
+        numpy_helper.from_array(np.asarray([64], dtype=np.int64), "head_dim"),
+    ]
+    graph = helper.make_graph(
+        [
+            helper.make_node("Shape", ["X"], ["shape"], name="shape"),
+            helper.make_node("Gather", ["shape", "index"], ["length"], name="gather", axis=0),
+            helper.make_node("Unsqueeze", ["length", "axes"], ["length_1d"], name="unsqueeze"),
+            helper.make_node("Concat", ["length_1d", "one", "head_dim"], ["Y"], name="concat", axis=0),
+        ],
+        "scalar_shape_gather_unsqueeze_concat",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", "tokens"])],
+        [helper.make_tensor_value_info("Y", TensorProto.INT64, [3])],
+        initializer=initializers,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "scalar-shape-chain.onnx"
+    fnn_path = tmp_path / "scalar-shape-chain.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"batch": 1, "tokens": 16}
+    )
+    ort_session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    for tokens in (1, 5):
+        x = np.zeros((1, tokens), dtype=np.float32)
+        expected = ort_session.run(["Y"], {"X": x})[0]
+        actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual.astype(np.int64), expected)
+
+
+def test_bool_gather_matches_onnxruntime(tmp_path):
+    zero = numpy_helper.from_array(np.asarray(0.0, dtype=np.float32), "zero")
+    indices = numpy_helper.from_array(np.asarray([1, 0], dtype=np.int64), "indices")
+    graph = helper.make_graph(
+        [
+            helper.make_node("Less", ["X", "zero"], ["mask"], name="mask"),
+            helper.make_node("Flatten", ["mask"], ["flat_mask"], name="flatten", axis=1),
+            helper.make_node(
+                "Gather", ["flat_mask", "indices"], ["Y"], name="bool_gather", axis=0
+            ),
+        ],
+        "bool_gather",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 2])],
+        [helper.make_tensor_value_info("Y", TensorProto.BOOL, [2, 2])],
+        initializer=[zero, indices],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "bool-gather.onnx"
+    fnn_path = tmp_path / "bool-gather.fnn"
+    onnx.save(model, onnx_path)
+    values = np.asarray([[-1.0, 2.0], [3.0, -4.0]], dtype=np.float32)
+    expected = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"]
+    ).run(["Y"], {"X": values})[0]
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    actual = executor.forward({"X": fnn.tensor(values, list(values.shape))})["Y"].numpy()
+    np.testing.assert_array_equal(actual.astype(bool), expected)
+
+
+def test_comparison_boolean_and_isnan_lowering_matches_onnxruntime(tmp_path):
+    zero = numpy_helper.from_array(np.asarray(0.0, dtype=np.float32), "zero")
+    output_names = ["less_equal", "greater_equal", "both", "either", "is_nan"]
+    graph = helper.make_graph(
+        [
+            helper.make_node("LessOrEqual", ["X", "zero"], ["less_equal"]),
+            helper.make_node("GreaterOrEqual", ["X", "zero"], ["greater_equal"]),
+            helper.make_node("And", ["less_equal", "greater_equal"], ["both"]),
+            helper.make_node("Or", ["less_equal", "greater_equal"], ["either"]),
+            helper.make_node("IsNaN", ["X"], ["is_nan"]),
+        ],
+        "comparison_boolean_isnan",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [5])],
+        [helper.make_tensor_value_info(name, TensorProto.BOOL, [5]) for name in output_names],
+        initializer=[zero],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "comparison-boolean-isnan.onnx"
+    fnn_path = tmp_path / "comparison-boolean-isnan.fnn"
+    onnx.save(model, onnx_path)
+    values = np.asarray([-np.inf, -1.0, 0.0, np.inf, np.nan], dtype=np.float32)
+    expected = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"]
+    ).run(output_names, {"X": values})
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    actual = executor.forward({"X": fnn.tensor(values, [5])})
+    for name, reference in zip(output_names, expected):
+        np.testing.assert_array_equal(actual[name].numpy() != 0, reference)
+
+
 def test_runtime_constant_of_shape_matches_onnxruntime(tmp_path):
     fill = numpy_helper.from_array(np.asarray([2.5], dtype=np.float32))
     graph = helper.make_graph(
@@ -85,6 +183,60 @@ def test_runtime_constant_of_shape_matches_onnxruntime(tmp_path):
         x = np.arange(tokens * 4, dtype=np.float32).reshape(tokens, 4)
         expected = session.run(["Y"], {"X": x})[0]
         actual = executor.forward({"X": fnn.tensor(x, list(x.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_int64_max_slice_end_preserves_live_symbolic_extent(tmp_path):
+    starts = numpy_helper.from_array(np.asarray([1], dtype=np.int64), "starts")
+    ends = numpy_helper.from_array(np.asarray([np.iinfo(np.int64).max], dtype=np.int64), "ends")
+    axes = numpy_helper.from_array(np.asarray([1], dtype=np.int64), "axes")
+    steps = numpy_helper.from_array(np.asarray([1], dtype=np.int64), "steps")
+    graph = helper.make_graph(
+        [helper.make_node("Slice", ["X", "starts", "ends", "axes", "steps"], ["Y"], name="tail")],
+        "slice_to_end",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", "tokens", 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", "tail_tokens", 4])],
+        initializer=[starts, ends, axes, steps],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "slice-to-end.onnx"
+    fnn_path = tmp_path / "slice-to-end.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    for tokens in (2, 5):
+        executor = fnn.build_model_from_fnn(
+            str(fnn_path),
+            symbolic_dim_bounds={"batch": 1, "tokens": 8, "tail_tokens": 7},
+        )
+        values = np.arange(tokens * 4, dtype=np.float32).reshape(1, tokens, 4)
+        expected = session.run(["Y"], {"X": values})[0]
+        actual = executor.forward({"X": fnn.tensor(values, list(values.shape))})["Y"].numpy()
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_bounded_batch_flatten_reshape_matches_onnxruntime(tmp_path):
+    target = numpy_helper.from_array(np.asarray([-1], dtype=np.int64), "target")
+    graph = helper.make_graph(
+        [helper.make_node("Reshape", ["X", "target"], ["Y"], name="flatten")],
+        "multisymbol_flatten",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", "tokens"])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch_times_tokens"])],
+        initializer=[target],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "multisymbol-flatten.onnx"
+    fnn_path = tmp_path / "multisymbol-flatten.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"batch": 1, "tokens": 8, "batch_times_tokens": 8}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    for shape in ((1, 3), (1, 4)):
+        values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        expected = session.run(["Y"], {"X": values})[0]
+        actual = executor.forward({"X": fnn.tensor(values, list(shape))})["Y"].numpy()
         np.testing.assert_array_equal(actual, expected)
 
 

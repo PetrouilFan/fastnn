@@ -62,6 +62,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             | Opcode::Clamp
             | Opcode::Sign
             | Opcode::Round
+            | Opcode::IsNaN
             | Opcode::LogicalNot
             | Opcode::LogSoftmax
             | Opcode::Mish => inputs.first().map(|i| i.output_type.shape.clone()),
@@ -625,22 +626,17 @@ fn matmul_output_shape(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, Fas
     let k_b = &b[b.len() - 2];
     let n = &b[b.len() - 1];
 
-    match (k_a.evaluate(), k_b.evaluate()) {
-        (Some(va), Some(vb)) if va != vb => {
+    match (k_a, k_b) {
+        (DimExpr::Known(va), DimExpr::Known(vb)) if va != vb => {
             return Err(FastnnError::compilation(format!(
                 "MatMul: inner dimensions must match, got {} vs {}",
                 va, vb
             )));
         }
-        (Some(_), Some(_)) => {}
-        _ => {
-            if k_a != k_b {
-                return Err(FastnnError::compilation(format!(
-                    "MatMul: inner dimensions must match, got {} vs {}",
-                    k_a, k_b
-                )));
-            }
-        }
+        // Distinct symbolic names may still describe the same live extent after
+        // ONNX shape propagation. Runtime validation resolves both expressions
+        // and rejects any actual mismatch before dispatch.
+        _ => {}
     }
 
     let batch_a = &a[..a.len() - 2];
