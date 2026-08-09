@@ -833,16 +833,21 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
             "capacity_bytes": "4",
         }
     ]
+    del model
     assert first.forward_stateful({"delta": fnn.tensor([0.0], [1])}) == {}
     assert first.output_buffer_capacities() == [4]
     first.reset_state()
     out1 = first.forward_stateful({"delta": fnn.tensor([1.0], [1])}, True)
     out2 = first.forward_stateful({"delta": fnn.tensor([2.0], [1])}, True)
     isolated = second.forward_stateful({"delta": fnn.tensor([1.0], [1])}, True)
+    isolated_next = second.forward_stateful({"delta": fnn.tensor([2.0], [1])}, True)
     np.testing.assert_array_equal(out1["next_state"].numpy(), np.array([1.0], np.float32))
     np.testing.assert_array_equal(out2["next_state"].numpy(), np.array([3.0], np.float32))
     np.testing.assert_array_equal(
         isolated["next_state"].numpy(), np.array([1.0], np.float32)
+    )
+    np.testing.assert_array_equal(
+        isolated_next["next_state"].numpy(), np.array([3.0], np.float32)
     )
 
     with pytest.raises(ValueError, match="runtime-owned"):
@@ -912,6 +917,7 @@ def test_aot_runtime_owned_state_append_non_innermost_axis(tmp_path):
     )
     assert executor.state_descriptors()[0]["update"] == "append"
     assert executor.state_descriptors()[0]["axis"] == "1"
+    assert executor.state_shapes() == {"state": [2, 1, 2]}
 
     first = executor.forward_stateful(
         {"delta": fnn.tensor([5.0, 6.0, 7.0, 8.0], [2, 1, 2])}
@@ -933,13 +939,19 @@ def test_aot_runtime_owned_state_append_non_innermost_axis(tmp_path):
     executor.forward_stateful(
         {"delta": fnn.tensor([13.0, 14.0, 15.0, 16.0], [2, 1, 2])}
     )
+    assert executor.state_shapes() == {"state": [2, 4, 2]}
+    assert executor.session_steps == 3
     with pytest.raises(RuntimeError, match="exceeding capacity"):
         executor.forward_stateful(
             {"delta": fnn.tensor([17.0, 18.0, 19.0, 20.0], [2, 1, 2])}
         )
     assert executor.state_sizes()["state"] == 2 * 4 * 2 * 4
+    assert executor.state_shapes() == {"state": [2, 4, 2]}
+    assert executor.session_steps == 3
     executor.reset_state()
     assert executor.state_sizes()["state"] == 2 * 1 * 2 * 4
+    assert executor.state_shapes() == {"state": [2, 1, 2]}
+    assert executor.session_steps == 0
 
 
 def test_aot_runtime_owned_state_rejects_capacity_overflow_atomically(tmp_path):

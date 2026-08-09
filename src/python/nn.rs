@@ -1755,6 +1755,11 @@ impl AotExecutor {
             .collect()
     }
 
+    /// Return live tensor dimensions separately from allocation capacity.
+    fn state_shapes(&self) -> std::collections::HashMap<String, Vec<usize>> {
+        self.state_shapes.clone()
+    }
+
     /// Return reusable output-buffer capacities for allocation diagnostics.
     fn output_buffer_capacities(&self) -> Vec<usize> {
         self.reusable_outputs
@@ -1803,6 +1808,9 @@ impl AotExecutor {
                 "persistent state has not been configured",
             ));
         }
+        let next_stateful_step = self.stateful_steps.checked_add(1).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")
+        })?;
         for descriptor in &self.state_bindings {
             if inputs.contains_key(&descriptor.input_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -1974,6 +1982,17 @@ impl AotExecutor {
                 }
             }
         }
+        // Decode every user-visible output before committing any persistent
+        // state. Output representation or shape failures must leave the
+        // session at the previous successful step.
+        let hidden_outputs = (!include_state_outputs).then(|| {
+            self.state_bindings
+                .iter()
+                .map(|descriptor| descriptor.output_name.clone())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let result = self.decode_outputs_filtered(&output_data, hidden_outputs.as_ref())?;
+
         for descriptor in &self.state_bindings {
             let input_name = &descriptor.input_name;
             let state = self.state_values.get_mut(input_name).ok_or_else(|| {
@@ -2023,16 +2042,7 @@ impl AotExecutor {
                 }
             }
         }
-        self.stateful_steps = self.stateful_steps.checked_add(1).ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")
-        })?;
-        let hidden_outputs = (!include_state_outputs).then(|| {
-            self.state_bindings
-                .iter()
-                .map(|descriptor| descriptor.output_name.clone())
-                .collect::<std::collections::HashSet<_>>()
-        });
-        let result = self.decode_outputs_filtered(&output_data, hidden_outputs.as_ref())?;
+        self.stateful_steps = next_stateful_step;
         self.reusable_outputs = output_data;
         Ok(result)
     }
