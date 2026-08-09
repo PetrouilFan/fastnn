@@ -1219,17 +1219,28 @@ struct StateDescriptor {
     update: StateUpdatePolicy,
 }
 
-#[pyclass(unsendable)]
-pub struct AotExecutor {
-    plan: crate::backend::ExecutablePlan,
-    memory_plan: crate::compiler::plan::MemoryPlan,
+/// Immutable resources shared by every mutable inference session created from
+/// one compiled model. The executable and memory plans stored here are pristine
+/// templates; each session clones only their metadata so live-shape tightening
+/// can never leak across sessions.
+#[derive(Clone)]
+struct CompiledAotModel {
+    plan_template: crate::backend::ExecutablePlan,
+    memory_plan_template: crate::compiler::plan::MemoryPlan,
     graph: std::sync::Arc<crate::ir::ComputeGraph>,
-    executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
-    input_names: Vec<String>,
-    output_map: Vec<(String, usize)>,
+    input_names: std::sync::Arc<[String]>,
+    output_map: std::sync::Arc<[(String, usize)]>,
     prepared_plan: std::sync::Arc<crate::backend::prepared::PreparedExecutablePlan>,
     persistent_prepared_weights:
         std::sync::Arc<crate::backend::prepared::PersistentPreparedWeights>,
+}
+
+#[pyclass(unsendable)]
+pub struct AotExecutor {
+    compiled: std::sync::Arc<CompiledAotModel>,
+    plan: crate::backend::ExecutablePlan,
+    memory_plan: crate::compiler::plan::MemoryPlan,
+    executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
     state_bindings: Vec<StateDescriptor>,
     state_values: std::collections::HashMap<String, Vec<u8>>,
     initial_state_values: std::collections::HashMap<String, Vec<u8>>,
@@ -1467,15 +1478,20 @@ impl AotExecutor {
         let persistent_prepared_weights = std::sync::Arc::new(
             crate::backend::prepared::build_persistent_prepared_weights(&prepared_plan),
         );
-        Ok(AotExecutor {
-            plan,
-            memory_plan,
+        let compiled = std::sync::Arc::new(CompiledAotModel {
+            plan_template: plan.clone(),
+            memory_plan_template: memory_plan.clone(),
             graph: std::sync::Arc::new(compiled_graph),
-            executor,
-            input_names,
-            output_map,
+            input_names: input_names.into(),
+            output_map: output_map.into(),
             prepared_plan: std::sync::Arc::new(prepared_plan),
             persistent_prepared_weights,
+        });
+        Ok(AotExecutor {
+            compiled,
+            plan,
+            memory_plan,
+            executor,
             state_bindings: Vec::new(),
             state_values: std::collections::HashMap::new(),
             initial_state_values: std::collections::HashMap::new(),
@@ -1492,6 +1508,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1515,19 +1532,19 @@ impl AotExecutor {
 
         #[cfg(feature = "prepared-plan")]
         let output_data = {
-            if self.prepared_plan.static_weight_binding_count() > 0 {
+            if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
                 self.executor
                     .execute_prepared_no_copy(
-                        &self.graph,
+                        &self.compiled.graph,
                         &mut self.plan,
                         &self.memory_plan,
                         &input_refs,
-                        &self.prepared_plan,
+                        &self.compiled.prepared_plan,
                     )
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             } else {
                 self.executor
-                    .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+                    .execute(&self.compiled.graph, &mut self.plan, &self.memory_plan, &input_refs)
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             }
         };
@@ -1535,7 +1552,7 @@ impl AotExecutor {
         #[cfg(not(feature = "prepared-plan"))]
         let output_data = self
             .executor
-            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .execute(&self.compiled.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.decode_outputs(&output_data)
@@ -1562,16 +1579,12 @@ impl AotExecutor {
         }
 
         Ok(Self {
-            plan: self.plan.clone(),
-            memory_plan: self.memory_plan.clone(),
-            graph: self.graph.clone(),
+            compiled: self.compiled.clone(),
+            plan: self.compiled.plan_template.clone(),
+            memory_plan: self.compiled.memory_plan_template.clone(),
             executor: crate::backend::executor::GraphExecutor::new(
                 crate::backend::cpu::CpuBackend,
             ),
-            input_names: self.input_names.clone(),
-            output_map: self.output_map.clone(),
-            prepared_plan: self.prepared_plan.clone(),
-            persistent_prepared_weights: self.persistent_prepared_weights.clone(),
             state_bindings: self.state_bindings.clone(),
             state_values,
             initial_state_values: self.initial_state_values.clone(),
@@ -1609,12 +1622,13 @@ impl AotExecutor {
         let mut shapes = std::collections::HashMap::with_capacity(bindings.len());
         let append_axes = append_axes.unwrap_or_default();
         for (input_name, output_name) in bindings {
-            if !self.input_names.iter().any(|name| name == &input_name) {
+            if !self.compiled.input_names.iter().any(|name| name == &input_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "state input '{input_name}' is not a graph input"
                 )));
             }
             let output_index = self
+                .compiled
                 .output_map
                 .iter()
                 .find_map(|(name, index)| (name == &output_name).then_some(*index))
@@ -1634,6 +1648,7 @@ impl AotExecutor {
                 ))
             })?;
             let input_position = self
+                .compiled
                 .input_names
                 .iter()
                 .position(|name| name == &input_name)
@@ -1642,12 +1657,13 @@ impl AotExecutor {
                         "state input '{input_name}' lost its graph position"
                     ))
                 })?;
-            let input_node_id = *self.graph.inputs.get(input_position).ok_or_else(|| {
+            let input_node_id = *self.compiled.graph.inputs.get(input_position).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "state input '{input_name}' has no graph input node"
                 ))
             })?;
             let capacity = self
+                .compiled
                 .graph
                 .get_node(input_node_id)
                 .and_then(|node| node.output_type.try_byte_size_with_env(None))
@@ -1796,6 +1812,7 @@ impl AotExecutor {
             }
         }
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1821,22 +1838,22 @@ impl AotExecutor {
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
         #[cfg(feature = "prepared-plan")]
-        let mut output_data = if self.prepared_plan.static_weight_binding_count() > 0 {
+        let mut output_data = if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
             self.executor
                 .execute_prepared_no_copy_reusing_outputs_with_view(
-                    &self.graph,
+                    &self.compiled.graph,
                     &mut self.plan,
                     &self.memory_plan,
                     &input_refs,
-                    &self.prepared_plan,
-                    &self.persistent_prepared_weights,
+                    &self.compiled.prepared_plan,
+                    &self.compiled.persistent_prepared_weights,
                     std::mem::take(&mut self.reusable_outputs),
                 )
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
         } else {
             self.executor
                 .execute_reusing_outputs(
-                    &self.graph,
+                    &self.compiled.graph,
                     &mut self.plan,
                     &self.memory_plan,
                     &input_refs,
@@ -1849,7 +1866,7 @@ impl AotExecutor {
         let mut output_data = self
             .executor
             .execute_reusing_outputs(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
@@ -2093,19 +2110,27 @@ impl AotExecutor {
         // after every derived representation has been rebuilt successfully.
         let (plan, memory_plan, graph) = self
             .executor
-            .compile_with_plan_and_quantize((*self.graph).clone(), None, Some(calib))
+            .compile_with_plan_and_quantize((*self.compiled.graph).clone(), None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
         self.executor.invalidate_runtime_cache();
-        self.plan = plan;
-        self.memory_plan = memory_plan;
-        self.graph = std::sync::Arc::new(graph);
-        self.persistent_prepared_weights = std::sync::Arc::new(
+        let persistent_prepared_weights = std::sync::Arc::new(
             crate::backend::prepared::build_persistent_prepared_weights(&prepared_plan),
         );
-        self.prepared_plan = std::sync::Arc::new(prepared_plan);
+        let compiled = std::sync::Arc::new(CompiledAotModel {
+            plan_template: plan.clone(),
+            memory_plan_template: memory_plan.clone(),
+            graph: std::sync::Arc::new(graph),
+            input_names: self.compiled.input_names.clone(),
+            output_map: self.compiled.output_map.clone(),
+            prepared_plan: std::sync::Arc::new(prepared_plan),
+            persistent_prepared_weights,
+        });
+        self.compiled = compiled;
+        self.plan = plan;
+        self.memory_plan = memory_plan;
 
         Ok(())
     }
@@ -2131,6 +2156,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -2155,11 +2181,11 @@ impl AotExecutor {
         let output_data = self
             .executor
             .execute_prepared_fallback(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -2186,6 +2212,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -2210,11 +2237,11 @@ impl AotExecutor {
         let output_data = self
             .executor
             .execute_prepared_arena_fallback(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -2247,6 +2274,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -2271,11 +2299,11 @@ impl AotExecutor {
         let output_data = self
             .executor
             .execute_prepared_no_copy(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -2298,6 +2326,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -2321,7 +2350,7 @@ impl AotExecutor {
 
         let (output_data, profile_entries) = self
             .executor
-            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .execute_profile(&self.compiled.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         self.encode_profile_result(py, &output_data, profile_entries)
@@ -2334,6 +2363,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -2358,11 +2388,11 @@ impl AotExecutor {
         let (output_data, profile_entries) = self
             .executor
             .execute_profile_prepared_arena_fallback(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -2472,8 +2502,8 @@ impl AotExecutor {
             use crate::backend::prepared::PreparedInstruction;
 
             let mut slots = HashMap::new();
-            if let Some(arena) = self.prepared_plan.constant_arena() {
-                for prepared in &self.prepared_plan.instructions {
+            if let Some(arena) = self.compiled.prepared_plan.constant_arena() {
+                for prepared in &self.compiled.prepared_plan.instructions {
                     match prepared {
                         PreparedInstruction::Conv2d(conv) => {
                             if let Some(id) = conv.packed_weight {
@@ -2569,11 +2599,11 @@ impl AotExecutor {
                     kernel_read_bytes += read_bytes;
                     kernel_write_bytes += write_bytes;
 
-                    let node = node_id.and_then(|id| self.graph.get_node(id));
+                    let node = node_id.and_then(|id| self.compiled.graph.get_node(id));
                     let input_nodes = node.map(|n| n.inputs.clone()).unwrap_or_default();
                     let input_shapes = input_nodes
                         .iter()
-                        .filter_map(|id| self.graph.get_node(*id))
+                        .filter_map(|id| self.compiled.graph.get_node(*id))
                         .map(|input| {
                             input
                                 .output_type
@@ -2790,7 +2820,7 @@ impl AotExecutor {
     #[cfg(feature = "prepared-plan")]
     fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
         use crate::backend::prepared::PreparedInstruction;
-        let instructions = &self.prepared_plan.instructions;
+        let instructions = &self.compiled.prepared_plan.instructions;
         let mut stats = std::collections::HashMap::new();
         stats.insert("total".to_string(), instructions.len());
         stats.insert(
@@ -2816,39 +2846,39 @@ impl AotExecutor {
         );
         stats.insert(
             "static_weight_bindings".to_string(),
-            self.prepared_plan.static_weight_binding_count(),
+            self.compiled.prepared_plan.static_weight_binding_count(),
         );
         stats.insert(
             "constant_arena_entries".to_string(),
-            self.prepared_plan.constant_arena_entry_count(),
+            self.compiled.prepared_plan.constant_arena_entry_count(),
         );
         stats.insert(
             "constant_arena_bytes".to_string(),
-            self.prepared_plan.constant_arena_total_bytes(),
+            self.compiled.prepared_plan.constant_arena_total_bytes(),
         );
         stats.insert(
             "packed_fp32_conv_candidates".to_string(),
-            self.prepared_plan.packed_fp32_conv_candidate_count(),
+            self.compiled.prepared_plan.packed_fp32_conv_candidate_count(),
         );
         stats.insert(
             "packed_fp32_conv_candidate_flops".to_string(),
-            self.prepared_plan.packed_fp32_conv_candidate_flops(),
+            self.compiled.prepared_plan.packed_fp32_conv_candidate_flops(),
         );
         stats.insert(
             "transposed_fp32_conv_entries".to_string(),
-            self.prepared_plan.transposed_fp32_conv_entry_count(),
+            self.compiled.prepared_plan.transposed_fp32_conv_entry_count(),
         );
         stats.insert(
             "transposed_fp32_conv_bytes".to_string(),
-            self.prepared_plan.transposed_fp32_conv_total_bytes(),
+            self.compiled.prepared_plan.transposed_fp32_conv_total_bytes(),
         );
         stats.insert(
             "transposed_fp32_conv_bindings".to_string(),
-            self.prepared_plan.transposed_fp32_conv_binding_count(),
+            self.compiled.prepared_plan.transposed_fp32_conv_binding_count(),
         );
         stats.insert(
             "transposed_fp32_conv_binding_flops".to_string(),
-            self.prepared_plan.transposed_fp32_conv_binding_flops(),
+            self.compiled.prepared_plan.transposed_fp32_conv_binding_flops(),
         );
         Ok(stats)
     }
@@ -2865,8 +2895,8 @@ impl AotExecutor {
     fn debug_graph(&self) -> pyo3::PyResult<String> {
         let mut out = String::new();
         out.push_str("=== COMPILED GRAPH ===\n");
-        for node_id in self.graph.try_topological_sort().map_err(PyErr::from)? {
-            if let Some(node) = self.graph.get_node(node_id) {
+        for node_id in self.compiled.graph.try_topological_sort().map_err(PyErr::from)? {
+            if let Some(node) = self.compiled.graph.get_node(node_id) {
                 out.push_str(&format!(
                     "  Node {}: {} / {:?} / inputs={:?}\n",
                     node_id, node.name, node.opcode, node.inputs
@@ -2880,8 +2910,8 @@ impl AotExecutor {
                 }
             }
         }
-        out.push_str(&format!("Inputs: {:?}\n", self.graph.inputs));
-        out.push_str(&format!("Outputs: {:?}\n", self.graph.outputs));
+        out.push_str(&format!("Inputs: {:?}\n", self.compiled.graph.inputs));
+        out.push_str(&format!("Outputs: {:?}\n", self.compiled.graph.outputs));
         Ok(out)
     }
 
@@ -2918,7 +2948,7 @@ impl AotExecutor {
             item.set_item("elapsed_ns", entry.elapsed_ns)?;
             let node_name = entry
                 .node_id
-                .and_then(|node_id| self.graph.get_node(node_id))
+                .and_then(|node_id| self.compiled.graph.get_node(node_id))
                 .map(|node| node.name.clone())
                 .unwrap_or_default();
             item.set_item("node_name", node_name)?;
@@ -2949,20 +2979,20 @@ impl AotExecutor {
         output_data: &[Vec<u8>],
         hidden_outputs: Option<&std::collections::HashSet<String>>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        if output_data.len() != self.graph.outputs.len()
+        if output_data.len() != self.compiled.graph.outputs.len()
             || self.executor.last_output_shapes().len() != output_data.len()
-            || self.output_map.len() != output_data.len()
+            || self.compiled.output_map.len() != output_data.len()
         {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "AotExecutor: output cardinality mismatch (bytes={}, shapes={}, graph={}, names={})",
                 output_data.len(),
                 self.executor.last_output_shapes().len(),
-                self.graph.outputs.len(),
-                self.output_map.len()
+                self.compiled.graph.outputs.len(),
+                self.compiled.output_map.len()
             )));
         }
         let mut result = std::collections::HashMap::new();
-        for (name, idx) in &self.output_map {
+        for (name, idx) in self.compiled.output_map.iter() {
             if hidden_outputs.is_some_and(|hidden| hidden.contains(name)) {
                 continue;
             }
@@ -2971,12 +3001,12 @@ impl AotExecutor {
                     "AotExecutor: output index {idx} is out of range"
                 ))
             })?;
-            let output_node_id = *self.graph.outputs.get(*idx).ok_or_else(|| {
+            let output_node_id = *self.compiled.graph.outputs.get(*idx).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "AotExecutor: graph output index {idx} is out of range"
                 ))
             })?;
-            let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+            let output_node = self.compiled.graph.get_node(output_node_id).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(
                     "AotExecutor: output node not found in graph",
                 )
