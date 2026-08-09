@@ -3995,28 +3995,46 @@ impl Backend for CpuBackend {
                             let output_shape = &resolved[rank..];
 
                             let read_scalar = |slice: BufferSlice| -> Result<i64, BackendError> {
-                                if slice.size != 4 {
-                                    return Err(BackendError::Dispatch(format!(
-                                        "runtime_slice_f32: expected scalar auxiliary input, got {} bytes",
-                                        slice.size
-                                    )));
-                                }
-                                let bytes = &arena.data_mut()[slice.offset..slice.offset + 4];
-                                let value = f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                let end =
+                                    slice.offset.checked_add(slice.size).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "runtime_slice_f32: scalar input range overflows"
+                                                .into(),
+                                        )
+                                    })?;
+                                let data = arena.data_mut();
+                                let bytes = data.get(slice.offset..end).ok_or_else(|| {
                                     BackendError::Dispatch(
-                                        "runtime_slice_f32: malformed scalar input".into(),
+                                        "runtime_slice_f32: scalar input exceeds arena".into(),
                                     )
-                                })?);
-                                if !value.is_finite()
-                                    || value.fract() != 0.0
-                                    || value < i64::MIN as f32
-                                    || value > i64::MAX as f32
-                                {
-                                    return Err(BackendError::Dispatch(format!(
-                                        "runtime_slice_f32: invalid integer scalar {value}"
-                                    )));
+                                })?;
+                                match bytes.len() {
+                                    4 => {
+                                        let value = f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                            BackendError::Dispatch(
+                                                "runtime_slice_f32: malformed F32 scalar input".into(),
+                                            )
+                                        })?);
+                                        if !value.is_finite()
+                                            || value.fract() != 0.0
+                                            || value < i64::MIN as f32
+                                            || value > i64::MAX as f32
+                                        {
+                                            return Err(BackendError::Dispatch(format!(
+                                                "runtime_slice_f32: invalid integer scalar {value}"
+                                            )));
+                                        }
+                                        Ok(value as i64)
+                                    }
+                                    8 => Ok(i64::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "runtime_slice_f32: malformed I64 scalar input".into(),
+                                        )
+                                    })?)),
+                                    size => Err(BackendError::Dispatch(format!(
+                                        "runtime_slice_f32: expected a 4- or 8-byte scalar auxiliary input, got {size} bytes"
+                                    ))),
                                 }
-                                Ok(value as i64)
                             };
 
                             let raw_start = read_scalar(input_slices[1])?;
@@ -11222,7 +11240,7 @@ impl Backend for CpuBackend {
                             }
                             let read_scalar = |slice: BufferSlice| {
                                 let data = arena.data_mut();
-                                bytemuck::try_cast_slice::<_, f32>(
+                                let value = bytemuck::try_cast_slice::<_, f32>(
                                     &data[slice.offset..slice.offset + scalar_bytes],
                                 )
                                 .ok()
@@ -11231,7 +11249,12 @@ impl Backend for CpuBackend {
                                     BackendError::Dispatch(
                                         "range_f32: scalar storage cannot be read as f32".into(),
                                     )
-                                })
+                                })?;
+                                if value != 0.0 && value.abs() < f32::MIN_POSITIVE {
+                                    Ok(i32::from_le_bytes(value.to_le_bytes()) as f32)
+                                } else {
+                                    Ok(value)
+                                }
                             };
                             let start_value = read_scalar(input_slices[0])?;
                             let limit_value = read_scalar(input_slices[1])?;

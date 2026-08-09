@@ -230,13 +230,15 @@ def _run_fastnn_worker(args: argparse.Namespace) -> dict[str, Any]:
             return output, elapsed
 
         actual, _ = replay(False)
+        actual_numpy = {name: tensor.numpy() for name, tensor in actual.items()}
+        np.savez(args.work_dir / f"fastnn-context-{context}.npz", **actual_numpy)
         with np.load(args.work_dir / f"ort-context-{context}.npz") as expected:
-            logits_error = _max_abs(actual["logits"].numpy(), expected["logits"])
+            logits_error = _max_abs(actual_numpy["logits"], expected["logits"])
             cache_error = max(
-                _max_abs(actual[output_name].numpy(), expected[output_name])
+                _max_abs(actual_numpy[output_name], expected[output_name])
                 for _, output_name in contract["state_pairs"]
             )
-            fastnn_argmax = int(np.argmax(actual["logits"].numpy()[0, -1]))
+            fastnn_argmax = int(np.argmax(actual_numpy["logits"][0, -1]))
             ort_argmax = int(np.argmax(expected["logits"][0, -1]))
         if (
             logits_error > args.logits_atol

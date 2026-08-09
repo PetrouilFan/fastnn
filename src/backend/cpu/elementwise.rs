@@ -130,6 +130,39 @@ fn fused_binary_activation_dispatch_slices(
     }
 }
 
+fn for_each_broadcast_index(
+    lhs_shape: &[usize],
+    rhs_shape: &[usize],
+    output_shape: &[usize],
+    output_elements: usize,
+    mut write: impl FnMut(usize, usize, usize),
+) {
+    for flat_output_index in 0..output_elements {
+        let mut remaining = flat_output_index;
+        let mut lhs_index = 0usize;
+        let mut rhs_index = 0usize;
+        let mut lhs_stride = 1usize;
+        let mut rhs_stride = 1usize;
+        for output_axis in (0..output_shape.len()).rev() {
+            let coordinate = remaining % output_shape[output_axis];
+            remaining /= output_shape[output_axis];
+            if let Some(lhs_axis) = output_axis.checked_sub(output_shape.len() - lhs_shape.len()) {
+                if lhs_shape[lhs_axis] != 1 {
+                    lhs_index += coordinate * lhs_stride;
+                }
+                lhs_stride *= lhs_shape[lhs_axis];
+            }
+            if let Some(rhs_axis) = output_axis.checked_sub(output_shape.len() - rhs_shape.len()) {
+                if rhs_shape[rhs_axis] != 1 {
+                    rhs_index += coordinate * rhs_stride;
+                }
+                rhs_stride *= rhs_shape[rhs_axis];
+            }
+        }
+        write(flat_output_index, lhs_index, rhs_index);
+    }
+}
+
 pub(super) fn broadcast_binary_dispatch(
     input_slices: &[BufferSlice],
     arena: &CpuBuffer,
@@ -151,19 +184,27 @@ pub(super) fn broadcast_binary_dispatch(
     let lhs_elements = product(lhs_shape)?;
     let rhs_elements = product(rhs_shape)?;
     let output_elements = product(output_shape)?;
-    let scalar_bytes = std::mem::size_of::<f32>();
-    if lhs_slice.size != lhs_elements * scalar_bytes
-        || rhs_slice.size != rhs_elements * scalar_bytes
-        || output_slice.size != output_elements * scalar_bytes
+    let widths = [
+        lhs_slice.size.checked_div(lhs_elements),
+        rhs_slice.size.checked_div(rhs_elements),
+        output_slice.size.checked_div(output_elements),
+    ];
+    let [lhs_width, rhs_width, output_width] = widths.map(Option::unwrap_or_default);
+    if lhs_elements == 0
+        || rhs_elements == 0
+        || output_elements == 0
+        || !matches!(lhs_width, 1 | 4)
+        || !matches!(rhs_width, 1 | 4)
+        || !matches!(output_width, 1 | 4)
     {
         return Err(format!(
             "broadcast semantic shapes disagree with storage: lhs {lhs_shape:?} bytes {}, rhs {rhs_shape:?} bytes {}, output {output_shape:?} bytes {}, expected [{}, {}, {}]",
             lhs_slice.size,
             rhs_slice.size,
             output_slice.size,
-            lhs_elements * scalar_bytes,
-            rhs_elements * scalar_bytes,
-            output_elements * scalar_bytes,
+            lhs_elements * lhs_width,
+            rhs_elements * rhs_width,
+            output_elements * output_width,
         ));
     }
     for input_shape in [lhs_shape, rhs_shape] {
@@ -182,42 +223,81 @@ pub(super) fn broadcast_binary_dispatch(
         }
     }
 
-    arena::with_binary_f32_slices(
-        arena,
-        *lhs_slice,
-        *rhs_slice,
-        output_slice,
-        |lhs, rhs, output| {
-            for (flat_output_index, destination) in output.iter_mut().enumerate() {
-                let mut remaining = flat_output_index;
-                let mut lhs_index = 0usize;
-                let mut rhs_index = 0usize;
-                let mut lhs_stride = 1usize;
-                let mut rhs_stride = 1usize;
-                for output_axis in (0..output_shape.len()).rev() {
-                    let coordinate = remaining % output_shape[output_axis];
-                    remaining /= output_shape[output_axis];
-                    if let Some(lhs_axis) =
-                        output_axis.checked_sub(output_shape.len() - lhs_shape.len())
-                    {
-                        if lhs_shape[lhs_axis] != 1 {
-                            lhs_index += coordinate * lhs_stride;
-                        }
-                        lhs_stride *= lhs_shape[lhs_axis];
-                    }
-                    if let Some(rhs_axis) =
-                        output_axis.checked_sub(output_shape.len() - rhs_shape.len())
-                    {
-                        if rhs_shape[rhs_axis] != 1 {
-                            rhs_index += coordinate * rhs_stride;
-                        }
-                        rhs_stride *= rhs_shape[rhs_axis];
-                    }
+    if lhs_width != 4 || rhs_width != 4 || output_width != 4 {
+        let read_boolean = |slice: BufferSlice, width: usize| -> Result<Vec<f32>, String> {
+            let values = if width == 1 {
+                unsafe { arena.view_u8(slice.offset, slice.size) }
+                    .iter()
+                    .map(|&value| value as f32)
+                    .collect()
+            } else {
+                if !slice.offset.is_multiple_of(std::mem::align_of::<f32>()) {
+                    return Err("four-byte boolean broadcast input is misaligned".into());
                 }
-                *destination = op(lhs[lhs_index], rhs[rhs_index]);
+                unsafe { arena.view_f32(slice.offset, slice.size) }.to_vec()
+            };
+            if values.iter().any(|value| !matches!(*value, 0.0 | 1.0)) {
+                return Err("mixed-width broadcast operands are not canonical booleans".into());
             }
-        },
-    );
+            Ok(values)
+        };
+        let lhs = read_boolean(*lhs_slice, lhs_width)?;
+        let rhs = read_boolean(*rhs_slice, rhs_width)?;
+        let mut result = vec![0.0f32; output_elements];
+        let mut invalid_boolean = false;
+        for_each_broadcast_index(
+            lhs_shape,
+            rhs_shape,
+            output_shape,
+            output_elements,
+            |destination, lhs_index, rhs_index| {
+                let lhs_value = lhs[lhs_index];
+                let rhs_value = rhs[rhs_index];
+                let value = op(lhs_value as f32, rhs_value as f32);
+                if lhs_value > 1.0 || rhs_value > 1.0 || !(value == 0.0 || value == 1.0) {
+                    invalid_boolean = true;
+                } else {
+                    result[destination] = value;
+                }
+            },
+        );
+        if invalid_boolean {
+            return Err("one-byte broadcast operands are not canonical booleans".into());
+        }
+        if output_width == 1 {
+            let output = unsafe { arena.view_u8_mut(output_slice.offset, output_slice.size) };
+            for (destination, value) in output.iter_mut().zip(result) {
+                *destination = value as u8;
+            }
+        } else {
+            if !output_slice
+                .offset
+                .is_multiple_of(std::mem::align_of::<f32>())
+            {
+                return Err("four-byte boolean broadcast output is misaligned".into());
+            }
+            unsafe { arena.view_f32_mut(output_slice.offset, output_slice.size) }
+                .copy_from_slice(&result);
+        }
+    } else {
+        arena::with_binary_f32_slices(
+            arena,
+            *lhs_slice,
+            *rhs_slice,
+            output_slice,
+            |lhs, rhs, output| {
+                for_each_broadcast_index(
+                    lhs_shape,
+                    rhs_shape,
+                    output_shape,
+                    output_elements,
+                    |destination, lhs_index, rhs_index| {
+                        output[destination] = op(lhs[lhs_index], rhs[rhs_index]);
+                    },
+                );
+            },
+        );
+    }
     Ok(())
 }
 

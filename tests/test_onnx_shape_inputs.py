@@ -93,6 +93,56 @@ def test_scalar_shape_gather_unsqueeze_concat_matches_onnxruntime(tmp_path):
         np.testing.assert_array_equal(actual.astype(np.int64), expected)
 
 
+def test_unsqueeze_axis_two_then_expand_matches_onnxruntime(tmp_path):
+    axes = numpy_helper.from_array(np.asarray([2], dtype=np.int64), "axes")
+    target = numpy_helper.from_array(
+        np.asarray([1, 3, 3, 1, 4], dtype=np.int64), "target"
+    )
+    graph = helper.make_graph(
+        [
+            helper.make_node("Unsqueeze", ["X", "axes"], ["expanded_rank"]),
+            helper.make_node("Expand", ["expanded_rank", "target"], ["Y"]),
+        ],
+        "gqa_unsqueeze_expand",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 1, 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 3, 1, 4])],
+        initializer=[axes, target],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "gqa-unsqueeze-expand.onnx"
+    fnn_path = tmp_path / "gqa-unsqueeze-expand.fnn"
+    onnx.save(model, onnx_path)
+    values = np.arange(12, dtype=np.float32).reshape(1, 3, 1, 4)
+    expected = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"]
+    ).run(["Y"], {"X": values})[0]
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    actual = executor.forward({"X": fnn.tensor(values, list(values.shape))})["Y"].numpy()
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_flatten_axis_two_matches_onnxruntime(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Flatten", ["X"], ["Y"], axis=2)],
+        "flatten_axis_two",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3, 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [6, 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "flatten-axis-two.onnx"
+    fnn_path = tmp_path / "flatten-axis-two.fnn"
+    onnx.save(model, onnx_path)
+    values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    expected = ort.InferenceSession(
+        str(onnx_path), providers=["CPUExecutionProvider"]
+    ).run(["Y"], {"X": values})[0]
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    actual = executor.forward({"X": fnn.tensor(values, list(values.shape))})["Y"].numpy()
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_bool_gather_matches_onnxruntime(tmp_path):
     zero = numpy_helper.from_array(np.asarray(0.0, dtype=np.float32), "zero")
     indices = numpy_helper.from_array(np.asarray([1, 0], dtype=np.int64), "indices")
@@ -125,19 +175,28 @@ def test_bool_gather_matches_onnxruntime(tmp_path):
 
 def test_comparison_boolean_and_isnan_lowering_matches_onnxruntime(tmp_path):
     zero = numpy_helper.from_array(np.asarray(0.0, dtype=np.float32), "zero")
-    output_names = ["less_equal", "greater_equal", "both", "either", "is_nan"]
+    true_scalar = numpy_helper.from_array(np.asarray(True, dtype=np.bool_), "true_scalar")
+    output_names = [
+        "less_equal",
+        "greater_equal",
+        "both",
+        "either",
+        "scalar_and",
+        "is_nan",
+    ]
     graph = helper.make_graph(
         [
             helper.make_node("LessOrEqual", ["X", "zero"], ["less_equal"]),
             helper.make_node("GreaterOrEqual", ["X", "zero"], ["greater_equal"]),
             helper.make_node("And", ["less_equal", "greater_equal"], ["both"]),
             helper.make_node("Or", ["less_equal", "greater_equal"], ["either"]),
+            helper.make_node("And", ["true_scalar", "less_equal"], ["scalar_and"]),
             helper.make_node("IsNaN", ["X"], ["is_nan"]),
         ],
         "comparison_boolean_isnan",
         [helper.make_tensor_value_info("X", TensorProto.FLOAT, [5])],
         [helper.make_tensor_value_info(name, TensorProto.BOOL, [5]) for name in output_names],
-        initializer=[zero],
+        initializer=[zero, true_scalar],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
     onnx_path = tmp_path / "comparison-boolean-isnan.onnx"

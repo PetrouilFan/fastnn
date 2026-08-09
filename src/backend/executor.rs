@@ -330,14 +330,33 @@ struct RuntimeOutputs {
 
 fn constant_scalar_f32(value: &TensorValue, node_id: NodeId) -> Result<f32, BackendError> {
     match value {
-        TensorValue::Float(value) => Ok(*value),
+        TensorValue::Float(value) => {
+            if *value != 0.0 && value.abs() < f32::MIN_POSITIVE {
+                Ok(i32::from_le_bytes(value.to_le_bytes()) as f32)
+            } else {
+                Ok(*value)
+            }
+        }
         TensorValue::Int(value) => Ok(*value as f32),
         TensorValue::Data { bytes, tensor_type } => match tensor_type.dtype() {
-            IrDType::F32 if bytes.len() == 4 => Ok(f32::from_le_bytes(
-                bytes[..4].try_into().map_err(|_| {
+            IrDType::F32 if bytes.len() == 4 => {
+                let value = f32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
                     BackendError::Dispatch(format!("constant node {node_id} has invalid F32 bytes"))
-                })?,
-            )),
+                })?);
+                // FNN currently stores some ONNX integer shape scalars in a four-byte
+                // physical slot while retaining their original integer bit pattern.
+                // Such small integers decode as non-zero F32 subnormals; recover the
+                // integer value for runtime shape/range evaluation only.
+                if value != 0.0 && value.abs() < f32::MIN_POSITIVE {
+                    Ok(i32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
+                        BackendError::Dispatch(format!(
+                            "constant node {node_id} has invalid integer shape bytes"
+                        ))
+                    })?) as f32)
+                } else {
+                    Ok(value)
+                }
+            }
             IrDType::I32 if bytes.len() == 4 => Ok(i32::from_le_bytes(
                 bytes[..4].try_into().map_err(|_| {
                     BackendError::Dispatch(format!("constant node {node_id} has invalid I32 bytes"))
@@ -2256,8 +2275,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     })?;
                 if in_numel != out_numel {
                     return Err(format!(
-                        "Reshape node {node_id}: live element count mismatch {in_numel} vs {out_numel} (in {:?} -> {:?})",
-                        input_shapes[0], live_output
+                        "Reshape node {node_id} name='{}': live element count mismatch {in_numel} vs {out_numel} (in {:?} -> {:?})",
+                        node.name, input_shapes[0], live_output
                     ));
                 }
             }

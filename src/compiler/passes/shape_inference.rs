@@ -125,24 +125,36 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                     None
                 }
             }
-            Opcode::Flatten => inputs.first().map(|i| {
-                let shape = &i.output_type.shape;
-                if shape.len() >= 2 {
-                    let mut dims = Vec::new();
-                    if let Some(first) = shape.first() {
-                        dims.push(first.clone());
+            Opcode::Flatten => {
+                if let Some(input) = inputs.first() {
+                    let shape = &input.output_type.shape;
+                    let rank = i64::try_from(shape.len()).map_err(|_| {
+                        FastnnError::shape(format!("Flatten node {node_id} rank does not fit i64"))
+                    })?;
+                    let raw_axis = node.optional_attr::<i64>("axis")?.unwrap_or(1);
+                    let axis = if raw_axis < 0 {
+                        rank.checked_add(raw_axis)
+                    } else {
+                        Some(raw_axis)
                     }
-                    let product: DimExpr = shape[1..]
-                        .iter()
-                        .cloned()
-                        .reduce(|a, b| a.mul(&b))
-                        .unwrap_or(DimExpr::Known(1));
-                    dims.push(product);
-                    dims
+                    .filter(|&axis| axis >= 0 && axis <= rank)
+                    .ok_or_else(|| {
+                        FastnnError::shape(format!(
+                            "Flatten node {node_id} axis {raw_axis} is out of range for rank {rank}"
+                        ))
+                    })? as usize;
+                    let product = |dimensions: &[DimExpr]| {
+                        dimensions
+                            .iter()
+                            .cloned()
+                            .reduce(|left, right| left.mul(&right))
+                            .unwrap_or(DimExpr::Known(1))
+                    };
+                    Some(vec![product(&shape[..axis]), product(&shape[axis..])])
                 } else {
-                    shape.clone()
+                    None
                 }
-            }),
+            }
             Opcode::TopK => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => {
                 if let Some(input) = inputs.first() {

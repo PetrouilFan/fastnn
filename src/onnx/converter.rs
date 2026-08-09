@@ -633,7 +633,29 @@ impl<'a> OnnxConverter<'a> {
                     self.out(node, self.graph.reshape(&ins[0], &dims));
                 }
             }
-            "Flatten" => self.out(node, self.graph.flatten(&ins[0])),
+            "Flatten" => {
+                let rank = ins[0].shape().len();
+                let raw_axis = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(1);
+                let rank_i64 = i64::try_from(rank)
+                    .map_err(|_| "Flatten input rank exceeds i64".to_string())?;
+                let axis = if raw_axis < 0 {
+                    rank_i64
+                        .checked_add(raw_axis)
+                        .ok_or_else(|| format!("Flatten axis {raw_axis} overflows"))?
+                } else {
+                    raw_axis
+                };
+                if axis < 0 || axis > rank_i64 {
+                    return Err(format!(
+                        "Flatten axis {raw_axis} is out of range for rank {rank}"
+                    ));
+                }
+                self.out(node, self.graph.flatten_axis(&ins[0], axis as usize));
+            }
             "Transpose" => {
                 let perm: Vec<usize> = parse_ints(&node.attrs, "perm", &[1, 0]);
                 if perm.len() == 2 && perm[0] == 1 && perm[1] == 0 {
@@ -907,43 +929,82 @@ impl<'a> OnnxConverter<'a> {
                 self.out(node, out);
             }
             "Squeeze" => {
-                let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
+                let axes = if let Some(axes) = axes_from_attr_or_input(node, self.params) {
+                    axes
+                } else if node.inputs.len() > 1 {
+                    return Err(format!(
+                        "Squeeze node '{}' requires compile-time axes",
+                        node.name
+                    ));
+                } else {
+                    ins[0]
+                        .shape()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(axis, dimension)| {
+                            matches!(dimension, DimExpr::Known(1)).then_some(axis as i64)
+                        })
+                        .collect()
+                };
                 let mut r = ins[0].clone();
                 let initial_rank = r.shape().len() as i64;
-                // Convert negative axes to positive based on initial rank,
-                // then sort descending so we squeeze from the end first
-                // (avoids index-shifting issues).
-                let mut pos_axes: Vec<usize> = axes
-                    .iter()
-                    .map(|&a| {
-                        if a < 0 {
-                            (initial_rank + a) as usize
-                        } else {
-                            a as usize
-                        }
-                    })
-                    .collect();
-                pos_axes.sort_by(|a, b| b.cmp(a));
-                pos_axes.dedup();
-                for &a in &pos_axes {
-                    r = self.graph.squeeze(&r, a);
+                let mut pos_axes = Vec::with_capacity(axes.len());
+                for axis in axes {
+                    if axis < -initial_rank || axis >= initial_rank {
+                        return Err(format!(
+                            "Squeeze node '{}' axis {axis} is out of bounds for rank {initial_rank}",
+                            node.name
+                        ));
+                    }
+                    pos_axes.push(if axis < 0 {
+                        (initial_rank + axis) as usize
+                    } else {
+                        axis as usize
+                    });
+                }
+                pos_axes.sort_unstable_by(|left, right| right.cmp(left));
+                if pos_axes.windows(2).any(|axes| axes[0] == axes[1]) {
+                    return Err(format!("Squeeze node '{}' has duplicate axes", node.name));
+                }
+                for axis in pos_axes {
+                    r = self.graph.squeeze(&r, axis);
                 }
                 self.out(node, r);
             }
             "Unsqueeze" => {
-                // Per ONNX: axes are indices in the *output* tensor shape.
-                // Negative values count back from the end of the output shape.
-                let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
-                let mut r = ins[0].clone();
-                for &a in &axes {
-                    let input_rank = r.shape().len() as i64;
-                    let output_rank = input_rank + 1; // after this unsqueeze
-                    let dim = if a < 0 {
-                        (output_rank + a) as usize
+                let axes = axes_from_attr_or_input(node, self.params).ok_or_else(|| {
+                    format!("Unsqueeze node '{}' requires compile-time axes", node.name)
+                })?;
+                let output_rank =
+                    ins[0]
+                        .shape()
+                        .len()
+                        .checked_add(axes.len())
+                        .ok_or_else(|| {
+                            format!("Unsqueeze node '{}' output rank overflows", node.name)
+                        })?;
+                let output_rank_i64 = output_rank as i64;
+                let mut pos_axes = Vec::with_capacity(axes.len());
+                for axis in axes {
+                    if axis < -output_rank_i64 || axis >= output_rank_i64 {
+                        return Err(format!(
+                            "Unsqueeze node '{}' axis {axis} is out of bounds for output rank {output_rank}",
+                            node.name
+                        ));
+                    }
+                    pos_axes.push(if axis < 0 {
+                        (output_rank_i64 + axis) as usize
                     } else {
-                        a as usize
-                    };
-                    r = self.graph.unsqueeze(&r, dim);
+                        axis as usize
+                    });
+                }
+                pos_axes.sort_unstable();
+                if pos_axes.windows(2).any(|axes| axes[0] == axes[1]) {
+                    return Err(format!("Unsqueeze node '{}' has duplicate axes", node.name));
+                }
+                let mut r = ins[0].clone();
+                for axis in pos_axes {
+                    r = self.graph.unsqueeze(&r, axis);
                 }
                 self.out(node, r);
             }
@@ -1992,6 +2053,16 @@ fn normalize_axes(parsed: &[i64], rank: usize) -> Vec<usize> {
         out.push(normalized);
     }
     out
+}
+
+fn axes_from_attr_or_input(node: &OnnxNode, params: &HashMap<String, Tensor>) -> Option<Vec<i64>> {
+    if node.attrs.contains_key("axes") {
+        return Some(parse_ints_i64(&node.attrs, "axes", &[]));
+    }
+    let axes_name = node.inputs.get(1)?;
+    let axes_tensor = params.get(axes_name)?;
+    let raw = axes_tensor.to_numpy().ok()?;
+    Some(raw.iter().map(|&value| value as i64).collect())
 }
 
 /// Resolve the ONNX reduce axes for `attrs["axes"]` falling back to
