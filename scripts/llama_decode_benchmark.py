@@ -212,25 +212,37 @@ def _run_fastnn_worker(args: argparse.Namespace) -> dict[str, Any]:
 
     cases = []
     for context in args.contexts:
-        def replay(timed: bool) -> tuple[dict[str, Any], float | None]:
-            session.reset_state()
+        def replay(
+            target_session: Any, timed: bool
+        ) -> tuple[dict[str, Any], float | None]:
+            target_session.reset_state()
             output = None
             elapsed = None
             for step in range(context + 1):
                 inputs = tensors(_token_inputs(contract, step))
                 start = time.perf_counter_ns() if timed and step == context else None
                 output = (
-                    session.prefill(inputs, True)
+                    target_session.prefill(inputs, True)
                     if step == 0
-                    else session.decode(inputs, True)
+                    else target_session.decode(inputs, True)
                 )
                 if start is not None:
                     elapsed = (time.perf_counter_ns() - start) / 1e6
             assert output is not None
             return output, elapsed
 
-        actual, _ = replay(False)
+        actual, _ = replay(session, False)
         actual_numpy = {name: tensor.numpy() for name, tensor in actual.items()}
+        isolated_session = model.create_session()
+        isolated, _ = replay(isolated_session, False)
+        isolated_numpy = {name: tensor.numpy() for name, tensor in isolated.items()}
+        isolation_error = max(
+            _max_abs(actual_numpy[name], isolated_numpy[name]) for name in actual_numpy
+        )
+        if isolation_error != 0.0:
+            raise AssertionError(
+                f"context={context} independent session replay diverged: {isolation_error}"
+            )
         np.savez(args.work_dir / f"fastnn-context-{context}.npz", **actual_numpy)
         with np.load(args.work_dir / f"ort-context-{context}.npz") as expected:
             logits_error = _max_abs(actual_numpy["logits"], expected["logits"])
@@ -250,10 +262,10 @@ def _run_fastnn_worker(args: argparse.Namespace) -> dict[str, Any]:
                 f"cache={cache_error}, argmax={fastnn_argmax}/{ort_argmax}"
             )
         for _ in range(args.warmup):
-            replay(False)
+            replay(session, False)
         samples = []
         for _ in range(args.iterations):
-            _, elapsed = replay(True)
+            _, elapsed = replay(session, True)
             assert elapsed is not None
             samples.append(elapsed)
         cases.append(
@@ -264,6 +276,7 @@ def _run_fastnn_worker(args: argparse.Namespace) -> dict[str, Any]:
                     "logits_max_abs": logits_error,
                     "cache_max_abs": cache_error,
                     "argmax": [fastnn_argmax, ort_argmax],
+                    "session_isolation_max_abs": isolation_error,
                 },
             }
         )

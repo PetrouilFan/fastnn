@@ -62,6 +62,18 @@ def _resolve_model(args: argparse.Namespace) -> tuple[str, str]:
     if args.model in MODEL_ALIASES:
         model_id, pinned_revision = MODEL_ALIASES[args.model]
         return model_id, args.revision or pinned_revision
+    local_model = Path(args.model).expanduser()
+    if local_model.is_dir():
+        fixture_manifest = local_model / "fastnn-fixture.json"
+        if not fixture_manifest.is_file():
+            raise SystemExit(
+                "local --model directories require fastnn-fixture.json for reproducibility"
+            )
+        fixture = json.loads(fixture_manifest.read_text())
+        revision = fixture.get("weights_sha256")
+        if not isinstance(revision, str) or len(revision) != 64:
+            raise SystemExit("local fixture manifest lacks a valid weights_sha256")
+        return str(local_model.resolve()), f"local-sha256:{revision}"
     if not args.revision:
         raise SystemExit("custom --model requires an immutable --revision commit SHA")
     return args.model, args.revision
@@ -94,17 +106,21 @@ def main() -> None:
 
     started = time.time()
     if not args.skip_download:
-        _run(
-            [
-                "hf",
-                "download",
-                model_id,
-                "--revision",
-                revision,
-                "--local-dir",
-                str(source_dir),
-            ]
-        )
+        local_model = Path(model_id)
+        if local_model.is_dir():
+            shutil.copytree(local_model, source_dir)
+        else:
+            _run(
+                [
+                    "hf",
+                    "download",
+                    model_id,
+                    "--revision",
+                    revision,
+                    "--local-dir",
+                    str(source_dir),
+                ]
+            )
     if not source_dir.exists():
         raise SystemExit(f"missing pinned source directory: {source_dir}")
 

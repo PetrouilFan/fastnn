@@ -122,16 +122,21 @@ def test_unsqueeze_axis_two_then_expand_matches_onnxruntime(tmp_path):
     np.testing.assert_array_equal(actual, expected)
 
 
-def test_flatten_axis_two_matches_onnxruntime(tmp_path):
+@pytest.mark.parametrize("axis", [0, 1, 2, 3, -1, -2, -3])
+def test_flatten_axes_match_onnxruntime(tmp_path, axis):
+    rank = 3
+    normalized = axis if axis >= 0 else axis + rank
+    outer = int(np.prod((2, 3, 4)[:normalized], dtype=np.int64))
+    inner = int(np.prod((2, 3, 4)[normalized:], dtype=np.int64))
     graph = helper.make_graph(
-        [helper.make_node("Flatten", ["X"], ["Y"], axis=2)],
-        "flatten_axis_two",
+        [helper.make_node("Flatten", ["X"], ["Y"], axis=axis)],
+        f"flatten_axis_{axis}",
         [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3, 4])],
-        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [6, 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [outer, inner])],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
-    onnx_path = tmp_path / "flatten-axis-two.onnx"
-    fnn_path = tmp_path / "flatten-axis-two.fnn"
+    onnx_path = tmp_path / f"flatten-axis-{axis}.onnx"
+    fnn_path = tmp_path / f"flatten-axis-{axis}.fnn"
     onnx.save(model, onnx_path)
     values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     expected = ort.InferenceSession(
@@ -141,6 +146,23 @@ def test_flatten_axis_two_matches_onnxruntime(tmp_path):
     executor = fnn.build_model_from_fnn(str(fnn_path))
     actual = executor.forward({"X": fnn.tensor(values, list(values.shape))})["Y"].numpy()
     np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("axis", [4, -4])
+def test_flatten_rejects_out_of_range_axis(tmp_path, axis):
+    graph = helper.make_graph(
+        [helper.make_node("Flatten", ["X"], ["Y"], axis=axis)],
+        "flatten_invalid_axis",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3, 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, None)],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / f"flatten-invalid-axis-{axis}.onnx"
+    fnn_path = tmp_path / f"flatten-invalid-axis-{axis}.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    with pytest.raises((RuntimeError, ValueError), match="[Ff]latten|axis"):
+        fnn.build_model_from_fnn(str(fnn_path))
 
 
 def test_bool_gather_matches_onnxruntime(tmp_path):
