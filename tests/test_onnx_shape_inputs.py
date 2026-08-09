@@ -274,6 +274,58 @@ def test_int64_max_slice_end_preserves_live_symbolic_extent(tmp_path):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_shape_tail_slice_with_negative_start_has_exact_extent(tmp_path):
+    starts = numpy_helper.from_array(np.asarray([-1], dtype=np.int64), "starts")
+    ends = numpy_helper.from_array(
+        np.asarray([np.iinfo(np.int64).max], dtype=np.int64), "ends"
+    )
+    axes = numpy_helper.from_array(np.asarray([0], dtype=np.int64), "axes")
+    steps = numpy_helper.from_array(np.asarray([1], dtype=np.int64), "steps")
+    graph = helper.make_graph(
+        [
+            helper.make_node("Shape", ["X"], ["shape"], name="shape"),
+            helper.make_node(
+                "Slice",
+                ["shape", "starts", "ends", "axes", "steps"],
+                ["Y"],
+                name="last_extent",
+            ),
+        ],
+        "shape_tail_slice",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["tokens", 4, 5])],
+        [helper.make_tensor_value_info("Y", TensorProto.INT64, [1])],
+        initializer=[starts, ends, axes, steps],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "shape-tail-slice.onnx"
+    fnn_path = tmp_path / "shape-tail-slice.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path), symbolic_dim_bounds={"tokens": 8}
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    for tokens in (1, 5):
+        values = np.zeros((tokens, 4, 5), dtype=np.float32)
+        expected = session.run(["Y"], {"X": values})[0]
+        actual = executor.forward(
+            {"X": fnn.tensor(values, list(values.shape))}
+        )["Y"].numpy()
+        np.testing.assert_array_equal(actual.astype(np.int64), expected)
+
+
+def test_scalar_reduce_mean_keepdims_does_not_modulo_zero(tmp_path):
+    nodes = [
+        helper.make_node(
+            "ReduceMean", ["X"], ["Y"], name="reduce_scalar", keepdims=1
+        )
+    ]
+    expected, actual = _run_ort_and_fastnn(
+        tmp_path, nodes, {}, np.asarray(3.5, dtype=np.float32), ["Y"]
+    )
+    np.testing.assert_allclose(actual[0], expected[0], rtol=0.0, atol=0.0)
+
+
 def test_bounded_batch_flatten_reshape_matches_onnxruntime(tmp_path):
     target = numpy_helper.from_array(np.asarray([-1], dtype=np.int64), "target")
     graph = helper.make_graph(

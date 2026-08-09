@@ -582,6 +582,7 @@ def build_dag_model(
             output_producers[output] = producer
 
     dag_nodes = []
+    legacy_unknown_shape_outputs: set[str] = set()
     for node in onnx_nodes:
         if node.get("op_type", "") == "Input" or node.get("opcode", "") == "Input":
             continue
@@ -630,13 +631,43 @@ def build_dag_model(
             elif isinstance(value, str):
                 dag_node[key] = value
         output_shape = node.get("output_shape", {})
-        if isinstance(output_shape, dict) and "shape" in output_shape:
+        if isinstance(output_shape, dict) and output_shape.get("shape"):
             dag_node["output_rank"] = str(len(output_shape["shape"]))
+        elif node.get("op_type") == "Constant":
+            dag_node["output_rank"] = "0"
         elif node.get("op_type") == "Gather":
-            gather_input_names = [value.strip() for value in inputs_str.split(",") if value.strip()]
-            index_producer = output_producers.get(gather_input_names[1]) if len(gather_input_names) > 1 else None
-            if index_producer is not None and index_producer.get("op_type") == "Constant":
+            gather_input_names = [
+                value.strip() for value in inputs_str.split(",") if value.strip()
+            ]
+            data_producer = (
+                output_producers.get(gather_input_names[0]) if gather_input_names else None
+            )
+            # Scalar gathers in exporter shape programs consume a Shape result.
+            # Do not apply this to embedding gathers whose output metadata may be
+            # absent: their runtime index tensor preserves its own rank.
+            if data_producer is not None and data_producer.get("op_type") == "Shape":
                 dag_node["output_rank"] = "0"
+        if (
+            isinstance(output_shape, dict)
+            and dag_node.get("output_rank") != "0"
+            and (
+                output_shape.get("shape") == []
+                or (
+                    node.get("op_type") == "Slice"
+                    and any(
+                        not (
+                            isinstance(dimension, str)
+                            and dimension.startswith("Known(")
+                        )
+                        and not isinstance(dimension, (int, float))
+                        for dimension in output_shape.get("shape", [])
+                    )
+                )
+            )
+        ):
+            legacy_unknown_shape_outputs.update(
+                value.strip() for value in outputs_str.split(",") if value.strip()
+            )
         dag_nodes.append(dag_node)
 
     # Replicate _make_fastnn_executor's constant folding for Shape→Gather→Add/Sub/Mul/Div chains
@@ -781,7 +812,18 @@ def build_dag_model(
             out_name = outputs[0] if outputs else ""
             attrs = node.get("attrs", {}) if isinstance(node.get("attrs", {}), dict) else {}
             candidate = None
-            if op_type == "Shape" and inputs and inputs[0] in tensor_shapes:
+            if op_type == "Constant" and out_name in const_values:
+                constant = np.asarray(const_values[out_name]).reshape(-1)
+                if np.issubdtype(constant.dtype, np.integer):
+                    candidate = [int(item) for item in constant]
+                elif (
+                    constant.size <= 64
+                    and np.issubdtype(constant.dtype, np.floating)
+                    and np.all(np.isfinite(constant))
+                    and np.all(constant == np.trunc(constant))
+                ):
+                    candidate = [int(item) for item in constant]
+            elif op_type == "Shape" and inputs and inputs[0] in tensor_shapes:
                 candidate = list(tensor_shapes[inputs[0]])
             elif op_type == "Gather" and len(inputs) >= 2 and inputs[0] in shape_values and inputs[1] in const_values and int(attrs.get("axis", 0)) == 0:
                 source = shape_values[inputs[0]]
@@ -791,7 +833,8 @@ def build_dag_model(
                     if index < 0:
                         index += len(source)
                     if index < 0 or index >= len(source):
-                        raise ValueError(f"shape-value Gather {node_name!r} index is out of range")
+                        candidate = None
+                        break
                     candidate.append(source[index])
             elif op_type in {"Add", "Sub", "Mul", "Div"} and len(inputs) >= 2 and inputs[0] in shape_values and inputs[1] in shape_values:
                 left, right = shape_values[inputs[0]], shape_values[inputs[1]]
@@ -896,7 +939,9 @@ def build_dag_model(
                 shape_values[out_name] = candidate
                 changed = True
             tensor_candidate = None
-            if op_type == "Split" and inputs and inputs[0] in tensor_shapes and outputs:
+            if op_type == "Shape" and inputs and inputs[0] in tensor_shapes:
+                tensor_candidate = [f"Known({len(tensor_shapes[inputs[0]])})"]
+            elif op_type == "Split" and inputs and inputs[0] in tensor_shapes and outputs:
                 source_shape = tensor_shapes[inputs[0]]
                 axis = int(attrs.get("axis", 0))
                 if axis < 0:
@@ -935,6 +980,10 @@ def build_dag_model(
                     axes = [int(value) for value in str(axes_value).strip("[]").split(",") if value]
                 starts_value = shape_values.get(inputs[1]) if len(inputs) > 1 else None
                 ends_value = shape_values.get(inputs[2]) if len(inputs) > 2 else None
+                if starts_value is None and len(inputs) > 1 and inputs[1] in const_values:
+                    starts_value = [int(value) for value in np.asarray(const_values[inputs[1]]).reshape(-1)]
+                if ends_value is None and len(inputs) > 2 and inputs[2] in const_values:
+                    ends_value = [int(value) for value in np.asarray(const_values[inputs[2]]).reshape(-1)]
                 if starts_value is None and "starts" in attrs:
                     starts_value = [f"Known({value})" for value in _integer_list(attrs["starts"])]
                 if ends_value is None and "ends" in attrs:
@@ -945,6 +994,22 @@ def build_dag_model(
                         axis %= len(source_shape)
                         start_expression = _dimension_expression(start)
                         end_expression = _dimension_expression(end)
+                        source_expression = _dimension_expression(source_shape[axis])
+                        try:
+                            source_extent = ast.literal_eval(source_expression)
+                            raw_start = ast.literal_eval(start_expression)
+                            raw_end = ast.literal_eval(end_expression)
+                            if not all(
+                                isinstance(value, int)
+                                for value in (source_extent, raw_start, raw_end)
+                            ):
+                                raise ValueError("slice extent is not an integer literal")
+                        except (ValueError, SyntaxError):
+                            pass
+                        else:
+                            normalized = slice(raw_start, raw_end, 1).indices(source_extent)
+                            tensor_candidate[axis] = f"Known({len(range(*normalized))})"
+                            continue
                         try:
                             unbounded_end = int(end_expression) >= np.iinfo(np.int64).max
                         except ValueError:
@@ -954,7 +1019,7 @@ def build_dag_model(
                         # allocating an effectively unbounded output dimension.
                         if unbounded_end:
                             end_expression = _dimension_expression(source_shape[axis])
-                        extent = f"Symbol({end_expression}-{start_expression})"
+                        extent = f"Symbol(({end_expression})-({start_expression}))"
                         tensor_candidate[axis] = _bound_dimension_descriptor(extent, dimension_bounds)
             elif op_type == "Gather" and len(inputs) >= 2 and inputs[0] in tensor_shapes and inputs[1] in tensor_shapes:
                 data_shape = tensor_shapes[inputs[0]]
@@ -1057,7 +1122,7 @@ def build_dag_model(
                 axes = attrs.get("axes", [])
                 if not isinstance(axes, (list, tuple)):
                     axes = [int(value) for value in str(axes).split(",") if value]
-                if int(attrs.get("keepdims", attrs.get("keepdim", 1))):
+                if int(attrs.get("keepdims", attrs.get("keepdim", 1))) and tensor_candidate:
                     for axis in axes:
                         normalized = int(axis) % len(tensor_candidate)
                         tensor_candidate[normalized] = "Known(1)"
@@ -1066,9 +1131,14 @@ def build_dag_model(
             if scalar_output:
                 tensor_candidate = []
             current_shape = tensor_shapes.get(out_name) if out_name else None
-            needs_inferred_shape = scalar_output or current_shape is None or any(
-                isinstance(dimension, str) and dimension.startswith("Symbol(")
-                for dimension in (current_shape or [])
+            needs_inferred_shape = (
+                scalar_output
+                or current_shape is None
+                or out_name in legacy_unknown_shape_outputs
+                or any(
+                    isinstance(dimension, str) and dimension.startswith("Symbol(")
+                    for dimension in (current_shape or [])
+                )
             )
             if out_name and tensor_candidate is not None and needs_inferred_shape and current_shape != tensor_candidate:
                 tensor_shapes[out_name] = tensor_candidate
@@ -1150,14 +1220,23 @@ def build_dag_model(
                     inferred_shape = list(tensor_shapes[inputs[0]])
                     for raw_axis, start, end in zip(axes, starts, ends):
                         axis = raw_axis % len(inferred_shape)
-                        end_expression = (
-                            _dimension_expression(inferred_shape[axis])
-                            if end >= np.iinfo(np.int64).max
-                            else str(end)
-                        )
-                        inferred_shape[axis] = _bound_dimension_descriptor(
-                            f"Symbol({end_expression}-{start})", dimension_bounds
-                        )
+                        source_expression = _dimension_expression(inferred_shape[axis])
+                        try:
+                            source_extent = ast.literal_eval(source_expression)
+                            if not isinstance(source_extent, int):
+                                raise ValueError("slice extent is not an integer literal")
+                        except (ValueError, SyntaxError):
+                            end_expression = (
+                                source_expression
+                                if end >= np.iinfo(np.int64).max
+                                else str(end)
+                            )
+                            inferred_shape[axis] = _bound_dimension_descriptor(
+                                f"Symbol(({end_expression})-({start}))", dimension_bounds
+                            )
+                        else:
+                            normalized = slice(start, end, 1).indices(source_extent)
+                            inferred_shape[axis] = f"Known({len(range(*normalized))})"
                     dag["shape"] = _attr_to_str(inferred_shape)
                     node_outputs = node.get("outputs", [])
                     if isinstance(node_outputs, str):

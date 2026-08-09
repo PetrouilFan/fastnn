@@ -330,33 +330,16 @@ struct RuntimeOutputs {
 
 fn constant_scalar_f32(value: &TensorValue, node_id: NodeId) -> Result<f32, BackendError> {
     match value {
-        TensorValue::Float(value) => {
-            if *value != 0.0 && value.abs() < f32::MIN_POSITIVE {
-                Ok(i32::from_le_bytes(value.to_le_bytes()) as f32)
-            } else {
-                Ok(*value)
-            }
-        }
+        TensorValue::Float(value) => Ok(*value),
         TensorValue::Int(value) => Ok(*value as f32),
         TensorValue::Data { bytes, tensor_type } => match tensor_type.dtype() {
-            IrDType::F32 if bytes.len() == 4 => {
-                let value = f32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
-                    BackendError::Dispatch(format!("constant node {node_id} has invalid F32 bytes"))
-                })?);
-                // FNN currently stores some ONNX integer shape scalars in a four-byte
-                // physical slot while retaining their original integer bit pattern.
-                // Such small integers decode as non-zero F32 subnormals; recover the
-                // integer value for runtime shape/range evaluation only.
-                if value != 0.0 && value.abs() < f32::MIN_POSITIVE {
-                    Ok(i32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
-                        BackendError::Dispatch(format!(
-                            "constant node {node_id} has invalid integer shape bytes"
-                        ))
-                    })?) as f32)
-                } else {
-                    Ok(value)
-                }
-            }
+            IrDType::F32 if bytes.len() == 4 => Ok(f32::from_le_bytes(
+                bytes[..4].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!(
+                        "constant node {node_id} has invalid F32 bytes"
+                    ))
+                })?,
+            )),
             IrDType::I32 if bytes.len() == 4 => Ok(i32::from_le_bytes(
                 bytes[..4].try_into().map_err(|_| {
                     BackendError::Dispatch(format!("constant node {node_id} has invalid I32 bytes"))
@@ -5123,6 +5106,22 @@ mod execution_storage_size_tests {
             .push(plan.levels.last().copied().unwrap_or(0) + 1);
         let mask = classify_stable_write_consts(&graph, &plan, &memory_plan);
         assert!(!mask[write_index]);
+    }
+
+    #[test]
+    fn f32_shape_scalar_preserves_subnormal_numeric_value() {
+        let subnormal = f32::from_bits(1);
+        assert_eq!(
+            constant_scalar_f32(&TensorValue::Float(subnormal), 7).unwrap(),
+            subnormal
+        );
+
+        let data = TensorValue::Data {
+            bytes: subnormal.to_le_bytes().to_vec().into(),
+            tensor_type: crate::ir::TensorType::new(Vec::new(), IrDType::F32),
+        };
+        assert_eq!(constant_scalar_f32(&data, 8).unwrap(), subnormal);
+        assert_eq!(constant_scalar_f32(&TensorValue::Int(1), 9).unwrap(), 1.0);
     }
 
     #[test]
