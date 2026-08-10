@@ -98,6 +98,8 @@ def run_fastnn(args: argparse.Namespace, outputs: list[str], quantize: str | Non
     model.configure_state(
         bindings,
         {name: tensor(np.zeros((1, 12, 0, 64), dtype=np.float32)) for name in bindings},
+        None,
+        {name: 2 for name in bindings},
     )
     session = model.create_session()
     model_inputs = {name: tensor(value) for name, value in feeds(args.token).items() if name not in bindings}

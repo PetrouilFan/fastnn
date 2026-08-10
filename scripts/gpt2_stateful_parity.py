@@ -74,7 +74,7 @@ def make_model(args: argparse.Namespace):
         input_name: tensor(np.zeros((1, 12, 0, 64), dtype=np.float32))
         for input_name in bindings
     }
-    model.configure_state(bindings, initial)
+    model.configure_state(bindings, initial, None, {name: 2 for name in bindings})
     return model
 
 

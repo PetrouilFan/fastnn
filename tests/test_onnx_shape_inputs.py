@@ -954,6 +954,74 @@ def test_aot_runtime_owned_state_append_non_innermost_axis(tmp_path):
     assert executor.session_steps == 0
 
 
+def test_aot_runtime_owned_state_appends_suffix_from_full_output(tmp_path):
+    state = helper.make_tensor_value_info(
+        "state", TensorProto.FLOAT, [2, "state_length", 2]
+    )
+    delta = helper.make_tensor_value_info("delta", TensorProto.FLOAT, [2, 1, 2])
+    current = helper.make_tensor_value_info(
+        "current", TensorProto.FLOAT, [2, "next_state_length", 2]
+    )
+    graph = helper.make_graph(
+        [helper.make_node("Concat", ["state", "delta"], ["current"], axis=1)],
+        "append_full_state_suffix",
+        [state, delta],
+        [current],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx_path = tmp_path / "append-full-state-suffix.onnx"
+    fnn_path = tmp_path / "append-full-state-suffix.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+
+    executor = fnn.build_model_from_fnn(
+        str(fnn_path),
+        symbolic_dim_bounds={"state_length": 4, "next_state_length": 5},
+    )
+    executor.configure_state(
+        {"state": "current"},
+        {"state": fnn.tensor([1.0, 2.0, 3.0, 4.0], [2, 1, 2])},
+        None,
+        {"state": 1},
+    )
+    assert executor.state_descriptors()[0]["update"] == "append_suffix"
+
+    for values, expected in (
+        (
+            [5.0, 6.0, 7.0, 8.0],
+            [[[1.0, 2.0], [5.0, 6.0]], [[3.0, 4.0], [7.0, 8.0]]],
+        ),
+        (
+            [9.0, 10.0, 11.0, 12.0],
+            [
+                [[1.0, 2.0], [5.0, 6.0], [9.0, 10.0]],
+                [[3.0, 4.0], [7.0, 8.0], [11.0, 12.0]],
+            ],
+        ),
+        (
+            [13.0, 14.0, 15.0, 16.0],
+            [
+                [[1.0, 2.0], [5.0, 6.0], [9.0, 10.0], [13.0, 14.0]],
+                [[3.0, 4.0], [7.0, 8.0], [11.0, 12.0], [15.0, 16.0]],
+            ],
+        ),
+    ):
+        output = executor.forward_stateful(
+            {"delta": fnn.tensor(values, [2, 1, 2])}, True
+        )["current"].numpy()
+        np.testing.assert_array_equal(output, np.asarray(expected, np.float32))
+
+    before_sizes = executor.state_sizes()
+    before_shapes = executor.state_shapes()
+    with pytest.raises(RuntimeError, match="exceeding capacity"):
+        executor.forward_stateful(
+            {"delta": fnn.tensor([17.0, 18.0, 19.0, 20.0], [2, 1, 2])}
+        )
+    assert executor.state_sizes() == before_sizes
+    assert executor.state_shapes() == before_shapes
+    assert executor.session_steps == 3
+
+
 def test_aot_runtime_owned_state_rejects_capacity_overflow_atomically(tmp_path):
     graph = helper.make_graph(
         [helper.make_node("Concat", ["state", "delta"], ["next_state"], axis=0)],

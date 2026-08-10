@@ -1209,6 +1209,9 @@ impl_nn_module!(PyTransformerEncoder {
 enum StateUpdatePolicy {
     Replace,
     Append { axis: usize },
+    /// The graph emits the complete updated tensor; retain only the suffix
+    /// beyond the current live extent and append it to session-owned storage.
+    AppendSuffix { axis: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -1599,12 +1602,13 @@ impl AotExecutor {
     /// Configure graph inputs whose values are retained and replaced by graph
     /// outputs after every successful invocation. This is generic persistent
     /// tensor state; it does not depend on transformer layer or tensor names.
-    #[pyo3(signature = (bindings, initial_state, append_axes=None))]
+    #[pyo3(signature = (bindings, initial_state, append_axes=None, append_suffix_axes=None))]
     fn configure_state(
         &mut self,
         bindings: std::collections::HashMap<String, String>,
         initial_state: std::collections::HashMap<String, PyTensor>,
         append_axes: Option<std::collections::HashMap<String, usize>>,
+        append_suffix_axes: Option<std::collections::HashMap<String, usize>>,
     ) -> pyo3::PyResult<()> {
         if bindings.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1621,6 +1625,15 @@ impl AotExecutor {
         let mut capacities = std::collections::HashMap::with_capacity(bindings.len());
         let mut shapes = std::collections::HashMap::with_capacity(bindings.len());
         let append_axes = append_axes.unwrap_or_default();
+        let append_suffix_axes = append_suffix_axes.unwrap_or_default();
+        if let Some(input_name) = append_axes
+            .keys()
+            .find(|name| append_suffix_axes.contains_key(*name))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "state '{input_name}' cannot use both append and append-suffix updates"
+            )));
+        }
         for (input_name, output_name) in bindings {
             if !self.compiled.input_names.iter().any(|name| name == &input_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -1700,6 +1713,14 @@ impl AotExecutor {
                     )));
                 }
                 StateUpdatePolicy::Append { axis }
+            } else if let Some(axis) = append_suffix_axes.get(&input_name).copied() {
+                if axis >= shape.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "append-suffix axis {axis} is out of range for state '{input_name}' rank {}",
+                        shape.len()
+                    )));
+                }
+                StateUpdatePolicy::AppendSuffix { axis }
             } else {
                 StateUpdatePolicy::Replace
             };
@@ -1781,10 +1802,13 @@ impl AotExecutor {
                     match descriptor.update {
                         StateUpdatePolicy::Replace => "replace",
                         StateUpdatePolicy::Append { .. } => "append",
+                        StateUpdatePolicy::AppendSuffix { .. } => "append_suffix",
                     }
                     .to_string(),
                 );
-                if let StateUpdatePolicy::Append { axis } = descriptor.update {
+                if let StateUpdatePolicy::Append { axis }
+                | StateUpdatePolicy::AppendSuffix { axis } = descriptor.update
+                {
                     fields.insert("axis".to_string(), axis.to_string());
                 }
                 if let Some(capacity) = self.state_capacities.get(&descriptor.input_name) {
@@ -1980,6 +2004,96 @@ impl AotExecutor {
                         ))?;
                     append_shapes.insert(input_name.clone(), (new_shape, element_bytes));
                 }
+                StateUpdatePolicy::AppendSuffix { axis } => {
+                    let old_shape = self.state_shapes.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "live shape for append-suffix state '{input_name}' is missing"
+                        ))
+                    })?;
+                    let full_shape = self
+                        .executor
+                        .last_output_shapes()
+                        .get(output_index)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "runtime shape for append-suffix output '{}' is missing",
+                                descriptor.output_name
+                            ))
+                        })?;
+                    if old_shape.len() != full_shape.len() || axis >= old_shape.len() {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix state '{input_name}' rank/axis is incompatible with output shape"
+                        )));
+                    }
+                    for dimension in 0..old_shape.len() {
+                        if dimension != axis && old_shape[dimension] != full_shape[dimension] {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "append-suffix state '{input_name}' dimension {dimension} differs: {} vs {}",
+                                old_shape[dimension], full_shape[dimension]
+                            )));
+                        }
+                    }
+                    if full_shape[axis] <= old_shape[axis] {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix output '{}' axis {axis} must grow beyond live extent {} (got {})",
+                            descriptor.output_name, old_shape[axis], full_shape[axis]
+                        )));
+                    }
+                    let full_elements = full_shape
+                        .iter()
+                        .try_fold(1usize, |value, dim| value.checked_mul(*dim))
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "append-suffix output element count overflows",
+                            )
+                        })?;
+                    if full_elements == 0 || output.len() % full_elements != 0 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix output '{}' has inconsistent byte geometry",
+                            descriptor.output_name
+                        )));
+                    }
+                    let element_bytes = output.len() / full_elements;
+                    let old_elements = old_shape
+                        .iter()
+                        .try_fold(1usize, |value, dim| value.checked_mul(*dim))
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "append-suffix state element count overflows",
+                            )
+                        })?;
+                    let state_len = self.state_values.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "state buffer for '{input_name}' is missing"
+                        ))
+                    })?.len();
+                    if old_elements.checked_mul(element_bytes) != Some(state_len) {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix state '{input_name}' has inconsistent byte geometry"
+                        )));
+                    }
+                    let suffix_elements = full_elements.checked_sub(old_elements).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix output is smaller than the live state",
+                        )
+                    })?;
+                    let suffix_bytes = suffix_elements.checked_mul(element_bytes).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix byte length overflows",
+                        )
+                    })?;
+                    let new_len = state_len.checked_add(suffix_bytes).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix state byte length overflows",
+                        )
+                    })?;
+                    if new_len > capacity {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "appending suffix to state '{input_name}' requires {new_len} bytes, exceeding capacity {capacity}"
+                        )));
+                    }
+                    append_shapes.insert(input_name.clone(), (full_shape.clone(), element_bytes));
+                }
             }
         }
         // Decode every user-visible output before committing any persistent
@@ -2037,6 +2151,29 @@ impl AotExecutor {
                         let delta_start = outer_index * delta_block;
                         state[new_start + old_block..new_start + new_block]
                             .copy_from_slice(&output[delta_start..delta_start + delta_block]);
+                    }
+                    self.state_shapes.insert(input_name.clone(), new_shape.clone());
+                }
+                StateUpdatePolicy::AppendSuffix { axis } => {
+                    let output = &output_data[descriptor.output_index];
+                    let old_shape = self.state_shapes[input_name].clone();
+                    let (new_shape, element_bytes) = &append_shapes[input_name];
+                    let inner_elements = old_shape[axis + 1..].iter().product::<usize>();
+                    let inner_bytes = inner_elements * *element_bytes;
+                    let outer = old_shape[..axis].iter().product::<usize>();
+                    let old_block = old_shape[axis] * inner_bytes;
+                    let new_block = new_shape[axis] * inner_bytes;
+                    let suffix_block = new_block - old_block;
+                    let old_len = state.len();
+                    state.resize(old_len + outer * suffix_block, 0);
+                    for outer_index in (0..outer).rev() {
+                        let old_start = outer_index * old_block;
+                        let new_start = outer_index * new_block;
+                        state.copy_within(old_start..old_start + old_block, new_start);
+                        let suffix_source = outer_index * new_block + old_block;
+                        state[new_start + old_block..new_start + new_block].copy_from_slice(
+                            &output[suffix_source..suffix_source + suffix_block],
+                        );
                     }
                     self.state_shapes.insert(input_name.clone(), new_shape.clone());
                 }

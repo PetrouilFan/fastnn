@@ -176,7 +176,13 @@ def benchmark_case(
         symbolic_dim_bounds={"batch_size": 1, "past_sequence_length": context + 2},
     )
     empty = initial_state()
-    model.configure_state(dict(STATE_PAIRS), {name: as_tensor(value) for name, value in empty.items()})
+    bindings = dict(STATE_PAIRS)
+    model.configure_state(
+        bindings,
+        {name: as_tensor(value) for name, value in empty.items()},
+        None,
+        {name: 2 for name in bindings},
+    )
     session = model.create_session()
 
     actual, _ = run_fastnn_to_context(session, context, timed=False)

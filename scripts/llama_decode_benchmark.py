@@ -204,7 +204,16 @@ def _run_fastnn_worker(args: argparse.Namespace) -> dict[str, Any]:
     initial = {
         name: fnn.tensor(value, list(value.shape)) for name, value in initial_numpy.items()
     }
-    model.configure_state(dict(contract["state_pairs"]), initial)
+    bindings = dict(contract["state_pairs"])
+    sequence_axes = {}
+    for name, shape in contract["state_shapes"].items():
+        empty_axes = [axis for axis, extent in enumerate(shape) if extent == 0]
+        if len(empty_axes) != 1:
+            raise ValueError(
+                f"state {name} must have exactly one empty sequence axis, got shape {shape}"
+            )
+        sequence_axes[name] = empty_axes[0]
+    model.configure_state(bindings, initial, None, sequence_axes)
     session = model.create_session()
 
     def tensors(values: dict[str, np.ndarray]) -> dict[str, Any]:
