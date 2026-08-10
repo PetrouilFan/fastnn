@@ -33,6 +33,41 @@ def _run_ort_and_fastnn(tmp_path, nodes, initializers, input_array, output_names
     return expected, [actual[name].numpy() for name in output_names]
 
 
+def test_runtime_telemetry_is_opt_in_and_reports_reuse(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Relu", ["X"], ["Y"], name="relu")],
+        "runtime_telemetry",
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 4])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "runtime-telemetry.onnx"
+    fnn_path = tmp_path / "runtime-telemetry.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    inputs = {"X": fnn.tensor(np.array([[-1.0, 2.0, -3.0, 4.0]], dtype=np.float32), [1, 4])}
+
+    executor.forward(inputs)
+    assert executor.runtime_telemetry() is None
+
+    executor.enable_runtime_telemetry(True)
+    executor.forward(inputs)
+    first = executor.runtime_telemetry()
+    executor.forward(inputs)
+    second = executor.runtime_telemetry()
+
+    assert first["input_bytes"] == 16
+    assert first["output_bytes"] == 16
+    assert first["instruction_count"] > 0
+    assert first["total_ns"] >= first["dispatch_ns"]
+    assert second["reused_shape_plan"] == 1
+    assert second["reused_arena"] == 1
+
+    executor.enable_runtime_telemetry(False)
+    assert executor.runtime_telemetry() is None
+
+
 def test_runtime_shape_uses_each_input_extent(tmp_path):
     graph = helper.make_graph(
         [helper.make_node("Shape", ["X"], ["Y"], name="shape")],

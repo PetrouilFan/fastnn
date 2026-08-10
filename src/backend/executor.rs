@@ -36,6 +36,29 @@ struct StaticShapeCache {
     filtered_plan: ExecutablePlan,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeTelemetry {
+    pub shape_preamble_ns: u128,
+    pub input_write_ns: u128,
+    pub dispatch_ns: u128,
+    pub output_read_ns: u128,
+    pub state_binding_ns: u128,
+    pub state_update_ns: u128,
+    pub total_ns: u128,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub actual_arena_bytes_copied: usize,
+    pub full_cache_bytes_avoided: usize,
+    pub arena_bytes: usize,
+    pub rss_bytes: usize,
+    pub instruction_count: usize,
+    pub write_const_count: usize,
+    pub fill_count: usize,
+    pub mem_copy_count: usize,
+    pub reused_shape_plan: bool,
+    pub reused_arena: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExecutionResourceLimits {
     pub executable: PlanResourceLimits,
@@ -332,6 +355,26 @@ fn filter_initialized_stable_constants(
     }
 }
 
+fn current_rss_bytes() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|kilobytes| kilobytes.saturating_mul(1024))
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -350,6 +393,8 @@ pub struct GraphExecutor<B: Backend> {
     stable_constants_initialized: bool,
     last_output_shapes: Vec<Vec<usize>>,
     next_output_reads: Option<Vec<OutputReadPolicy>>,
+    runtime_telemetry_enabled: bool,
+    last_runtime_telemetry: Option<RuntimeTelemetry>,
 }
 
 #[derive(Clone, Debug)]
@@ -842,6 +887,8 @@ impl<B: Backend> GraphExecutor<B> {
             stable_constants_initialized: false,
             last_output_shapes: Vec::new(),
             next_output_reads: None,
+            runtime_telemetry_enabled: false,
+            last_runtime_telemetry: None,
         }
     }
 
@@ -867,6 +914,37 @@ impl<B: Backend> GraphExecutor<B> {
         self.static_shape_cache = None;
         self.stable_write_const_mask = None;
         self.stable_constants_initialized = false;
+        self.last_runtime_telemetry = None;
+    }
+
+    pub fn set_runtime_telemetry_enabled(&mut self, enabled: bool) {
+        self.runtime_telemetry_enabled = enabled;
+        if !enabled {
+            self.last_runtime_telemetry = None;
+        }
+    }
+
+    pub fn last_runtime_telemetry(&self) -> Option<&RuntimeTelemetry> {
+        self.last_runtime_telemetry.as_ref()
+    }
+
+    pub fn runtime_telemetry_enabled(&self) -> bool {
+        self.runtime_telemetry_enabled
+    }
+
+    pub(crate) fn augment_runtime_telemetry(
+        &mut self,
+        state_binding_ns: u128,
+        state_update_ns: u128,
+        full_cache_bytes_avoided: usize,
+        end_to_end_ns: u128,
+    ) {
+        if let Some(telemetry) = self.last_runtime_telemetry.as_mut() {
+            telemetry.state_binding_ns = state_binding_ns;
+            telemetry.state_update_ns = state_update_ns;
+            telemetry.full_cache_bytes_avoided = full_cache_bytes_avoided;
+            telemetry.total_ns = end_to_end_ns;
+        }
     }
 
     /// Run the full compilation pipeline:
@@ -1285,6 +1363,9 @@ impl<B: Backend> GraphExecutor<B> {
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
         mut reusable_outputs: Option<Vec<Vec<u8>>>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        let telemetry_total_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
+        let shape_preamble_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
+        let reused_shape_plan = self.static_shape_cache.is_some();
         let output_read_policies = self.next_output_reads.take();
         validate_compiled_artifacts(graph, plan, memory_plan, &self.resource_limits)?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
@@ -1344,6 +1425,14 @@ impl<B: Backend> GraphExecutor<B> {
                     (tightened_memory_plan, shape_env, None)
                 }
             };
+        let mut runtime_telemetry = telemetry_total_start.map(|_| RuntimeTelemetry {
+            shape_preamble_ns: shape_preamble_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or_default(),
+            input_bytes: inputs.iter().map(|input| input.len()).sum(),
+            reused_shape_plan,
+            ..RuntimeTelemetry::default()
+        });
 
         // Slot safety check: only needed on the first call when shapes are
         // being resolved for the first time. On subsequent calls with a
@@ -1426,6 +1515,10 @@ impl<B: Backend> GraphExecutor<B> {
             .cached_arena
             .as_ref()
             .is_some_and(|(cap, _)| *cap >= arena_size);
+        if let Some(telemetry) = runtime_telemetry.as_mut() {
+            telemetry.arena_bytes = arena_size;
+            telemetry.reused_arena = enough_capacity;
+        }
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
             self.stable_constants_initialized = false;
@@ -1445,6 +1538,7 @@ impl<B: Backend> GraphExecutor<B> {
             })?
             .1;
 
+        let input_write_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
         for (&input_node_id, input_bytes) in graph.inputs.iter().zip(inputs.iter()) {
             let slot = tightened_memory_plan
                 .slots
@@ -1454,6 +1548,9 @@ impl<B: Backend> GraphExecutor<B> {
                 })?;
             self.backend
                 .try_write_arena(arena, slot.offset, input_bytes)?;
+        }
+        if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), input_write_start) {
+            telemetry.input_write_ns = start.elapsed().as_nanos();
         }
 
         // ── Dispatch: no-copy persistent view path vs standard path ──
@@ -1498,6 +1595,25 @@ impl<B: Backend> GraphExecutor<B> {
                 }
             };
 
+            if let Some(telemetry) = runtime_telemetry.as_mut() {
+                telemetry.instruction_count = dispatch_plan.instructions.len();
+                telemetry.write_const_count = dispatch_plan
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, Instruction::WriteConst { .. }))
+                    .count();
+                telemetry.fill_count = dispatch_plan
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, Instruction::Fill { .. }))
+                    .count();
+                telemetry.mem_copy_count = dispatch_plan
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, Instruction::MemCopy { .. }))
+                    .count();
+            }
+            let dispatch_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
             let profile_entries = if profile {
                 let mut entries = Vec::with_capacity(dispatch_plan.instructions.len());
                 for (instruction_index, instruction) in
@@ -1543,6 +1659,10 @@ impl<B: Backend> GraphExecutor<B> {
                 Vec::new()
             };
 
+            if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), dispatch_start) {
+                telemetry.dispatch_ns = start.elapsed().as_nanos();
+            }
+            let output_read_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
             let runtime_outputs = read_execution_outputs(
                 graph,
                 &tightened_memory_plan,
@@ -1553,6 +1673,19 @@ impl<B: Backend> GraphExecutor<B> {
                 output_read_policies.as_deref(),
             )?;
             self.last_output_shapes = runtime_outputs.shapes;
+            if let Some(mut telemetry) = runtime_telemetry {
+                telemetry.output_read_ns = output_read_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default();
+                telemetry.output_bytes = runtime_outputs.data.iter().map(Vec::len).sum();
+                telemetry.actual_arena_bytes_copied =
+                    telemetry.input_bytes.saturating_add(telemetry.output_bytes);
+                telemetry.rss_bytes = current_rss_bytes();
+                telemetry.total_ns = telemetry_total_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default();
+                self.last_runtime_telemetry = Some(telemetry);
+            }
             self.stable_constants_initialized = true;
             return Ok((runtime_outputs.data, profile_entries));
         }
@@ -1578,7 +1711,26 @@ impl<B: Backend> GraphExecutor<B> {
         } else {
             arena_preloaded_plan.as_ref().unwrap_or(plan)
         };
+        if let Some(telemetry) = runtime_telemetry.as_mut() {
+            telemetry.instruction_count = dispatch_plan.instructions.len();
+            telemetry.write_const_count = dispatch_plan
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::WriteConst { .. }))
+                .count();
+            telemetry.fill_count = dispatch_plan
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::Fill { .. }))
+                .count();
+            telemetry.mem_copy_count = dispatch_plan
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::MemCopy { .. }))
+                .count();
+        }
 
+        let dispatch_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
         let profile_entries = if profile {
             self.backend
                 .dispatch_profile(dispatch_plan, arena, &shape_env)?
@@ -1587,6 +1739,10 @@ impl<B: Backend> GraphExecutor<B> {
             Vec::new()
         };
 
+        if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), dispatch_start) {
+            telemetry.dispatch_ns = start.elapsed().as_nanos();
+        }
+        let output_read_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
         let runtime_outputs = read_execution_outputs(
             graph,
             &tightened_memory_plan,
@@ -1597,6 +1753,19 @@ impl<B: Backend> GraphExecutor<B> {
             output_read_policies.as_deref(),
         )?;
         self.last_output_shapes = runtime_outputs.shapes;
+        if let Some(mut telemetry) = runtime_telemetry {
+            telemetry.output_read_ns = output_read_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or_default();
+            telemetry.output_bytes = runtime_outputs.data.iter().map(Vec::len).sum();
+            telemetry.actual_arena_bytes_copied =
+                telemetry.input_bytes.saturating_add(telemetry.output_bytes);
+            telemetry.rss_bytes = current_rss_bytes();
+            telemetry.total_ns = telemetry_total_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or_default();
+            self.last_runtime_telemetry = Some(telemetry);
+        }
         Ok((runtime_outputs.data, profile_entries))
     }
 

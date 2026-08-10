@@ -1789,6 +1789,54 @@ impl AotExecutor {
             .collect()
     }
 
+    fn enable_runtime_telemetry(&mut self, enabled: bool) {
+        self.executor.set_runtime_telemetry_enabled(enabled);
+    }
+
+    fn runtime_telemetry(&self) -> Option<std::collections::HashMap<String, u128>> {
+        self.executor.last_runtime_telemetry().map(|telemetry| {
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("shape_preamble_ns".into(), telemetry.shape_preamble_ns);
+            fields.insert("input_write_ns".into(), telemetry.input_write_ns);
+            fields.insert("dispatch_ns".into(), telemetry.dispatch_ns);
+            fields.insert("output_read_ns".into(), telemetry.output_read_ns);
+            fields.insert("state_binding_ns".into(), telemetry.state_binding_ns);
+            fields.insert("state_update_ns".into(), telemetry.state_update_ns);
+            fields.insert("total_ns".into(), telemetry.total_ns);
+            fields.insert("input_bytes".into(), telemetry.input_bytes as u128);
+            fields.insert("output_bytes".into(), telemetry.output_bytes as u128);
+            fields.insert(
+                "actual_arena_bytes_copied".into(),
+                telemetry.actual_arena_bytes_copied as u128,
+            );
+            fields.insert(
+                "full_cache_bytes_avoided".into(),
+                telemetry.full_cache_bytes_avoided as u128,
+            );
+            fields.insert("arena_bytes".into(), telemetry.arena_bytes as u128);
+            fields.insert("rss_bytes".into(), telemetry.rss_bytes as u128);
+            fields.insert(
+                "instruction_count".into(),
+                telemetry.instruction_count as u128,
+            );
+            fields.insert(
+                "write_const_count".into(),
+                telemetry.write_const_count as u128,
+            );
+            fields.insert("fill_count".into(), telemetry.fill_count as u128);
+            fields.insert("mem_copy_count".into(), telemetry.mem_copy_count as u128);
+            fields.insert(
+                "reused_shape_plan".into(),
+                u128::from(telemetry.reused_shape_plan),
+            );
+            fields.insert(
+                "reused_arena".into(),
+                u128::from(telemetry.reused_arena),
+            );
+            fields
+        })
+    }
+
     /// Return immutable state descriptor metadata.
     fn state_descriptors(&self) -> Vec<std::collections::HashMap<String, String>> {
         self.state_bindings
@@ -1827,6 +1875,10 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
         include_state_outputs: bool,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let telemetry_start = self
+            .executor
+            .runtime_telemetry_enabled()
+            .then(std::time::Instant::now);
         if self.state_bindings.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "persistent state has not been configured",
@@ -1895,6 +1947,10 @@ impl AotExecutor {
             self.executor.set_next_output_reads(policies);
         }
 
+        let state_binding_ns = telemetry_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default();
+
         #[cfg(feature = "prepared-plan")]
         let mut output_data = if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
             self.executor
@@ -1931,6 +1987,20 @@ impl AotExecutor {
                 std::mem::take(&mut self.reusable_outputs),
             )
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+
+        let state_update_start = telemetry_start.map(|_| std::time::Instant::now());
+        let full_cache_bytes_avoided = if compact_state_suffixes {
+            self.state_bindings
+                .iter()
+                .filter(|descriptor| {
+                    matches!(descriptor.update, StateUpdatePolicy::AppendSuffix { .. })
+                })
+                .filter_map(|descriptor| self.state_values.get(&descriptor.input_name))
+                .map(Vec::len)
+                .sum()
+        } else {
+            0
+        };
 
         // Validate every update before mutating any state so overflow and shape
         // errors are transactional across all descriptors.
@@ -2216,6 +2286,16 @@ impl AotExecutor {
         }
         self.stateful_steps = next_stateful_step;
         self.reusable_outputs = output_data;
+        if let Some(start) = telemetry_start {
+            self.executor.augment_runtime_telemetry(
+                state_binding_ns,
+                state_update_start
+                    .map(|update_start| update_start.elapsed().as_nanos())
+                    .unwrap_or_default(),
+                full_cache_bytes_avoided,
+                start.elapsed().as_nanos(),
+            );
+        }
         Ok(result)
     }
 
