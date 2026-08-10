@@ -2086,6 +2086,12 @@ impl Backend for CpuBackend {
                     };
                     let mut params: Vec<usize> = vec![index_depth];
                     params.extend(data_shape.iter().map(|&d| d as usize));
+                    params.push(0x5343_4154);
+                    params.push(usize::from(
+                        node.attrs
+                            .get("reduction")
+                            .is_some_and(|value| value == "add"),
+                    ));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "scatter_nd".to_string(),
@@ -7655,14 +7661,21 @@ impl Backend for CpuBackend {
                             );
                         }
                         "scatter_nd" => {
-                            if input_slices.len() != 3 || params.len() < 2 {
+                            if input_slices.len() != 3 || params.len() < 3 {
                                 return Err(BackendError::Dispatch(
                                     "scatter_nd: expected data, indices, updates, and geometry"
                                         .into(),
                                 ));
                             }
                             let index_depth = params[0];
-                            let data_dims = &params[1..];
+                            let has_reduction =
+                                params.len() >= 4 && params[params.len() - 2] == 0x5343_4154;
+                            let reduction_add = has_reduction && params[params.len() - 1] != 0;
+                            let data_dims = if has_reduction {
+                                &params[1..params.len() - 2]
+                            } else {
+                                &params[1..]
+                            };
                             if index_depth == 0 || index_depth > data_dims.len() {
                                 return Err(BackendError::Dispatch(
                                     "scatter_nd: invalid index depth".into(),
@@ -7770,10 +7783,24 @@ impl Backend for CpuBackend {
                                             linear_offset += *index as usize * stride;
                                         }
                                         let update_start = tuple_index * inner_size;
-                                        output[linear_offset..linear_offset + inner_size]
-                                            .copy_from_slice(
-                                                &updates[update_start..update_start + inner_size],
-                                            );
+                                        if reduction_add {
+                                            for (destination, update) in output
+                                                [linear_offset..linear_offset + inner_size]
+                                                .iter_mut()
+                                                .zip(
+                                                    &updates
+                                                        [update_start..update_start + inner_size],
+                                                )
+                                            {
+                                                *destination += *update;
+                                            }
+                                        } else {
+                                            output[linear_offset..linear_offset + inner_size]
+                                                .copy_from_slice(
+                                                    &updates
+                                                        [update_start..update_start + inner_size],
+                                                );
+                                        }
                                     }
                                 },
                             );

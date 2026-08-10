@@ -427,8 +427,14 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> 
             if !grad_output_ids.is_empty() {
                 grad_graph.set_outputs(grad_output_ids);
 
-                let input_refs: Vec<&[u8]> =
-                    all_input_tensors.iter().map(|t| t.as_bytes()).collect();
+                let contiguous_inputs: Vec<Tensor> = all_input_tensors
+                    .iter()
+                    .map(|tensor| tensor.try_contiguous())
+                    .collect::<FastnnResult<_>>()?;
+                let input_refs: Vec<&[u8]> = contiguous_inputs
+                    .iter()
+                    .map(|tensor| tensor.try_as_bytes())
+                    .collect::<FastnnResult<_>>()?;
 
                 use crate::backend::cpu::CpuBackend;
                 use crate::backend::executor::GraphExecutor;
@@ -440,7 +446,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> 
                     if let Ok(mut r) =
                         executor.execute(&compiled_graph, &mut plan, &memory_plan, &input_refs)
                     {
-                        store_gradients(&leaf_inputs, &mut r);
+                        store_gradients(&leaf_inputs, &mut r)?;
                         return Ok(());
                     }
                 }
@@ -538,6 +544,7 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> 
                 let dim = (inputs[0].ndim() - 1) as i64;
                 forward_builder.log_softmax(&input_gts[0], dim)
             }
+            "EmbeddingBackward" => forward_builder.embedding(&input_gts[0], &input_gts[1]),
             "LeakyReLUBackward" => {
                 // Read negative_slope from the second input if available
                 let slope = if inputs.len() > 1 {
@@ -802,19 +809,32 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> 
     }
 
     // ── Step 5: Store gradients on leaf tensors ───────────────────────
-    store_gradients(&leaf_inputs, &mut results);
+    store_gradients(&leaf_inputs, &mut results)?;
     Ok(())
 }
 
 /// Extract gradient results (aligned 1:1 with `leaf_inputs`) and accumulate onto leaf tensors.
-fn store_gradients(leaf_inputs: &[Tensor], results: &mut [Vec<u8>]) {
+fn store_gradients(leaf_inputs: &[Tensor], results: &mut [Vec<u8>]) -> FastnnResult<()> {
+    if results.len() != leaf_inputs.len() {
+        return Err(FastnnError::Autograd(format!(
+            "backward produced {} gradients for {} trainable leaves",
+            results.len(),
+            leaf_inputs.len()
+        )));
+    }
     for (tensor, result_bytes) in leaf_inputs.iter().zip(results.iter_mut()) {
         let result_bytes = std::mem::take(result_bytes);
         let numel = tensor.shape().iter().product::<i64>() as usize;
         let expected_bytes = tensor.dtype().storage_bytes(numel);
 
         if result_bytes.len() != expected_bytes {
-            continue;
+            return Err(FastnnError::Autograd(format!(
+                "gradient for tensor {} has {} bytes, expected {} for shape {:?}",
+                tensor.id(),
+                result_bytes.len(),
+                expected_bytes,
+                tensor.shape()
+            )));
         }
 
         let storage = Storage::from_vec(result_bytes, tensor.dtype(), Device::Cpu);
@@ -831,6 +851,7 @@ fn store_gradients(leaf_inputs: &[Tensor], results: &mut [Vec<u8>]) {
 
         TensorImpl::set_grad_for_tensor(tensor, Some(final_grad));
     }
+    Ok(())
 }
 
 // =============================================================================
@@ -1396,16 +1417,37 @@ pub fn build_backward_graph(
             }
             Opcode::Add => {
                 for &input_id in &node.inputs {
-                    accumulate_grad(&mut grad_graph, &mut grads, input_id, grad_id);
+                    let reduced = reduce_broadcast_dims(
+                        grad_id,
+                        input_id,
+                        forward_graph,
+                        &node.output_type.shape,
+                        &mut grad_graph,
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, input_id, reduced);
                 }
             }
             Opcode::Sub => {
                 if let Some(&first) = node.inputs.first() {
-                    accumulate_grad(&mut grad_graph, &mut grads, first, grad_id);
+                    let reduced = reduce_broadcast_dims(
+                        grad_id,
+                        first,
+                        forward_graph,
+                        &node.output_type.shape,
+                        &mut grad_graph,
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, first, reduced);
                 }
-                if node.inputs.len() > 1 {
-                    let neg = create_neg(grad_id, &mut grad_graph);
-                    accumulate_grad(&mut grad_graph, &mut grads, node.inputs[1], neg);
+                if let Some(&second) = node.inputs.get(1) {
+                    let negated = create_neg(grad_id, &mut grad_graph);
+                    let reduced = reduce_broadcast_dims(
+                        negated,
+                        second,
+                        forward_graph,
+                        &node.output_type.shape,
+                        &mut grad_graph,
+                    );
+                    accumulate_grad(&mut grad_graph, &mut grads, second, reduced);
                 }
             }
             Opcode::Mul => {
@@ -3448,8 +3490,65 @@ pub fn build_backward_graph(
                     accumulate_grad(&mut grad_graph, &mut grads, input_id, grad);
                 }
             }
-            Opcode::Embedding
-            | Opcode::AddScalar
+            Opcode::Embedding => {
+                if node.inputs.len() >= 2 {
+                    let weight_id = node.inputs[0];
+                    let indices_id = node.inputs[1];
+                    let weight_type = forward_graph
+                        .get_node(weight_id)
+                        .map(|n| n.output_type.clone())
+                        .unwrap_or(TensorType::new(vec![], IrDType::F32));
+                    let indices_shape = forward_graph
+                        .get_node(indices_id)
+                        .map(|n| n.output_type.shape.clone())
+                        .unwrap_or_default();
+                    let known_extent = |dimension: &DimExpr| match dimension {
+                        DimExpr::Known(extent) => Some(*extent),
+                        _ => None,
+                    };
+                    let index_count = indices_shape.iter().try_fold(1u64, |count, dimension| {
+                        known_extent(dimension).and_then(|extent| count.checked_mul(extent))
+                    });
+                    let embedding_width = weight_type.shape.get(1).and_then(known_extent);
+                    if let (Some(index_count), Some(embedding_width)) =
+                        (index_count, embedding_width)
+                    {
+                        let flat_indices_type = TensorType::new(
+                            vec![DimExpr::Known(index_count), DimExpr::Known(1)],
+                            IrDType::F32,
+                        );
+                        let flat_indices = grad_graph.add_node(
+                            Opcode::Reshape,
+                            vec![indices_id],
+                            flat_indices_type,
+                        );
+                        let flat_grad_type = TensorType::new(
+                            vec![DimExpr::Known(index_count), DimExpr::Known(embedding_width)],
+                            IrDType::F32,
+                        );
+                        let flat_grad =
+                            grad_graph.add_node(Opcode::Reshape, vec![grad_id], flat_grad_type);
+                        let zero = create_constant_scalar(
+                            0.0f32,
+                            &weight_type.shape,
+                            weight_type.dtype(),
+                            &mut grad_graph,
+                        );
+                        let grad_weight = grad_graph.add_node(
+                            Opcode::ScatterNd,
+                            vec![zero, flat_indices, flat_grad],
+                            weight_type,
+                        );
+                        if let Some(scatter) = grad_graph.get_node_mut(grad_weight) {
+                            scatter
+                                .attrs
+                                .insert("reduction".to_string(), "add".to_string());
+                        }
+                        accumulate_grad(&mut grad_graph, &mut grads, weight_id, grad_weight);
+                    }
+                }
+            }
+            Opcode::AddScalar
             | Opcode::UpsampleNearest2d
             | Opcode::UpsampleBilinear2d
             | Opcode::AdaptiveAvgPool2d

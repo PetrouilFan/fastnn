@@ -213,6 +213,29 @@ def test_embedding():
     assert_shape_equal(output, [4, 32])
 
 
+def test_embedding_backward_accumulates_duplicate_indices():
+    emb = fnn.Embedding(5, 3)
+    weight = list(emb.parameters())[0]
+    indices = fnn.tensor([1, 1, 3], [3])
+
+    emb(indices).sum().backward()
+
+    assert weight.grad is not None
+    np.testing.assert_array_equal(
+        weight.grad.numpy(),
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [2.0, 2.0, 2.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+
 def test_dropout():
     dropout = fnn.Dropout(0.5)
     x = fnn.ones([10, 10])

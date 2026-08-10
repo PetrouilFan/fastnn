@@ -505,6 +505,12 @@ impl MemoryPlan {
                     for &dimension in data_shape {
                         params.push(to_usize(dimension, "scatter_nd data dimension")?);
                     }
+                    params.push(0x5343_4154);
+                    params.push(usize::from(
+                        node.attrs
+                            .get("reduction")
+                            .is_some_and(|value| value == "add"),
+                    ));
                     params
                 }
                 Opcode::Slice if node.inputs.len() == 1 => {
