@@ -46,6 +46,19 @@ def latency_summary(samples_ms: list[float]) -> dict[str, float]:
     }
 
 
+def telemetry_summary(samples: list[dict[str, int]]) -> dict[str, dict[str, float]]:
+    if not samples:
+        return {}
+    fields = sorted(set.intersection(*(set(sample) for sample in samples)))
+    return {
+        field: {
+            "median": float(statistics.median(sample[field] for sample in samples)),
+            "p95": float(np.percentile([sample[field] for sample in samples], 95)),
+        }
+        for field in fields
+    }
+
+
 def initial_state() -> dict[str, np.ndarray]:
     return {
         name: np.zeros((1, 12, 0, 64), dtype=np.float32)
@@ -58,10 +71,11 @@ def run_fastnn_to_context(
     context: int,
     *,
     timed: bool,
-) -> tuple[dict[str, Any], float | None]:
+) -> tuple[dict[str, Any], float | None, dict[str, int] | None]:
     session.reset_state()
     output: dict[str, Any] | None = None
     elapsed_ms: float | None = None
+    telemetry: dict[str, int] | None = None
     for step in range(context + 1):
         inputs = {
             "input_ids": as_tensor(np.asarray([[42 + (step % 7)]], dtype=np.int64)),
@@ -75,8 +89,9 @@ def run_fastnn_to_context(
         )
         if start is not None:
             elapsed_ms = (time.perf_counter_ns() - start) / 1e6
+            telemetry = session.runtime_telemetry()
     assert output is not None
-    return output, elapsed_ms
+    return output, elapsed_ms, telemetry
 
 
 def run_ort_to_context(
@@ -184,8 +199,9 @@ def benchmark_case(
         {name: 2 for name in bindings},
     )
     session = model.create_session()
+    session.enable_runtime_telemetry(True)
 
-    actual, _ = run_fastnn_to_context(session, context, timed=False)
+    actual, _, _ = run_fastnn_to_context(session, context, timed=False)
     expected, _ = run_ort_to_context(ort_session, context, timed=False)
     logits_max_abs = float(np.max(np.abs(actual["logits"].numpy() - expected["logits"])))
     cache_max_abs = max(
@@ -238,12 +254,15 @@ def benchmark_case(
             run_pytorch_to_context(pytorch_model, context, timed=False)
 
     fastnn_ms = []
+    fastnn_telemetry = []
     ort_ms = []
     pytorch_ms = []
     for _ in range(iterations):
-        _, elapsed = run_fastnn_to_context(session, context, timed=True)
+        _, elapsed, telemetry = run_fastnn_to_context(session, context, timed=True)
         assert elapsed is not None
+        assert telemetry is not None
         fastnn_ms.append(elapsed)
+        fastnn_telemetry.append(telemetry)
         _, elapsed = run_ort_to_context(ort_session, context, timed=True)
         assert elapsed is not None
         ort_ms.append(elapsed)
@@ -263,6 +282,7 @@ def benchmark_case(
             "argmax": [fastnn_argmax, ort_argmax],
         },
         "fastnn": fastnn_summary,
+        "fastnn_runtime_telemetry": telemetry_summary(fastnn_telemetry),
         "onnxruntime": ort_summary,
         "median_speedup_fastnn_over_ort": ort_summary["median_ms"] / fastnn_summary["median_ms"],
     }

@@ -55,6 +55,9 @@ pub struct RuntimeTelemetry {
     pub write_const_count: usize,
     pub fill_count: usize,
     pub mem_copy_count: usize,
+    pub arena_growth_events: usize,
+    pub output_capacity_growth_events: usize,
+    pub state_capacity_growth_events: usize,
     pub reused_shape_plan: bool,
     pub reused_arena: bool,
 }
@@ -937,12 +940,16 @@ impl<B: Backend> GraphExecutor<B> {
         state_binding_ns: u128,
         state_update_ns: u128,
         full_cache_bytes_avoided: usize,
+        output_capacity_growth_events: usize,
+        state_capacity_growth_events: usize,
         end_to_end_ns: u128,
     ) {
         if let Some(telemetry) = self.last_runtime_telemetry.as_mut() {
             telemetry.state_binding_ns = state_binding_ns;
             telemetry.state_update_ns = state_update_ns;
             telemetry.full_cache_bytes_avoided = full_cache_bytes_avoided;
+            telemetry.output_capacity_growth_events = output_capacity_growth_events;
+            telemetry.state_capacity_growth_events = state_capacity_growth_events;
             telemetry.total_ns = end_to_end_ns;
         }
     }
@@ -1518,6 +1525,7 @@ impl<B: Backend> GraphExecutor<B> {
         if let Some(telemetry) = runtime_telemetry.as_mut() {
             telemetry.arena_bytes = arena_size;
             telemetry.reused_arena = enough_capacity;
+            telemetry.arena_growth_events = usize::from(!enough_capacity);
         }
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));

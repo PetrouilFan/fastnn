@@ -1826,6 +1826,18 @@ impl AotExecutor {
             fields.insert("fill_count".into(), telemetry.fill_count as u128);
             fields.insert("mem_copy_count".into(), telemetry.mem_copy_count as u128);
             fields.insert(
+                "arena_growth_events".into(),
+                telemetry.arena_growth_events as u128,
+            );
+            fields.insert(
+                "output_capacity_growth_events".into(),
+                telemetry.output_capacity_growth_events as u128,
+            );
+            fields.insert(
+                "state_capacity_growth_events".into(),
+                telemetry.state_capacity_growth_events as u128,
+            );
+            fields.insert(
                 "reused_shape_plan".into(),
                 u128::from(telemetry.reused_shape_plan),
             );
@@ -1879,6 +1891,18 @@ impl AotExecutor {
             .executor
             .runtime_telemetry_enabled()
             .then(std::time::Instant::now);
+        let output_capacities_before = telemetry_start.map(|_| {
+            self.reusable_outputs
+                .iter()
+                .map(Vec::capacity)
+                .collect::<Vec<_>>()
+        });
+        let state_capacities_before = telemetry_start.map(|_| {
+            self.state_values
+                .iter()
+                .map(|(name, value)| (name.clone(), value.capacity()))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
         if self.state_bindings.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "persistent state has not been configured",
@@ -2287,12 +2311,37 @@ impl AotExecutor {
         self.stateful_steps = next_stateful_step;
         self.reusable_outputs = output_data;
         if let Some(start) = telemetry_start {
+            let output_capacity_growth_events = output_capacities_before
+                .as_ref()
+                .map(|before| {
+                    self.reusable_outputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, output)| {
+                            output.capacity() > before.get(*index).copied().unwrap_or_default()
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
+            let state_capacity_growth_events = state_capacities_before
+                .as_ref()
+                .map(|before| {
+                    self.state_values
+                        .iter()
+                        .filter(|(name, state)| {
+                            state.capacity() > before.get(*name).copied().unwrap_or_default()
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
             self.executor.augment_runtime_telemetry(
                 state_binding_ns,
                 state_update_start
                     .map(|update_start| update_start.elapsed().as_nanos())
                     .unwrap_or_default(),
                 full_cache_bytes_avoided,
+                output_capacity_growth_events,
+                state_capacity_growth_events,
                 start.elapsed().as_nanos(),
             );
         }

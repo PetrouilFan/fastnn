@@ -48,7 +48,6 @@ def test_runtime_telemetry_is_opt_in_and_reports_reuse(tmp_path):
     executor = fnn.build_model_from_fnn(str(fnn_path))
     inputs = {"X": fnn.tensor(np.array([[-1.0, 2.0, -3.0, 4.0]], dtype=np.float32), [1, 4])}
 
-    executor.forward(inputs)
     assert executor.runtime_telemetry() is None
 
     executor.enable_runtime_telemetry(True)
@@ -60,7 +59,9 @@ def test_runtime_telemetry_is_opt_in_and_reports_reuse(tmp_path):
     assert first["input_bytes"] == 16
     assert first["output_bytes"] == 16
     assert first["instruction_count"] > 0
+    assert first["arena_growth_events"] == 1
     assert first["total_ns"] >= first["dispatch_ns"]
+    assert second["arena_growth_events"] == 0
     assert second["reused_shape_plan"] == 1
     assert second["reused_arena"] == 1
 
