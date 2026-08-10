@@ -12517,6 +12517,38 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
+    fn try_read_arena_ranges_into(
+        &self,
+        arena: &CpuBuffer,
+        ranges: &[(usize, usize)],
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        let total_size = ranges
+            .iter()
+            .try_fold(0usize, |total, (_, size)| total.checked_add(*size))
+            .ok_or_else(|| BackendError::Dispatch("CPU output range size overflows".into()))?;
+        let buf = arena.data_mut();
+        for &(offset, size) in ranges {
+            let end = offset
+                .checked_add(size)
+                .ok_or_else(|| BackendError::Dispatch("CPU arena read range overflows".into()))?;
+            if end > buf.len() {
+                return Err(BackendError::Dispatch(format!(
+                    "CPU arena read range {offset}..{end} exceeds {} bytes",
+                    buf.len()
+                )));
+            }
+        }
+        destination.clear();
+        destination.try_reserve_exact(total_size).map_err(|error| {
+            BackendError::Dispatch(format!("CPU output allocation failed: {error}"))
+        })?;
+        for &(offset, size) in ranges {
+            destination.extend_from_slice(&buf[offset..offset + size]);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "prepared-plan")]
     fn dispatch_with_persistent_view(
         &self,

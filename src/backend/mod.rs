@@ -1552,4 +1552,23 @@ pub trait Backend {
         *destination = self.try_read_arena(arena, offset, size)?;
         Ok(())
     }
+
+    /// Read several validated arena ranges into one compact destination.
+    /// Backends may override this to avoid an allocation per range.
+    fn try_read_arena_ranges_into(
+        &self,
+        arena: &Self::Buffer,
+        ranges: &[(usize, usize)],
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        destination.clear();
+        for &(offset, size) in ranges {
+            let bytes = self.try_read_arena(arena, offset, size)?;
+            destination.try_reserve(bytes.len()).map_err(|error| {
+                BackendError::Dispatch(format!("output range allocation failed: {error}"))
+            })?;
+            destination.extend_from_slice(&bytes);
+        }
+        Ok(())
+    }
 }

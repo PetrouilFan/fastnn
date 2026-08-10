@@ -1869,6 +1869,32 @@ impl AotExecutor {
             })
             .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
 
+        let compact_state_suffixes = !include_state_outputs;
+        if compact_state_suffixes {
+            let mut policies = vec![
+                crate::backend::executor::OutputReadPolicy::Full;
+                self.compiled.output_map.len()
+            ];
+            for descriptor in &self.state_bindings {
+                if let StateUpdatePolicy::AppendSuffix { axis } = descriptor.update {
+                    let old_extent = self
+                        .state_shapes
+                        .get(&descriptor.input_name)
+                        .and_then(|shape| shape.get(axis))
+                        .copied()
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "live append-suffix extent for '{}' is missing",
+                                descriptor.input_name
+                            ))
+                        })?;
+                    policies[descriptor.output_index] =
+                        crate::backend::executor::OutputReadPolicy::Suffix { axis, old_extent };
+                }
+            }
+            self.executor.set_next_output_reads(policies);
+        }
+
         #[cfg(feature = "prepared-plan")]
         let mut output_data = if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
             self.executor
@@ -2047,13 +2073,6 @@ impl AotExecutor {
                                 "append-suffix output element count overflows",
                             )
                         })?;
-                    if full_elements == 0 || output.len() % full_elements != 0 {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "append-suffix output '{}' has inconsistent byte geometry",
-                            descriptor.output_name
-                        )));
-                    }
-                    let element_bytes = output.len() / full_elements;
                     let old_elements = old_shape
                         .iter()
                         .try_fold(1usize, |value, dim| value.checked_mul(*dim))
@@ -2062,6 +2081,23 @@ impl AotExecutor {
                                 "append-suffix state element count overflows",
                             )
                         })?;
+                    let suffix_elements = full_elements.checked_sub(old_elements).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix output is smaller than the live state",
+                        )
+                    })?;
+                    let transferred_elements = if compact_state_suffixes {
+                        suffix_elements
+                    } else {
+                        full_elements
+                    };
+                    if transferred_elements == 0 || output.len() % transferred_elements != 0 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix output '{}' has inconsistent byte geometry",
+                            descriptor.output_name
+                        )));
+                    }
+                    let element_bytes = output.len() / transferred_elements;
                     let state_len = self.state_values.get(input_name).ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err(format!(
                             "state buffer for '{input_name}' is missing"
@@ -2072,11 +2108,6 @@ impl AotExecutor {
                             "append-suffix state '{input_name}' has inconsistent byte geometry"
                         )));
                     }
-                    let suffix_elements = full_elements.checked_sub(old_elements).ok_or_else(|| {
-                        pyo3::exceptions::PyRuntimeError::new_err(
-                            "append-suffix output is smaller than the live state",
-                        )
-                    })?;
                     let suffix_bytes = suffix_elements.checked_mul(element_bytes).ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err(
                             "append-suffix byte length overflows",
@@ -2170,7 +2201,11 @@ impl AotExecutor {
                         let old_start = outer_index * old_block;
                         let new_start = outer_index * new_block;
                         state.copy_within(old_start..old_start + old_block, new_start);
-                        let suffix_source = outer_index * new_block + old_block;
+                        let suffix_source = if compact_state_suffixes {
+                            outer_index * suffix_block
+                        } else {
+                            outer_index * new_block + old_block
+                        };
                         state[new_start + old_block..new_start + new_block].copy_from_slice(
                             &output[suffix_source..suffix_source + suffix_block],
                         );

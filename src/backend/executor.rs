@@ -321,6 +321,17 @@ pub struct GraphExecutor<B: Backend> {
     stable_write_const_mask: Option<Vec<bool>>,
     stable_constants_initialized: bool,
     last_output_shapes: Vec<Vec<usize>>,
+    next_output_reads: Option<Vec<OutputReadPolicy>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OutputReadPolicy {
+    Full,
+    #[cfg(feature = "python")]
+    Suffix {
+        axis: usize,
+        old_extent: usize,
+    },
 }
 
 struct RuntimeOutputs {
@@ -630,6 +641,7 @@ fn read_execution_outputs<B: Backend>(
     backend: &B,
     arena: &B::Buffer,
     reuse: Option<Vec<Vec<u8>>>,
+    read_policies: Option<&[OutputReadPolicy]>,
 ) -> Result<RuntimeOutputs, BackendError> {
     let mut outputs = reuse.unwrap_or_default();
     outputs.resize_with(graph.outputs.len(), Vec::new);
@@ -681,7 +693,92 @@ fn read_execution_outputs<B: Backend>(
                 slot.offset, tightened_memory_plan.total_size
             )));
         }
-        backend.try_read_arena_into(arena, slot.offset, actual_size, &mut outputs[output_index])?;
+        let policy = read_policies
+            .and_then(|policies| policies.get(output_index))
+            .unwrap_or(&OutputReadPolicy::Full);
+        match *policy {
+            OutputReadPolicy::Full => backend.try_read_arena_into(
+                arena,
+                slot.offset,
+                actual_size,
+                &mut outputs[output_index],
+            )?,
+            #[cfg(feature = "python")]
+            OutputReadPolicy::Suffix { axis, old_extent } => {
+                if axis >= shape.len() || old_extent >= shape[axis] {
+                    return Err(BackendError::Dispatch(format!(
+                        "output node {output_node_id} suffix axis/extent ({axis}, {old_extent}) is invalid for shape {shape:?}"
+                    )));
+                }
+                let elements = shape
+                    .iter()
+                    .try_fold(1usize, |total, extent| total.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} element count overflows"
+                        ))
+                    })?;
+                if elements == 0 || actual_size % elements != 0 {
+                    return Err(BackendError::Dispatch(format!(
+                        "output node {output_node_id} has inconsistent byte geometry"
+                    )));
+                }
+                let element_bytes = actual_size / elements;
+                let inner = shape[axis + 1..]
+                    .iter()
+                    .try_fold(element_bytes, |bytes, extent| bytes.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix inner block overflows"
+                        ))
+                    })?;
+                let outer = shape[..axis]
+                    .iter()
+                    .try_fold(1usize, |count, extent| count.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix outer count overflows"
+                        ))
+                    })?;
+                let full_block = shape[axis].checked_mul(inner).ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "output node {output_node_id} suffix full block overflows"
+                    ))
+                })?;
+                let prefix_block = old_extent.checked_mul(inner).ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "output node {output_node_id} suffix prefix block overflows"
+                    ))
+                })?;
+                let suffix_block = full_block - prefix_block;
+                let mut ranges = Vec::new();
+                ranges.try_reserve_exact(outer).map_err(|error| {
+                    BackendError::Dispatch(format!(
+                        "output suffix range allocation failed: {error}"
+                    ))
+                })?;
+                for outer_index in 0..outer {
+                    let block_offset = outer_index.checked_mul(full_block).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix block offset overflows"
+                        ))
+                    })?;
+                    let relative_offset =
+                        block_offset.checked_add(prefix_block).ok_or_else(|| {
+                            BackendError::Dispatch(format!(
+                                "output node {output_node_id} suffix relative offset overflows"
+                            ))
+                        })?;
+                    let offset = slot.offset.checked_add(relative_offset).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix arena offset overflows"
+                        ))
+                    })?;
+                    ranges.push((offset, suffix_block));
+                }
+                backend.try_read_arena_ranges_into(arena, &ranges, &mut outputs[output_index])?;
+            }
+        }
         shapes.push(shape);
     }
     Ok(RuntimeOutputs {
@@ -716,11 +813,17 @@ impl<B: Backend> GraphExecutor<B> {
             stable_write_const_mask: None,
             stable_constants_initialized: false,
             last_output_shapes: Vec::new(),
+            next_output_reads: None,
         }
     }
 
     pub fn last_output_shapes(&self) -> &[Vec<usize>] {
         &self.last_output_shapes
+    }
+
+    #[cfg(feature = "python")]
+    pub(crate) fn set_next_output_reads(&mut self, policies: Vec<OutputReadPolicy>) {
+        self.next_output_reads = Some(policies);
     }
 
     /// Return a reference to the backend.
@@ -1154,6 +1257,7 @@ impl<B: Backend> GraphExecutor<B> {
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
         mut reusable_outputs: Option<Vec<Vec<u8>>>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        let output_read_policies = self.next_output_reads.take();
         validate_compiled_artifacts(graph, plan, memory_plan, &self.resource_limits)?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
         let (tightened_memory_plan, shape_env, cached_filtered_plan) =
@@ -1432,6 +1536,7 @@ impl<B: Backend> GraphExecutor<B> {
                 &self.backend,
                 arena,
                 reusable_outputs.take(),
+                output_read_policies.as_deref(),
             )?;
             self.last_output_shapes = runtime_outputs.shapes;
             self.stable_constants_initialized = true;
@@ -1475,6 +1580,7 @@ impl<B: Backend> GraphExecutor<B> {
             &self.backend,
             arena,
             reusable_outputs.take(),
+            output_read_policies.as_deref(),
         )?;
         self.last_output_shapes = runtime_outputs.shapes;
         Ok((runtime_outputs.data, profile_entries))

@@ -986,6 +986,16 @@ def test_aot_runtime_owned_state_appends_suffix_from_full_output(tmp_path):
     )
     assert executor.state_descriptors()[0]["update"] == "append_suffix"
 
+    hidden = executor.forward_stateful(
+        {"delta": fnn.tensor([5.0, 6.0, 7.0, 8.0], [2, 1, 2])}
+    )
+    assert "current" not in hidden
+    assert executor.state_shapes() == {"state": [2, 2, 2]}
+    # The hidden recurrent output buffer retains only the 16-byte delta, not
+    # the 32-byte complete state emitted by the graph.
+    assert executor.output_buffer_capacities()[0] <= 16
+    executor.reset_state()
+
     for values, expected in (
         (
             [5.0, 6.0, 7.0, 8.0],
