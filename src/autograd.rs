@@ -760,7 +760,14 @@ pub fn backward(root: &Tensor, grad_output: Option<Tensor>) -> FastnnResult<()> 
     combined.set_inputs(recorded_input_ids.clone());
     combined.set_outputs(grad_output_ids);
 
-    let input_refs: Vec<&[u8]> = all_input_tensors.iter().map(|t| t.as_bytes()).collect();
+    let contiguous_inputs: Vec<Tensor> = all_input_tensors
+        .iter()
+        .map(|tensor| tensor.try_contiguous())
+        .collect::<FastnnResult<_>>()?;
+    let input_refs: Vec<&[u8]> = contiguous_inputs
+        .iter()
+        .map(|tensor| tensor.try_as_bytes())
+        .collect::<FastnnResult<_>>()?;
 
     use crate::backend::cpu::CpuBackend;
     use crate::backend::executor::GraphExecutor;

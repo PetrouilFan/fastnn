@@ -2374,20 +2374,37 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 let _ = resolve_axis(&node.attrs, "axis", rank)
                     .map_err(|e| format!("Softmax node {}: {e}", node_id))?;
             }
-            Opcode::BatchNorm | Opcode::LayerNorm => {
+            Opcode::BatchNorm => {
                 if input_shapes.len() < 2 {
                     return Err(format!(
-                        "Norm node {}: expected at least 2 inputs (data + weight)",
+                        "BatchNorm node {}: expected at least 2 inputs (data + weight)",
                         node_id
                     ));
                 }
-                // Channel dim must match between data and weight for 1D/2D norm
                 let data = &input_shapes[0];
-                let w = &input_shapes[1];
-                if data.len() >= 2 && !w.is_empty() && data[1] != w[0] {
+                let weight = &input_shapes[1];
+                if data.len() >= 2 && !weight.is_empty() && data[1] != weight[0] {
                     return Err(format!(
-                        "Norm node {}: data channels {} != weight features {}",
-                        node_id, data[1], w[0]
+                        "BatchNorm node {}: data channels {} != weight features {}",
+                        node_id, data[1], weight[0]
+                    ));
+                }
+            }
+            Opcode::LayerNorm => {
+                if input_shapes.len() < 2 {
+                    return Err(format!(
+                        "LayerNorm node {}: expected at least 2 inputs (data + weight)",
+                        node_id
+                    ));
+                }
+                let data = &input_shapes[0];
+                let weight = &input_shapes[1];
+                if weight.len() > data.len()
+                    || data[data.len().saturating_sub(weight.len())..] != weight[..]
+                {
+                    return Err(format!(
+                        "LayerNorm node {}: trailing data shape {:?} is incompatible with weight shape {:?}",
+                        node_id, data, weight
                     ));
                 }
             }

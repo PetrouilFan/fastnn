@@ -253,7 +253,7 @@ pub(super) fn broadcast_binary_dispatch(
             |destination, lhs_index, rhs_index| {
                 let lhs_value = lhs[lhs_index];
                 let rhs_value = rhs[rhs_index];
-                let value = op(lhs_value as f32, rhs_value as f32);
+                let value = op(lhs_value, rhs_value);
                 if lhs_value > 1.0 || rhs_value > 1.0 || !(value == 0.0 || value == 1.0) {
                     invalid_boolean = true;
                 } else {
