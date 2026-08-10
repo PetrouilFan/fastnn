@@ -304,6 +304,34 @@ fn classify_stable_write_consts(
         .collect()
 }
 
+fn filter_initialized_stable_constants(
+    plan: &ExecutablePlan,
+    stable_mask: &[bool],
+) -> ExecutablePlan {
+    let (instructions, levels): (Vec<_>, Vec<_>) = plan
+        .instructions
+        .iter()
+        .zip(&plan.levels)
+        .enumerate()
+        .filter(|(instruction_index, (instruction, _))| {
+            !matches!(
+                instruction,
+                Instruction::WriteConst { .. }
+                    if stable_mask
+                        .get(*instruction_index)
+                        .copied()
+                        .unwrap_or(false)
+            )
+        })
+        .map(|(_, (instruction, level))| (instruction.clone(), *level))
+        .unzip();
+    ExecutablePlan {
+        instructions,
+        arena_size: plan.arena_size,
+        levels,
+    }
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -1300,23 +1328,9 @@ impl<B: Backend> GraphExecutor<B> {
                 // Cache for static-shape models so subsequent calls
                 // skip the entire preamble.
                 if graph.has_static_shapes() {
-                    let (filtered_instructions, filtered_levels): (Vec<_>, Vec<_>) = plan
-                        .instructions
-                        .iter()
-                        .zip(&plan.levels)
-                        .filter(|(instruction, _)| {
-                            !matches!(
-                                instruction,
-                                Instruction::WriteConst { .. } | Instruction::Fill { .. }
-                            )
-                        })
-                        .map(|(instruction, level)| (instruction.clone(), *level))
-                        .unzip();
-                    let filtered_plan = ExecutablePlan {
-                        instructions: filtered_instructions,
-                        arena_size: plan.arena_size,
-                        levels: filtered_levels,
-                    };
+                    let stable_mask =
+                        classify_stable_write_consts(graph, plan, &tightened_memory_plan);
+                    let filtered_plan = filter_initialized_stable_constants(plan, &stable_mask);
                     self.static_shape_cache = Some(StaticShapeCache {
                         tightened_memory_plan: tightened_memory_plan.clone(),
                         shape_env: shape_env.clone(),
@@ -3248,6 +3262,37 @@ mod prepared_fallback_tests {
 #[cfg(test)]
 mod execution_storage_size_tests {
     use super::*;
+
+    #[test]
+    fn stable_constant_filter_retains_fills_and_overwritten_constants() {
+        let stable = Instruction::WriteConst {
+            dst: BufferSlice::new(0, 4),
+            data: std::sync::Arc::from([1u8, 2, 3, 4]),
+        };
+        let fill = Instruction::Fill {
+            dst: BufferSlice::new(4, 4),
+            value: 0.0,
+        };
+        let overwritten = Instruction::WriteConst {
+            dst: BufferSlice::new(8, 4),
+            data: std::sync::Arc::from([5u8, 6, 7, 8]),
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![stable, fill, overwritten],
+            arena_size: 12,
+            levels: vec![0, 1, 2],
+        };
+
+        let filtered = filter_initialized_stable_constants(&plan, &[true, false, false]);
+
+        assert_eq!(filtered.instructions.len(), 2);
+        assert!(matches!(filtered.instructions[0], Instruction::Fill { .. }));
+        assert!(matches!(
+            filtered.instructions[1],
+            Instruction::WriteConst { .. }
+        ));
+        assert_eq!(filtered.levels, vec![1, 2]);
+    }
 
     #[test]
     fn unsigned_packed_types_use_exact_packed_storage_size() {
