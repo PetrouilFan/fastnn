@@ -6,18 +6,22 @@ Current development priorities and historical planning documents.
 
 ## Current Focus
 
-fastnn v2.6 is in release stabilization after the canonical tensor-contract,
-compiler/runtime safety, signed quantization, and prepared grouped W4A8 MatMul
-migration. New feature work is frozen until the release gates pass.
+fastnn v2.6.0 is released. Current development is establishing an
+architecture-neutral transformer and LLM runtime rather than adding a
+model-specific GPT-2 path.
 
 **Active areas:**
 
-- **Release correctness** — package/version consistency, wheel smoke tests, and
-  Linux/macOS/Windows/AArch64 validation
-- **CPU numerical contracts** — signed I8/I4 endpoints, affine correction,
-  malformed-metadata rejection, and deterministic model evidence
-- **Prepared grouped W4A8 MatMul** — G32/G64/G128 integration, scalar fallback,
-  AVX2 execution, durable compensation, and shared activation reuse
+- **Typed ONNX correctness** — exact mixed-dtype initializer round-trips,
+  external-data validation, strict unsupported-operation errors, and faithful
+  symbolic dimensions
+- **Runtime shape semantics** — tensor-driven Reshape, Slice, Split, Expand,
+  Range, and bounded semantic extents
+- **Transformer execution foundations** — reusable prefill/decode, persistent
+  session state, KV-cache ownership, and MHA/GQA geometry
+
+The dependency order, live GPT-2/TinyLlama/Qwen audit, and acceptance gates are in
+[Architecture-neutral LLM Runtime Roadmap](llm-runtime.md).
 
 The active source-layout and ownership plan is
 [Codebase Reorganization Roadmap](codebase-reorganization.md). It defines

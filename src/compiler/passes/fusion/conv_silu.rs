@@ -214,7 +214,7 @@ mod tests {
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
                 tensor_type: weight_type.clone(),
-                bytes: vec![0u8; 4 * 3 * 3 * 3 * 4],
+                bytes: vec![0u8; 4 * 3 * 3 * 3 * 4].into(),
             }),
             vec![],
             weight_type.clone(),
@@ -281,7 +281,7 @@ mod tests {
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
                 tensor_type: input_type.clone(),
-                bytes: vec![0u8; 16],
+                bytes: vec![0u8; 16].into(),
             }),
             vec![],
             input_type.clone(),
@@ -323,7 +323,7 @@ mod tests {
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
                 tensor_type: ty.clone(),
-                bytes: vec![0u8; 16],
+                bytes: vec![0u8; 16].into(),
             }),
             vec![],
             ty.clone(),
@@ -356,7 +356,7 @@ mod tests {
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
                 tensor_type: ty.clone(),
-                bytes: vec![0u8; 16],
+                bytes: vec![0u8; 16].into(),
             }),
             vec![],
             ty.clone(),
@@ -402,7 +402,7 @@ mod tests {
         let w = graph.add_node(
             Opcode::Constant(TensorValue::Data {
                 tensor_type: ty.clone(),
-                bytes: vec![0u8; 16],
+                bytes: vec![0u8; 16].into(),
             }),
             vec![],
             ty.clone(),

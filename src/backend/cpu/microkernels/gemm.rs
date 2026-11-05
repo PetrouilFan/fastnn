@@ -9,9 +9,6 @@ use crate::dtypes::{F32x1, I4x8, I8x4, PackedWord};
 use crate::dtypes::{F4x8, F8x4, F8x4R};
 use crate::packed_tensor::PackedTensor;
 
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use std::arch::x86_64::*;
-
 use super::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

@@ -4,7 +4,6 @@ use crate::{
     impl_training_state,
     nn::{clear_grad, Module, TrainingState},
 };
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Embedding {
@@ -44,13 +43,13 @@ impl Module for Embedding {
         .next()
         .unwrap();
 
-        // Attach autograd so gradients flow to the weight
+        // Attach autograd so gradients flow to the weight.
         if self.weight.requires_grad() {
             let inputs = vec![self.weight.clone(), indices.clone()];
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("EmbeddingBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
+            output = Tensor::attach_grad_fn(
+                output,
+                autograd::make_node_info("EmbeddingBackward", inputs),
+            );
         }
 
         output

@@ -379,7 +379,7 @@ impl GraphBuilder {
     /// Create a constant tensor node with raw byte data.
     pub fn constant(&self, data: &[u8], tensor_type: TensorType) -> GraphTensor {
         let value = TensorValue::Data {
-            bytes: data.to_vec(),
+            bytes: data.to_vec().into(),
             tensor_type: tensor_type.clone(),
         };
         let mut inner = self.inner.borrow_mut();
@@ -626,6 +626,7 @@ impl GraphBuilder {
     }
 
     impl_unary_op!(round, Round);
+    impl_unary_op!(is_nan, IsNaN);
     impl_unary_op!(sign, Sign);
     impl_unary_op!(logical_not, LogicalNot);
     pub fn log_softmax(&self, input: &GraphTensor, dim: i64) -> GraphTensor {
@@ -729,12 +730,39 @@ impl GraphBuilder {
     pub fn reshape(&self, input: &GraphTensor, shape: &[DimExpr]) -> GraphTensor {
         let output_type = input.tensor_type.with_shape(shape.to_vec());
         let mut attrs = HashMap::new();
-        let shape_str: Vec<String> = shape.iter().map(|d| format!("{}", d)).collect();
+        let shape_str: Vec<String> = shape
+            .iter()
+            .map(|dimension| match dimension {
+                DimExpr::Known(value) => value.to_string(),
+                DimExpr::Symbol(symbol) => format!("Symbol({symbol})"),
+                DimExpr::Bounded { sym, max } => format!("Bounded({sym};{max})"),
+            })
+            .collect();
         attrs.insert("shape".to_string(), shape_str.join(","));
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node_with_attrs(
             Opcode::Reshape,
             vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Reshape using a runtime shape tensor and bounded semantic output shape.
+    pub fn runtime_reshape(
+        &self,
+        input: &GraphTensor,
+        shape_input: &GraphTensor,
+        shape: &[DimExpr],
+    ) -> GraphTensor {
+        let output_type = input.tensor_type.with_shape(shape.to_vec());
+        let mut attrs = HashMap::new();
+        attrs.insert("runtime_shape".to_string(), "1".to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Reshape,
+            vec![input.node_id, shape_input.node_id],
             output_type.clone(),
             attrs,
         );
@@ -780,19 +808,25 @@ impl GraphBuilder {
 
     /// Flatten to 2D (keep first dim, product of rest).
     pub fn flatten(&self, input: &GraphTensor) -> GraphTensor {
+        self.flatten_axis(input, 1)
+    }
+
+    /// Flatten to 2D using the ONNX axis contract.
+    pub fn flatten_axis(&self, input: &GraphTensor, axis: usize) -> GraphTensor {
         let shape = input.shape();
-        let first = shape.first().cloned().unwrap_or(DimExpr::Known(1));
-        let rest: DimExpr = if shape.len() > 1 {
-            dim_product(shape[1..].iter())
-        } else {
-            DimExpr::Known(1)
-        };
+        assert!(axis <= shape.len(), "flatten axis exceeds input rank");
+        let first = dim_product(shape[..axis].iter());
+        let rest = dim_product(shape[axis..].iter());
         let output_type = input.tensor_type.with_shape(vec![first, rest]);
+        let mut attrs = HashMap::new();
+        attrs.insert("axis".to_string(), axis.to_string());
         let mut inner = self.inner.borrow_mut();
-        let node_id =
-            inner
-                .graph
-                .add_node(Opcode::Flatten, vec![input.node_id], output_type.clone());
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Flatten,
+            vec![input.node_id],
+            output_type.clone(),
+            attrs,
+        );
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -940,6 +974,20 @@ impl GraphBuilder {
             output_type.clone(),
             attrs,
         );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
+    /// Slice using runtime starts/ends/axes/steps tensors and bounded output shape.
+    pub fn runtime_slice(&self, inputs: &[GraphTensor], shape: &[DimExpr]) -> GraphTensor {
+        let output_type = inputs[0].tensor_type.with_shape(shape.to_vec());
+        let mut attrs = HashMap::new();
+        attrs.insert("runtime_bounds".to_string(), "1".to_string());
+        let input_ids = inputs.iter().map(|input| input.node_id).collect();
+        let mut inner = self.inner.borrow_mut();
+        let node_id =
+            inner
+                .graph
+                .add_node_with_attrs(Opcode::Slice, input_ids, output_type.clone(), attrs);
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
@@ -1243,6 +1291,29 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Create a runtime-filled tensor whose live shape is supplied by `shape_input`.
+    ///
+    /// `output_shape` describes bounded allocation and semantic dimensions; the
+    /// runtime validates the shape tensor against those resolved dimensions.
+    pub fn constant_of_shape(
+        &self,
+        shape_input: &GraphTensor,
+        output_shape: Vec<DimExpr>,
+        fill_value: f32,
+    ) -> GraphTensor {
+        let output_type = TensorType::new(output_shape, IrDType::F32);
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("value".to_string(), fill_value.to_string());
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::ConstantOfShape,
+            vec![shape_input.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Cast tensor to a target dtype.
     pub fn cast_op(&self, input: &GraphTensor, to: IrDType) -> GraphTensor {
         let output_shape = input.shape().to_vec();
@@ -1439,6 +1510,25 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
+    /// Expand with caller-supplied bounded semantic output metadata.
+    pub fn expand_op_with_shape(
+        &self,
+        input: &GraphTensor,
+        shape: &GraphTensor,
+        attrs: HashMap<String, String>,
+        output_shape: Vec<DimExpr>,
+    ) -> GraphTensor {
+        let output_type = input.tensor_type.with_shape(output_shape);
+        let mut inner = self.inner.borrow_mut();
+        let node_id = inner.graph.add_node_with_attrs(
+            Opcode::Expand,
+            vec![input.node_id, shape.node_id],
+            output_type.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, output_type)
+    }
+
     /// Set attributes on an existing graph node (e.g. for shape-inference hints).
     pub fn set_node_attrs(&self, node_id: NodeId, attrs: HashMap<String, String>) {
         let mut inner = self.inner.borrow_mut();
@@ -1465,16 +1555,27 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, output_type)
     }
 
-    /// Range(start, limit, step) — produces a 1D F32 tensor.
+    /// Range(start, limit, step) — produces a 1D F32 storage tensor.
+    /// Integral ONNX ranges retain integer bit patterns in that storage.
     /// All three inputs must be 0D (scalar) tensors.
-    /// Output is a 1D F32 tensor of dynamic length.
+    /// Output is a 1D tensor of dynamic length.
     pub fn range_op(
         &self,
         start: &GraphTensor,
         limit: &GraphTensor,
         step: &GraphTensor,
     ) -> GraphTensor {
-        let output_type = TensorType::new(vec![DimExpr::Symbol("N".to_string())], IrDType::F32);
+        self.range_op_with_shape(start, limit, step, vec![DimExpr::Symbol("N".to_string())])
+    }
+
+    pub fn range_op_with_shape(
+        &self,
+        start: &GraphTensor,
+        limit: &GraphTensor,
+        step: &GraphTensor,
+        shape: Vec<DimExpr>,
+    ) -> GraphTensor {
+        let output_type = TensorType::new(shape, IrDType::F32);
         let mut inner = self.inner.borrow_mut();
         let node_id = inner.graph.add_node(
             Opcode::Range,
@@ -1950,6 +2051,54 @@ impl GraphBuilder {
         GraphTensor::new(self.clone(), node_id, tt)
     }
 
+    /// Element-wise sine.
+    pub fn sin(&self, input: &GraphTensor) -> GraphTensor {
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
+        let node_id =
+            self.inner
+                .borrow_mut()
+                .graph
+                .add_node(Opcode::Sin, vec![input.node_id], tt.clone());
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// Element-wise cosine.
+    pub fn cos(&self, input: &GraphTensor) -> GraphTensor {
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
+        let node_id =
+            self.inner
+                .borrow_mut()
+                .graph
+                .add_node(Opcode::Cos, vec![input.node_id], tt.clone());
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
+    /// ONNX Trilu over the innermost two dimensions.
+    pub fn trilu(
+        &self,
+        input: &GraphTensor,
+        diagonal: Option<&GraphTensor>,
+        upper: bool,
+    ) -> GraphTensor {
+        let tt = input.tensor_type.with_shape(input.shape().to_vec());
+        let mut inputs = vec![input.node_id];
+        if let Some(diagonal) = diagonal {
+            inputs.push(diagonal.node_id);
+        }
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert(
+            "upper".to_string(),
+            if upper { "1" } else { "0" }.to_string(),
+        );
+        let node_id = self.inner.borrow_mut().graph.add_node_with_attrs(
+            Opcode::Trilu,
+            inputs,
+            tt.clone(),
+            attrs,
+        );
+        GraphTensor::new(self.clone(), node_id, tt)
+    }
+
     /// Flip (reverse) tensor along specified dimensions.
     pub fn flip(&self, input: &GraphTensor, dims: &[usize]) -> GraphTensor {
         let mut attrs = std::collections::HashMap::new();
@@ -1976,6 +2125,25 @@ impl GraphBuilder {
         let y_shape = y.shape();
         let output_shape = broadcast_shape(x_shape, y_shape);
         let out_tt = TensorType::new(output_shape, IrDType::F32);
+        let node_id = {
+            let mut inner = self.inner.borrow_mut();
+            inner.graph.add_node(
+                Opcode::Where,
+                vec![condition.node_id, x.node_id, y.node_id],
+                out_tt.clone(),
+            )
+        };
+        GraphTensor::new(self.clone(), node_id, out_tt)
+    }
+
+    pub fn where_tensor_with_shape(
+        &self,
+        condition: &GraphTensor,
+        x: &GraphTensor,
+        y: &GraphTensor,
+        output_shape: Vec<DimExpr>,
+    ) -> GraphTensor {
+        let out_tt = TensorType::new(output_shape, x.dtype());
         let node_id = {
             let mut inner = self.inner.borrow_mut();
             inner.graph.add_node(
@@ -2737,6 +2905,14 @@ impl GraphBuilder {
         let mut inner = self.inner.borrow_mut();
         if let Some(node) = inner.graph.get_node_mut(node_id) {
             node.name = name.to_string();
+        }
+    }
+
+    /// Replace the declared output contract of an existing node.
+    pub(crate) fn set_node_output_type(&self, node_id: NodeId, tensor_type: TensorType) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(node) = inner.graph.get_node_mut(node_id) {
+            node.output_type = tensor_type;
         }
     }
 

@@ -69,9 +69,9 @@ pub fn quantize_matmul_activations_per_token(graph: &mut ComputeGraph) -> Result
                         "dynamic W4A8 currently requires static activation dimensions",
                     )
                 })?;
-            if dimensions.len() != 2 {
+            if dimensions.len() < 2 {
                 return Err(FastnnError::compilation(format!(
-                    "dynamic W4A8 currently requires rank-2 activations, got rank {}",
+                    "dynamic W4A8 requires activation rank of at least 2, got rank {}",
                     dimensions.len()
                 )));
             }
@@ -604,7 +604,7 @@ mod tests {
         let const_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::F32);
         let const_id = graph.add_node(
             Opcode::Constant(crate::ir::TensorValue::Data {
-                bytes: const_data,
+                bytes: const_data.into(),
                 tensor_type: const_tt.clone(),
             }),
             vec![],

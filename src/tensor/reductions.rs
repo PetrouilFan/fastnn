@@ -42,7 +42,11 @@ impl Tensor {
             if autograd::is_grad_enabled() && self.requires_grad() {
                 let inputs = vec![self.clone()];
                 let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(autograd::make_node_info("SumBackward", inputs));
+                meta.grad_fn = Some(autograd::make_node_info_with_params(
+                    "SumBackward",
+                    inputs,
+                    vec![normalized_dim as i64, i64::from(keepdim)],
+                ));
                 Arc::make_mut(&mut output.inner).set_autograd_meta(meta);
             }
             return Ok(output);
@@ -55,7 +59,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("sum execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "SumBackward"))
+        Ok(self.attach_reduction_grad(output, "SumBackward", normalized_dim, keepdim))
     }
 
     pub fn max(&self, dim: i32, keepdim: bool) -> Tensor {
@@ -71,7 +75,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("max execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "MaximumBackward"))
+        Ok(self.attach_reduction_grad(output, "MaximumBackward", normalized_dim, keepdim))
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {
@@ -87,7 +91,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("mean execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "MeanBackward"))
+        Ok(self.attach_reduction_grad(output, "MeanBackward", normalized_dim, keepdim))
     }
 
     pub fn cumsum(&self, dim: i64, exclusive: bool, reverse: bool) -> Tensor {
@@ -104,13 +108,26 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("cumsum execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "CumSumBackward"))
+        Ok(self.attach_reduction_grad(output, "CumSumBackward", normalized_dim, false))
     }
 
-    fn attach_reduction_grad(&self, output: Tensor, backward_name: &'static str) -> Tensor {
+    fn attach_reduction_grad(
+        &self,
+        output: Tensor,
+        backward_name: &'static str,
+        dim: usize,
+        keepdim: bool,
+    ) -> Tensor {
         if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info(backward_name, inputs))
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info_with_params(
+                    backward_name,
+                    inputs,
+                    vec![dim as i64, i64::from(keepdim)],
+                ),
+            )
         } else {
             output
         }

@@ -216,6 +216,36 @@ pub unsafe fn logical_not_f32_avx2(input: &[f32], output: &mut [f32]) {
     }
 }
 
+#[inline]
+pub fn is_nan_f32_scalar(x: f32) -> f32 {
+    if x.is_nan() {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+// SAFETY: Caller ensures valid, non-overlapping equal-length slices.
+pub unsafe fn is_nan_f32_avx2(input: &[f32], output: &mut [f32]) {
+    debug_assert_eq!(input.len(), output.len());
+    let len = output.len();
+    let mut i = 0;
+    let one = _mm256_set1_ps(1.0);
+    while i + 8 <= len {
+        let values = _mm256_loadu_ps(input.as_ptr().add(i));
+        _mm256_storeu_ps(
+            output.as_mut_ptr().add(i),
+            _mm256_and_ps(_mm256_cmp_ps::<{ _CMP_UNORD_Q }>(values, values), one),
+        );
+        i += 8;
+    }
+    for j in i..len {
+        output[j] = is_nan_f32_scalar(input[j]);
+    }
+}
+
 // ── Parametric ops ───────────────────────────────────────────
 
 #[inline]

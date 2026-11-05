@@ -224,7 +224,7 @@ mod tests {
         );
         graph.add_node(
             Opcode::Constant(TensorValue::Data {
-                bytes: data,
+                bytes: data.into(),
                 tensor_type: tt.clone(),
             }),
             vec![],
@@ -499,7 +499,7 @@ mod tests {
         );
         let weight_id = graph.add_node(
             Opcode::Constant(crate::ir::TensorValue::Data {
-                bytes: weight_data,
+                bytes: weight_data.into(),
                 tensor_type: tt.clone(),
             }),
             vec![],

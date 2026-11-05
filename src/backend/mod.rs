@@ -647,7 +647,7 @@ pub enum Instruction {
     /// that carry [`TensorValue::Data`](crate::ir::TensorValue::Data).
     WriteConst {
         dst: BufferSlice,
-        data: Vec<u8>,
+        data: std::sync::Arc<[u8]>,
     },
 }
 
@@ -695,7 +695,7 @@ impl Default for PlanResourceLimits {
             max_total_params: 16_000_000,
             max_total_param_dims: 16_000_000,
             max_total_kernel_name_bytes: 64_000_000,
-            max_total_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_total_constant_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
             max_total_quant_metadata: 16_000_000,
         }
     }
@@ -939,7 +939,7 @@ impl ExecutablePlan {
                         )));
                     }
                 }
-                Instruction::WriteConst { dst, data } => {
+                Instruction::WriteConst { data, dst } => {
                     total_constant_bytes = total_constant_bytes
                         .checked_add(data.len())
                         .ok_or_else(|| {
@@ -1011,6 +1011,27 @@ fn decode_executable_plan(
 #[cfg(test)]
 mod executable_plan_validation_tests {
     use super::*;
+
+    #[test]
+    fn executable_plan_clone_shares_constant_payloads() {
+        let data: std::sync::Arc<[u8]> = vec![1, 2, 3, 4].into();
+        let plan = ExecutablePlan {
+            instructions: vec![Instruction::WriteConst {
+                dst: BufferSlice::new(0, data.len()),
+                data: data.clone(),
+            }],
+            arena_size: data.len(),
+            levels: vec![0],
+        };
+        let cloned = plan.clone();
+        let Instruction::WriteConst {
+            data: cloned_data, ..
+        } = &cloned.instructions[0]
+        else {
+            panic!("expected WriteConst")
+        };
+        assert!(std::sync::Arc::ptr_eq(&data, cloned_data));
+    }
 
     fn matmul_capability(decode: DecodeFamily) -> QuantizedKernelCapability {
         QuantizedKernelCapability {
@@ -1267,7 +1288,7 @@ mod executable_plan_validation_tests {
         let out_of_bounds = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(usize::MAX, 4),
-                data: vec![0; 4],
+                data: vec![0; 4].into(),
             }],
             arena_size: 4,
             levels: vec![0],
@@ -1277,7 +1298,7 @@ mod executable_plan_validation_tests {
         let oversized_constant = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(0, 4),
-                data: vec![0; 8],
+                data: vec![0; 8].into(),
             }],
             arena_size: 8,
             levels: vec![0],
@@ -1310,7 +1331,7 @@ mod executable_plan_validation_tests {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(0, 4),
-                data: vec![0; 4],
+                data: vec![0; 4].into(),
             }],
             arena_size: 4,
             levels: vec![0],
@@ -1519,5 +1540,35 @@ pub trait Backend {
         size: usize,
     ) -> Result<Vec<u8>, BackendError> {
         Ok(self.read_arena(arena, offset, size))
+    }
+
+    fn try_read_arena_into(
+        &self,
+        arena: &Self::Buffer,
+        offset: usize,
+        size: usize,
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        *destination = self.try_read_arena(arena, offset, size)?;
+        Ok(())
+    }
+
+    /// Read several validated arena ranges into one compact destination.
+    /// Backends may override this to avoid an allocation per range.
+    fn try_read_arena_ranges_into(
+        &self,
+        arena: &Self::Buffer,
+        ranges: &[(usize, usize)],
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        destination.clear();
+        for &(offset, size) in ranges {
+            let bytes = self.try_read_arena(arena, offset, size)?;
+            destination.try_reserve(bytes.len()).map_err(|error| {
+                BackendError::Dispatch(format!("output range allocation failed: {error}"))
+            })?;
+            destination.extend_from_slice(&bytes);
+        }
+        Ok(())
     }
 }

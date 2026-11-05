@@ -1,17 +1,20 @@
 use crate::backend::{BackendError, BufferSlice, ExecutablePlan, Instruction};
 use crate::ir::NodeId;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static NEXT_PREPARED_PLAN_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default)]
 pub struct PreparedExecutablePlan {
     pub instructions: Vec<PreparedInstruction>,
     pub arena_size: usize,
     pub scratch_size: usize,
-    /// Static constant data attached to this plan (metadata only — not
-    /// consulted by any runtime dispatch path yet). Populated via
-    /// [`PreparedExecutablePlan::register_constant_arena`].
+    /// Static constant data attached to this plan. Runtime prepared dispatch
+    /// borrows immutable weight views from this arena.
     constant_arena: Option<PreparedConstantArena>,
+    identity: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -31,7 +34,7 @@ impl Default for PreparedPlanResourceLimits {
             max_scratch_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
             max_instructions: 1_000_000,
             max_constant_entries: 1_000_000,
-            max_constant_bytes: usize::try_from(4 * GIB).unwrap_or(usize::MAX),
+            max_constant_bytes: usize::try_from(8 * GIB).unwrap_or(usize::MAX),
         }
     }
 }
@@ -223,18 +226,29 @@ impl PackedWeightKind {
 /// the corresponding kernels and accuracy gates land.
 #[derive(Clone, Debug)]
 pub enum PackedWeightStore {
-    /// Reference `fp32` payload — the layout the current CPU backend
-    /// consumes directly via `WriteConst`.
-    Unpacked(Vec<f32>),
+    /// Owned reference `fp32` payload.
+    Unpacked(Arc<[f32]>),
+    /// Zero-copy fp32 view over the immutable bytes owned by the source
+    /// `WriteConst`. The range is validated at preparation time and exposed
+    /// only when it is correctly aligned for `f32`.
+    SharedFp32Bytes {
+        data: Arc<[u8]>,
+        offset: usize,
+        byte_len: usize,
+    },
     /// Pretransposed fp32 matrix payload for future prepared Conv GEMM paths.
     ///
     /// The source Conv weight is interpreted as row-major `[M, K]`; this
     /// variant stores a row-major `[K, M]` transpose. It is metadata/storage
     /// only until an opt-in prepared runtime path consumes it.
-    TransposedFp32 { data: Vec<f32>, m: usize, k: usize },
+    TransposedFp32 {
+        data: Arc<[f32]>,
+        m: usize,
+        k: usize,
+    },
     /// Raw byte payload for packed quantized weights (I4, I8, F8, F4, F8R).
     /// The caller knows the bit width and unpacking scheme.
-    PackedRaw(Vec<u8>),
+    PackedRaw(Arc<[u8]>),
     /// Reserved discriminant for future packed precision variants. Carries
     /// no payload and is never produced by the current code paths.
     Reserved,
@@ -254,7 +268,7 @@ pub struct TransposedFp32WeightRef<'a> {
 impl PackedWeightStore {
     /// Build an [`PackedWeightStore::Unpacked`] entry holding `data`.
     pub fn unpacked(data: Vec<f32>) -> Self {
-        PackedWeightStore::Unpacked(data)
+        PackedWeightStore::Unpacked(data.into())
     }
 
     /// View the stored runtime `f32` payload when the store is
@@ -263,7 +277,15 @@ impl PackedWeightStore {
     /// layout.
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         match self {
-            PackedWeightStore::Unpacked(data) => Some(data.as_slice()),
+            PackedWeightStore::Unpacked(data) => Some(data.as_ref()),
+            PackedWeightStore::SharedFp32Bytes {
+                data,
+                offset,
+                byte_len,
+            } => {
+                let end = offset.checked_add(*byte_len)?;
+                bytemuck::try_cast_slice(data.get(*offset..end)?).ok()
+            }
             PackedWeightStore::TransposedFp32 { .. }
             | PackedWeightStore::PackedRaw(_)
             | PackedWeightStore::Reserved => None,
@@ -274,6 +296,7 @@ impl PackedWeightStore {
     pub const fn kind_name(&self) -> &'static str {
         match self {
             PackedWeightStore::Unpacked(_) => "unpacked",
+            PackedWeightStore::SharedFp32Bytes { .. } => "shared_fp32_bytes",
             PackedWeightStore::TransposedFp32 { .. } => "transposed_fp32",
             PackedWeightStore::PackedRaw(_) => "packed_raw",
             PackedWeightStore::Reserved => "reserved",
@@ -296,20 +319,13 @@ pub struct PreparedConstantEntry {
     pub numel: usize,
     /// Total byte length of the stored payload (numel * element_bytes).
     pub byte_len: usize,
-    /// Backing storage variant. Always
-    /// [`PackedWeightStore::Unpacked`] in this skeleton.
+    /// Backing storage variant. Ordinary fp32 weights normally share the
+    /// immutable source `WriteConst`; transformed or unaligned data is owned.
     pub store: PackedWeightStore,
 }
 
-/// Owns the static `Vec<f32>` payloads attached to a prepared plan.
-///
-/// This type is **metadata only** in the current wave: no kernel and no
-/// dispatch path consults it. A later lane will populate it from
-/// [`Instruction::WriteConst`] producers and route conv/matmul weight
-/// reads through the arena instead of re-materialising bytes on every
-/// forward pass. Until then the arena is a parallel storage surface
-/// whose lifetime is tied to the [`PreparedExecutablePlan`] it is
-/// registered against.
+/// Owns or shares static payloads attached to a prepared plan. Its lifetime is
+/// tied to the [`PreparedExecutablePlan`] that created it.
 #[derive(Clone, Debug, Default)]
 pub struct PreparedConstantArena {
     entries: Vec<PreparedConstantEntry>,
@@ -358,6 +374,49 @@ impl PreparedConstantArena {
             store: PackedWeightStore::unpacked(data),
         });
         self.name_to_id.insert(name, id);
+        Ok(id)
+    }
+
+    fn try_insert_shared_fp32(
+        &mut self,
+        name: &str,
+        data: Arc<[u8]>,
+        offset: usize,
+        byte_len: usize,
+    ) -> Result<PackedWeightId, BackendError> {
+        if let Some(&id) = self.name_to_id.get(name) {
+            return Ok(id);
+        }
+        let end = offset
+            .checked_add(byte_len)
+            .ok_or_else(|| BackendError::Dispatch("prepared shared fp32 range overflows".into()))?;
+        let bytes = data.get(offset..end).ok_or_else(|| {
+            BackendError::Dispatch("prepared shared fp32 range exceeds source payload".into())
+        })?;
+        if !byte_len.is_multiple_of(std::mem::size_of::<f32>()) {
+            return Err(BackendError::Dispatch(format!(
+                "prepared fp32 constant payload has {} trailing byte(s)",
+                byte_len % std::mem::size_of::<f32>()
+            )));
+        }
+        if bytemuck::try_cast_slice::<u8, f32>(bytes).is_err() {
+            return self.try_insert(name, bytes_to_f32_vec(bytes)?);
+        }
+        let index = self.entries.len();
+        let id = PackedWeightId::new(index);
+        self.entries.push(PreparedConstantEntry {
+            id,
+            name: name.to_string(),
+            kind: PackedWeightKind::Fp32,
+            numel: byte_len / std::mem::size_of::<f32>(),
+            byte_len,
+            store: PackedWeightStore::SharedFp32Bytes {
+                data,
+                offset,
+                byte_len,
+            },
+        });
+        self.name_to_id.insert(name.to_string(), id);
         Ok(id)
     }
 
@@ -414,9 +473,8 @@ impl PreparedConstantArena {
         self.name_to_id.get(name).copied()
     }
 
-    /// Fetch the `f32` payload for `id`. Returns `None` when the id is
-    /// out of range or the slot is not stored as
-    /// [`PackedWeightStore::Unpacked`].
+    /// Fetch the `f32` payload for `id`. Returns `None` when the id is out of
+    /// range or the slot is not in a runtime-consumable fp32 layout.
     pub fn get(&self, id: PackedWeightId) -> Option<&[f32]> {
         self.entries
             .get(id.index)
@@ -441,7 +499,7 @@ impl PreparedConstantArena {
                         && data.len() == *m * *k =>
                 {
                     Some(TransposedFp32WeightRef {
-                        data: data.as_slice(),
+                        data: data.as_ref(),
                         m: *m,
                         k: *k,
                     })
@@ -470,7 +528,7 @@ impl PreparedConstantArena {
         self.entries
             .get(id.index)
             .and_then(|entry| match &entry.store {
-                PackedWeightStore::PackedRaw(data) => Some(data.as_slice()),
+                PackedWeightStore::PackedRaw(data) => Some(data.as_ref()),
                 _ => None,
             })
     }
@@ -498,7 +556,7 @@ impl PreparedConstantArena {
             kind,
             numel,
             byte_len,
-            store: PackedWeightStore::PackedRaw(data),
+            store: PackedWeightStore::PackedRaw(data.into()),
         });
         self.name_to_id.insert(name, id);
         id
@@ -546,14 +604,14 @@ pub type StaticWeightMap = Vec<StaticWeightBinding>;
 /// Snapshot of one [`Instruction::WriteConst`] in the plan. Used as an
 /// intermediate representation while we match consumer input slots
 /// against static producers.
-#[derive(Clone, Copy, Debug)]
-struct WriteConstEntry<'a> {
+#[derive(Clone, Debug)]
+struct WriteConstEntry {
     /// Plan-wide index of the WriteConst instruction.
     writer_idx: usize,
     /// Destination slot the WriteConst materialises.
     dst: BufferSlice,
     /// Raw bytes the WriteConst deposits into the arena.
-    data: &'a [u8],
+    data: Arc<[u8]>,
 }
 
 /// Map a kernel name suffix to the corresponding [`PreparedActivation`].
@@ -712,8 +770,10 @@ pub fn try_prepare_conv2d(
 ///
 /// # Required metadata fields from `CallKernel`
 /// - `kernel_name`: must be a matmul-family name.
-/// - `params`: `[m, k, n]`. Concrete element counts baked in by the CPU
-///   backend; symbolic dims are resolved through `param_dims` at runtime.
+/// - `params`: `[m, k, n]` for specialized/quantized kernels and legacy
+///   plans, or `[m, k, n, has_bias, activation]` for the unified plain-fp32
+///   `"matmul"` kernel. Symbolic dims are resolved through `param_dims` at
+///   runtime.
 /// - `input_slices[0]`: left operand `A`.
 /// - `input_slices[1]`: right operand `B` / weight tensor.
 /// - `input_slices[2]` (optional): bias — only present for
@@ -740,7 +800,11 @@ pub fn try_prepare_matmul(
         return None;
     }
 
-    if params.len() != 3 {
+    // Plain fp32 `matmul` carries the unified
+    // [m, k, n, has_bias, activation] contract. Specialized fused and
+    // quantized variants retain the legacy [m, k, n] layout.
+    let valid_params = params.len() == 3 || (kernel_name == "matmul" && params.len() == 5);
+    if !valid_params {
         return None;
     }
     let m = params[0];
@@ -855,7 +919,7 @@ fn detect_static_weights_with_limits(
                 const_slots.push(WriteConstEntry {
                     writer_idx,
                     dst: *dst,
-                    data,
+                    data: Arc::clone(data),
                 });
             }
         }
@@ -937,7 +1001,7 @@ fn detect_static_weights_with_limits(
 /// [`StaticWeightBinding`]. Returns `None` when no `WriteConst` covers
 /// the slot — the consumer is treated as dynamic in that case.
 fn bind_consumer_input(
-    const_slots: &[WriteConstEntry<'_>],
+    const_slots: &[WriteConstEntry],
     arena: &mut PreparedConstantArena,
     instruction_index: usize,
     input_index: usize,
@@ -992,8 +1056,12 @@ fn bind_consumer_input(
         }
     }
     let weight_id = if kind == PackedWeightKind::Fp32 {
-        let payload = bytes_to_f32_vec(payload_bytes)?;
-        arena.try_insert(&name, payload)?
+        arena.try_insert_shared_fp32(
+            &name,
+            Arc::clone(&producer.data),
+            relative_start,
+            payload_bytes.len(),
+        )?
     } else {
         arena.insert_raw(&name, payload_bytes.to_vec(), kind)
     };
@@ -1009,9 +1077,9 @@ fn bind_consumer_input(
 /// `slot` (byte-exact) or strictly covers it. Order of producers
 /// follows plan order, so a tie-break favours the earliest writer.
 fn find_covering_write_const<'a>(
-    const_slots: &'a [WriteConstEntry<'a>],
+    const_slots: &'a [WriteConstEntry],
     slot: &BufferSlice,
-) -> Option<&'a WriteConstEntry<'a>> {
+) -> Option<&'a WriteConstEntry> {
     const_slots
         .iter()
         .find(|entry| covers_slice(&entry.dst, entry.data.len(), slot))
@@ -1206,7 +1274,46 @@ pub fn validate_prepared_against_plan_with_limits(
                 };
                 expected.packed_weight = actual.packed_weight;
                 expected.packed_bias = actual.packed_bias;
-                if actual != &expected {
+                let runtime_tightened = matches!(
+                    &plan.instructions[i],
+                    Instruction::CallKernel { param_dims: Some(dims), .. }
+                        if dims.iter().any(|dim| !matches!(dim, crate::ir::DimExpr::Known(_)))
+                );
+                let allow_capacity_geometry = runtime_tightened && actual.packed_weight.is_none();
+                let b_mismatch = if !allow_capacity_geometry {
+                    actual.b != expected.b
+                } else {
+                    actual.b.offset != expected.b.offset || actual.b.size < expected.b.size
+                };
+                let bias_mismatch = match (actual.bias, expected.bias, actual.packed_bias) {
+                    (Some(actual_bias), Some(expected_bias), Some(_))
+                    | (Some(actual_bias), Some(expected_bias), None)
+                        if !allow_capacity_geometry =>
+                    {
+                        actual_bias != expected_bias
+                    }
+                    (Some(actual_bias), Some(expected_bias), None) => {
+                        actual_bias.offset != expected_bias.offset
+                            || actual_bias.size < expected_bias.size
+                    }
+                    (None, None, _) => false,
+                    _ => true,
+                };
+                let static_geometry_mismatch =
+                    !allow_capacity_geometry && (actual.k != expected.k || actual.n != expected.n);
+                if actual.instruction_index != expected.instruction_index
+                    || actual.node_id != expected.node_id
+                    || b_mismatch
+                    || bias_mismatch
+                    || actual.activation != expected.activation
+                    || static_geometry_mismatch
+                    || actual.packed_weight != expected.packed_weight
+                    || actual.packed_bias != expected.packed_bias
+                    || actual.a.offset != expected.a.offset
+                    || actual.output.offset != expected.output.offset
+                    || actual.a.size < expected.a.size
+                    || actual.output.size < expected.output.size
+                {
                     return Err(BackendError::Dispatch(format!(
                         "prepared fallback: matmul payload mismatch at slot {i}"
                     )));
@@ -1292,6 +1399,7 @@ pub fn prepare_executable_plan_with_limits(
         arena_size: plan.arena_size,
         scratch_size: 0,
         constant_arena: None,
+        identity: NEXT_PREPARED_PLAN_IDENTITY.fetch_add(1, Ordering::Relaxed),
     };
     prepared.register_constant_arena(arena);
     validate_prepared_against_plan_with_limits(&prepared, plan, limits)?;
@@ -1458,7 +1566,7 @@ fn materialize_transposed_fp32_conv_weights(
             transposed.len(),
             byte_len,
             PackedWeightStore::TransposedFp32 {
-                data: transposed,
+                data: transposed.into(),
                 m,
                 k,
             },
@@ -1729,9 +1837,14 @@ pub struct PersistentPreparedWeights {
     by_key: HashMap<PreparedWeightKey, Arc<Vec<f32>>>,
     /// Raw byte payloads for quantized weight slots.
     by_key_u8: HashMap<PreparedWeightKey, Arc<Vec<u8>>>,
+    prepared_plan_identity: u64,
 }
 
 impl PersistentPreparedWeights {
+    #[cfg(any(feature = "prepared-plan", test))]
+    pub(crate) fn belongs_to(&self, prepared: &PreparedExecutablePlan) -> bool {
+        self.prepared_plan_identity != 0 && self.prepared_plan_identity == prepared.identity
+    }
     /// Build an empty view.
     pub fn new() -> Self {
         Self::default()
@@ -1804,6 +1917,7 @@ impl Clone for PersistentPreparedWeights {
         Self {
             by_key: self.by_key.clone(),
             by_key_u8: self.by_key_u8.clone(),
+            prepared_plan_identity: self.prepared_plan_identity,
         }
     }
 }
@@ -1827,11 +1941,11 @@ pub fn build_persistent_prepared_weights(
 ) -> PersistentPreparedWeights {
     use PreparedInstruction::*;
 
-    let Some(arena) = prepared.constant_arena() else {
-        return PersistentPreparedWeights::new();
-    };
-
     let mut view = PersistentPreparedWeights::new();
+    view.prepared_plan_identity = prepared.identity;
+    let Some(arena) = prepared.constant_arena() else {
+        return view;
+    };
     for inst in &prepared.instructions {
         match inst {
             Conv2d(conv) => {
@@ -1922,6 +2036,22 @@ fn register_quantized_slot(
 mod tests {
     use super::*;
     use crate::backend::{BufferSlice, Instruction};
+
+    #[test]
+    fn persistent_weight_view_is_bound_to_its_prepared_plan() {
+        let first = PreparedExecutablePlan {
+            identity: 1,
+            ..PreparedExecutablePlan::default()
+        };
+        let second = PreparedExecutablePlan {
+            identity: 2,
+            ..PreparedExecutablePlan::default()
+        };
+        let view = build_persistent_prepared_weights(&first);
+        assert!(view.belongs_to(&first));
+        assert!(!view.belongs_to(&second));
+        assert!(!PersistentPreparedWeights::new().belongs_to(&first));
+    }
 
     fn empty_plan() -> ExecutablePlan {
         ExecutablePlan {
@@ -2044,7 +2174,10 @@ mod tests {
     fn make_write_const(dst: BufferSlice, f32_payload: &[f32]) -> Instruction {
         let data: Vec<u8> = f32_payload.iter().flat_map(|v| v.to_le_bytes()).collect();
         assert_eq!(data.len(), dst.size, "write_const payload size mismatch");
-        Instruction::WriteConst { dst, data }
+        Instruction::WriteConst {
+            data: data.into(),
+            dst,
+        }
     }
 
     // ── prepare_executable_plan ────────────────────────────────
@@ -2055,7 +2188,7 @@ mod tests {
             instructions: vec![
                 Instruction::WriteConst {
                     dst: BufferSlice::new(0, 4),
-                    data: vec![0; 4],
+                    data: vec![0; 4].into(),
                 },
                 Instruction::CallKernel {
                     kernel_name: "conv2d_silu".into(),
@@ -2444,6 +2577,31 @@ mod tests {
     }
 
     #[test]
+    fn try_prepare_plain_matmul_accepts_unified_five_param_contract() {
+        let mut inst = make_matmul_instruction("matmul", 4, 8, 16, false);
+        let Instruction::CallKernel { params, .. } = &mut inst else {
+            unreachable!();
+        };
+        params.extend([0, 0]);
+
+        let result = try_prepare_matmul(&inst, 0).expect("should promote unified matmul");
+        let PreparedInstruction::MatMul(matmul) = result else {
+            panic!("expected MatMul");
+        };
+        assert_eq!((matmul.m, matmul.k, matmul.n), (4, 8, 16));
+    }
+
+    #[test]
+    fn try_prepare_specialized_matmul_rejects_unified_five_param_contract() {
+        let mut inst = make_matmul_instruction("matmul_i4", 4, 8, 16, false);
+        let Instruction::CallKernel { params, .. } = &mut inst else {
+            unreachable!();
+        };
+        params.extend([0, 0]);
+        assert!(try_prepare_matmul(&inst, 0).is_none());
+    }
+
+    #[test]
     fn try_prepare_matmul_with_activation() {
         let inst = make_matmul_instruction("matmul_relu", 2, 3, 5, false);
         let result = try_prepare_matmul(&inst, 0).expect("should promote");
@@ -2492,7 +2650,7 @@ mod tests {
             input_slices: vec![BufferSlice::new(0, 16), BufferSlice::new(16, 16)],
             output_slice: BufferSlice::new(32, 16),
             secondary_output_slice: None,
-            params: vec![4, 4], // need 3
+            params: vec![4, 4], // need either 3 or 5
             node_id: None,
             param_dims: None,
             weight_meta: None,
@@ -2676,6 +2834,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(empty.len(), 0);
         assert!(empty.is_empty());
@@ -2687,6 +2846,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(one.len(), 1);
         assert!(!one.is_empty());
@@ -2724,7 +2884,7 @@ mod tests {
             instructions: vec![
                 Instruction::WriteConst {
                     dst: BufferSlice::new(weight_offset, weight_size),
-                    data,
+                    data: data.into(),
                 },
                 conv,
             ],
@@ -2796,7 +2956,7 @@ mod tests {
             instructions: vec![
                 Instruction::WriteConst {
                     dst: weight,
-                    data: vec![0u8; weight.size],
+                    data: vec![0u8; weight.size].into(),
                 },
                 conv,
             ],
@@ -2953,6 +3113,23 @@ mod tests {
     }
 
     #[test]
+    fn arena_clone_shares_immutable_payloads() {
+        let mut arena = PreparedConstantArena::new();
+        let unpacked = arena.insert("weight", vec![1.0_f32, 2.0, 3.0]);
+        let packed = arena.insert_raw("packed", vec![0x21_u8, 0x43], PackedWeightKind::U4);
+        let cloned = arena.clone();
+
+        assert_eq!(
+            arena.get(unpacked).unwrap().as_ptr(),
+            cloned.get(unpacked).unwrap().as_ptr()
+        );
+        assert_eq!(
+            arena.get_raw(packed).unwrap().as_ptr(),
+            cloned.get_raw(packed).unwrap().as_ptr()
+        );
+    }
+
+    #[test]
     fn arena_duplicate_name_reuses_slot() {
         let mut arena = PreparedConstantArena::new();
         let first = arena.insert("matmul_weight", vec![1.0_f32, 2.0, 3.0]);
@@ -3000,7 +3177,7 @@ mod tests {
             4,
             4 * std::mem::size_of::<f32>(),
             PackedWeightStore::TransposedFp32 {
-                data: vec![1.0_f32, 3.0, 2.0, 4.0],
+                data: vec![1.0_f32, 3.0, 2.0, 4.0].into(),
                 m: 2,
                 k: 2,
             },
@@ -3209,6 +3386,17 @@ mod tests {
                 assert_eq!(arena.len(), 1);
                 assert_eq!(arena.get(id), Some(weight_payload.as_slice()));
                 assert_eq!(arena.id_for("matmul_0_i1"), Some(id));
+                let source = match &plan.instructions[0] {
+                    Instruction::WriteConst { data, .. } => data,
+                    other => panic!("expected WriteConst, got {other:?}"),
+                };
+                let entry = arena.entries().next().expect("constant entry");
+                match &entry.store {
+                    PackedWeightStore::SharedFp32Bytes { data, .. } => {
+                        assert!(Arc::ptr_eq(source, data));
+                    }
+                    other => panic!("expected shared fp32 bytes, got {other:?}"),
+                }
             }
             other => panic!("expected MatMul at index 1, got {other:?}"),
         }
@@ -3602,6 +3790,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.static_weight_binding_count(), 1);
 
@@ -3615,6 +3804,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.static_weight_binding_count(), 2);
 
@@ -3630,6 +3820,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.static_weight_binding_count(), 0);
     }
@@ -3651,6 +3842,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.constant_arena_entry_count(), 0);
     }
@@ -3718,6 +3910,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         assert_eq!(plan.constant_arena_total_bytes(), 0);
     }
@@ -3817,6 +4010,7 @@ mod tests {
             arena_size: 0,
             scratch_size: 1,
             constant_arena: None,
+            identity: 0,
         };
         let limits = PreparedPlanResourceLimits {
             max_scratch_bytes: 0,
@@ -3930,6 +4124,7 @@ mod tests {
             arena_size: plan.arena_size,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         let err = validate_prepared_against_plan(&scrambled, &plan)
             .expect_err("scrambled order must be rejected");
@@ -3955,6 +4150,7 @@ mod tests {
             arena_size: plan.arena_size,
             scratch_size: 0,
             constant_arena: None,
+            identity: 0,
         };
         let err = validate_prepared_against_plan(&forged, &plan)
             .expect_err("out-of-bounds index must be rejected");

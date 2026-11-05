@@ -121,7 +121,21 @@ impl Tensor {
         Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let _edges = autograd::make_edge(self);
             let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("SliceBackward", inputs))
+            let node = autograd::make_node_info_with_params("SliceBackward", inputs, {
+                let extent = self.shape()[dim];
+                let normalized_start = if start < 0 {
+                    (extent + start).max(0)
+                } else {
+                    start.min(extent)
+                };
+                vec![
+                    dim as i64,
+                    normalized_start,
+                    normalized_start + output.shape()[dim] * step,
+                    step,
+                ]
+            });
+            Self::attach_grad_fn(output, node)
         } else {
             output
         })

@@ -1,6 +1,6 @@
 use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode};
 use crate::utils::parse_shape_attr;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Remove nodes that are not reachable from `graph.inputs`, `graph.outputs`,
 /// or `graph.required_nodes`.
@@ -143,17 +143,39 @@ fn eliminate_noops(graph: &mut ComputeGraph) -> usize {
         return 0;
     }
 
-    for (node_id, replacement_id) in &rewrites {
-        let consumers: Vec<NodeId> = graph.consumers(*node_id);
-        for consumer_id in consumers {
-            if let Some(consumer) = graph.get_node_mut(consumer_id) {
-                for input in consumer.inputs.iter_mut() {
-                    if *input == *node_id {
-                        *input = *replacement_id;
-                    }
-                }
+    let replacement_map: HashMap<NodeId, NodeId> = rewrites.iter().copied().collect();
+    let resolve_replacement = |mut id: NodeId| {
+        let mut remaining = replacement_map.len();
+        while let Some(&replacement) = replacement_map.get(&id) {
+            id = replacement;
+            remaining = remaining.saturating_sub(1);
+            if remaining == 0 {
+                break;
             }
         }
+        id
+    };
+
+    // Resolve the full replacement chain before deleting anything. Rewriting
+    // chained no-ops one at a time can otherwise point a consumer at an
+    // intermediate node that was already removed (A -> Cast -> Cast -> B).
+    for node in &mut graph.nodes {
+        if replacement_map.contains_key(&node.id) {
+            continue;
+        }
+        for input in &mut node.inputs {
+            *input = resolve_replacement(*input);
+        }
+    }
+    for output in &mut graph.outputs {
+        *output = resolve_replacement(*output);
+    }
+    graph.required_nodes = graph
+        .required_nodes
+        .iter()
+        .map(|&required| resolve_replacement(required))
+        .collect();
+    for (node_id, _) in &rewrites {
         graph.remove_node(*node_id);
     }
 
@@ -215,5 +237,24 @@ mod tests {
 
         assert_eq!(eliminate_noops(&mut graph), 0);
         assert!(graph.get_node(cast).is_some());
+    }
+
+    #[test]
+    fn chained_noops_rewrite_consumers_to_live_terminal_input() {
+        let mut graph = ComputeGraph::new();
+        let ty = TensorType::new(vec![DimExpr::Known(4)], crate::ir::IrDType::F32);
+        let input = graph.add_node(Opcode::Input, vec![], ty.clone());
+        let cast_a = graph.add_node(Opcode::Cast, vec![input], ty.clone());
+        let cast_b = graph.add_node(Opcode::Cast, vec![cast_a], ty.clone());
+        let consumer = graph.add_node(Opcode::Relu, vec![cast_b], ty);
+        graph.inputs = vec![input];
+        graph.outputs = vec![consumer];
+
+        eliminate_dead_code(&mut graph);
+
+        assert!(graph.get_node(cast_a).is_none());
+        assert!(graph.get_node(cast_b).is_none());
+        assert_eq!(graph.get_node(consumer).unwrap().inputs, vec![input]);
+        graph.validate_with_limits(&Default::default()).unwrap();
     }
 }

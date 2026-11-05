@@ -23,9 +23,7 @@ use crate::backend::{
 use crate::compiler::passes::calibration;
 use crate::compiler::passes::training::{inject_optimizer, TrainConfig};
 use crate::compiler::{MemoryPlan, MemoryPlanResourceLimits};
-#[cfg(test)]
-use crate::ir::IrDType;
-use crate::ir::{ComputeGraph, DimExpr, NodeId, Opcode, ShapeEnv, TensorValue};
+use crate::ir::{ComputeGraph, DimExpr, IrDType, NodeId, Opcode, ShapeEnv, TensorValue};
 use crate::types::{CompileTarget, QuantTarget};
 use std::collections::HashMap;
 
@@ -36,6 +34,32 @@ struct StaticShapeCache {
     tightened_memory_plan: MemoryPlan,
     shape_env: ShapeEnv,
     filtered_plan: ExecutablePlan,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeTelemetry {
+    pub shape_preamble_ns: u128,
+    pub input_write_ns: u128,
+    pub dispatch_ns: u128,
+    pub output_read_ns: u128,
+    pub state_binding_ns: u128,
+    pub state_update_ns: u128,
+    pub total_ns: u128,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub actual_arena_bytes_copied: usize,
+    pub full_cache_bytes_avoided: usize,
+    pub arena_bytes: usize,
+    pub rss_bytes: usize,
+    pub instruction_count: usize,
+    pub write_const_count: usize,
+    pub fill_count: usize,
+    pub mem_copy_count: usize,
+    pub arena_growth_events: usize,
+    pub output_capacity_growth_events: usize,
+    pub state_capacity_growth_events: usize,
+    pub reused_shape_plan: bool,
+    pub reused_arena: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -257,6 +281,103 @@ fn validate_compiled_artifacts(
     Ok(())
 }
 
+fn slices_overlap(left: BufferSlice, right: BufferSlice) -> bool {
+    if left.size == 0 || right.size == 0 {
+        return false;
+    }
+    let left_end = left.offset.saturating_add(left.size);
+    let right_end = right.offset.saturating_add(right.size);
+    left.offset < right_end && right.offset < left_end
+}
+
+fn classify_stable_write_consts(
+    graph: &ComputeGraph,
+    plan: &ExecutablePlan,
+    memory_plan: &MemoryPlan,
+) -> Vec<bool> {
+    let mut runtime_writes = Vec::new();
+    for input_id in &graph.inputs {
+        if let Some(slot) = memory_plan.slots.get(input_id) {
+            runtime_writes.push(BufferSlice::new(slot.offset, slot.size));
+        }
+    }
+    for instruction in &plan.instructions {
+        match instruction {
+            Instruction::CallKernel {
+                output_slice,
+                secondary_output_slice,
+                ..
+            } => {
+                runtime_writes.push(*output_slice);
+                if let Some(secondary) = secondary_output_slice {
+                    runtime_writes.push(*secondary);
+                }
+            }
+            Instruction::MemCopy { dst, .. } | Instruction::Fill { dst, .. } => {
+                runtime_writes.push(*dst);
+            }
+            Instruction::WriteConst { .. } => {}
+        }
+    }
+    plan.instructions
+        .iter()
+        .map(|instruction| match instruction {
+            Instruction::WriteConst { dst, .. } => !runtime_writes
+                .iter()
+                .any(|runtime_dst| slices_overlap(*dst, *runtime_dst)),
+            _ => false,
+        })
+        .collect()
+}
+
+fn filter_initialized_stable_constants(
+    plan: &ExecutablePlan,
+    stable_mask: &[bool],
+) -> ExecutablePlan {
+    let (instructions, levels): (Vec<_>, Vec<_>) = plan
+        .instructions
+        .iter()
+        .zip(&plan.levels)
+        .enumerate()
+        .filter(|(instruction_index, (instruction, _))| {
+            !matches!(
+                instruction,
+                Instruction::WriteConst { .. }
+                    if stable_mask
+                        .get(*instruction_index)
+                        .copied()
+                        .unwrap_or(false)
+            )
+        })
+        .map(|(_, (instruction, level))| (instruction.clone(), *level))
+        .unzip();
+    ExecutablePlan {
+        instructions,
+        arena_size: plan.arena_size,
+        levels,
+    }
+}
+
+fn current_rss_bytes() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|kilobytes| kilobytes.saturating_mul(1024))
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
 /// An ahead-of-time graph executor that compiles and dispatches
 /// computation graphs through the v2.0 backend pipeline.
 ///
@@ -268,12 +389,323 @@ pub struct GraphExecutor<B: Backend> {
     /// Populated after the first inference when `graph.has_static_shapes()`
     /// is true. Subsequent calls skip ShapeEnv/tighten/tighten_slices.
     static_shape_cache: Option<StaticShapeCache>,
+    /// WriteConst instructions whose destinations cannot be overwritten by
+    /// graph inputs or runtime instructions. Once one prepared session step
+    /// has materialised them, later steps can retain them in the cached arena.
+    stable_write_const_mask: Option<Vec<bool>>,
+    stable_constants_initialized: bool,
     last_output_shapes: Vec<Vec<usize>>,
+    next_output_reads: Option<Vec<OutputReadPolicy>>,
+    runtime_telemetry_enabled: bool,
+    last_runtime_telemetry: Option<RuntimeTelemetry>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OutputReadPolicy {
+    Full,
+    #[cfg(feature = "python")]
+    Suffix {
+        axis: usize,
+        old_extent: usize,
+    },
 }
 
 struct RuntimeOutputs {
     data: Vec<Vec<u8>>,
     shapes: Vec<Vec<usize>>,
+}
+
+fn constant_scalar_f32(value: &TensorValue, node_id: NodeId) -> Result<f32, BackendError> {
+    match value {
+        TensorValue::Float(value) => Ok(*value),
+        TensorValue::Int(value) => Ok(*value as f32),
+        TensorValue::Data { bytes, tensor_type } => match tensor_type.dtype() {
+            IrDType::F32 if bytes.len() == 4 => Ok(f32::from_le_bytes(
+                bytes[..4].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!(
+                        "constant node {node_id} has invalid F32 bytes"
+                    ))
+                })?,
+            )),
+            IrDType::I32 if bytes.len() == 4 => Ok(i32::from_le_bytes(
+                bytes[..4].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!("constant node {node_id} has invalid I32 bytes"))
+                })?,
+            ) as f32),
+            IrDType::I64 if bytes.len() == 8 => Ok(i64::from_le_bytes(
+                bytes[..8].try_into().map_err(|_| {
+                    BackendError::Dispatch(format!("constant node {node_id} has invalid I64 bytes"))
+                })?,
+            ) as f32),
+            dtype => Err(BackendError::Dispatch(format!(
+                "constant node {node_id} is not one scalar supported by Range ({dtype:?}, {} bytes)",
+                bytes.len()
+            ))),
+        },
+    }
+}
+
+fn evaluate_runtime_scalar(
+    graph: &ComputeGraph,
+    node_id: NodeId,
+    positions: &HashMap<NodeId, usize>,
+    inputs: &[&[u8]],
+    shape_env: &ShapeEnv,
+    visiting: &mut std::collections::HashSet<NodeId>,
+) -> Result<f32, BackendError> {
+    if !visiting.insert(node_id) {
+        return Err(BackendError::Dispatch(format!(
+            "runtime scalar expression contains a cycle at node {node_id}"
+        )));
+    }
+    let result = (|| {
+        if let Some(position) = positions.get(&node_id) {
+            let bytes = inputs.get(*position).ok_or_else(|| {
+                BackendError::Dispatch(format!("runtime scalar input node {node_id} is missing"))
+            })?;
+            if bytes.len() != 4 {
+                return Err(BackendError::Dispatch(format!(
+                    "runtime scalar input node {node_id} must contain one F32 value"
+                )));
+            }
+            return Ok(f32::from_le_bytes(bytes[..4].try_into().map_err(|_| {
+                BackendError::Dispatch("runtime scalar byte conversion failed".into())
+            })?));
+        }
+        let node = graph.get_node(node_id).ok_or_else(|| {
+            BackendError::Dispatch(format!("runtime scalar node {node_id} is missing"))
+        })?;
+        match &node.opcode {
+            Opcode::Constant(value) => constant_scalar_f32(value, node_id),
+            Opcode::Cast | Opcode::Reshape | Opcode::Squeeze | Opcode::Unsqueeze => {
+                let input = *node.inputs.first().ok_or_else(|| {
+                    BackendError::Dispatch(format!("{:?} node {node_id} has no input", node.opcode))
+                })?;
+                evaluate_runtime_scalar(graph, input, positions, inputs, shape_env, visiting)
+            }
+            Opcode::Add | Opcode::Sub | Opcode::Mul => {
+                if node.inputs.len() != 2 {
+                    return Err(BackendError::Dispatch(format!(
+                        "scalar {:?} node {node_id} requires two inputs",
+                        node.opcode
+                    )));
+                }
+                let left = evaluate_runtime_scalar(
+                    graph,
+                    node.inputs[0],
+                    positions,
+                    inputs,
+                    shape_env,
+                    visiting,
+                )?;
+                let right = evaluate_runtime_scalar(
+                    graph,
+                    node.inputs[1],
+                    positions,
+                    inputs,
+                    shape_env,
+                    visiting,
+                )?;
+                Ok(match node.opcode {
+                    Opcode::Add => left + right,
+                    Opcode::Sub => left - right,
+                    Opcode::Mul => left * right,
+                    _ => unreachable!(),
+                })
+            }
+            Opcode::Slice => {
+                let data_id = *node.inputs.first().ok_or_else(|| {
+                    BackendError::Dispatch(format!("Slice node {node_id} has no data input"))
+                })?;
+                let shape_node = graph.get_node(data_id).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Slice node {node_id} data input is missing"))
+                })?;
+                let source_id = match shape_node.opcode {
+                    Opcode::Shape => *shape_node.inputs.first().ok_or_else(|| {
+                        BackendError::Dispatch(format!("Shape node {} has no input", shape_node.id))
+                    })?,
+                    _ => {
+                        return Err(BackendError::Dispatch(format!(
+                            "runtime scalar Slice node {node_id} does not read a Shape result"
+                        )))
+                    }
+                };
+                let source = graph.get_node(source_id).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Shape source node {source_id} is missing"))
+                })?;
+                let rank = source.output_type.shape.len() as i64;
+                let raw_start = if let Some(value) = node
+                    .attrs
+                    .get("starts")
+                    .or_else(|| node.attrs.get("start"))
+                    .and_then(|value| value.split(',').next())
+                {
+                    value.trim().parse::<i64>().map_err(|error| {
+                        BackendError::Dispatch(format!(
+                            "Slice node {node_id} has invalid start: {error}"
+                        ))
+                    })?
+                } else {
+                    let start_id = *node.inputs.get(1).ok_or_else(|| {
+                        BackendError::Dispatch(format!("Slice node {node_id} has no start input"))
+                    })?;
+                    let value = evaluate_runtime_scalar(
+                        graph, start_id, positions, inputs, shape_env, visiting,
+                    )?;
+                    if !value.is_finite() || value.fract() != 0.0 {
+                        return Err(BackendError::Dispatch(format!(
+                            "Slice node {node_id} start must be a finite integer"
+                        )));
+                    }
+                    value as i64
+                };
+                let index = if raw_start < 0 {
+                    rank + raw_start
+                } else {
+                    raw_start
+                };
+                if index < 0 || index >= rank {
+                    return Err(BackendError::Dispatch(format!(
+                        "Slice node {node_id} index {raw_start} is out of range for Shape rank {rank}"
+                    )));
+                }
+                source.output_type.shape[index as usize]
+                    .evaluate_with_env(shape_env)
+                    .map(|value| value as f32)
+                    .map_err(BackendError::Dispatch)
+            }
+            Opcode::Gather => {
+                if node.inputs.len() < 2 {
+                    return Err(BackendError::Dispatch(format!(
+                        "Gather node {node_id} requires data and indices"
+                    )));
+                }
+                let shape_node = graph.get_node(node.inputs[0]).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Gather node {node_id} data input is missing"))
+                })?;
+                let source_id = match shape_node.opcode {
+                    Opcode::Shape => *shape_node.inputs.first().ok_or_else(|| {
+                        BackendError::Dispatch(format!("Shape node {} has no input", shape_node.id))
+                    })?,
+                    _ => {
+                        return Err(BackendError::Dispatch(format!(
+                            "runtime scalar Gather node {node_id} does not read a Shape result"
+                        )))
+                    }
+                };
+                let index = evaluate_runtime_scalar(
+                    graph,
+                    node.inputs[1],
+                    positions,
+                    inputs,
+                    shape_env,
+                    visiting,
+                )?;
+                if !index.is_finite() || index.fract() != 0.0 {
+                    return Err(BackendError::Dispatch(format!(
+                        "Gather node {node_id} index must be a finite integer"
+                    )));
+                }
+                let source = graph.get_node(source_id).ok_or_else(|| {
+                    BackendError::Dispatch(format!("Shape source node {source_id} is missing"))
+                })?;
+                let rank = source.output_type.shape.len() as i64;
+                let raw_index = index as i64;
+                let normalized = if raw_index < 0 {
+                    rank.checked_add(raw_index)
+                } else {
+                    Some(raw_index)
+                }
+                .filter(|value| *value >= 0 && *value < rank)
+                .ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "Gather node {node_id} index {raw_index} is out of range for Shape rank {rank}"
+                    ))
+                })? as usize;
+                source.output_type.shape[normalized]
+                    .evaluate_with_env(shape_env)
+                    .map(|value| value as f32)
+                    .map_err(BackendError::Dispatch)
+            }
+            opcode => Err(BackendError::Dispatch(format!(
+                "Range scalar node {node_id} uses unsupported derived opcode {opcode:?}"
+            ))),
+        }
+    })();
+    visiting.remove(&node_id);
+    result
+}
+
+fn bind_runtime_range_shapes(
+    graph: &ComputeGraph,
+    inputs: &[&[u8]],
+    shape_env: &mut ShapeEnv,
+) -> Result<(), BackendError> {
+    let positions: HashMap<NodeId, usize> = graph
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(index, &id)| (id, index))
+        .collect();
+    for node in &graph.nodes {
+        if !matches!(node.opcode, Opcode::Range) || node.inputs.len() != 3 {
+            continue;
+        }
+        let mut values = [0.0f32; 3];
+        let mut visiting = std::collections::HashSet::new();
+        for (index, input_id) in node.inputs.iter().enumerate() {
+            values[index] = evaluate_runtime_scalar(
+                graph,
+                *input_id,
+                &positions,
+                inputs,
+                shape_env,
+                &mut visiting,
+            )?;
+        }
+        let [start, limit, step] = values;
+        if !start.is_finite() || !limit.is_finite() || !step.is_finite() || step == 0.0 {
+            return Err(BackendError::Dispatch(
+                "range_f32: start, limit, and nonzero step must be finite".into(),
+            ));
+        }
+        let span = if step > 0.0 {
+            (limit - start) / step
+        } else {
+            (start - limit) / -step
+        };
+        if !span.is_finite() || span > u64::MAX as f32 {
+            return Err(BackendError::Dispatch(
+                "range_f32: element count is invalid".into(),
+            ));
+        }
+        let count = span.ceil().max(0.0) as u64;
+        let dimension = node.output_type.shape.first().ok_or_else(|| {
+            BackendError::Dispatch(format!("Range node {} output must have rank one", node.id))
+        })?;
+        if node.output_type.shape.len() != 1 {
+            return Err(BackendError::Dispatch(format!(
+                "Range node {} output must have rank one",
+                node.id
+            )));
+        }
+        match dimension {
+            DimExpr::Symbol(symbol) | DimExpr::Bounded { sym: symbol, .. } => shape_env
+                .try_bind(symbol, count)
+                .map_err(BackendError::Dispatch)?,
+            _ if dimension
+                .evaluate_with_env(shape_env)
+                .map_err(BackendError::Dispatch)?
+                == count => {}
+            _ => {
+                return Err(BackendError::Dispatch(format!(
+                    "Range node {} live extent disagrees with its declared shape",
+                    node.id
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read output tensors from the arena using the tightened memory plan
@@ -284,10 +716,13 @@ fn read_execution_outputs<B: Backend>(
     shape_env: &ShapeEnv,
     backend: &B,
     arena: &B::Buffer,
+    reuse: Option<Vec<Vec<u8>>>,
+    read_policies: Option<&[OutputReadPolicy]>,
 ) -> Result<RuntimeOutputs, BackendError> {
-    let mut outputs = Vec::with_capacity(graph.outputs.len());
+    let mut outputs = reuse.unwrap_or_default();
+    outputs.resize_with(graph.outputs.len(), Vec::new);
     let mut shapes = Vec::with_capacity(graph.outputs.len());
-    for &output_node_id in graph.outputs.iter() {
+    for (output_index, &output_node_id) in graph.outputs.iter().enumerate() {
         let slot = tightened_memory_plan
             .slots
             .get(&output_node_id)
@@ -302,14 +737,10 @@ fn read_execution_outputs<B: Backend>(
             .shape
             .iter()
             .map(|dimension| {
-                let value = match dimension {
-                    crate::ir::DimExpr::Known(value) => Some(*value),
-                    crate::ir::DimExpr::Symbol(name) => shape_env.resolve(name),
-                    crate::ir::DimExpr::Bounded { sym, .. } => shape_env.resolve(sym),
-                }
-                .ok_or_else(|| {
+                let value = dimension.evaluate_with_env(shape_env).map_err(|error| {
                     BackendError::Dispatch(format!(
-                        "output node {output_node_id} has an unresolved dimension"
+                        "output node {output_node_id} name='{}' dimension {dimension:?}: {error}",
+                        node.name
                     ))
                 })?;
                 usize::try_from(value).map_err(|_| {
@@ -338,8 +769,92 @@ fn read_execution_outputs<B: Backend>(
                 slot.offset, tightened_memory_plan.total_size
             )));
         }
-        let data = backend.try_read_arena(arena, slot.offset, actual_size)?;
-        outputs.push(data);
+        let policy = read_policies
+            .and_then(|policies| policies.get(output_index))
+            .unwrap_or(&OutputReadPolicy::Full);
+        match *policy {
+            OutputReadPolicy::Full => backend.try_read_arena_into(
+                arena,
+                slot.offset,
+                actual_size,
+                &mut outputs[output_index],
+            )?,
+            #[cfg(feature = "python")]
+            OutputReadPolicy::Suffix { axis, old_extent } => {
+                if axis >= shape.len() || old_extent >= shape[axis] {
+                    return Err(BackendError::Dispatch(format!(
+                        "output node {output_node_id} suffix axis/extent ({axis}, {old_extent}) is invalid for shape {shape:?}"
+                    )));
+                }
+                let elements = shape
+                    .iter()
+                    .try_fold(1usize, |total, extent| total.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} element count overflows"
+                        ))
+                    })?;
+                if elements == 0 || actual_size % elements != 0 {
+                    return Err(BackendError::Dispatch(format!(
+                        "output node {output_node_id} has inconsistent byte geometry"
+                    )));
+                }
+                let element_bytes = actual_size / elements;
+                let inner = shape[axis + 1..]
+                    .iter()
+                    .try_fold(element_bytes, |bytes, extent| bytes.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix inner block overflows"
+                        ))
+                    })?;
+                let outer = shape[..axis]
+                    .iter()
+                    .try_fold(1usize, |count, extent| count.checked_mul(*extent))
+                    .ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix outer count overflows"
+                        ))
+                    })?;
+                let full_block = shape[axis].checked_mul(inner).ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "output node {output_node_id} suffix full block overflows"
+                    ))
+                })?;
+                let prefix_block = old_extent.checked_mul(inner).ok_or_else(|| {
+                    BackendError::Dispatch(format!(
+                        "output node {output_node_id} suffix prefix block overflows"
+                    ))
+                })?;
+                let suffix_block = full_block - prefix_block;
+                let mut ranges = Vec::new();
+                ranges.try_reserve_exact(outer).map_err(|error| {
+                    BackendError::Dispatch(format!(
+                        "output suffix range allocation failed: {error}"
+                    ))
+                })?;
+                for outer_index in 0..outer {
+                    let block_offset = outer_index.checked_mul(full_block).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix block offset overflows"
+                        ))
+                    })?;
+                    let relative_offset =
+                        block_offset.checked_add(prefix_block).ok_or_else(|| {
+                            BackendError::Dispatch(format!(
+                                "output node {output_node_id} suffix relative offset overflows"
+                            ))
+                        })?;
+                    let offset = slot.offset.checked_add(relative_offset).ok_or_else(|| {
+                        BackendError::Dispatch(format!(
+                            "output node {output_node_id} suffix arena offset overflows"
+                        ))
+                    })?;
+                    ranges.push((offset, suffix_block));
+                }
+                backend.try_read_arena_ranges_into(arena, &ranges, &mut outputs[output_index])?;
+            }
+        }
         shapes.push(shape);
     }
     Ok(RuntimeOutputs {
@@ -371,12 +886,22 @@ impl<B: Backend> GraphExecutor<B> {
             resource_limits,
             cached_arena: None,
             static_shape_cache: None,
+            stable_write_const_mask: None,
+            stable_constants_initialized: false,
             last_output_shapes: Vec::new(),
+            next_output_reads: None,
+            runtime_telemetry_enabled: false,
+            last_runtime_telemetry: None,
         }
     }
 
     pub fn last_output_shapes(&self) -> &[Vec<usize>] {
         &self.last_output_shapes
+    }
+
+    #[cfg(feature = "python")]
+    pub(crate) fn set_next_output_reads(&mut self, policies: Vec<OutputReadPolicy>) {
+        self.next_output_reads = Some(policies);
     }
 
     /// Return a reference to the backend.
@@ -390,6 +915,43 @@ impl<B: Backend> GraphExecutor<B> {
     pub fn invalidate_runtime_cache(&mut self) {
         self.cached_arena = None;
         self.static_shape_cache = None;
+        self.stable_write_const_mask = None;
+        self.stable_constants_initialized = false;
+        self.last_runtime_telemetry = None;
+    }
+
+    pub fn set_runtime_telemetry_enabled(&mut self, enabled: bool) {
+        self.runtime_telemetry_enabled = enabled;
+        if !enabled {
+            self.last_runtime_telemetry = None;
+        }
+    }
+
+    pub fn last_runtime_telemetry(&self) -> Option<&RuntimeTelemetry> {
+        self.last_runtime_telemetry.as_ref()
+    }
+
+    pub fn runtime_telemetry_enabled(&self) -> bool {
+        self.runtime_telemetry_enabled
+    }
+
+    pub(crate) fn augment_runtime_telemetry(
+        &mut self,
+        state_binding_ns: u128,
+        state_update_ns: u128,
+        full_cache_bytes_avoided: usize,
+        output_capacity_growth_events: usize,
+        state_capacity_growth_events: usize,
+        end_to_end_ns: u128,
+    ) {
+        if let Some(telemetry) = self.last_runtime_telemetry.as_mut() {
+            telemetry.state_binding_ns = state_binding_ns;
+            telemetry.state_update_ns = state_update_ns;
+            telemetry.full_cache_bytes_avoided = full_cache_bytes_avoided;
+            telemetry.output_capacity_growth_events = output_capacity_growth_events;
+            telemetry.state_capacity_growth_events = state_capacity_growth_events;
+            telemetry.total_ns = end_to_end_ns;
+        }
     }
 
     /// Run the full compilation pipeline:
@@ -492,8 +1054,29 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, false, None, None)
+        self.execute_internal(graph, plan, memory_plan, inputs, false, None, None, None)
             .map(|(outputs, _profile)| outputs)
+    }
+
+    pub fn execute_reusing_outputs(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        reusable_outputs: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            None,
+            None,
+            Some(reusable_outputs),
+        )
+        .map(|(outputs, _profile)| outputs)
     }
 
     pub fn execute_profile(
@@ -503,7 +1086,7 @@ impl<B: Backend> GraphExecutor<B> {
         memory_plan: &MemoryPlan,
         inputs: &[&[u8]],
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
-        self.execute_internal(graph, plan, memory_plan, inputs, true, None, None)
+        self.execute_internal(graph, plan, memory_plan, inputs, true, None, None, None)
     }
 
     /// Profile the opt-in prepared arena fallback path.
@@ -527,7 +1110,16 @@ impl<B: Backend> GraphExecutor<B> {
             plan,
             &self.resource_limits.prepared,
         )?;
-        self.execute_internal(graph, plan, memory_plan, inputs, true, Some(prepared), None)
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            true,
+            Some(prepared),
+            None,
+            None,
+        )
     }
 
     /// Opt-in prepared-execution fallback path.
@@ -610,6 +1202,7 @@ impl<B: Backend> GraphExecutor<B> {
             false,
             Some(prepared),
             None,
+            None,
         )
         .map(|(outputs, _profile)| outputs)
     }
@@ -671,6 +1264,70 @@ impl<B: Backend> GraphExecutor<B> {
         .map(|(outputs, _profile)| outputs)
     }
 
+    #[cfg(feature = "prepared-plan")]
+    pub fn execute_prepared_no_copy_reusing_outputs(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+        reusable_outputs: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
+        let view = crate::backend::prepared::build_persistent_prepared_weights(prepared);
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            None,
+            Some(&view),
+            Some(reusable_outputs),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
+    #[cfg(feature = "prepared-plan")]
+    pub(crate) fn execute_prepared_no_copy_reusing_outputs_with_view(
+        &mut self,
+        graph: &ComputeGraph,
+        plan: &mut ExecutablePlan,
+        memory_plan: &MemoryPlan,
+        inputs: &[&[u8]],
+        prepared: &crate::backend::prepared::PreparedExecutablePlan,
+        view: &crate::backend::prepared::PersistentPreparedWeights,
+        reusable_outputs: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        crate::backend::prepared::validate_prepared_against_plan_with_limits(
+            prepared,
+            plan,
+            &self.resource_limits.prepared,
+        )?;
+        if !view.belongs_to(prepared) {
+            return Err(BackendError::Dispatch(
+                "persistent prepared-weight view does not belong to the validated prepared plan"
+                    .into(),
+            ));
+        }
+        self.execute_internal(
+            graph,
+            plan,
+            memory_plan,
+            inputs,
+            false,
+            None,
+            Some(view),
+            Some(reusable_outputs),
+        )
+        .map(|(outputs, _profile)| outputs)
+    }
+
     /// Profile the no-copy prepared path. Mirrors
     /// [`Self::execute_prepared_no_copy`] but preserves per-instruction
     /// [`ProfileEntry`] rows so callers can quantify the saved
@@ -711,7 +1368,12 @@ impl<B: Backend> GraphExecutor<B> {
         prepared_preload: Option<&crate::backend::prepared::PreparedExecutablePlan>,
         #[cfg_attr(not(feature = "prepared-plan"), allow(unused_variables))]
         persistent_view: Option<&crate::backend::prepared::PersistentPreparedWeights>,
+        mut reusable_outputs: Option<Vec<Vec<u8>>>,
     ) -> Result<(Vec<Vec<u8>>, Vec<ProfileEntry>), BackendError> {
+        let telemetry_total_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
+        let shape_preamble_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
+        let reused_shape_plan = self.static_shape_cache.is_some();
+        let output_read_policies = self.next_output_reads.take();
         validate_compiled_artifacts(graph, plan, memory_plan, &self.resource_limits)?;
         // ── Preamble: shape env, tighten, safety, arena, input write ──
         let (tightened_memory_plan, shape_env, cached_filtered_plan) =
@@ -731,8 +1393,9 @@ impl<B: Backend> GraphExecutor<B> {
                     Some(filtered_plan.clone()),
                 )
             } else {
-                let shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
+                let mut shape_env = ShapeEnv::from_graph_inputs(graph, inputs)
                     .map_err(|e| BackendError::Dispatch(format!("shape env: {e}")))?;
+                bind_runtime_range_shapes(graph, inputs, &mut shape_env)?;
                 validate_shapes(graph, &shape_env)
                     .map_err(|e| BackendError::Dispatch(format!("shape validation: {e}")))?;
 
@@ -753,23 +1416,9 @@ impl<B: Backend> GraphExecutor<B> {
                 // Cache for static-shape models so subsequent calls
                 // skip the entire preamble.
                 if graph.has_static_shapes() {
-                    let (filtered_instructions, filtered_levels): (Vec<_>, Vec<_>) = plan
-                        .instructions
-                        .iter()
-                        .zip(&plan.levels)
-                        .filter(|(instruction, _)| {
-                            !matches!(
-                                instruction,
-                                Instruction::WriteConst { .. } | Instruction::Fill { .. }
-                            )
-                        })
-                        .map(|(instruction, level)| (instruction.clone(), *level))
-                        .unzip();
-                    let filtered_plan = ExecutablePlan {
-                        instructions: filtered_instructions,
-                        arena_size: plan.arena_size,
-                        levels: filtered_levels,
-                    };
+                    let stable_mask =
+                        classify_stable_write_consts(graph, plan, &tightened_memory_plan);
+                    let filtered_plan = filter_initialized_stable_constants(plan, &stable_mask);
                     self.static_shape_cache = Some(StaticShapeCache {
                         tightened_memory_plan: tightened_memory_plan.clone(),
                         shape_env: shape_env.clone(),
@@ -783,6 +1432,14 @@ impl<B: Backend> GraphExecutor<B> {
                     (tightened_memory_plan, shape_env, None)
                 }
             };
+        let mut runtime_telemetry = telemetry_total_start.map(|_| RuntimeTelemetry {
+            shape_preamble_ns: shape_preamble_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or_default(),
+            input_bytes: inputs.iter().map(|input| input.len()).sum(),
+            reused_shape_plan,
+            ..RuntimeTelemetry::default()
+        });
 
         // Slot safety check: only needed on the first call when shapes are
         // being resolved for the first time. On subsequent calls with a
@@ -843,8 +1500,10 @@ impl<B: Backend> GraphExecutor<B> {
                 })?;
             if input_bytes.len() != slot.size {
                 return Err(BackendError::Dispatch(format!(
-                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}",
-                    input_bytes.len(), slot.size
+                    "input {i} for node {input_node_id} has {} bytes but its memory slot requires {}; declared shape {:?}, shape env {:?}",
+                    input_bytes.len(), slot.size,
+                    graph.get_node(input_node_id).map(|node| &node.output_type.shape),
+                    shape_env
                 )));
             }
             let input_end = slot.offset.checked_add(input_bytes.len()).ok_or_else(|| {
@@ -863,8 +1522,21 @@ impl<B: Backend> GraphExecutor<B> {
             .cached_arena
             .as_ref()
             .is_some_and(|(cap, _)| *cap >= arena_size);
+        if let Some(telemetry) = runtime_telemetry.as_mut() {
+            telemetry.arena_bytes = arena_size;
+            telemetry.reused_arena = enough_capacity;
+            telemetry.arena_growth_events = usize::from(!enough_capacity);
+        }
         if !enough_capacity {
             self.cached_arena = Some((arena_size, self.backend.try_allocate_arena(arena_size)?));
+            self.stable_constants_initialized = false;
+        }
+        if self.stable_write_const_mask.is_none() {
+            self.stable_write_const_mask = Some(classify_stable_write_consts(
+                graph,
+                plan,
+                &tightened_memory_plan,
+            ));
         }
         let arena = &self
             .cached_arena
@@ -874,6 +1546,7 @@ impl<B: Backend> GraphExecutor<B> {
             })?
             .1;
 
+        let input_write_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
         for (&input_node_id, input_bytes) in graph.inputs.iter().zip(inputs.iter()) {
             let slot = tightened_memory_plan
                 .slots
@@ -884,16 +1557,23 @@ impl<B: Backend> GraphExecutor<B> {
             self.backend
                 .try_write_arena(arena, slot.offset, input_bytes)?;
         }
+        if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), input_write_start) {
+            telemetry.input_write_ns = start.elapsed().as_nanos();
+        }
 
         // ── Dispatch: no-copy persistent view path vs standard path ──
         #[cfg(feature = "prepared-plan")]
         if let Some(view) = persistent_view {
-            let dispatch_plan: ExecutablePlan = if view.is_empty() {
+            let dispatch_plan: ExecutablePlan = if view.is_empty()
+                && !self.stable_constants_initialized
+            {
                 plan.clone()
             } else {
                 let mut filtered: Vec<Instruction> = Vec::with_capacity(plan.instructions.len());
                 let mut filtered_levels = Vec::with_capacity(plan.levels.len());
-                for (instruction, level) in plan.instructions.iter().zip(&plan.levels) {
+                for (instruction_index, (instruction, level)) in
+                    plan.instructions.iter().zip(&plan.levels).enumerate()
+                {
                     // Only skip WriteConst for fp32 weight slots — the
                     // persistent-view dispatch path (`dispatch_with_persistent_view`)
                     // knows how to satisfy fp32 Conv2d/MatMul weights from the
@@ -904,7 +1584,13 @@ impl<B: Backend> GraphExecutor<B> {
                         instruction,
                         Instruction::WriteConst { dst, .. }
                             if view.get(&(dst.offset, dst.size)).is_some()
-                    );
+                    ) || (self.stable_constants_initialized
+                        && self
+                            .stable_write_const_mask
+                            .as_ref()
+                            .and_then(|mask| mask.get(instruction_index))
+                            .copied()
+                            .unwrap_or(false));
                     if !drop {
                         filtered.push(instruction.clone());
                         filtered_levels.push(*level);
@@ -917,6 +1603,25 @@ impl<B: Backend> GraphExecutor<B> {
                 }
             };
 
+            if let Some(telemetry) = runtime_telemetry.as_mut() {
+                telemetry.instruction_count = dispatch_plan.instructions.len();
+                telemetry.write_const_count = dispatch_plan
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, Instruction::WriteConst { .. }))
+                    .count();
+                telemetry.fill_count = dispatch_plan
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, Instruction::Fill { .. }))
+                    .count();
+                telemetry.mem_copy_count = dispatch_plan
+                    .instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, Instruction::MemCopy { .. }))
+                    .count();
+            }
+            let dispatch_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
             let profile_entries = if profile {
                 let mut entries = Vec::with_capacity(dispatch_plan.instructions.len());
                 for (instruction_index, instruction) in
@@ -962,14 +1667,34 @@ impl<B: Backend> GraphExecutor<B> {
                 Vec::new()
             };
 
+            if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), dispatch_start) {
+                telemetry.dispatch_ns = start.elapsed().as_nanos();
+            }
+            let output_read_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
             let runtime_outputs = read_execution_outputs(
                 graph,
                 &tightened_memory_plan,
                 &shape_env,
                 &self.backend,
                 arena,
+                reusable_outputs.take(),
+                output_read_policies.as_deref(),
             )?;
             self.last_output_shapes = runtime_outputs.shapes;
+            if let Some(mut telemetry) = runtime_telemetry {
+                telemetry.output_read_ns = output_read_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default();
+                telemetry.output_bytes = runtime_outputs.data.iter().map(Vec::len).sum();
+                telemetry.actual_arena_bytes_copied =
+                    telemetry.input_bytes.saturating_add(telemetry.output_bytes);
+                telemetry.rss_bytes = current_rss_bytes();
+                telemetry.total_ns = telemetry_total_start
+                    .map(|start| start.elapsed().as_nanos())
+                    .unwrap_or_default();
+                self.last_runtime_telemetry = Some(telemetry);
+            }
+            self.stable_constants_initialized = true;
             return Ok((runtime_outputs.data, profile_entries));
         }
 
@@ -994,7 +1719,26 @@ impl<B: Backend> GraphExecutor<B> {
         } else {
             arena_preloaded_plan.as_ref().unwrap_or(plan)
         };
+        if let Some(telemetry) = runtime_telemetry.as_mut() {
+            telemetry.instruction_count = dispatch_plan.instructions.len();
+            telemetry.write_const_count = dispatch_plan
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::WriteConst { .. }))
+                .count();
+            telemetry.fill_count = dispatch_plan
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::Fill { .. }))
+                .count();
+            telemetry.mem_copy_count = dispatch_plan
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::MemCopy { .. }))
+                .count();
+        }
 
+        let dispatch_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
         let profile_entries = if profile {
             self.backend
                 .dispatch_profile(dispatch_plan, arena, &shape_env)?
@@ -1003,14 +1747,33 @@ impl<B: Backend> GraphExecutor<B> {
             Vec::new()
         };
 
+        if let (Some(telemetry), Some(start)) = (runtime_telemetry.as_mut(), dispatch_start) {
+            telemetry.dispatch_ns = start.elapsed().as_nanos();
+        }
+        let output_read_start = self.runtime_telemetry_enabled.then(std::time::Instant::now);
         let runtime_outputs = read_execution_outputs(
             graph,
             &tightened_memory_plan,
             &shape_env,
             &self.backend,
             arena,
+            reusable_outputs.take(),
+            output_read_policies.as_deref(),
         )?;
         self.last_output_shapes = runtime_outputs.shapes;
+        if let Some(mut telemetry) = runtime_telemetry {
+            telemetry.output_read_ns = output_read_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or_default();
+            telemetry.output_bytes = runtime_outputs.data.iter().map(Vec::len).sum();
+            telemetry.actual_arena_bytes_copied =
+                telemetry.input_bytes.saturating_add(telemetry.output_bytes);
+            telemetry.rss_bytes = current_rss_bytes();
+            telemetry.total_ns = telemetry_total_start
+                .map(|start| start.elapsed().as_nanos())
+                .unwrap_or_default();
+            self.last_runtime_telemetry = Some(telemetry);
+        }
         Ok((runtime_outputs.data, profile_entries))
     }
 
@@ -1033,6 +1796,7 @@ impl<B: Backend> GraphExecutor<B> {
             profile,
             None,
             persistent_view,
+            None,
         )
     }
 
@@ -1537,6 +2301,49 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             .get_node(node_id)
             .ok_or_else(|| format!("node {} not found during shape validation", node_id))?;
 
+        // Only these operators have runtime shape constraints below. Avoid
+        // resolving and allocating input-shape vectors for constants and
+        // operators whose shape contract was already checked at compile time.
+        if !matches!(
+            &node.opcode,
+            Opcode::MatMul
+                | Opcode::ReduceSum
+                | Opcode::ReduceMean
+                | Opcode::Concat
+                | Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::Div
+                | Opcode::Conv2d
+                | Opcode::Transpose
+                | Opcode::Reshape
+                | Opcode::Flatten
+                | Opcode::Softmax
+                | Opcode::BatchNorm
+                | Opcode::LayerNorm
+                | Opcode::Slice
+                | Opcode::MaxPool
+                | Opcode::AvgPool
+                | Opcode::Squeeze
+                | Opcode::Unsqueeze
+                | Opcode::Gather
+                | Opcode::Pad
+                | Opcode::Neg
+                | Opcode::Abs
+                | Opcode::Exp
+                | Opcode::Log
+                | Opcode::Sqrt
+                | Opcode::Round
+                | Opcode::IsNaN
+                | Opcode::Relu
+                | Opcode::Gelu
+                | Opcode::Silu
+                | Opcode::Sigmoid
+                | Opcode::Tanh
+        ) {
+            continue;
+        }
+
         let input_shapes: Vec<Vec<u64>> = node
             .inputs
             .iter()
@@ -1733,43 +2540,24 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 if input_shapes.is_empty() {
                     continue;
                 }
-                let in_numel: u64 = input_shapes[0].iter().product();
-                // For reshape, compute expected numel from attrs or output shape
-                if let Some(out_shape) = node.attrs.get("shape") {
-                    // Split the shape attr into tokens. Each token is either a
-                    // concrete u64 dim ("42") or a symbolic dim ("N", "-1", etc.)
-                    // that will be resolved at runtime.
-                    let tokens: Vec<&str> = out_shape
-                        .trim_matches(|c| c == '[' || c == ']')
-                        .split(',')
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    // Collect only the concrete (u64-parseable) dims.
-                    let concrete: Vec<u64> = tokens.iter().filter_map(|s| s.parse().ok()).collect();
-                    let symbol_count = tokens.len() - concrete.len();
-                    if symbol_count == 0 {
-                        // All dims are concrete: the total element count must
-                        // match exactly.
-                        let out_numel: u64 = concrete.iter().product();
-                        if in_numel != out_numel {
-                            return Err(format!(
-                                "Reshape node {}: element count mismatch {} vs {} (in {:?} -> {:?})",
-                                node_id, in_numel, out_numel, input_shapes[0], concrete
-                            ));
-                        }
-                    } else if symbol_count == 1 {
-                        // Exactly one symbolic dim: the runtime will compute it
-                        // as in_numel / product(concrete_dims).  Validate that
-                        // the division is exact.
-                        let known_product: u64 = concrete.iter().product();
-                        if known_product == 0 || !in_numel.is_multiple_of(known_product) {
-                            return Err(format!(
-                                "Reshape node {}: element count {} not divisible by known dims product {} (shape={:?})",
-                                node_id, in_numel, known_product, tokens
-                            ));
-                        }
-                    } // Multiple symbolic dims: cannot validate statically, skip.
+                let in_numel = input_shapes[0]
+                    .iter()
+                    .try_fold(1u64, |product, dimension| product.checked_mul(*dimension))
+                    .ok_or_else(|| {
+                        format!("Reshape node {node_id}: input element count overflows")
+                    })?;
+                let live_output = resolve_shape_lenient(&node.output_type.shape, shape_env);
+                let out_numel = live_output
+                    .iter()
+                    .try_fold(1u64, |product, dimension| product.checked_mul(*dimension))
+                    .ok_or_else(|| {
+                        format!("Reshape node {node_id}: output element count overflows")
+                    })?;
+                if in_numel != out_numel {
+                    return Err(format!(
+                        "Reshape node {node_id} name='{}': live element count mismatch {in_numel} vs {out_numel} (in {:?} -> {:?})",
+                        node.name, input_shapes[0], live_output
+                    ));
                 }
             }
             Opcode::Softmax if !input_shapes.is_empty() => {
@@ -1777,20 +2565,37 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                 let _ = resolve_axis(&node.attrs, "axis", rank)
                     .map_err(|e| format!("Softmax node {}: {e}", node_id))?;
             }
-            Opcode::BatchNorm | Opcode::LayerNorm => {
+            Opcode::BatchNorm => {
                 if input_shapes.len() < 2 {
                     return Err(format!(
-                        "Norm node {}: expected at least 2 inputs (data + weight)",
+                        "BatchNorm node {}: expected at least 2 inputs (data + weight)",
                         node_id
                     ));
                 }
-                // Channel dim must match between data and weight for 1D/2D norm
                 let data = &input_shapes[0];
-                let w = &input_shapes[1];
-                if data.len() >= 2 && !w.is_empty() && data[1] != w[0] {
+                let weight = &input_shapes[1];
+                if data.len() >= 2 && !weight.is_empty() && data[1] != weight[0] {
                     return Err(format!(
-                        "Norm node {}: data channels {} != weight features {}",
-                        node_id, data[1], w[0]
+                        "BatchNorm node {}: data channels {} != weight features {}",
+                        node_id, data[1], weight[0]
+                    ));
+                }
+            }
+            Opcode::LayerNorm => {
+                if input_shapes.len() < 2 {
+                    return Err(format!(
+                        "LayerNorm node {}: expected at least 2 inputs (data + weight)",
+                        node_id
+                    ));
+                }
+                let data = &input_shapes[0];
+                let weight = &input_shapes[1];
+                if weight.len() > data.len()
+                    || data[data.len().saturating_sub(weight.len())..] != weight[..]
+                {
+                    return Err(format!(
+                        "LayerNorm node {}: trailing data shape {:?} is incompatible with weight shape {:?}",
+                        node_id, data, weight
                     ));
                 }
             }
@@ -1821,8 +2626,8 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
                     ));
                 }
                 let dim_size = input_shapes[0][dim] as i64;
-                let adjusted_end = if end < 0 { dim_size + end + 1 } else { end };
-                if start >= dim_size || adjusted_end > dim_size || start >= adjusted_end {
+                let adjusted_end = if end < 0 { dim_size + end + 1 } else { end }.min(dim_size);
+                if start >= dim_size || start >= adjusted_end {
                     return Err(format!(
                         "Slice node {}: invalid range [{}, {}) on dim {} with size {}",
                         node_id, start, adjusted_end, dim, dim_size
@@ -1934,6 +2739,7 @@ fn validate_shapes(graph: &ComputeGraph, shape_env: &ShapeEnv) -> Result<(), Str
             | Opcode::Log
             | Opcode::Sqrt
             | Opcode::Round
+            | Opcode::IsNaN
             | Opcode::Relu
             | Opcode::Gelu
             | Opcode::Silu
@@ -2589,7 +3395,7 @@ mod prepared_fallback_tests {
             .expect("small test arena must not overflow");
         plan.instructions.push(Instruction::WriteConst {
             dst: BufferSlice::new(unowned_offset, 4),
-            data: vec![0; 4],
+            data: vec![0; 4].into(),
         });
         plan.levels.push(plan.levels.last().copied().unwrap_or(0));
 
@@ -2633,6 +3439,37 @@ mod prepared_fallback_tests {
 #[cfg(test)]
 mod execution_storage_size_tests {
     use super::*;
+
+    #[test]
+    fn stable_constant_filter_retains_fills_and_overwritten_constants() {
+        let stable = Instruction::WriteConst {
+            dst: BufferSlice::new(0, 4),
+            data: std::sync::Arc::from([1u8, 2, 3, 4]),
+        };
+        let fill = Instruction::Fill {
+            dst: BufferSlice::new(4, 4),
+            value: 0.0,
+        };
+        let overwritten = Instruction::WriteConst {
+            dst: BufferSlice::new(8, 4),
+            data: std::sync::Arc::from([5u8, 6, 7, 8]),
+        };
+        let plan = ExecutablePlan {
+            instructions: vec![stable, fill, overwritten],
+            arena_size: 12,
+            levels: vec![0, 1, 2],
+        };
+
+        let filtered = filter_initialized_stable_constants(&plan, &[true, false, false]);
+
+        assert_eq!(filtered.instructions.len(), 2);
+        assert!(matches!(filtered.instructions[0], Instruction::Fill { .. }));
+        assert!(matches!(
+            filtered.instructions[1],
+            Instruction::WriteConst { .. }
+        ));
+        assert_eq!(filtered.levels, vec![1, 2]);
+    }
 
     #[test]
     fn unsigned_packed_types_use_exact_packed_storage_size() {
@@ -3086,7 +3923,7 @@ mod execution_storage_size_tests {
                 ],
                 output_slice: crate::backend::BufferSlice::new(32, 16),
                 secondary_output_slice: None,
-                params: vec![2, 2, 3, 2, 1],
+                params: vec![2, 2, 3, 2, 1, 0],
                 param_dims: None,
                 node_id: Some(0),
                 weight_meta: None,
@@ -4365,7 +5202,7 @@ mod execution_storage_size_tests {
         let plan = ExecutablePlan {
             instructions: vec![Instruction::WriteConst {
                 dst: BufferSlice::new(0, 8),
-                data: vec![1, 2, 3, 4],
+                data: vec![1, 2, 3, 4].into(),
             }],
             arena_size: 8,
             levels: vec![0],
@@ -4578,6 +5415,58 @@ mod execution_storage_size_tests {
         assert!(error
             .to_string()
             .contains("requires activation calibration"));
+    }
+
+    #[test]
+    fn stable_constant_classifier_rejects_runtime_overwrites() {
+        let builder = crate::GraphBuilder::new();
+        let input =
+            builder.input_with_dims(&[crate::ir::DimExpr::Symbol("N".into())], IrDType::F32);
+        let constant = builder.constant(
+            &1.0_f32.to_le_bytes(),
+            crate::ir::TensorType::new(vec![crate::ir::DimExpr::Known(1)], IrDType::F32),
+        );
+        let output = builder.add(&input, &constant);
+        let mut source_graph = builder.to_graph();
+        source_graph.set_outputs(vec![output.node_id]);
+        let executor = GraphExecutor::new(crate::backend::cpu::CpuBackend);
+        let (mut plan, memory_plan, graph) = executor
+            .compile_with_plan(source_graph)
+            .expect("compile dynamic add");
+        let write_index = plan
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction, Instruction::WriteConst { .. }))
+            .expect("constant write");
+        let mask = classify_stable_write_consts(&graph, &plan, &memory_plan);
+        assert!(mask[write_index]);
+
+        let dst = match plan.instructions[write_index] {
+            Instruction::WriteConst { dst, .. } => dst,
+            _ => unreachable!(),
+        };
+        plan.instructions
+            .push(Instruction::Fill { dst, value: 0.0 });
+        plan.levels
+            .push(plan.levels.last().copied().unwrap_or(0) + 1);
+        let mask = classify_stable_write_consts(&graph, &plan, &memory_plan);
+        assert!(!mask[write_index]);
+    }
+
+    #[test]
+    fn f32_shape_scalar_preserves_subnormal_numeric_value() {
+        let subnormal = f32::from_bits(1);
+        assert_eq!(
+            constant_scalar_f32(&TensorValue::Float(subnormal), 7).unwrap(),
+            subnormal
+        );
+
+        let data = TensorValue::Data {
+            bytes: subnormal.to_le_bytes().to_vec().into(),
+            tensor_type: crate::ir::TensorType::new(Vec::new(), IrDType::F32),
+        };
+        assert_eq!(constant_scalar_f32(&data, 8).unwrap(), subnormal);
+        assert_eq!(constant_scalar_f32(&TensorValue::Int(1), 9).unwrap(), 1.0);
     }
 
     #[test]

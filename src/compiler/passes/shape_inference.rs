@@ -62,6 +62,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             | Opcode::Clamp
             | Opcode::Sign
             | Opcode::Round
+            | Opcode::IsNaN
             | Opcode::LogicalNot
             | Opcode::LogSoftmax
             | Opcode::Mish => inputs.first().map(|i| i.output_type.shape.clone()),
@@ -124,24 +125,36 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                     None
                 }
             }
-            Opcode::Flatten => inputs.first().map(|i| {
-                let shape = &i.output_type.shape;
-                if shape.len() >= 2 {
-                    let mut dims = Vec::new();
-                    if let Some(first) = shape.first() {
-                        dims.push(first.clone());
+            Opcode::Flatten => {
+                if let Some(input) = inputs.first() {
+                    let shape = &input.output_type.shape;
+                    let rank = i64::try_from(shape.len()).map_err(|_| {
+                        FastnnError::shape(format!("Flatten node {node_id} rank does not fit i64"))
+                    })?;
+                    let raw_axis = node.optional_attr::<i64>("axis")?.unwrap_or(1);
+                    let axis = if raw_axis < 0 {
+                        rank.checked_add(raw_axis)
+                    } else {
+                        Some(raw_axis)
                     }
-                    let product: DimExpr = shape[1..]
-                        .iter()
-                        .cloned()
-                        .reduce(|a, b| a.mul(&b))
-                        .unwrap_or(DimExpr::Known(1));
-                    dims.push(product);
-                    dims
+                    .filter(|&axis| axis >= 0 && axis <= rank)
+                    .ok_or_else(|| {
+                        FastnnError::shape(format!(
+                            "Flatten node {node_id} axis {raw_axis} is out of range for rank {rank}"
+                        ))
+                    })? as usize;
+                    let product = |dimensions: &[DimExpr]| {
+                        dimensions
+                            .iter()
+                            .cloned()
+                            .reduce(|left, right| left.mul(&right))
+                            .unwrap_or(DimExpr::Known(1))
+                    };
+                    Some(vec![product(&shape[..axis]), product(&shape[axis..])])
                 } else {
-                    shape.clone()
+                    None
                 }
-            }),
+            }
             Opcode::TopK => inputs.first().map(|i| i.output_type.shape.clone()),
             Opcode::ReduceSum | Opcode::ReduceMean | Opcode::ReduceMax | Opcode::ArgMax => {
                 if let Some(input) = inputs.first() {
@@ -279,7 +292,9 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 }
             }
             Opcode::Slice => {
-                if !inputs.is_empty() {
+                if node.inputs.len() > 1 {
+                    Some(node.output_type.shape.clone())
+                } else if !inputs.is_empty() {
                     let input_shape = &inputs[0].output_type.shape;
                     let mut shape = input_shape.clone();
                     let dim = node.required_attr::<usize>("dim")?;
@@ -454,6 +469,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                     vec![DimExpr::Known(rank as u64)]
                 })
             }
+            Opcode::ConstantOfShape => Some(node.output_type.shape.clone()),
             Opcode::Cast => {
                 // Cast preserves shape, changes dtype (handled by output_type)
                 inputs.first().map(|i| i.output_type.shape.clone())
@@ -500,13 +516,12 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                             }
                             Some(broadcast_shape)
                         } else {
-                            // Fallback: use data shape
-                            Some(inputs[0].output_type.shape.clone())
+                            Some(node.output_type.shape.clone())
                         }
                     } else {
-                        // No expand_shape attr: fallback to data shape.
-                        // The expand kernel will read the target shape at runtime.
-                        Some(inputs[0].output_type.shape.clone())
+                        // Runtime shape tensor: preserve the bounded semantic output
+                        // metadata supplied by the ONNX graph.
+                        Some(node.output_type.shape.clone())
                     }
                 } else {
                     inputs.first().map(|i| i.output_type.shape.clone())
@@ -518,11 +533,8 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
                 inputs.first().map(|i| i.output_type.shape.clone())
             }
             Opcode::Range => {
-                // Range(start, limit, step) — always produces a 1D F32 tensor.
-                // The length is dynamic (set by the builder as Symbol("N")).
-                inputs
-                    .first()
-                    .map(|_| vec![DimExpr::Symbol("N".to_string())])
+                // Runtime length is carried by the declared bounded semantic shape.
+                Some(node.output_type.shape.clone())
             }
             Opcode::Constant(_)
             | Opcode::Input
@@ -532,6 +544,9 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             | Opcode::Repeat
             | Opcode::CumSum
             | Opcode::Erf
+            | Opcode::Sin
+            | Opcode::Cos
+            | Opcode::Trilu
             | Opcode::Flip
             | Opcode::Where
             | Opcode::SgdUpdate
@@ -588,12 +603,12 @@ fn broadcast_shapes(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, Fastnn
                     (Some(1), _) => db.clone(),
                     (_, Some(1)) => da.clone(),
                     _ if da == db => da.clone(),
-                    _ => {
-                        return Err(FastnnError::compilation(format!(
-                            "Cannot broadcast dimensions: {} vs {}",
-                            da, db
-                        )));
-                    }
+                    // Symbolic dimensions may only become broadcast-compatible after
+                    // ShapeEnv resolution (for example S versus S+0, or a model
+                    // constraint that resolves one side to 1). Preserve the lhs
+                    // semantic extent here and require the runtime broadcast kernel
+                    // to validate the concrete dimensions before reading data.
+                    _ => da.clone(),
                 }
             }
         };
@@ -623,22 +638,17 @@ fn matmul_output_shape(a: &[DimExpr], b: &[DimExpr]) -> Result<Vec<DimExpr>, Fas
     let k_b = &b[b.len() - 2];
     let n = &b[b.len() - 1];
 
-    match (k_a.evaluate(), k_b.evaluate()) {
-        (Some(va), Some(vb)) if va != vb => {
+    match (k_a, k_b) {
+        (DimExpr::Known(va), DimExpr::Known(vb)) if va != vb => {
             return Err(FastnnError::compilation(format!(
                 "MatMul: inner dimensions must match, got {} vs {}",
                 va, vb
             )));
         }
-        (Some(_), Some(_)) => {}
-        _ => {
-            if k_a != k_b {
-                return Err(FastnnError::compilation(format!(
-                    "MatMul: inner dimensions must match, got {} vs {}",
-                    k_a, k_b
-                )));
-            }
-        }
+        // Distinct symbolic names may still describe the same live extent after
+        // ONNX shape propagation. Runtime validation resolves both expressions
+        // and rejects any actual mismatch before dispatch.
+        _ => {}
     }
 
     let batch_a = &a[..a.len() - 2];

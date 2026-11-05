@@ -229,6 +229,11 @@ impl_simd_unary_wrapper!(
     microkernels::logical_not_f32_scalar
 );
 impl_simd_unary_wrapper!(
+    is_nan_f32,
+    microkernels::is_nan_f32_avx2,
+    microkernels::is_nan_f32_scalar
+);
+impl_simd_unary_wrapper!(
     mish_f32,
     microkernels::mish_f32_avx2,
     microkernels::mish_f32_scalar

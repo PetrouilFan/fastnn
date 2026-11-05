@@ -14,8 +14,9 @@
 //!
 //! # Supported Ops
 //!
-//! All common ONNX ops are supported either directly or via decomposition into
-//! simpler IR ops. Unsupported ops pass through their first input.
+//! Supported ONNX ops are lowered directly or decomposed into simpler IR ops.
+//! Unsupported ops are rejected: silently substituting an input would create a
+//! structurally valid graph with incorrect numerical semantics.
 
 use std::collections::HashMap;
 
@@ -41,6 +42,63 @@ pub struct OnnxNode {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub attrs: HashMap<String, String>,
+}
+
+fn split_sizes_from_tensor(tensor: &Tensor, node_name: &str) -> Result<Vec<usize>, String> {
+    let bytes = tensor
+        .try_as_bytes()
+        .map_err(|error| format!("Split node '{node_name}' cannot read split sizes: {error}"))?;
+    let values: Vec<i64> = match tensor.dtype() {
+        DType::I64 => bytes
+            .chunks_exact(8)
+            .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("exact I64 chunk")))
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("exact I32 chunk")) as i64)
+            .collect(),
+        DType::F32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("exact F32 chunk")))
+            .map(|value| {
+                if value.is_finite()
+                    && value > 0.0
+                    && value.fract() == 0.0
+                    && value <= i64::MAX as f32
+                {
+                    Ok(value as i64)
+                } else {
+                    Err(format!(
+                        "Split node '{node_name}' has invalid promoted split size {value}"
+                    ))
+                }
+            })
+            .collect::<Result<_, _>>()?,
+        dtype => {
+            return Err(format!(
+                "Split node '{node_name}' requires I32 or I64 split sizes, got {dtype:?}"
+            ));
+        }
+    };
+    values
+        .into_iter()
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                format!("Split node '{node_name}' has non-positive split size {value}")
+            })
+        })
+        .map(|result| {
+            result.and_then(|value| {
+                if value == 0 {
+                    Err(format!(
+                        "Split node '{node_name}' has non-positive split size 0"
+                    ))
+                } else {
+                    Ok(value)
+                }
+            })
+        })
+        .collect()
 }
 
 /// Converts parsed ONNX model data into an AOT ComputeGraph.
@@ -183,8 +241,8 @@ impl<'a> OnnxConverter<'a> {
             "BatchNormalization" => 5,
             "ScatterND" | "Where" | "QuantizeLinear" | "DequantizeLinear" | "LSTM" | "GRU" => 3,
             "Add" | "Sub" | "Mul" | "Div" | "Pow" | "Max" | "Min" | "Greater" | "Less"
-            | "Equal" | "MatMul" | "Gemm" | "Conv" | "PRelu" | "Embedding" | "Gather"
-            | "GatherElements" => 2,
+            | "Equal" | "GreaterOrEqual" | "LessOrEqual" | "And" | "Or" | "MatMul" | "Gemm"
+            | "Conv" | "PRelu" | "Embedding" | "Gather" | "GatherElements" => 2,
             _ => 1,
         };
         if ins.len() < minimum_inputs {
@@ -226,6 +284,23 @@ impl<'a> OnnxConverter<'a> {
             "Greater" => self.out(node, self.graph.gt_scalar(&ins[0], &ins[1])),
             "Less" => self.out(node, self.graph.lt_scalar(&ins[0], &ins[1])),
             "Equal" => self.out(node, self.graph.eq_scalar(&ins[0], &ins[1])),
+            "GreaterOrEqual" => {
+                let greater = self.graph.gt_scalar(&ins[0], &ins[1]);
+                let equal = self.graph.eq_scalar(&ins[0], &ins[1]);
+                self.out(node, self.graph.add(&greater, &equal))
+            }
+            "LessOrEqual" => {
+                let less = self.graph.lt_scalar(&ins[0], &ins[1]);
+                let equal = self.graph.eq_scalar(&ins[0], &ins[1]);
+                self.out(node, self.graph.add(&less, &equal))
+            }
+            // Comparisons use canonical 0.0/1.0 runtime values. Multiplication
+            // and maximum preserve ONNX boolean And/Or semantics for those
+            // values without introducing a second boolean storage contract.
+            "And" => self.out(node, self.graph.mul(&ins[0], &ins[1])),
+            "Or" => self.out(node, self.graph.maximum(&ins[0], &ins[1])),
+            // IEEE equality is false for NaN, including self-comparison.
+            "IsNaN" => self.out(node, self.graph.is_nan(&ins[0])),
 
             // ── Parametric activations ──────────────────────────────
             "LeakyRelu" => {
@@ -515,29 +590,72 @@ impl<'a> OnnxConverter<'a> {
 
             // ── Shape ops ───────────────────────────────────────────
             "Reshape" => {
-                let shape: Vec<i64> = parse_ints_i64(&node.attrs, "shape", &[]);
-                if !shape.is_empty() {
-                    let dims = resolve_reshape_dims(&shape, &ins[0]);
+                let promoted_target = parse_ints_i64(&node.attrs, "target_shape", &[]);
+                if !promoted_target.is_empty() {
+                    let dims = resolve_reshape_dims(&promoted_target, &ins[0])?;
                     self.out(node, self.graph.reshape(&ins[0], &dims));
                 } else if ins.len() >= 2 {
-                    // Opset 11+: shape comes from a tensor input (ins[1]).
-                    // Try to resolve it from params first (compile-time constant).
+                    // Opset 11+: shape comes from a tensor input. Preserve -1/0
+                    // semantics from the tensor instead of treating bounded output
+                    // metadata as a concrete target.
                     let shape_name = &node.inputs[1];
                     if let Some(shape_tensor) = self.params.get(shape_name) {
                         let shape_data: Vec<f32> =
                             shape_tensor.to_numpy().map_err(|error| error.to_string())?;
-                        let shape_i64: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
-                        let dims = resolve_reshape_dims(&shape_i64, &ins[0]);
+                        let shape_i64: Vec<i64> =
+                            shape_data.iter().map(|&value| value as i64).collect();
+                        let dims = resolve_reshape_dims(&shape_i64, &ins[0])?;
                         self.out(node, self.graph.reshape(&ins[0], &dims));
                     } else {
-                        // Shape is dynamic; keep as pass-through for now.
-                        self.out(node, ins[0].clone());
+                        let dims = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
+                            format!(
+                                "Reshape node '{}' has a runtime shape tensor but no bounded output shape metadata",
+                                node.name
+                            )
+                        })?;
+                        if dims.is_empty() {
+                            return Err(format!(
+                                "Reshape node '{}' has empty bounded output shape metadata",
+                                node.name
+                            ));
+                        }
+                        self.out(node, self.graph.runtime_reshape(&ins[0], &ins[1], &dims));
                     }
                 } else {
-                    self.out(node, ins[0].clone());
+                    let shape: Vec<i64> = parse_ints_i64(&node.attrs, "shape", &[]);
+                    if shape.is_empty() {
+                        return Err(format!(
+                            "Reshape node '{}' has neither a static shape attribute nor a shape tensor input",
+                            node.name
+                        ));
+                    }
+                    let dims = resolve_reshape_dims(&shape, &ins[0])?;
+                    self.out(node, self.graph.reshape(&ins[0], &dims));
                 }
             }
-            "Flatten" => self.out(node, self.graph.flatten(&ins[0])),
+            "Flatten" => {
+                let rank = ins[0].shape().len();
+                let raw_axis = node
+                    .attrs
+                    .get("axis")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(1);
+                let rank_i64 = i64::try_from(rank)
+                    .map_err(|_| "Flatten input rank exceeds i64".to_string())?;
+                let axis = if raw_axis < 0 {
+                    rank_i64
+                        .checked_add(raw_axis)
+                        .ok_or_else(|| format!("Flatten axis {raw_axis} overflows"))?
+                } else {
+                    raw_axis
+                };
+                if axis < 0 || axis > rank_i64 {
+                    return Err(format!(
+                        "Flatten axis {raw_axis} is out of range for rank {rank}"
+                    ));
+                }
+                self.out(node, self.graph.flatten_axis(&ins[0], axis as usize));
+            }
             "Transpose" => {
                 let perm: Vec<usize> = parse_ints(&node.attrs, "perm", &[1, 0]);
                 if perm.len() == 2 && perm[0] == 1 && perm[1] == 0 {
@@ -547,8 +665,12 @@ impl<'a> OnnxConverter<'a> {
                     // General N-D permute: use perm-aware transpose
                     self.out(node, self.graph.transpose_with_perm(&ins[0], &perm));
                 } else {
-                    // Perm length doesn't match: fallback to legacy reverse
-                    self.out(node, self.graph.transpose(&ins[0]));
+                    return Err(format!(
+                        "Transpose node '{}' has permutation length {} for input rank {}",
+                        node.name,
+                        perm.len(),
+                        ins[0].shape().len()
+                    ));
                 }
             }
             "Concat" => {
@@ -563,14 +685,22 @@ impl<'a> OnnxConverter<'a> {
                 let axis = if raw_axis < 0 {
                     let r = rank as i64;
                     if raw_axis < -r {
-                        0usize // fallback: should not happen
+                        return Err(format!(
+                            "Concat node '{}' axis {raw_axis} is out of range for rank {rank}",
+                            node.name
+                        ));
                     } else {
                         (r + raw_axis) as usize
                     }
                 } else {
                     raw_axis as usize
                 };
-                let axis = axis.min(rank.saturating_sub(1));
+                if axis >= rank {
+                    return Err(format!(
+                        "Concat node '{}' axis {raw_axis} is out of range for rank {rank}",
+                        node.name
+                    ));
+                }
                 let refs: Vec<&GraphTensor> = ins.iter().collect();
                 self.out(node, self.graph.concat(&refs, axis));
             }
@@ -585,122 +715,296 @@ impl<'a> OnnxConverter<'a> {
                     .unwrap_or(0);
                 let rank = ins.first().map(|t| t.shape().len()).unwrap_or(1);
                 let axis = if raw_axis < 0 {
-                    let r = rank as i64;
-                    if raw_axis < -r {
-                        0usize
-                    } else {
-                        (r + raw_axis) as usize
+                    let normalized = rank as i64 + raw_axis;
+                    if normalized < 0 {
+                        return Err(format!(
+                            "Split node '{}' axis {raw_axis} is out of range for rank {rank}",
+                            node.name
+                        ));
                     }
+                    normalized as usize
                 } else {
                     raw_axis as usize
                 };
-                let axis = axis.min(rank.saturating_sub(1));
-                let n_outputs = node.outputs.len().max(1);
-                let split_sizes: Vec<usize> = if let Some(s) = node.attrs.get("split") {
-                    s.split(',').filter_map(|v| v.trim().parse().ok()).collect()
+                if axis >= rank {
+                    return Err(format!(
+                        "Split node '{}' axis {raw_axis} is out of range for rank {rank}",
+                        node.name
+                    ));
+                }
+                let n_outputs = node.outputs.len();
+                if n_outputs == 0 {
+                    return Err(format!("Split node '{}' has no outputs", node.name));
+                }
+                let split_sizes: Vec<usize> = if ins.len() > 1 {
+                    let split_name = node.inputs.get(1).ok_or_else(|| {
+                        format!(
+                            "Split node '{}' is missing its split-size input name",
+                            node.name
+                        )
+                    })?;
+                    let split_tensor = self.params.get(split_name).ok_or_else(|| {
+                        format!(
+                            "Split node '{}' supplies runtime split sizes; only constant tensor split sizes are currently supported",
+                            node.name
+                        )
+                    })?;
+                    split_sizes_from_tensor(split_tensor, &node.name)?
+                } else if let Some(s) = node.attrs.get("split") {
+                    s.split(',')
+                        .map(|value| {
+                            value.trim().parse::<usize>().map_err(|_| {
+                                format!(
+                                    "Split node '{}' has invalid split size {value:?}",
+                                    node.name
+                                )
+                            })
+                        })
+                        .collect::<Result<_, _>>()?
                 } else {
-                    vec![]
+                    Vec::new()
                 };
-                if split_sizes.len() == n_outputs && split_sizes.iter().all(|&s| s > 0) {
-                    // Explicit split sizes from attribute
-                    let mut start = 0usize;
-                    for (i, out_name) in node.outputs.iter().enumerate() {
-                        if i < split_sizes.len() {
-                            let end = start + split_sizes[i];
-                            let output = self.graph.slice(&ins[0], axis, start, end);
-                            if !node.name.is_empty() {
-                                self.graph.set_node_name(output.node_id, &node.name);
-                            }
-                            self.name_to_id.insert(out_name.clone(), output);
-                            start = end;
-                        }
+                let dim_size = ins[0]
+                    .shape()
+                    .get(axis)
+                    .and_then(|dimension| dimension.evaluate())
+                    .ok_or_else(|| {
+                        format!(
+                            "Split node '{}' has a symbolic axis extent; live dynamic Split lowering is not yet supported",
+                            node.name
+                        )
+                    })? as usize;
+                let split_sizes = if split_sizes.is_empty() {
+                    if !dim_size.is_multiple_of(n_outputs) {
+                        return Err(format!(
+                            "Split node '{}' cannot equally divide axis extent {dim_size} across {n_outputs} outputs",
+                            node.name
+                        ));
                     }
+                    vec![dim_size / n_outputs; n_outputs]
                 } else {
-                    // Equal split: each output gets dim_size / n_outputs.
-                    let dim_size_opt = ins[0].shape().get(axis).and_then(|d| d.evaluate());
-                    if let Some(dim_size) = dim_size_opt {
-                        let part = dim_size as usize / n_outputs.max(1);
-                        if part > 0 {
-                            let mut start = 0usize;
-                            for (i, out_name) in node.outputs.iter().enumerate() {
-                                let end = if i == n_outputs - 1 {
-                                    dim_size as usize // last output gets remainder
-                                } else {
-                                    start + part
-                                };
-                                let output = self.graph.slice(&ins[0], axis, start, end);
-                                if !node.name.is_empty() {
-                                    self.graph.set_node_name(output.node_id, &node.name);
-                                }
-                                self.name_to_id.insert(out_name.clone(), output);
-                                start = end;
-                            }
-                        } else {
-                            // Part is 0 (dim smaller than n_outputs): passthrough
-                            for out_name in &node.outputs {
-                                self.name_to_id.insert(out_name.clone(), ins[0].clone());
-                            }
-                        }
-                    } else {
-                        // Symbolic dimension: can't compute split at converter time
-                        // Fallback: all outputs get the full input (approximate)
-                        for out_name in &node.outputs {
-                            self.name_to_id.insert(out_name.clone(), ins[0].clone());
-                        }
+                    if split_sizes.len() != n_outputs {
+                        return Err(format!(
+                            "Split node '{}' has {} split sizes for {n_outputs} outputs",
+                            node.name,
+                            split_sizes.len()
+                        ));
                     }
+                    let total = split_sizes.iter().try_fold(0usize, |sum, size| {
+                        sum.checked_add(*size).ok_or_else(|| {
+                            format!("Split node '{}' split-size sum overflows", node.name)
+                        })
+                    })?;
+                    if total != dim_size {
+                        return Err(format!(
+                            "Split node '{}' split sizes sum to {total}, but axis extent is {dim_size}",
+                            node.name
+                        ));
+                    }
+                    split_sizes
+                };
+                let mut start = 0usize;
+                for (out_name, size) in node.outputs.iter().zip(split_sizes) {
+                    let end = start.checked_add(size).ok_or_else(|| {
+                        format!("Split node '{}' slice bound overflows", node.name)
+                    })?;
+                    let output = self.graph.slice(&ins[0], axis, start, end);
+                    if !node.name.is_empty() {
+                        self.graph.set_node_name(output.node_id, &node.name);
+                    }
+                    self.name_to_id.insert(out_name.clone(), output);
+                    start = end;
                 }
             }
             "Slice" => {
-                let starts: Vec<i64> = parse_ints_i64(&node.attrs, "starts", &[0]);
-                let ends: Vec<i64> = parse_ints_i64(&node.attrs, "ends", &[1]);
-                let axes: Vec<usize> = parse_ints(&node.attrs, "axes", &[0]);
-                let dim = *axes.first().unwrap_or(&0);
-                let start = *starts.first().unwrap_or(&0).max(&0) as usize;
-                let end = *ends.first().unwrap_or(&1) as usize;
-                let mut out = self.graph.slice(&ins[0], dim, start, end);
+                if !node.attrs.contains_key("starts") || !node.attrs.contains_key("ends") {
+                    if ins.len() < 3 || ins.len() > 5 {
+                        return Err(format!(
+                            "Slice node '{}' supplies runtime bounds but has {} inputs; expected data, starts, ends, and optional axes/steps",
+                            node.name,
+                            ins.len()
+                        ));
+                    }
+                    let shape = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
+                        format!(
+                            "Slice node '{}' supplies runtime bounds but no bounded output shape metadata",
+                            node.name
+                        )
+                    })?;
+                    if shape.is_empty() {
+                        return Err(format!(
+                            "Slice node '{}' has empty bounded output shape metadata",
+                            node.name
+                        ));
+                    }
+                    let output = self.graph.runtime_slice(&ins, &shape);
+                    self.out(node, output);
+                    return Ok(());
+                }
+                let starts = parse_ints_i64(&node.attrs, "starts", &[]);
+                let ends = parse_ints_i64(&node.attrs, "ends", &[]);
+                let axes = parse_ints_i64(
+                    &node.attrs,
+                    "axes",
+                    &(0..starts.len())
+                        .map(|axis| axis as i64)
+                        .collect::<Vec<_>>(),
+                );
+                let steps = parse_ints_i64(&node.attrs, "steps", &vec![1; starts.len()]);
+                if starts.is_empty()
+                    || starts.len() != ends.len()
+                    || starts.len() != axes.len()
+                    || starts.len() != steps.len()
+                {
+                    return Err(format!(
+                        "Slice node '{}' requires matching non-empty start/end/axis/step tuples (got {}/{}/{}/{})",
+                        node.name,
+                        starts.len(),
+                        ends.len(),
+                        axes.len(),
+                        steps.len()
+                    ));
+                }
+
+                let mut out = ins[0].clone();
+                for (((&raw_start, &raw_end), &raw_axis), &step) in
+                    starts.iter().zip(&ends).zip(&axes).zip(&steps)
+                {
+                    if step != 1 {
+                        return Err(format!(
+                            "Slice node '{}' uses unsupported step {step}; only step=1 is currently supported",
+                            node.name
+                        ));
+                    }
+                    let rank = out.shape().len() as i64;
+                    let axis = if raw_axis < 0 {
+                        rank.checked_add(raw_axis)
+                    } else {
+                        Some(raw_axis)
+                    }
+                    .filter(|&axis| axis >= 0 && axis < rank)
+                    .ok_or_else(|| {
+                        format!(
+                            "Slice node '{}' axis {raw_axis} is out of range for rank {rank}",
+                            node.name
+                        )
+                    })? as usize;
+                    let extent = out.shape()[axis].evaluate();
+                    let normalize = |index: i64, is_end: bool| -> Result<usize, String> {
+                        if let Some(extent) = extent {
+                            let extent = i64::try_from(extent).map_err(|_| {
+                                format!("Slice node '{}' axis extent exceeds i64", node.name)
+                            })?;
+                            let normalized = if index < 0 {
+                                extent.saturating_add(index)
+                            } else {
+                                index
+                            }
+                            .clamp(0, extent);
+                            Ok(normalized as usize)
+                        } else if index < 0 || (is_end && index == i64::MAX) {
+                            Err(format!(
+                                "Slice node '{}' requires a known axis extent for bound {index}",
+                                node.name
+                            ))
+                        } else {
+                            usize::try_from(index).map_err(|_| {
+                                format!("Slice node '{}' bound {index} exceeds usize", node.name)
+                            })
+                        }
+                    };
+                    let start = normalize(raw_start, false)?;
+                    let end = normalize(raw_end, true)?;
+                    if end <= start {
+                        return Err(format!(
+                            "Slice node '{}' has empty or reversed interval {start}..{end}",
+                            node.name
+                        ));
+                    }
+                    out = self.graph.slice(&out, axis, start, end);
+                }
                 if let Some(shape) = parse_shape_attr(&node.attrs, "output_shape") {
                     out = self.graph.reshape(&out, &shape);
                 }
                 self.out(node, out);
             }
             "Squeeze" => {
-                let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
+                let axes = if let Some(axes) = axes_from_attr_or_input(node, self.params) {
+                    axes
+                } else if node.inputs.len() > 1 {
+                    return Err(format!(
+                        "Squeeze node '{}' requires compile-time axes",
+                        node.name
+                    ));
+                } else {
+                    ins[0]
+                        .shape()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(axis, dimension)| {
+                            matches!(dimension, DimExpr::Known(1)).then_some(axis as i64)
+                        })
+                        .collect()
+                };
                 let mut r = ins[0].clone();
                 let initial_rank = r.shape().len() as i64;
-                // Convert negative axes to positive based on initial rank,
-                // then sort descending so we squeeze from the end first
-                // (avoids index-shifting issues).
-                let mut pos_axes: Vec<usize> = axes
-                    .iter()
-                    .map(|&a| {
-                        if a < 0 {
-                            (initial_rank + a) as usize
-                        } else {
-                            a as usize
-                        }
-                    })
-                    .collect();
-                pos_axes.sort_by(|a, b| b.cmp(a));
-                pos_axes.dedup();
-                for &a in &pos_axes {
-                    r = self.graph.squeeze(&r, a);
+                let mut pos_axes = Vec::with_capacity(axes.len());
+                for axis in axes {
+                    if axis < -initial_rank || axis >= initial_rank {
+                        return Err(format!(
+                            "Squeeze node '{}' axis {axis} is out of bounds for rank {initial_rank}",
+                            node.name
+                        ));
+                    }
+                    pos_axes.push(if axis < 0 {
+                        (initial_rank + axis) as usize
+                    } else {
+                        axis as usize
+                    });
+                }
+                pos_axes.sort_unstable_by(|left, right| right.cmp(left));
+                if pos_axes.windows(2).any(|axes| axes[0] == axes[1]) {
+                    return Err(format!("Squeeze node '{}' has duplicate axes", node.name));
+                }
+                for axis in pos_axes {
+                    r = self.graph.squeeze(&r, axis);
                 }
                 self.out(node, r);
             }
             "Unsqueeze" => {
-                // Per ONNX: axes are indices in the *output* tensor shape.
-                // Negative values count back from the end of the output shape.
-                let axes: Vec<i64> = parse_ints_i64(&node.attrs, "axes", &[0]);
-                let mut r = ins[0].clone();
-                for &a in &axes {
-                    let input_rank = r.shape().len() as i64;
-                    let output_rank = input_rank + 1; // after this unsqueeze
-                    let dim = if a < 0 {
-                        (output_rank + a) as usize
+                let axes = axes_from_attr_or_input(node, self.params).ok_or_else(|| {
+                    format!("Unsqueeze node '{}' requires compile-time axes", node.name)
+                })?;
+                let output_rank =
+                    ins[0]
+                        .shape()
+                        .len()
+                        .checked_add(axes.len())
+                        .ok_or_else(|| {
+                            format!("Unsqueeze node '{}' output rank overflows", node.name)
+                        })?;
+                let output_rank_i64 = output_rank as i64;
+                let mut pos_axes = Vec::with_capacity(axes.len());
+                for axis in axes {
+                    if axis < -output_rank_i64 || axis >= output_rank_i64 {
+                        return Err(format!(
+                            "Unsqueeze node '{}' axis {axis} is out of bounds for output rank {output_rank}",
+                            node.name
+                        ));
+                    }
+                    pos_axes.push(if axis < 0 {
+                        (output_rank_i64 + axis) as usize
                     } else {
-                        a as usize
-                    };
-                    r = self.graph.unsqueeze(&r, dim);
+                        axis as usize
+                    });
+                }
+                pos_axes.sort_unstable();
+                if pos_axes.windows(2).any(|axes| axes[0] == axes[1]) {
+                    return Err(format!("Unsqueeze node '{}' has duplicate axes", node.name));
+                }
+                let mut r = ins[0].clone();
+                for axis in pos_axes {
+                    r = self.graph.unsqueeze(&r, axis);
                 }
                 self.out(node, r);
             }
@@ -725,7 +1029,16 @@ impl<'a> OnnxConverter<'a> {
                     .get("axis")
                     .and_then(|a| a.parse().ok())
                     .unwrap_or(0);
-                self.out(node, self.graph.gather(&ins[0], &ins[1], axis));
+                let gathered = self.graph.gather(&ins[0], &ins[1], axis);
+                let output_rank = node
+                    .attrs
+                    .get("output_rank")
+                    .and_then(|rank| rank.parse::<usize>().ok());
+                if output_rank == Some(0) {
+                    self.out(node, self.graph.reshape(&gathered, &[]));
+                } else {
+                    self.out(node, gathered);
+                }
             }
             "ScatterND" => {
                 self.out(node, self.graph.scatter_nd(&ins[0], &ins[1], &ins[2]));
@@ -743,10 +1056,36 @@ impl<'a> OnnxConverter<'a> {
                 };
                 self.out(node, self.graph.argmax(&ins[0], a));
             }
+            // Input/Parameter entries may be present in the Python graph adapter.
+            // Their graph tensors were registered before node processing.
+            "Input" | "Parameter" => {}
             "Constant" => {
-                // Already handled in Phase 2; check if still missing
+                // Phase 2 registers parameter payloads before node processing.
+                // Restore the serialized semantic contract here because scalar
+                // I64/Bool constants are physically carried by the F32 parameter
+                // container and would otherwise become rank-1 F32 tensors.
                 let out_name = node.outputs.first().cloned().unwrap_or_default();
-                if !self.name_to_id.contains_key(&out_name) {
+                if let Some(existing) = self.name_to_id.get(&out_name).cloned() {
+                    let declared_shape =
+                        if node.attrs.get("output_rank").map(String::as_str) == Some("0") {
+                            Some(Vec::new())
+                        } else {
+                            parse_shape_attr(&node.attrs, "shape")
+                        };
+                    if let Some(shape) = declared_shape {
+                        // FNN currently stores ONNX integer shape constants in
+                        // F32 parameter payloads. Correct rank here, but retain
+                        // the physical dtype so gather/shape kernels decode the
+                        // bytes using the representation actually present.
+                        let tensor_type = TensorType::new(shape, existing.dtype());
+                        self.graph
+                            .set_node_output_type(existing.node_id(), tensor_type.clone());
+                        self.out(
+                            node,
+                            GraphTensor::new(self.graph.clone(), existing.node_id(), tensor_type),
+                        );
+                    }
+                } else {
                     let c = self.scalar(0.0);
                     self.out(node, c);
                 }
@@ -828,18 +1167,46 @@ impl<'a> OnnxConverter<'a> {
                     let gt = self.graph.constant(&full_data, tt);
                     self.out(node, gt);
                 } else {
-                    // Dynamic shape: can't evaluate at converter time
-                    return Err(
-                        "ConstantOfShape with runtime shape is not yet supported".to_string()
-                    );
+                    let output_shape = parse_shape_attr(&node.attrs, "shape").ok_or_else(|| {
+                        format!(
+                            "ConstantOfShape node '{}' has a runtime shape input but no bounded output shape metadata",
+                            node.name
+                        )
+                    })?;
+                    if output_shape.is_empty() {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' has empty bounded output shape metadata",
+                            node.name
+                        ));
+                    }
+                    let fill_value: f32 = node
+                        .attrs
+                        .get("value")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0.0);
+                    if !fill_value.is_finite() {
+                        return Err(format!(
+                            "ConstantOfShape node '{}' has non-finite fill value",
+                            node.name
+                        ));
+                    }
+                    let output = self
+                        .graph
+                        .constant_of_shape(&ins[0], output_shape, fill_value);
+                    self.out(node, output);
                 }
             }
             "Range" => {
                 // Range(start, limit, step) — produces a 1D F32 tensor.
                 // All 3 inputs are 0D scalars in the ONNX model.
                 if ins.len() >= 3 {
-                    let gt = self.graph.range_op(&ins[0], &ins[1], &ins[2]);
-                    self.out(node, gt);
+                    let range = if let Some(shape) = parse_shape_attr(&node.attrs, "shape") {
+                        self.graph
+                            .range_op_with_shape(&ins[0], &ins[1], &ins[2], shape)
+                    } else {
+                        self.graph.range_op(&ins[0], &ins[1], &ins[2])
+                    };
+                    self.out(node, range);
                 } else {
                     return Err("Range needs 3 inputs (start, limit, step)".to_string());
                 }
@@ -881,7 +1248,16 @@ impl<'a> OnnxConverter<'a> {
                     expand_attrs.insert("expand_shape".to_string(), shape_str.clone());
                 }
                 let gt = if ins.len() >= 2 {
-                    self.graph.expand_op(&ins[0], &ins[1], expand_attrs)
+                    if let Some(output_shape) = parse_shape_attr(&node.attrs, "shape") {
+                        self.graph.expand_op_with_shape(
+                            &ins[0],
+                            &ins[1],
+                            expand_attrs,
+                            output_shape,
+                        )
+                    } else {
+                        self.graph.expand_op(&ins[0], &ins[1], expand_attrs)
+                    }
                 } else {
                     ins[0].clone()
                 };
@@ -1047,12 +1423,35 @@ impl<'a> OnnxConverter<'a> {
             "Erf" => {
                 self.out(node, self.graph.erf(&ins[0]));
             }
+            "Sin" => {
+                self.out(node, self.graph.sin(&ins[0]));
+            }
+            "Cos" => {
+                self.out(node, self.graph.cos(&ins[0]));
+            }
+            "Trilu" => {
+                let upper = node
+                    .attrs
+                    .get("upper")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(1)
+                    != 0;
+                self.out(node, self.graph.trilu(&ins[0], ins.get(1), upper));
+            }
             "Where" => {
                 // ONNX Where: cond (bool), x (T), y (T) → output elementwise select
                 if ins.len() < 3 {
                     return Err("Where needs 3 inputs: cond, x, y".to_string());
                 }
-                self.out(node, self.graph.where_tensor(&ins[0], &ins[1], &ins[2]));
+                if let Some(output_shape) = parse_shape_attr(&node.attrs, "shape") {
+                    self.out(
+                        node,
+                        self.graph
+                            .where_tensor_with_shape(&ins[0], &ins[1], &ins[2], output_shape),
+                    );
+                } else {
+                    self.out(node, self.graph.where_tensor(&ins[0], &ins[1], &ins[2]));
+                }
             }
             "CumSum" => {
                 let dim: usize = node
@@ -1546,13 +1945,12 @@ impl<'a> OnnxConverter<'a> {
                 }
             }
 
-            // ── Fallback ────────────────────────────────────────────
+            // ── Unsupported operation ──────────────────────────────
             _ => {
-                if !ins.is_empty() {
-                    self.out(node, ins[0].clone());
-                } else {
-                    self.out(node, self.scalar(0.0));
-                }
+                return Err(format!(
+                    "unsupported ONNX operation '{}' at node '{}'",
+                    node.op_type, node.name
+                ));
             }
         }
         Ok(())
@@ -1657,6 +2055,16 @@ fn normalize_axes(parsed: &[i64], rank: usize) -> Vec<usize> {
     out
 }
 
+fn axes_from_attr_or_input(node: &OnnxNode, params: &HashMap<String, Tensor>) -> Option<Vec<i64>> {
+    if node.attrs.contains_key("axes") {
+        return Some(parse_ints_i64(&node.attrs, "axes", &[]));
+    }
+    let axes_name = node.inputs.get(1)?;
+    let axes_tensor = params.get(axes_name)?;
+    let raw = axes_tensor.to_numpy().ok()?;
+    Some(raw.iter().map(|&value| value as i64).collect())
+}
+
 /// Resolve the ONNX reduce axes for `attrs["axes"]` falling back to
 /// the second input (opset 13+) when the axes were passed as a tensor
 /// initializer. Returns `None` when neither source provides axes (so
@@ -1684,46 +2092,105 @@ fn reduce_axes_from_attr_or_input(
 }
 
 fn parse_shape_attr(attrs: &HashMap<String, String>, key: &str) -> Option<Vec<DimExpr>> {
-    attrs.get(key).map(|s| {
-        s.split(',')
-            .filter_map(|v| v.trim().parse::<i64>().ok())
-            .map(|d| {
-                if d < 0 {
-                    DimExpr::Symbol(format!("d{}", -d))
-                } else {
-                    DimExpr::Known(d as u64)
-                }
-            })
-            .collect()
-    })
+    let value = attrs.get(key)?;
+    value
+        .trim_matches(|character| character == '[' || character == ']')
+        .split(',')
+        .map(|dimension| crate::ir::parse_dimension_descriptor(dimension.trim()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
-fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Vec<DimExpr> {
+fn resolve_reshape_dims(shape: &[i64], input: &GraphTensor) -> Result<Vec<DimExpr>, String> {
+    if shape.iter().filter(|&&dimension| dimension == -1).count() > 1 {
+        return Err("Reshape shape contains more than one inferred dimension".into());
+    }
+    if shape.iter().any(|&dimension| dimension < -1) {
+        return Err("Reshape shape contains a dimension below -1".into());
+    }
     let input_shape = input.shape();
-    let input_numel = input_shape
-        .iter()
-        .try_fold(1u64, |acc, d| d.evaluate().map(|v| acc.saturating_mul(v)));
+    let static_input_numel =
+        input_shape
+            .iter()
+            .try_fold(1u64, |product, dimension| match dimension {
+                DimExpr::Known(value) => product.checked_mul(*value),
+                _ => None,
+            });
     let known_product = shape
         .iter()
-        .filter(|&&d| d > 0)
-        .fold(1u64, |acc, &d| acc.saturating_mul(d as u64));
-    let infer_idx = shape.iter().position(|&d| d == -1);
+        .filter(|&&dimension| dimension > 0)
+        .try_fold(1u64, |product, &dimension| {
+            product.checked_mul(dimension as u64)
+        })
+        .ok_or_else(|| "Reshape known-dimension product overflows".to_string())?;
+    let symbolic_input_dims: Vec<&DimExpr> = input_shape
+        .iter()
+        .filter(|dimension| !matches!(dimension, DimExpr::Known(_)))
+        .collect();
+    let input_known_product = input_shape
+        .iter()
+        .filter_map(|dimension| match dimension {
+            DimExpr::Known(value) => Some(*value),
+            _ => None,
+        })
+        .try_fold(1u64, |product, dimension| product.checked_mul(dimension))
+        .ok_or_else(|| "Reshape input known-dimension product overflows".to_string())?;
 
     shape
         .iter()
         .enumerate()
-        .map(|(idx, &d)| {
-            if d == -1 {
-                if let (Some(numel), Some(_)) = (input_numel, infer_idx) {
-                    if known_product != 0 && numel % known_product == 0 {
-                        return DimExpr::Known(numel / known_product);
+        .map(|(index, &dimension)| {
+            if dimension == -1 {
+                if let Some(numel) = static_input_numel {
+                    if known_product == 0 || !numel.is_multiple_of(known_product) {
+                        return Err(format!(
+                            "Reshape cannot infer dimension from {numel} elements and known product {known_product}"
+                        ));
                     }
+                    return Ok(DimExpr::Known(numel / known_product));
                 }
-                DimExpr::Symbol("N".to_string())
-            } else if d == 0 {
-                input_shape.get(idx).cloned().unwrap_or(DimExpr::Known(0))
+                if symbolic_input_dims.len() == 1 && input_known_product == known_product {
+                    return Ok(symbolic_input_dims[0].clone());
+                }
+                // Flatten-to-[-1] is a common dynamic mask/indexing pattern. No
+                // division is required when the target's known product is one:
+                // the inferred extent is exactly the product of the input dims.
+                if known_product == 1 {
+                    let mut expression_parts = Vec::with_capacity(input_shape.len());
+                    let mut maximum = 1u64;
+                    for input_dimension in input_shape {
+                        let (expression, bound) = match input_dimension {
+                            DimExpr::Known(value) => (value.to_string(), *value),
+                            DimExpr::Symbol(symbol) => (
+                                symbol.clone(),
+                                SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed),
+                            ),
+                            DimExpr::Bounded { sym, max } => (sym.clone(), *max),
+                        };
+                        maximum = maximum.checked_mul(bound).ok_or_else(|| {
+                            "Reshape inferred symbolic product overflows".to_string()
+                        })?;
+                        if expression != "1" {
+                            expression_parts.push(expression);
+                        }
+                    }
+                    return Ok(DimExpr::Bounded {
+                        sym: if expression_parts.is_empty() {
+                            "1".to_string()
+                        } else {
+                            expression_parts.join("*")
+                        },
+                        max: maximum,
+                    });
+                }
+                Err("Reshape inferred dimension requires unsupported symbolic division".into())
+            } else if dimension == 0 {
+                input_shape
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("Reshape zero dimension {index} exceeds input rank"))
             } else {
-                DimExpr::Known(d as u64)
+                Ok(DimExpr::Known(dimension as u64))
             }
         })
         .collect()
@@ -1748,5 +2215,76 @@ fn ir_dtype_from_dtype(dtype: DType) -> IrDType {
         DType::F4 => IrDType::F4,
         DType::U4Scaled => IrDType::U4Scaled,
         DType::U8Scaled => IrDType::U8Scaled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(op_type: &str, inputs: &[&str], outputs: &[&str]) -> OnnxNode {
+        OnnxNode {
+            name: format!("{op_type}_node"),
+            op_type: op_type.to_string(),
+            inputs: inputs.iter().map(|value| (*value).to_string()).collect(),
+            outputs: outputs.iter().map(|value| (*value).to_string()).collect(),
+            attrs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn unsupported_operation_is_rejected_instead_of_passthrough() {
+        let nodes = [node("RotaryEmbedding", &["x"], &["y"])];
+        let params = HashMap::new();
+        let inputs = vec!["x".to_string()];
+        let outputs = vec!["y".to_string()];
+
+        let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
+            .to_compute_graph()
+            .expect_err("unsupported operation must fail conversion");
+
+        assert!(error.contains("unsupported ONNX operation 'RotaryEmbedding'"));
+        assert!(error.contains("RotaryEmbedding_node"));
+    }
+
+    #[test]
+    fn runtime_reshape_without_bounded_metadata_is_rejected() {
+        let nodes = [node("Reshape", &["x", "shape"], &["y"])];
+        let params = HashMap::new();
+        let inputs = vec!["x".to_string(), "shape".to_string()];
+        let outputs = vec!["y".to_string()];
+        let shapes = HashMap::from([
+            (
+                "x".to_string(),
+                vec![DimExpr::Symbol("sequence".to_string())],
+            ),
+            ("shape".to_string(), vec![DimExpr::Known(2)]),
+        ]);
+
+        let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
+            .with_input_shapes(&shapes)
+            .to_compute_graph()
+            .expect_err("runtime Reshape without bounded metadata must fail");
+
+        assert!(error.contains("no bounded output shape metadata"));
+    }
+
+    #[test]
+    fn symbolic_split_is_rejected_instead_of_duplicating_input() {
+        let nodes = [node("Split", &["x"], &["left", "right"])];
+        let params = HashMap::new();
+        let inputs = vec!["x".to_string()];
+        let outputs = vec!["left".to_string(), "right".to_string()];
+        let shapes = HashMap::from([(
+            "x".to_string(),
+            vec![DimExpr::Symbol("sequence".to_string())],
+        )]);
+
+        let error = OnnxConverter::new(&nodes, &params, &inputs, &outputs)
+            .with_input_shapes(&shapes)
+            .to_compute_graph()
+            .expect_err("symbolic Split must fail until it has real lowering");
+
+        assert!(error.contains("dynamic Split lowering is not yet supported"));
     }
 }

@@ -1205,21 +1205,59 @@ impl_nn_module!(PyTransformerEncoder {
 
 // ---- AotExecutor (ONNX graph execution via AOT compiler pipeline) ----
 
+#[derive(Clone, Debug)]
+enum StateUpdatePolicy {
+    Replace,
+    Append { axis: usize },
+    /// The graph emits the complete updated tensor; retain only the suffix
+    /// beyond the current live extent and append it to session-owned storage.
+    AppendSuffix { axis: usize },
+}
+
+#[derive(Clone, Debug)]
+struct StateDescriptor {
+    input_name: String,
+    output_name: String,
+    output_index: usize,
+    update: StateUpdatePolicy,
+}
+
+/// Immutable resources shared by every mutable inference session created from
+/// one compiled model. The executable and memory plans stored here are pristine
+/// templates; each session clones only their metadata so live-shape tightening
+/// can never leak across sessions.
+#[derive(Clone)]
+struct CompiledAotModel {
+    plan_template: crate::backend::ExecutablePlan,
+    memory_plan_template: crate::compiler::plan::MemoryPlan,
+    graph: std::sync::Arc<crate::ir::ComputeGraph>,
+    input_names: std::sync::Arc<[String]>,
+    output_map: std::sync::Arc<[(String, usize)]>,
+    prepared_plan: std::sync::Arc<crate::backend::prepared::PreparedExecutablePlan>,
+    persistent_prepared_weights:
+        std::sync::Arc<crate::backend::prepared::PersistentPreparedWeights>,
+}
+
 #[pyclass(unsendable)]
 pub struct AotExecutor {
+    compiled: std::sync::Arc<CompiledAotModel>,
     plan: crate::backend::ExecutablePlan,
     memory_plan: crate::compiler::plan::MemoryPlan,
-    graph: crate::ir::ComputeGraph,
     executor: crate::backend::executor::GraphExecutor<crate::backend::cpu::CpuBackend>,
-    input_names: Vec<String>,
-    output_map: Vec<(String, usize)>,
-    prepared_plan: crate::backend::prepared::PreparedExecutablePlan,
+    state_bindings: Vec<StateDescriptor>,
+    state_values: std::collections::HashMap<String, Vec<u8>>,
+    initial_state_values: std::collections::HashMap<String, Vec<u8>>,
+    state_capacities: std::collections::HashMap<String, usize>,
+    state_shapes: std::collections::HashMap<String, Vec<usize>>,
+    initial_state_shapes: std::collections::HashMap<String, Vec<usize>>,
+    reusable_outputs: Vec<Vec<u8>>,
+    stateful_steps: usize,
 }
 
 #[pymethods]
 impl AotExecutor {
     #[new]
-    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, quantize=None))]
+    #[pyo3(signature = (nodes, params, input_names, output_names, input_shapes=None, symbolic_input_shapes=None, quantize=None, w4a8_clip_ratios=None))]
     fn new(
         _py: pyo3::Python<'_>,
         nodes: Vec<std::collections::HashMap<String, String>>,
@@ -1227,7 +1265,9 @@ impl AotExecutor {
         input_names: Vec<String>,
         output_names: Vec<String>,
         input_shapes: Option<std::collections::HashMap<String, Vec<i64>>>,
+        symbolic_input_shapes: Option<std::collections::HashMap<String, Vec<String>>>,
         quantize: Option<pyo3::Bound<'_, pyo3::PyAny>>,
+        w4a8_clip_ratios: Option<std::collections::HashMap<String, Vec<f32>>>,
     ) -> pyo3::PyResult<Self> {
         // Clear the global f32 weight cache to prevent unbounded memory
         // accumulation across executor instances (e.g., when the benchmark
@@ -1309,6 +1349,16 @@ impl AotExecutor {
                 rust_input_shapes.insert(name, ir_dims);
             }
         }
+        if let Some(shapes) = symbolic_input_shapes {
+            for (name, dims) in shapes {
+                let ir_dims = dims
+                    .into_iter()
+                    .map(|dimension| crate::ir::parse_dimension_descriptor(&dimension))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                rust_input_shapes.insert(name, ir_dims);
+            }
+        }
 
         let converter = crate::onnx::converter::OnnxConverter::new(
             &onnx_nodes,
@@ -1322,6 +1372,8 @@ impl AotExecutor {
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         use crate::types::{CompileTarget, QuantTarget};
+        let calibrated_clip_ratios: std::collections::BTreeMap<String, Vec<f32>> =
+            w4a8_clip_ratios.unwrap_or_default().into_iter().collect();
         let target = match quantize {
             None => CompileTarget::Native,
             Some(obj) => {
@@ -1337,21 +1389,64 @@ impl AotExecutor {
                         }
                     }
                 } else if let Ok(s) = obj.extract::<String>() {
-                    match s.as_str() {
-                        "f32" => CompileTarget::Native,
-                        "i4" => CompileTarget::WeightOnly(QuantTarget::I4),
-                        "i8" => CompileTarget::WeightOnly(QuantTarget::I8),
-                        "u4" => CompileTarget::WeightOnly(QuantTarget::U4),
-                        "u8" => CompileTarget::WeightOnly(QuantTarget::U8),
-                        "f8" => CompileTarget::WeightOnly(QuantTarget::Fp8E4M3),
-                        "f8r" => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
-                        "f4" => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
-                        "i4cb" => CompileTarget::WeightOnly(QuantTarget::I4Codebook),
-                        _ => {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, 4, or 8)",
-                                s
-                            )))
+                    if let Some((base, exclusions)) = s.split_once(":exclude=") {
+                        let group_size = match base {
+                            "w4a8-g32" => 32,
+                            "w4a8-g64" => 64,
+                            "w4a8-g128" => 128,
+                            _ => {
+                                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                    "unsupported selective W4A8 target: '{base}'"
+                                )))
+                            }
+                        };
+                        let exclude_patterns: Vec<String> = exclusions
+                            .split(',')
+                            .map(str::trim)
+                            .map(str::to_string)
+                            .collect();
+                        if exclude_patterns.iter().any(String::is_empty) {
+                            return Err(pyo3::exceptions::PyValueError::new_err(
+                                "selective W4A8 exclusions must be non-empty comma-separated node-name substrings",
+                            ));
+                        }
+                        CompileTarget::DynamicW4A8 {
+                            group_size,
+                            exclude_patterns,
+                            clip_ratios: calibrated_clip_ratios.clone(),
+                        }
+                    } else {
+                        match s.as_str() {
+                            "f32" => CompileTarget::Native,
+                            "i4" => CompileTarget::WeightOnly(QuantTarget::I4),
+                            "i8" => CompileTarget::WeightOnly(QuantTarget::I8),
+                            "u4" => CompileTarget::WeightOnly(QuantTarget::U4),
+                            "u8" => CompileTarget::WeightOnly(QuantTarget::U8),
+                            "f8" => CompileTarget::WeightOnly(QuantTarget::Fp8E4M3),
+                            "f8r" => CompileTarget::WeightOnly(QuantTarget::Fp8E5M2),
+                            "f4" => CompileTarget::WeightOnly(QuantTarget::Fp4E2M1),
+                            "i4cb" => CompileTarget::WeightOnly(QuantTarget::I4Codebook),
+                            "w4a8-g32" => CompileTarget::DynamicW4A8 {
+                                group_size: 32,
+                                exclude_patterns: vec![],
+                                clip_ratios: calibrated_clip_ratios.clone(),
+                            },
+                            "w4a8-g64" => CompileTarget::DynamicW4A8 {
+                                group_size: 64,
+                                exclude_patterns: vec![],
+                                clip_ratios: calibrated_clip_ratios.clone(),
+                            },
+                            "w4a8-g128" => CompileTarget::DynamicW4A8 {
+                                group_size: 128,
+                                exclude_patterns: vec![],
+                                clip_ratios: calibrated_clip_ratios.clone(),
+                            },
+                            _ => {
+                                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                    "unsupported quantize string: '{}' (expected f32, i4, i8, u4, u8, f8, f8r, f4, i4cb, w4a8-g32, w4a8-g64, w4a8-g128, 4, or 8)",
+                                    s
+                                )))
+                            }
                         }
                     }
                 } else {
@@ -1383,14 +1478,31 @@ impl AotExecutor {
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
+        let persistent_prepared_weights = std::sync::Arc::new(
+            crate::backend::prepared::build_persistent_prepared_weights(&prepared_plan),
+        );
+        let compiled = std::sync::Arc::new(CompiledAotModel {
+            plan_template: plan.clone(),
+            memory_plan_template: memory_plan.clone(),
+            graph: std::sync::Arc::new(compiled_graph),
+            input_names: input_names.into(),
+            output_map: output_map.into(),
+            prepared_plan: std::sync::Arc::new(prepared_plan),
+            persistent_prepared_weights,
+        });
         Ok(AotExecutor {
+            compiled,
             plan,
             memory_plan,
-            graph: compiled_graph,
             executor,
-            input_names,
-            output_map,
-            prepared_plan,
+            state_bindings: Vec::new(),
+            state_values: std::collections::HashMap::new(),
+            initial_state_values: std::collections::HashMap::new(),
+            state_capacities: std::collections::HashMap::new(),
+            state_shapes: std::collections::HashMap::new(),
+            initial_state_shapes: std::collections::HashMap::new(),
+            reusable_outputs: Vec::new(),
+            stateful_steps: 0,
         })
     }
 
@@ -1399,6 +1511,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1422,19 +1535,19 @@ impl AotExecutor {
 
         #[cfg(feature = "prepared-plan")]
         let output_data = {
-            if self.prepared_plan.static_weight_binding_count() > 0 {
+            if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
                 self.executor
                     .execute_prepared_no_copy(
-                        &self.graph,
+                        &self.compiled.graph,
                         &mut self.plan,
                         &self.memory_plan,
                         &input_refs,
-                        &self.prepared_plan,
+                        &self.compiled.prepared_plan,
                     )
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             } else {
                 self.executor
-                    .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+                    .execute(&self.compiled.graph, &mut self.plan, &self.memory_plan, &input_refs)
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
             }
         };
@@ -1442,10 +1555,861 @@ impl AotExecutor {
         #[cfg(not(feature = "prepared-plan"))]
         let output_data = self
             .executor
-            .execute(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .execute(&self.compiled.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
+    }
+
+    /// Create an independent mutable inference session that shares immutable
+    /// compiled graph, executable constants, and prepared weights.
+    fn create_session(&self) -> pyo3::PyResult<Self> {
+        let mut state_values = std::collections::HashMap::with_capacity(self.state_values.len());
+        for (name, initial) in &self.initial_state_values {
+            let capacity = self.state_capacities.get(name).copied().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "configured state {name} is missing its capacity"
+                ))
+            })?;
+            let mut value = Vec::new();
+            value.try_reserve_exact(capacity).map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to allocate {capacity} bytes for session state {name}: {error}"
+                ))
+            })?;
+            value.extend_from_slice(initial);
+            state_values.insert(name.clone(), value);
+        }
+
+        Ok(Self {
+            compiled: self.compiled.clone(),
+            plan: self.compiled.plan_template.clone(),
+            memory_plan: self.compiled.memory_plan_template.clone(),
+            executor: crate::backend::executor::GraphExecutor::new(
+                crate::backend::cpu::CpuBackend,
+            ),
+            state_bindings: self.state_bindings.clone(),
+            state_values,
+            initial_state_values: self.initial_state_values.clone(),
+            state_capacities: self.state_capacities.clone(),
+            state_shapes: self.initial_state_shapes.clone(),
+            initial_state_shapes: self.initial_state_shapes.clone(),
+            reusable_outputs: Vec::new(),
+            stateful_steps: 0,
+        })
+    }
+
+    /// Configure graph inputs whose values are retained and replaced by graph
+    /// outputs after every successful invocation. This is generic persistent
+    /// tensor state; it does not depend on transformer layer or tensor names.
+    #[pyo3(signature = (bindings, initial_state, append_axes=None, append_suffix_axes=None))]
+    fn configure_state(
+        &mut self,
+        bindings: std::collections::HashMap<String, String>,
+        initial_state: std::collections::HashMap<String, PyTensor>,
+        append_axes: Option<std::collections::HashMap<String, usize>>,
+        append_suffix_axes: Option<std::collections::HashMap<String, usize>>,
+    ) -> pyo3::PyResult<()> {
+        if bindings.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "state bindings cannot be empty",
+            ));
+        }
+        if bindings.len() != initial_state.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "every state binding requires exactly one initial tensor",
+            ));
+        }
+        let mut bound_outputs = std::collections::HashSet::new();
+        for output_name in bindings.values() {
+            if !bound_outputs.insert(output_name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "state output '{output_name}' cannot be bound to multiple inputs"
+                )));
+            }
+        }
+        let mut configured = Vec::with_capacity(bindings.len());
+        let mut values = std::collections::HashMap::with_capacity(bindings.len());
+        let mut capacities = std::collections::HashMap::with_capacity(bindings.len());
+        let mut shapes = std::collections::HashMap::with_capacity(bindings.len());
+        let append_axes = append_axes.unwrap_or_default();
+        let append_suffix_axes = append_suffix_axes.unwrap_or_default();
+        if let Some(input_name) = append_axes
+            .keys()
+            .find(|name| append_suffix_axes.contains_key(*name))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "state '{input_name}' cannot use both append and append-suffix updates"
+            )));
+        }
+        for (input_name, output_name) in bindings {
+            if !self.compiled.input_names.iter().any(|name| name == &input_name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "state input '{input_name}' is not a graph input"
+                )));
+            }
+            let output_index = self
+                .compiled
+                .output_map
+                .iter()
+                .find_map(|(name, index)| (name == &output_name).then_some(*index))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "state output '{output_name}' is not a graph output"
+                    ))
+                })?;
+            let initial = initial_state.get(&input_name).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "initial state for '{input_name}' is missing"
+                ))
+            })?;
+            let bytes = initial.inner.try_as_bytes().map_err(|error| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "initial state {input_name} cannot be passed to AOT execution: {error}"
+                ))
+            })?;
+            let input_position = self
+                .compiled
+                .input_names
+                .iter()
+                .position(|name| name == &input_name)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "state input '{input_name}' lost its graph position"
+                    ))
+                })?;
+            let input_node_id = *self.compiled.graph.inputs.get(input_position).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state input '{input_name}' has no graph input node"
+                ))
+            })?;
+            let capacity = self
+                .compiled
+                .graph
+                .get_node(input_node_id)
+                .and_then(|node| node.output_type.try_byte_size_with_env(None))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "state input '{input_name}' does not have a bounded storage capacity"
+                    ))
+                })?;
+            if bytes.len() > capacity {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "initial state '{input_name}' requires {} bytes, exceeding capacity {capacity}",
+                    bytes.len()
+                )));
+            }
+            let mut storage = Vec::with_capacity(capacity);
+            storage.extend_from_slice(bytes);
+            let shape = initial
+                .inner
+                .shape()
+                .into_iter()
+                .map(|dimension| {
+                    usize::try_from(dimension).map_err(|_| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "initial state '{input_name}' has a negative dimension"
+                        ))
+                    })
+                })
+                .collect::<pyo3::PyResult<Vec<_>>>()?;
+            let update = if let Some(axis) = append_axes.get(&input_name).copied() {
+                if axis >= shape.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "append axis {axis} is out of range for state '{input_name}' rank {}",
+                        shape.len()
+                    )));
+                }
+                StateUpdatePolicy::Append { axis }
+            } else if let Some(axis) = append_suffix_axes.get(&input_name).copied() {
+                if axis >= shape.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "append-suffix axis {axis} is out of range for state '{input_name}' rank {}",
+                        shape.len()
+                    )));
+                }
+                StateUpdatePolicy::AppendSuffix { axis }
+            } else {
+                StateUpdatePolicy::Replace
+            };
+            values.insert(input_name.clone(), storage);
+            shapes.insert(input_name.clone(), shape);
+            capacities.insert(input_name.clone(), capacity);
+            configured.push(StateDescriptor {
+                input_name,
+                output_name,
+                output_index,
+                update,
+            });
+        }
+        configured.sort_by(|left, right| left.input_name.cmp(&right.input_name));
+        self.initial_state_values = values.clone();
+        self.state_values = values;
+        self.state_capacities = capacities;
+        self.initial_state_shapes = shapes.clone();
+        self.state_shapes = shapes;
+        self.state_bindings = configured;
+        self.stateful_steps = 0;
+        self.executor.invalidate_runtime_cache();
+        Ok(())
+    }
+
+    /// Restore every configured persistent tensor to its initial value.
+    fn reset_state(&mut self) -> pyo3::PyResult<()> {
+        if self.state_bindings.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "persistent state has not been configured",
+            ));
+        }
+        for (name, initial) in &self.initial_state_values {
+            let state = self.state_values.get_mut(name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "persistent state buffer '{name}' is missing"
+                ))
+            })?;
+            state.clear();
+            state.extend_from_slice(initial);
+        }
+        self.state_shapes.clone_from(&self.initial_state_shapes);
+        self.stateful_steps = 0;
+        self.executor.invalidate_runtime_cache();
+        Ok(())
+    }
+
+    /// Return live byte lengths for configured state tensors.
+    fn state_sizes(&self) -> std::collections::HashMap<String, usize> {
+        self.state_values
+            .iter()
+            .map(|(name, value)| (name.clone(), value.len()))
+            .collect()
+    }
+
+    /// Return live tensor dimensions separately from allocation capacity.
+    fn state_shapes(&self) -> std::collections::HashMap<String, Vec<usize>> {
+        self.state_shapes.clone()
+    }
+
+    /// Return reusable output-buffer capacities for allocation diagnostics.
+    fn output_buffer_capacities(&self) -> Vec<usize> {
+        self.reusable_outputs
+            .iter()
+            .map(Vec::capacity)
+            .collect()
+    }
+
+    fn enable_runtime_telemetry(&mut self, enabled: bool) {
+        self.executor.set_runtime_telemetry_enabled(enabled);
+    }
+
+    fn runtime_telemetry(&self) -> Option<std::collections::HashMap<String, u128>> {
+        self.executor.last_runtime_telemetry().map(|telemetry| {
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("shape_preamble_ns".into(), telemetry.shape_preamble_ns);
+            fields.insert("input_write_ns".into(), telemetry.input_write_ns);
+            fields.insert("dispatch_ns".into(), telemetry.dispatch_ns);
+            fields.insert("output_read_ns".into(), telemetry.output_read_ns);
+            fields.insert("state_binding_ns".into(), telemetry.state_binding_ns);
+            fields.insert("state_update_ns".into(), telemetry.state_update_ns);
+            fields.insert("total_ns".into(), telemetry.total_ns);
+            fields.insert("input_bytes".into(), telemetry.input_bytes as u128);
+            fields.insert("output_bytes".into(), telemetry.output_bytes as u128);
+            fields.insert(
+                "actual_arena_bytes_copied".into(),
+                telemetry.actual_arena_bytes_copied as u128,
+            );
+            fields.insert(
+                "full_cache_bytes_avoided".into(),
+                telemetry.full_cache_bytes_avoided as u128,
+            );
+            fields.insert("arena_bytes".into(), telemetry.arena_bytes as u128);
+            fields.insert("rss_bytes".into(), telemetry.rss_bytes as u128);
+            fields.insert(
+                "instruction_count".into(),
+                telemetry.instruction_count as u128,
+            );
+            fields.insert(
+                "write_const_count".into(),
+                telemetry.write_const_count as u128,
+            );
+            fields.insert("fill_count".into(), telemetry.fill_count as u128);
+            fields.insert("mem_copy_count".into(), telemetry.mem_copy_count as u128);
+            fields.insert(
+                "arena_growth_events".into(),
+                telemetry.arena_growth_events as u128,
+            );
+            fields.insert(
+                "output_capacity_growth_events".into(),
+                telemetry.output_capacity_growth_events as u128,
+            );
+            fields.insert(
+                "state_capacity_growth_events".into(),
+                telemetry.state_capacity_growth_events as u128,
+            );
+            fields.insert(
+                "reused_shape_plan".into(),
+                u128::from(telemetry.reused_shape_plan),
+            );
+            fields.insert(
+                "reused_arena".into(),
+                u128::from(telemetry.reused_arena),
+            );
+            fields
+        })
+    }
+
+    /// Return immutable state descriptor metadata.
+    fn state_descriptors(&self) -> Vec<std::collections::HashMap<String, String>> {
+        self.state_bindings
+            .iter()
+            .map(|descriptor| {
+                let mut fields = std::collections::HashMap::new();
+                fields.insert("input".to_string(), descriptor.input_name.clone());
+                fields.insert("output".to_string(), descriptor.output_name.clone());
+                fields.insert(
+                    "update".to_string(),
+                    match descriptor.update {
+                        StateUpdatePolicy::Replace => "replace",
+                        StateUpdatePolicy::Append { .. } => "append",
+                        StateUpdatePolicy::AppendSuffix { .. } => "append_suffix",
+                    }
+                    .to_string(),
+                );
+                if let StateUpdatePolicy::Append { axis }
+                | StateUpdatePolicy::AppendSuffix { axis } = descriptor.update
+                {
+                    fields.insert("axis".to_string(), axis.to_string());
+                }
+                if let Some(capacity) = self.state_capacities.get(&descriptor.input_name) {
+                    fields.insert("capacity_bytes".to_string(), capacity.to_string());
+                }
+                fields
+            })
+            .collect()
+    }
+
+    /// Execute while sourcing configured state inputs from Rust-owned buffers
+    /// and atomically replacing them with their bound output values on success.
+    #[pyo3(signature = (inputs, include_state_outputs=false))]
+    fn forward_stateful(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+        include_state_outputs: bool,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        let telemetry_start = self
+            .executor
+            .runtime_telemetry_enabled()
+            .then(std::time::Instant::now);
+        let output_capacities_before = telemetry_start.map(|_| {
+            self.reusable_outputs
+                .iter()
+                .map(Vec::capacity)
+                .collect::<Vec<_>>()
+        });
+        let state_capacities_before = telemetry_start.map(|_| {
+            self.state_values
+                .iter()
+                .map(|(name, value)| (name.clone(), value.capacity()))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
+        if self.state_bindings.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "persistent state has not been configured",
+            ));
+        }
+        let next_stateful_step = self.stateful_steps.checked_add(1).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("session step counter overflow")
+        })?;
+        for descriptor in &self.state_bindings {
+            if inputs.contains_key(&descriptor.input_name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "state input '{}' is runtime-owned and must not be supplied",
+                    descriptor.input_name
+                )));
+            }
+        }
+        let input_refs: Vec<&[u8]> = self
+            .compiled
+            .input_names
+            .iter()
+            .map(|name| {
+                if let Some(state) = self.state_values.get(name) {
+                    Ok(state.as_slice())
+                } else {
+                    inputs
+                        .get(name)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "required non-state input '{name}' not found"
+                            ))
+                        })
+                        .and_then(|tensor| {
+                            tensor.inner.try_as_bytes().map_err(|error| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "input {name} cannot be passed to AOT execution: {error}"
+                                ))
+                            })
+                        })
+                }
+            })
+            .collect::<pyo3::PyResult<Vec<&[u8]>>>()?;
+
+        let compact_state_suffixes = !include_state_outputs;
+        if compact_state_suffixes {
+            let mut policies = vec![
+                crate::backend::executor::OutputReadPolicy::Full;
+                self.compiled.output_map.len()
+            ];
+            for descriptor in &self.state_bindings {
+                if let StateUpdatePolicy::AppendSuffix { axis } = descriptor.update {
+                    let old_extent = self
+                        .state_shapes
+                        .get(&descriptor.input_name)
+                        .and_then(|shape| shape.get(axis))
+                        .copied()
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "live append-suffix extent for '{}' is missing",
+                                descriptor.input_name
+                            ))
+                        })?;
+                    policies[descriptor.output_index] =
+                        crate::backend::executor::OutputReadPolicy::Suffix { axis, old_extent };
+                }
+            }
+            self.executor.set_next_output_reads(policies);
+        }
+
+        let state_binding_ns = telemetry_start
+            .map(|start| start.elapsed().as_nanos())
+            .unwrap_or_default();
+
+        #[cfg(feature = "prepared-plan")]
+        let mut output_data = if self.compiled.prepared_plan.static_weight_binding_count() > 0 {
+            self.executor
+                .execute_prepared_no_copy_reusing_outputs_with_view(
+                    &self.compiled.graph,
+                    &mut self.plan,
+                    &self.memory_plan,
+                    &input_refs,
+                    &self.compiled.prepared_plan,
+                    &self.compiled.persistent_prepared_weights,
+                    std::mem::take(&mut self.reusable_outputs),
+                )
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
+        } else {
+            self.executor
+                .execute_reusing_outputs(
+                    &self.compiled.graph,
+                    &mut self.plan,
+                    &self.memory_plan,
+                    &input_refs,
+                    std::mem::take(&mut self.reusable_outputs),
+                )
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
+        };
+
+        #[cfg(not(feature = "prepared-plan"))]
+        let mut output_data = self
+            .executor
+            .execute_reusing_outputs(
+                &self.compiled.graph,
+                &mut self.plan,
+                &self.memory_plan,
+                &input_refs,
+                std::mem::take(&mut self.reusable_outputs),
+            )
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+
+        let state_update_start = telemetry_start.map(|_| std::time::Instant::now());
+        let full_cache_bytes_avoided = if compact_state_suffixes {
+            self.state_bindings
+                .iter()
+                .filter(|descriptor| {
+                    matches!(descriptor.update, StateUpdatePolicy::AppendSuffix { .. })
+                })
+                .filter_map(|descriptor| self.state_values.get(&descriptor.input_name))
+                .map(Vec::len)
+                .sum()
+        } else {
+            0
+        };
+
+        // Validate every update before mutating any state so overflow and shape
+        // errors are transactional across all descriptors.
+        let mut append_shapes = std::collections::HashMap::new();
+        for descriptor in &self.state_bindings {
+            let input_name = &descriptor.input_name;
+            let output_index = descriptor.output_index;
+            let output = output_data.get(output_index).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state output '{}' at index {output_index} for '{input_name}' is missing",
+                    descriptor.output_name
+                ))
+            })?;
+            let capacity = *self.state_capacities.get(input_name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state capacity for '{input_name}' is missing"
+                ))
+            })?;
+            match descriptor.update {
+                StateUpdatePolicy::Replace => {
+                    if output.len() > capacity {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "state output for '{input_name}' requires {} bytes, exceeding capacity {capacity}",
+                            output.len()
+                        )));
+                    }
+                }
+                StateUpdatePolicy::Append { axis } => {
+                    let old_shape = self.state_shapes.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "live shape for append state '{input_name}' is missing"
+                        ))
+                    })?;
+                    let delta_shape = self
+                        .executor
+                        .last_output_shapes()
+                        .get(output_index)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "runtime shape for append output '{}' is missing",
+                                descriptor.output_name
+                            ))
+                        })?;
+                    if old_shape.len() != delta_shape.len() || axis >= old_shape.len() {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append state '{input_name}' rank/axis is incompatible with output shape"
+                        )));
+                    }
+                    for dimension in 0..old_shape.len() {
+                        if dimension != axis && old_shape[dimension] != delta_shape[dimension] {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "append state '{input_name}' dimension {dimension} differs: {} vs {}",
+                                old_shape[dimension], delta_shape[dimension]
+                            )));
+                        }
+                    }
+                    let delta_elements = delta_shape.iter().try_fold(1usize, |value, dim| {
+                        value.checked_mul(*dim)
+                    }).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                        "append output element count overflows",
+                    ))?;
+                    if delta_elements == 0 || output.len() % delta_elements != 0 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append output '{}' has inconsistent byte geometry",
+                            descriptor.output_name
+                        )));
+                    }
+                    let element_bytes = output.len() / delta_elements;
+                    let old_elements = old_shape.iter().try_fold(1usize, |value, dim| {
+                        value.checked_mul(*dim)
+                    }).ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                        "append state element count overflows",
+                    ))?;
+                    let state_len = self.state_values.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "state buffer for '{input_name}' is missing"
+                        ))
+                    })?.len();
+                    if old_elements.checked_mul(element_bytes) != Some(state_len) {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append state '{input_name}' has inconsistent byte geometry"
+                        )));
+                    }
+                    let new_len = state_len.checked_add(output.len()).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("append byte length overflows")
+                    })?;
+                    if new_len > capacity {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "appending state '{input_name}' requires {new_len} bytes, exceeding capacity {capacity}"
+                        )));
+                    }
+                    let mut new_shape = old_shape.clone();
+                    new_shape[axis] = new_shape[axis]
+                        .checked_add(delta_shape[axis])
+                        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
+                            "append axis extent overflows",
+                        ))?;
+                    append_shapes.insert(input_name.clone(), (new_shape, element_bytes));
+                }
+                StateUpdatePolicy::AppendSuffix { axis } => {
+                    let old_shape = self.state_shapes.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "live shape for append-suffix state '{input_name}' is missing"
+                        ))
+                    })?;
+                    let full_shape = self
+                        .executor
+                        .last_output_shapes()
+                        .get(output_index)
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "runtime shape for append-suffix output '{}' is missing",
+                                descriptor.output_name
+                            ))
+                        })?;
+                    if old_shape.len() != full_shape.len() || axis >= old_shape.len() {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix state '{input_name}' rank/axis is incompatible with output shape"
+                        )));
+                    }
+                    for dimension in 0..old_shape.len() {
+                        if dimension != axis && old_shape[dimension] != full_shape[dimension] {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "append-suffix state '{input_name}' dimension {dimension} differs: {} vs {}",
+                                old_shape[dimension], full_shape[dimension]
+                            )));
+                        }
+                    }
+                    if full_shape[axis] <= old_shape[axis] {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix output '{}' axis {axis} must grow beyond live extent {} (got {})",
+                            descriptor.output_name, old_shape[axis], full_shape[axis]
+                        )));
+                    }
+                    let full_elements = full_shape
+                        .iter()
+                        .try_fold(1usize, |value, dim| value.checked_mul(*dim))
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "append-suffix output element count overflows",
+                            )
+                        })?;
+                    let old_elements = old_shape
+                        .iter()
+                        .try_fold(1usize, |value, dim| value.checked_mul(*dim))
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "append-suffix state element count overflows",
+                            )
+                        })?;
+                    let suffix_elements = full_elements.checked_sub(old_elements).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix output is smaller than the live state",
+                        )
+                    })?;
+                    let transferred_elements = if compact_state_suffixes {
+                        suffix_elements
+                    } else {
+                        full_elements
+                    };
+                    if transferred_elements == 0 || output.len() % transferred_elements != 0 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix output '{}' has inconsistent byte geometry",
+                            descriptor.output_name
+                        )));
+                    }
+                    let element_bytes = output.len() / transferred_elements;
+                    let state_len = self.state_values.get(input_name).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "state buffer for '{input_name}' is missing"
+                        ))
+                    })?.len();
+                    if old_elements.checked_mul(element_bytes) != Some(state_len) {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "append-suffix state '{input_name}' has inconsistent byte geometry"
+                        )));
+                    }
+                    let suffix_bytes = suffix_elements.checked_mul(element_bytes).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix byte length overflows",
+                        )
+                    })?;
+                    let new_len = state_len.checked_add(suffix_bytes).ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "append-suffix state byte length overflows",
+                        )
+                    })?;
+                    if new_len > capacity {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "appending suffix to state '{input_name}' requires {new_len} bytes, exceeding capacity {capacity}"
+                        )));
+                    }
+                    append_shapes.insert(input_name.clone(), (full_shape.clone(), element_bytes));
+                }
+            }
+        }
+        // Decode every user-visible output before committing any persistent
+        // state. Output representation or shape failures must leave the
+        // session at the previous successful step.
+        let hidden_outputs = (!include_state_outputs).then(|| {
+            self.state_bindings
+                .iter()
+                .map(|descriptor| descriptor.output_name.clone())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let result = self.decode_outputs_filtered(&output_data, hidden_outputs.as_ref())?;
+
+        // Reserve all replacement destinations before committing any state.
+        // Vec reservation is relative to length, not the current capacity.
+        if !include_state_outputs {
+            for descriptor in &self.state_bindings {
+                if matches!(descriptor.update, StateUpdatePolicy::Replace) {
+                    let output = &mut output_data[descriptor.output_index];
+                    let capacity = self.state_capacities[&descriptor.input_name];
+                    if output.capacity() < capacity {
+                        output.try_reserve_exact(capacity - output.len()).map_err(|error| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "failed to reserve replacement state: {error}"
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+
+        for descriptor in &self.state_bindings {
+            let input_name = &descriptor.input_name;
+            let state = self.state_values.get_mut(input_name).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "state buffer for '{input_name}' is missing"
+                ))
+            })?;
+            match descriptor.update {
+                StateUpdatePolicy::Replace => {
+                    let output_index = descriptor.output_index;
+                    let shape = self.executor.last_output_shapes()[output_index].clone();
+                    if include_state_outputs {
+                        state.clear();
+                        state.extend_from_slice(&output_data[output_index]);
+                    } else {
+                        let output = &mut output_data[output_index];
+                        std::mem::swap(state, output);
+                    }
+                    self.state_shapes.insert(input_name.clone(), shape);
+                }
+                StateUpdatePolicy::Append { axis } => {
+                    let output = &output_data[descriptor.output_index];
+                    let old_shape = self.state_shapes[input_name].clone();
+                    let (new_shape, element_bytes) = &append_shapes[input_name];
+                    let inner_elements = old_shape[axis + 1..].iter().product::<usize>();
+                    let inner_bytes = inner_elements * *element_bytes;
+                    let outer = old_shape[..axis].iter().product::<usize>();
+                    let old_block = old_shape[axis] * inner_bytes;
+                    let delta_axis = new_shape[axis] - old_shape[axis];
+                    let delta_block = delta_axis * inner_bytes;
+                    let new_block = old_block + delta_block;
+                    let old_len = state.len();
+                    state.resize(old_len + output.len(), 0);
+                    for outer_index in (0..outer).rev() {
+                        let old_start = outer_index * old_block;
+                        let new_start = outer_index * new_block;
+                        state.copy_within(old_start..old_start + old_block, new_start);
+                        let delta_start = outer_index * delta_block;
+                        state[new_start + old_block..new_start + new_block]
+                            .copy_from_slice(&output[delta_start..delta_start + delta_block]);
+                    }
+                    self.state_shapes.insert(input_name.clone(), new_shape.clone());
+                }
+                StateUpdatePolicy::AppendSuffix { axis } => {
+                    let output = &output_data[descriptor.output_index];
+                    let old_shape = self.state_shapes[input_name].clone();
+                    let (new_shape, element_bytes) = &append_shapes[input_name];
+                    let inner_elements = old_shape[axis + 1..].iter().product::<usize>();
+                    let inner_bytes = inner_elements * *element_bytes;
+                    let outer = old_shape[..axis].iter().product::<usize>();
+                    let old_block = old_shape[axis] * inner_bytes;
+                    let new_block = new_shape[axis] * inner_bytes;
+                    let suffix_block = new_block - old_block;
+                    let old_len = state.len();
+                    state.resize(old_len + outer * suffix_block, 0);
+                    for outer_index in (0..outer).rev() {
+                        let old_start = outer_index * old_block;
+                        let new_start = outer_index * new_block;
+                        state.copy_within(old_start..old_start + old_block, new_start);
+                        let suffix_source = if compact_state_suffixes {
+                            outer_index * suffix_block
+                        } else {
+                            outer_index * new_block + old_block
+                        };
+                        state[new_start + old_block..new_start + new_block].copy_from_slice(
+                            &output[suffix_source..suffix_source + suffix_block],
+                        );
+                    }
+                    self.state_shapes.insert(input_name.clone(), new_shape.clone());
+                }
+            }
+        }
+        self.stateful_steps = next_stateful_step;
+        self.reusable_outputs = output_data;
+        if let Some(start) = telemetry_start {
+            let output_capacity_growth_events = output_capacities_before
+                .as_ref()
+                .map(|before| {
+                    self.reusable_outputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, output)| {
+                            output.capacity() > before.get(*index).copied().unwrap_or_default()
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
+            let state_capacity_growth_events = state_capacities_before
+                .as_ref()
+                .map(|before| {
+                    self.state_values
+                        .iter()
+                        .filter(|(name, state)| {
+                            state.capacity() > before.get(*name).copied().unwrap_or_default()
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
+            self.executor.augment_runtime_telemetry(
+                state_binding_ns,
+                state_update_start
+                    .map(|update_start| update_start.elapsed().as_nanos())
+                    .unwrap_or_default(),
+                full_cache_bytes_avoided,
+                output_capacity_growth_events,
+                state_capacity_growth_events,
+                start.elapsed().as_nanos(),
+            );
+        }
+        Ok(result)
+    }
+
+    /// Initialize an empty stateful session. A second prefill requires reset.
+    #[pyo3(signature = (inputs, include_state_outputs=false))]
+    fn prefill(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+        include_state_outputs: bool,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        if self.stateful_steps != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "session is already initialized; reset before prefill",
+            ));
+        }
+        self.forward_stateful(inputs, include_state_outputs)
+    }
+
+    /// Advance an initialized stateful session.
+    #[pyo3(signature = (inputs, include_state_outputs=false))]
+    fn decode(
+        &mut self,
+        inputs: std::collections::HashMap<String, PyTensor>,
+        include_state_outputs: bool,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        if self.stateful_steps == 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "session is empty; prefill before decode",
+            ));
+        }
+        self.forward_stateful(inputs, include_state_outputs)
+    }
+
+    /// Number of successful stateful invocations since configuration or reset.
+    #[getter]
+    fn session_steps(&self) -> usize {
+        self.stateful_steps
+    }
+
+    /// Whether this executor has completed a successful prefill.
+    #[getter]
+    fn session_initialized(&self) -> bool {
+        self.stateful_steps != 0
     }
 
     /// Apply calibration scales from a JSON file to recompile the model with
@@ -1479,16 +2443,27 @@ impl AotExecutor {
         // after every derived representation has been rebuilt successfully.
         let (plan, memory_plan, graph) = self
             .executor
-            .compile_with_plan_and_quantize(self.graph.clone(), None, Some(calib))
+            .compile_with_plan_and_quantize((*self.compiled.graph).clone(), None, Some(calib))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let prepared_plan = crate::backend::prepared::prepare_executable_plan(&plan)
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
         self.executor.invalidate_runtime_cache();
+        let persistent_prepared_weights = std::sync::Arc::new(
+            crate::backend::prepared::build_persistent_prepared_weights(&prepared_plan),
+        );
+        let compiled = std::sync::Arc::new(CompiledAotModel {
+            plan_template: plan.clone(),
+            memory_plan_template: memory_plan.clone(),
+            graph: std::sync::Arc::new(graph),
+            input_names: self.compiled.input_names.clone(),
+            output_map: self.compiled.output_map.clone(),
+            prepared_plan: std::sync::Arc::new(prepared_plan),
+            persistent_prepared_weights,
+        });
+        self.compiled = compiled;
         self.plan = plan;
         self.memory_plan = memory_plan;
-        self.graph = graph;
-        self.prepared_plan = prepared_plan;
 
         Ok(())
     }
@@ -1514,6 +2489,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1538,15 +2514,15 @@ impl AotExecutor {
         let output_data = self
             .executor
             .execute_prepared_fallback(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -1569,6 +2545,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1593,15 +2570,15 @@ impl AotExecutor {
         let output_data = self
             .executor
             .execute_prepared_arena_fallback(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -1630,6 +2607,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1654,15 +2632,15 @@ impl AotExecutor {
         let output_data = self
             .executor
             .execute_prepared_no_copy(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.decode_outputs(output_data)
+        self.decode_outputs(&output_data)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -1681,6 +2659,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1704,10 +2683,10 @@ impl AotExecutor {
 
         let (output_data, profile_entries) = self
             .executor
-            .execute_profile(&self.graph, &mut self.plan, &self.memory_plan, &input_refs)
+            .execute_profile(&self.compiled.graph, &mut self.plan, &self.memory_plan, &input_refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.encode_profile_result(py, output_data, profile_entries)
+        self.encode_profile_result(py, &output_data, profile_entries)
     }
 
     #[cfg(feature = "prepared-plan")]
@@ -1717,6 +2696,7 @@ impl AotExecutor {
         inputs: std::collections::HashMap<String, PyTensor>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         let input_refs: Vec<&[u8]> = self
+            .compiled
             .input_names
             .iter()
             .map(|name| {
@@ -1741,15 +2721,15 @@ impl AotExecutor {
         let (output_data, profile_entries) = self
             .executor
             .execute_profile_prepared_arena_fallback(
-                &self.graph,
+                &self.compiled.graph,
                 &mut self.plan,
                 &self.memory_plan,
                 &input_refs,
-                &self.prepared_plan,
+                &self.compiled.prepared_plan,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        self.encode_profile_result(py, output_data, profile_entries)
+        self.encode_profile_result(py, &output_data, profile_entries)
     }
 
     #[cfg(not(feature = "prepared-plan"))]
@@ -1855,8 +2835,8 @@ impl AotExecutor {
             use crate::backend::prepared::PreparedInstruction;
 
             let mut slots = HashMap::new();
-            if let Some(arena) = self.prepared_plan.constant_arena() {
-                for prepared in &self.prepared_plan.instructions {
+            if let Some(arena) = self.compiled.prepared_plan.constant_arena() {
+                for prepared in &self.compiled.prepared_plan.instructions {
                     match prepared {
                         PreparedInstruction::Conv2d(conv) => {
                             if let Some(id) = conv.packed_weight {
@@ -1952,11 +2932,11 @@ impl AotExecutor {
                     kernel_read_bytes += read_bytes;
                     kernel_write_bytes += write_bytes;
 
-                    let node = node_id.and_then(|id| self.graph.get_node(id));
+                    let node = node_id.and_then(|id| self.compiled.graph.get_node(id));
                     let input_nodes = node.map(|n| n.inputs.clone()).unwrap_or_default();
                     let input_shapes = input_nodes
                         .iter()
-                        .filter_map(|id| self.graph.get_node(*id))
+                        .filter_map(|id| self.compiled.graph.get_node(*id))
                         .map(|input| {
                             input
                                 .output_type
@@ -2173,7 +3153,7 @@ impl AotExecutor {
     #[cfg(feature = "prepared-plan")]
     fn prepared_stats(&self) -> pyo3::PyResult<std::collections::HashMap<String, usize>> {
         use crate::backend::prepared::PreparedInstruction;
-        let instructions = &self.prepared_plan.instructions;
+        let instructions = &self.compiled.prepared_plan.instructions;
         let mut stats = std::collections::HashMap::new();
         stats.insert("total".to_string(), instructions.len());
         stats.insert(
@@ -2199,39 +3179,39 @@ impl AotExecutor {
         );
         stats.insert(
             "static_weight_bindings".to_string(),
-            self.prepared_plan.static_weight_binding_count(),
+            self.compiled.prepared_plan.static_weight_binding_count(),
         );
         stats.insert(
             "constant_arena_entries".to_string(),
-            self.prepared_plan.constant_arena_entry_count(),
+            self.compiled.prepared_plan.constant_arena_entry_count(),
         );
         stats.insert(
             "constant_arena_bytes".to_string(),
-            self.prepared_plan.constant_arena_total_bytes(),
+            self.compiled.prepared_plan.constant_arena_total_bytes(),
         );
         stats.insert(
             "packed_fp32_conv_candidates".to_string(),
-            self.prepared_plan.packed_fp32_conv_candidate_count(),
+            self.compiled.prepared_plan.packed_fp32_conv_candidate_count(),
         );
         stats.insert(
             "packed_fp32_conv_candidate_flops".to_string(),
-            self.prepared_plan.packed_fp32_conv_candidate_flops(),
+            self.compiled.prepared_plan.packed_fp32_conv_candidate_flops(),
         );
         stats.insert(
             "transposed_fp32_conv_entries".to_string(),
-            self.prepared_plan.transposed_fp32_conv_entry_count(),
+            self.compiled.prepared_plan.transposed_fp32_conv_entry_count(),
         );
         stats.insert(
             "transposed_fp32_conv_bytes".to_string(),
-            self.prepared_plan.transposed_fp32_conv_total_bytes(),
+            self.compiled.prepared_plan.transposed_fp32_conv_total_bytes(),
         );
         stats.insert(
             "transposed_fp32_conv_bindings".to_string(),
-            self.prepared_plan.transposed_fp32_conv_binding_count(),
+            self.compiled.prepared_plan.transposed_fp32_conv_binding_count(),
         );
         stats.insert(
             "transposed_fp32_conv_binding_flops".to_string(),
-            self.prepared_plan.transposed_fp32_conv_binding_flops(),
+            self.compiled.prepared_plan.transposed_fp32_conv_binding_flops(),
         );
         Ok(stats)
     }
@@ -2248,8 +3228,8 @@ impl AotExecutor {
     fn debug_graph(&self) -> pyo3::PyResult<String> {
         let mut out = String::new();
         out.push_str("=== COMPILED GRAPH ===\n");
-        for node_id in self.graph.try_topological_sort().map_err(PyErr::from)? {
-            if let Some(node) = self.graph.get_node(node_id) {
+        for node_id in self.compiled.graph.try_topological_sort().map_err(PyErr::from)? {
+            if let Some(node) = self.compiled.graph.get_node(node_id) {
                 out.push_str(&format!(
                     "  Node {}: {} / {:?} / inputs={:?}\n",
                     node_id, node.name, node.opcode, node.inputs
@@ -2263,8 +3243,8 @@ impl AotExecutor {
                 }
             }
         }
-        out.push_str(&format!("Inputs: {:?}\n", self.graph.inputs));
-        out.push_str(&format!("Outputs: {:?}\n", self.graph.outputs));
+        out.push_str(&format!("Inputs: {:?}\n", self.compiled.graph.inputs));
+        out.push_str(&format!("Outputs: {:?}\n", self.compiled.graph.outputs));
         Ok(out)
     }
 
@@ -2282,7 +3262,7 @@ impl AotExecutor {
     fn encode_profile_result(
         &self,
         py: pyo3::Python<'_>,
-        output_data: Vec<Vec<u8>>,
+        output_data: &[Vec<u8>],
         profile_entries: Vec<crate::backend::ProfileEntry>,
     ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         use pyo3::types::{PyDict, PyList};
@@ -2301,7 +3281,7 @@ impl AotExecutor {
             item.set_item("elapsed_ns", entry.elapsed_ns)?;
             let node_name = entry
                 .node_id
-                .and_then(|node_id| self.graph.get_node(node_id))
+                .and_then(|node_id| self.compiled.graph.get_node(node_id))
                 .map(|node| node.name.clone())
                 .unwrap_or_default();
             item.set_item("node_name", node_name)?;
@@ -2322,33 +3302,44 @@ impl AotExecutor {
     /// bytes.
     fn decode_outputs(
         &self,
-        output_data: Vec<Vec<u8>>,
+        output_data: &[Vec<u8>],
     ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
-        if output_data.len() != self.graph.outputs.len()
+        self.decode_outputs_filtered(output_data, None)
+    }
+
+    fn decode_outputs_filtered(
+        &self,
+        output_data: &[Vec<u8>],
+        hidden_outputs: Option<&std::collections::HashSet<String>>,
+    ) -> pyo3::PyResult<std::collections::HashMap<String, PyTensor>> {
+        if output_data.len() != self.compiled.graph.outputs.len()
             || self.executor.last_output_shapes().len() != output_data.len()
-            || self.output_map.len() != output_data.len()
+            || self.compiled.output_map.len() != output_data.len()
         {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "AotExecutor: output cardinality mismatch (bytes={}, shapes={}, graph={}, names={})",
                 output_data.len(),
                 self.executor.last_output_shapes().len(),
-                self.graph.outputs.len(),
-                self.output_map.len()
+                self.compiled.graph.outputs.len(),
+                self.compiled.output_map.len()
             )));
         }
         let mut result = std::collections::HashMap::new();
-        for (name, idx) in &self.output_map {
+        for (name, idx) in self.compiled.output_map.iter() {
+            if hidden_outputs.is_some_and(|hidden| hidden.contains(name)) {
+                continue;
+            }
             let data = output_data.get(*idx).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "AotExecutor: output index {idx} is out of range"
                 ))
             })?;
-            let output_node_id = *self.graph.outputs.get(*idx).ok_or_else(|| {
+            let output_node_id = *self.compiled.graph.outputs.get(*idx).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "AotExecutor: graph output index {idx} is out of range"
                 ))
             })?;
-            let output_node = self.graph.get_node(output_node_id).ok_or_else(|| {
+            let output_node = self.compiled.graph.get_node(output_node_id).ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err(
                     "AotExecutor: output node not found in graph",
                 )

@@ -791,7 +791,7 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     let act_tt = TensorType::new(vec![DimExpr::Known(1), DimExpr::Known(4)], IrDType::I8);
     let act_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: payload,
+            bytes: payload.into(),
             tensor_type: act_tt.clone(),
         }),
         vec![],
@@ -804,7 +804,7 @@ fn malformed_quantized_weight_metadata_returns_error_instead_of_panicking() {
     let w_tt = TensorType::new(vec![DimExpr::Known(4), DimExpr::Known(4)], IrDType::F32);
     let w_id = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: bytemuck::cast_slice(&w_data).to_vec(),
+            bytes: bytemuck::cast_slice(&w_data).to_vec().into(),
             tensor_type: w_tt.clone(),
         }),
         vec![],
@@ -973,7 +973,7 @@ fn rank_zero_quantized_weights_fail_cpu_lowering() {
     let quantized_type = TensorType::new(vec![], IrDType::I4);
     let weight = graph.add_node(
         Opcode::Constant(TensorValue::Data {
-            bytes: vec![0; 4],
+            bytes: vec![0; 4].into(),
             tensor_type: quantized_type.clone(),
         }),
         vec![],

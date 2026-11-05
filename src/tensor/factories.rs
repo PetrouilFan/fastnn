@@ -112,13 +112,8 @@ impl Tensor {
             ));
         };
         let data = Arc::make_mut(&mut cpu.data);
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                values.as_ptr(),
-                data.as_mut_ptr() as *mut f32,
-                values.len(),
-            );
-        }
+        // Copy bytes so empty storage does not require an f32-aligned pointer.
+        data.copy_from_slice(bytemuck::cast_slice(&values));
         Ok(Tensor::new(TensorImpl::try_new(
             storage,
             sizes,

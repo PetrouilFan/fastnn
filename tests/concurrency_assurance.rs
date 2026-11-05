@@ -58,7 +58,7 @@ fn prepared_execution_is_repeatable_across_concurrent_executors() {
     let input = graph.add_node(Opcode::Input, vec![], vector_type());
     let constant_values = vec![2.0_f32; 16];
     let constant = graph.add_constant(TensorValue::Data {
-        bytes: bytemuck::cast_slice(&constant_values).to_vec(),
+        bytes: bytemuck::cast_slice(&constant_values).to_vec().into(),
         tensor_type: vector_type(),
     });
     let output = graph.add_node(Opcode::Add, vec![input, constant], vector_type());

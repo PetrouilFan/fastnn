@@ -16,7 +16,12 @@ pub(crate) fn node_output_byte_size(
         return node
             .output_type
             .try_byte_size_with_env(shape_env)
-            .ok_or_else(|| format!("node {} output storage size overflows", node.id));
+            .ok_or_else(|| {
+                format!(
+                    "node {} name='{}' op='{:?}' output storage size overflows for shape {:?}",
+                    node.id, node.name, node.opcode, node.output_type.shape
+                )
+            });
     }
 
     let mut dimensions = Vec::with_capacity(node.output_type.shape.len());
@@ -291,7 +296,10 @@ impl MemoryPlan {
             let mut resolved_input_shapes = Vec::with_capacity(node.inputs.len());
             for &input_id in &node.inputs {
                 let input = graph.get_node(input_id).ok_or_else(|| {
-                    format!("node {node_id} references missing input node {input_id}")
+                    format!(
+                        "node {node_id} ({:?} '{}') references missing input node {input_id}",
+                        node.opcode, node.name
+                    )
                 })?;
                 let mut shape = Vec::with_capacity(input.output_type.shape.len());
                 for dimension in &input.output_type.shape {
@@ -317,7 +325,37 @@ impl MemoryPlan {
                     if lhs.len() < 2 || rhs.len() < 2 {
                         return Err(format!("matmul node {node_id} requires rank-two inputs"));
                     }
-                    let m = to_usize(lhs[lhs.len() - 2], "matmul M")?;
+                    let specialized_projection = node
+                        .inputs
+                        .get(1)
+                        .and_then(|id| graph.get_node(*id))
+                        .is_some_and(|weight| {
+                            weight.output_type.dtype() != crate::ir::IrDType::F32
+                        })
+                        || matches!(
+                            node.attrs.get("fused_op").map(String::as_str),
+                            Some(
+                                "MatMulAddRelu"
+                                    | "MatMulAddGelu"
+                                    | "MatMulAddSilu"
+                                    | "OpRelu"
+                                    | "OpGelu"
+                                    | "OpSilu"
+                            )
+                        );
+                    let m = if specialized_projection {
+                        lhs[..lhs.len() - 1]
+                            .iter()
+                            .try_fold(1usize, |count, value| {
+                                count
+                                    .checked_mul(to_usize(*value, "matmul row extent")?)
+                                    .ok_or_else(|| {
+                                        format!("matmul node {node_id} row count overflows")
+                                    })
+                            })?
+                    } else {
+                        to_usize(lhs[lhs.len() - 2], "matmul M")?
+                    };
                     let k = to_usize(lhs[lhs.len() - 1], "matmul K")?;
                     let rhs_k = to_usize(rhs[rhs.len() - 2], "matmul rhs K")?;
                     let n = to_usize(rhs[rhs.len() - 1], "matmul N")?;
@@ -425,6 +463,226 @@ impl MemoryPlan {
                         params.push(to_usize(*dimension, "reduction dimension")?);
                     }
                     params.extend([axis, is_mean, is_max]);
+                    params
+                }
+                Opcode::Concat => {
+                    let first = resolved_input_shapes.first().ok_or_else(|| {
+                        format!("concat node {node_id} requires at least one input")
+                    })?;
+                    let rank = first.len();
+                    let axis = node
+                        .attrs
+                        .get("axis")
+                        .ok_or_else(|| format!("concat node {node_id} is missing axis"))?
+                        .parse::<usize>()
+                        .map_err(|error| {
+                            format!("concat node {node_id} has invalid axis: {error}")
+                        })?;
+                    if axis >= rank {
+                        return Err(format!(
+                            "concat node {node_id} axis {axis} is out of range for rank {rank}"
+                        ));
+                    }
+                    for (input_index, shape) in resolved_input_shapes.iter().enumerate() {
+                        if shape.len() != rank {
+                            return Err(format!(
+                                "concat node {node_id} input {input_index} rank {} differs from {rank}",
+                                shape.len()
+                            ));
+                        }
+                        for dimension in 0..rank {
+                            if dimension != axis && shape[dimension] != first[dimension] {
+                                return Err(format!(
+                                    "concat node {node_id} input {input_index} dimension {dimension} value {} differs from {}",
+                                    shape[dimension], first[dimension]
+                                ));
+                            }
+                        }
+                    }
+                    let checked_product = |dimensions: &[u64], label: &str| {
+                        dimensions.iter().try_fold(1u64, |product, dimension| {
+                            product
+                                .checked_mul(*dimension)
+                                .ok_or_else(|| format!("concat node {node_id} {label} overflows"))
+                        })
+                    };
+                    let inner_stride = checked_product(&first[axis + 1..], "inner stride")?;
+                    let outer_count = checked_product(&first[..axis], "outer count")?;
+                    vec![
+                        axis,
+                        to_usize(inner_stride, "concat inner stride")?,
+                        to_usize(outer_count, "concat outer count")?,
+                    ]
+                }
+                Opcode::ScatterNd => {
+                    let data_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("scatter_nd node {node_id} is missing data"))?;
+                    let indices_shape = resolved_input_shapes
+                        .get(1)
+                        .ok_or_else(|| format!("scatter_nd node {node_id} is missing indices"))?;
+                    let index_depth = match indices_shape.len() {
+                        0 | 1 => 1,
+                        rank => to_usize(indices_shape[rank - 1], "scatter_nd index depth")?,
+                    };
+                    if index_depth == 0 || index_depth > data_shape.len() {
+                        return Err(format!(
+                            "scatter_nd node {node_id} index depth {index_depth} is invalid for data rank {}",
+                            data_shape.len()
+                        ));
+                    }
+                    let mut params = vec![index_depth];
+                    for &dimension in data_shape {
+                        params.push(to_usize(dimension, "scatter_nd data dimension")?);
+                    }
+                    params.push(0x5343_4154);
+                    params.push(usize::from(
+                        node.attrs
+                            .get("reduction")
+                            .is_some_and(|value| value == "add"),
+                    ));
+                    params
+                }
+                Opcode::Slice if node.inputs.len() == 1 => {
+                    let input_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("slice node {node_id} is missing data"))?;
+                    let dim: usize = node
+                        .required_attr("dim")
+                        .map_err(|error| error.to_string())?;
+                    let start: usize = node
+                        .required_attr("start")
+                        .map_err(|error| error.to_string())?;
+                    let raw_end: i64 = node
+                        .required_attr("end")
+                        .map_err(|error| error.to_string())?;
+                    if dim >= input_shape.len() {
+                        return Err(format!("slice node {node_id} axis {dim} is out of range"));
+                    }
+                    let dimension = i64::try_from(input_shape[dim])
+                        .map_err(|_| format!("slice node {node_id} dimension does not fit i64"))?;
+                    let end = if raw_end < 0 {
+                        dimension
+                            .checked_add(raw_end)
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or_else(|| format!("slice node {node_id} negative end overflows"))?
+                    } else {
+                        raw_end
+                    };
+                    let end = usize::try_from(end)
+                        .map_err(|_| format!("slice node {node_id} end does not fit usize"))?;
+                    let mut params = Vec::with_capacity(input_shape.len() + 4);
+                    params.push(input_shape.len());
+                    for &dimension in input_shape {
+                        params.push(to_usize(dimension, "slice input dimension")?);
+                    }
+                    params.extend([dim, start, end]);
+                    params
+                }
+                Opcode::Gather => {
+                    let data_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("gather node {node_id} is missing data"))?;
+                    let indices_shape = resolved_input_shapes
+                        .get(1)
+                        .ok_or_else(|| format!("gather node {node_id} is missing indices"))?;
+                    let axis: usize = node
+                        .optional_attr("axis")
+                        .map_err(|error| error.to_string())?
+                        .unwrap_or(0);
+                    if axis >= data_shape.len() {
+                        return Err(format!("gather node {node_id} axis {axis} is out of range"));
+                    }
+                    let indices_numel =
+                        indices_shape
+                            .iter()
+                            .try_fold(1usize, |product, &dimension| {
+                                product
+                                    .checked_mul(to_usize(dimension, "gather indices dimension")?)
+                                    .ok_or_else(|| {
+                                        format!("gather node {node_id} indices size overflows")
+                                    })
+                            })?;
+                    // FNN v3 stores runtime index payloads in numeric F32 slots even
+                    // when the semantic ONNX dtype is I32/I64. The kernel encoding
+                    // flag describes the physical payload, not the semantic dtype;
+                    // fresh artifacts therefore use numeric decoding. Legacy raw-bit
+                    // artifacts must be regenerated rather than inferred from values.
+                    let index_dtype = 0;
+                    let mut params = Vec::with_capacity(data_shape.len() + 4);
+                    params.push(data_shape.len());
+                    for &dimension in data_shape {
+                        params.push(to_usize(dimension, "gather data dimension")?);
+                    }
+                    params.extend([indices_numel, axis, index_dtype]);
+                    params
+                }
+                Opcode::Trilu => {
+                    let input_shape = resolved_input_shapes
+                        .first()
+                        .ok_or_else(|| format!("trilu node {node_id} requires one data input"))?;
+                    if input_shape.len() < 2 {
+                        return Err(format!("trilu node {node_id} requires rank >= 2"));
+                    }
+                    let upper = node
+                        .attrs
+                        .get("upper")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    let mut params = vec![input_shape.len()];
+                    for &dimension in input_shape {
+                        params.push(to_usize(dimension, "trilu input dimension")?);
+                    }
+                    params.push(upper);
+                    params
+                }
+                Opcode::Where => {
+                    if resolved_input_shapes.len() != 3 {
+                        return Err(format!("where node {node_id} requires three inputs"));
+                    }
+                    let mut output_shape = Vec::with_capacity(node.output_type.shape.len());
+                    for dimension in &node.output_type.shape {
+                        output_shape.push(dimension.evaluate_with_env(shape_env).map_err(
+                            |error| format!("where node {node_id} output shape: {error}"),
+                        )?);
+                    }
+                    let mut params = vec![
+                        resolved_input_shapes[0].len(),
+                        resolved_input_shapes[1].len(),
+                        resolved_input_shapes[2].len(),
+                        output_shape.len(),
+                    ];
+                    for shape in &resolved_input_shapes {
+                        for &dimension in shape {
+                            params.push(to_usize(dimension, "where input dimension")?);
+                        }
+                    }
+                    for dimension in output_shape {
+                        params.push(to_usize(dimension, "where output dimension")?);
+                    }
+                    params
+                }
+                Opcode::Expand => {
+                    let input_shape = resolved_input_shapes.first().ok_or_else(|| {
+                        format!("expand node {node_id} is missing its data input")
+                    })?;
+                    let mut output_shape = Vec::with_capacity(node.output_type.shape.len());
+                    for dimension in &node.output_type.shape {
+                        output_shape.push(dimension.evaluate_with_env(shape_env).map_err(
+                            |error| format!("expand node {node_id} output shape: {error}"),
+                        )?);
+                    }
+                    let max_rank = input_shape.len().max(output_shape.len());
+                    let mut params = Vec::with_capacity(1 + max_rank * 2);
+                    params.push(max_rank);
+                    params.extend(std::iter::repeat_n(1, max_rank - input_shape.len()));
+                    for &dimension in input_shape {
+                        params.push(to_usize(dimension, "expand input dimension")?);
+                    }
+                    params.extend(std::iter::repeat_n(1, max_rank - output_shape.len()));
+                    for dimension in output_shape {
+                        params.push(to_usize(dimension, "expand output dimension")?);
+                    }
                     params
                 }
                 Opcode::Conv2d => {

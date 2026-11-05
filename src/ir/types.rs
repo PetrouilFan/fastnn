@@ -39,6 +39,158 @@ pub enum DimExpr {
     Bounded { sym: String, max: u64 },
 }
 
+/// Parse the dimension descriptors emitted by the ONNX adapter.
+pub fn parse_dimension_descriptor(value: &str) -> Result<DimExpr, String> {
+    let value = value.trim();
+    if let Some(inner) = value
+        .strip_prefix("Known(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        return inner
+            .trim()
+            .parse::<u64>()
+            .map(DimExpr::Known)
+            .map_err(|error| format!("invalid known dimension {value:?}: {error}"));
+    }
+    if let Some(inner) = value
+        .strip_prefix("Symbol(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        let symbol = inner.trim();
+        if symbol.is_empty() {
+            return Err("symbolic dimension name is empty".to_string());
+        }
+        if contains_expression_operator(symbol) {
+            let max = evaluate_dimension_expression(symbol, |_| {
+                Some(SYMBOL_DIM_MAX.load(Ordering::Relaxed))
+            })?;
+            return Ok(DimExpr::Bounded {
+                sym: symbol.to_string(),
+                max,
+            });
+        }
+        return Ok(DimExpr::Symbol(symbol.to_string()));
+    }
+    if let Some(inner) = value
+        .strip_prefix("Bounded(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        let (symbol, maximum) = inner
+            .rsplit_once(';')
+            .ok_or_else(|| format!("bounded dimension is missing its maximum: {value:?}"))?;
+        let symbol = symbol.trim();
+        if symbol.is_empty() {
+            return Err("bounded dimension expression is empty".to_string());
+        }
+        let max = maximum
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| format!("invalid bounded dimension maximum {value:?}: {error}"))?;
+        if max == 0 {
+            return Err("bounded dimension maximum must be positive".to_string());
+        }
+        return Ok(DimExpr::Bounded {
+            sym: symbol.to_string(),
+            max,
+        });
+    }
+    value
+        .parse::<u64>()
+        .map(DimExpr::Known)
+        .map_err(|error| format!("invalid dimension descriptor {value:?}: {error}"))
+}
+
+fn contains_expression_operator(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| matches!(character, '+' | '*' | '/' | '^'))
+        || value
+            .char_indices()
+            .any(|(index, character)| character == '-' && index > 0)
+}
+
+fn evaluate_dimension_expression<F>(expression: &str, mut resolve: F) -> Result<u64, String>
+where
+    F: FnMut(&str) -> Option<u64>,
+{
+    fn strip_outer_parentheses(mut value: &str) -> &str {
+        loop {
+            let trimmed = value.trim();
+            if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+                return trimmed;
+            }
+            let mut depth = 0i64;
+            let mut wraps_all = true;
+            for (index, character) in trimmed.char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 && index + character.len_utf8() != trimmed.len() {
+                            wraps_all = false;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !wraps_all || depth != 0 {
+                return trimmed;
+            }
+            value = &trimmed[1..trimmed.len() - 1];
+        }
+    }
+
+    fn find_top_level(value: &str, operators: &[char]) -> Option<(usize, char)> {
+        let mut depth = 0i64;
+        for (index, character) in value.char_indices().rev() {
+            match character {
+                ')' => depth += 1,
+                '(' => depth -= 1,
+                _ if depth == 0
+                    && operators.contains(&character)
+                    && (character != '-' || index > 0) =>
+                {
+                    return Some((index, character));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn recurse<F>(value: &str, resolve: &mut F) -> Result<u64, String>
+    where
+        F: FnMut(&str) -> Option<u64>,
+    {
+        let value = strip_outer_parentheses(value);
+        if let Ok(integer) = value.trim().parse::<u64>() {
+            return Ok(integer);
+        }
+        for operators in [&['+', '-'][..], &['*', '/'][..], &['^'][..]] {
+            if let Some((index, operator)) = find_top_level(value, operators) {
+                let lhs = recurse(&value[..index], resolve)?;
+                let rhs = recurse(&value[index + operator.len_utf8()..], resolve)?;
+                return match operator {
+                    '+' => lhs.checked_add(rhs),
+                    '-' => lhs.checked_sub(rhs),
+                    '*' => lhs.checked_mul(rhs),
+                    '/' if rhs != 0 => Some(lhs / rhs),
+                    '^' => u32::try_from(rhs)
+                        .ok()
+                        .and_then(|power| lhs.checked_pow(power)),
+                    _ => None,
+                }
+                .ok_or_else(|| format!("dimension expression {value:?} overflows or is invalid"));
+            }
+        }
+        resolve(value.trim())
+            .ok_or_else(|| format!("unresolved dimension symbol {:?}", value.trim()))
+    }
+
+    recurse(expression, &mut resolve)
+}
+
 impl DimExpr {
     pub fn is_known(&self) -> bool {
         matches!(self, DimExpr::Known(_))
@@ -60,13 +212,13 @@ impl DimExpr {
             (DimExpr::Known(va), DimExpr::Known(vb)) => DimExpr::Known(va * vb),
             (DimExpr::Known(v), DimExpr::Bounded { sym, max })
             | (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) => DimExpr::Bounded {
-                sym: sym.clone(),
+                sym: format!("({sym})*({v})"),
                 max: max * v,
             },
             (DimExpr::Known(v), DimExpr::Symbol(s)) | (DimExpr::Symbol(s), DimExpr::Known(v)) => {
                 DimExpr::Bounded {
-                    sym: s.clone(),
-                    max: *v,
+                    sym: format!("({s})*({v})"),
+                    max: SYMBOL_DIM_MAX.load(Ordering::Relaxed) * v,
                 }
             }
             (
@@ -113,13 +265,13 @@ impl DimExpr {
             (DimExpr::Known(va), DimExpr::Known(vb)) => DimExpr::Known(va + vb),
             (DimExpr::Known(v), DimExpr::Bounded { sym, max })
             | (DimExpr::Bounded { sym, max }, DimExpr::Known(v)) => DimExpr::Bounded {
-                sym: sym.clone(),
+                sym: format!("({sym})+({v})"),
                 max: max + v,
             },
             (DimExpr::Known(v), DimExpr::Symbol(s)) | (DimExpr::Symbol(s), DimExpr::Known(v)) => {
                 DimExpr::Bounded {
-                    sym: s.clone(),
-                    max: *v,
+                    sym: format!("({s})+({v})"),
+                    max: SYMBOL_DIM_MAX.load(Ordering::Relaxed) + v,
                 }
             }
             (
@@ -269,12 +421,24 @@ impl ShapeEnv {
         let mut env = ShapeEnv::new();
         let mut input_infos: Vec<(NodeId, usize, usize, Vec<String>)> = Vec::new();
 
+        // A capacity of one is also an exact live extent. Seed these symbols so
+        // multi-symbol inputs such as [batch, sequence] can resolve the remaining
+        // dimensions without guessing.
+        for &input_id in &graph.inputs {
+            if let Some(node) = graph.get_node(input_id) {
+                for dimension in &node.output_type.shape {
+                    if let DimExpr::Bounded { sym, max: 1 } = dimension {
+                        if !contains_expression_operator(sym) {
+                            env.try_bind(sym, 1)?;
+                        }
+                    }
+                }
+            }
+        }
+
         // Pass 1: collect shape info, bind single-symbol inputs
         for (i, &input_id) in graph.inputs.iter().enumerate() {
             let data_bytes = inputs.get(i).map(|b| b.len()).unwrap_or(0);
-            if data_bytes == 0 {
-                continue;
-            }
             if let Some(node) = graph.get_node(input_id) {
                 let elem_size = node
                     .output_type
@@ -305,9 +469,6 @@ impl ShapeEnv {
                 }
                 let total_numel = data_bytes / elem_size;
                 let unknown_numel = total_numel / known_numel;
-                if unknown_numel == 0 {
-                    continue;
-                }
                 let symbolic: Vec<String> = node
                     .output_type
                     .shape
@@ -347,9 +508,7 @@ impl ShapeEnv {
                     ));
                 }
                 let val = total_numel / known_product;
-                if val > 0 {
-                    env.try_bind(unbound[0], val as u64)?;
-                }
+                env.try_bind(unbound[0], val as u64)?;
             }
         }
 
@@ -374,22 +533,33 @@ impl DimExpr {
     pub fn evaluate_with_env(&self, env: &ShapeEnv) -> Result<u64, String> {
         match self {
             DimExpr::Known(v) => Ok(*v),
-            DimExpr::Bounded { sym, max } => match env.resolve(sym) {
-                Some(v) => {
-                    if v > *max {
-                        Err(format!(
-                            "DimExpr::Bounded: symbol '{}' resolved to {}, exceeds bound {}",
-                            sym, v, max
-                        ))
+            DimExpr::Bounded { sym, max } => {
+                let resolved = env.resolve(sym).map(Ok).unwrap_or_else(|| {
+                    if contains_expression_operator(sym) {
+                        evaluate_dimension_expression(sym, |name| env.resolve(name))
                     } else {
-                        Ok(v)
+                        Ok(*max)
                     }
+                })?;
+                if resolved > *max {
+                    Err(format!(
+                        "DimExpr::Bounded: expression '{}' resolved to {}, exceeds bound {}",
+                        sym, resolved, max
+                    ))
+                } else {
+                    Ok(resolved)
                 }
-                None => Ok(*max),
-            },
-            DimExpr::Symbol(s) => env
-                .resolve(s)
-                .ok_or_else(|| format!("DimExpr::Symbol '{}' is not bound in the ShapeEnv", s)),
+            }
+            DimExpr::Symbol(symbol) => env.resolve(symbol).map(Ok).unwrap_or_else(|| {
+                if contains_expression_operator(symbol) {
+                    evaluate_dimension_expression(symbol, |name| env.resolve(name))
+                } else {
+                    Err(format!(
+                        "DimExpr::Symbol '{}' is not bound in the ShapeEnv",
+                        symbol
+                    ))
+                }
+            }),
         }
     }
 }
@@ -678,7 +848,12 @@ impl TensorType {
             .map(|dimension| {
                 Some(match dimension {
                     DimExpr::Known(value) => usize::try_from(*value).ok()?,
-                    DimExpr::Bounded { max, .. } => usize::try_from(*max).ok()?,
+                    DimExpr::Bounded { max, .. } => match env {
+                        Some(env) => {
+                            usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?
+                        }
+                        None => usize::try_from(*max).ok()?,
+                    },
                     DimExpr::Symbol(_) => match env {
                         Some(env) => {
                             usize::try_from(dimension.evaluate_with_env(env).ok()?).ok()?
@@ -848,6 +1023,46 @@ mod tests {
         let reshaped = tensor_type.with_shape(vec![DimExpr::Known(8)]);
 
         assert_eq!(reshaped.shape, vec![DimExpr::Known(8)]);
+    }
+
+    #[test]
+    fn parses_and_evaluates_affine_onnx_dimensions() {
+        let dimension = parse_dimension_descriptor("Symbol(past_sequence_length + 1)").unwrap();
+        let mut env = ShapeEnv::new();
+        env.try_bind("past_sequence_length", 7).unwrap();
+        assert_eq!(dimension.evaluate_with_env(&env).unwrap(), 8);
+    }
+
+    #[test]
+    fn rejects_unbound_affine_onnx_dimensions() {
+        let dimension = parse_dimension_descriptor("Symbol(sequence_length * 2)").unwrap();
+        let error = dimension.evaluate_with_env(&ShapeEnv::new()).unwrap_err();
+        assert!(error.contains("unresolved dimension symbol"));
+    }
+
+    #[test]
+    fn known_times_bounded_preserves_live_extent() {
+        let dimension = DimExpr::Known(2).mul(&DimExpr::Bounded {
+            sym: "tokens".into(),
+            max: 8,
+        });
+        let mut env = ShapeEnv::new();
+        env.try_bind("tokens", 3).unwrap();
+        assert_eq!(dimension.evaluate_with_env(&env).unwrap(), 6);
+        assert_eq!(dimension.evaluate(), Some(16));
+    }
+
+    #[test]
+    fn known_plus_bounded_preserves_live_affine_extent() {
+        let dimension = DimExpr::Known(1).add(&DimExpr::Bounded {
+            sym: "past_sequence_length".into(),
+            max: 8,
+        });
+        let mut env = ShapeEnv::new();
+        env.try_bind("past_sequence_length", 3).unwrap();
+
+        assert_eq!(dimension.evaluate_with_env(&env).unwrap(), 4);
+        assert_eq!(dimension.evaluate(), Some(9));
     }
 
     #[test]

@@ -471,10 +471,30 @@ fn cross_entropy_loss(
     let pred_inner = pred.inner.clone();
     let target_inner = target.inner.clone();
     let reduction_str = reduction.unwrap_or_else(|| "mean".to_string());
+    let pred_shape = pred_inner.shape();
+    if pred_shape.len() != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "cross_entropy_loss expects rank-2 logits [batch, classes], got {pred_shape:?}"
+        )));
+    }
+    let batch = pred_shape[0];
+    let classes = pred_shape[1];
+    if target_inner.numel() != batch {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "cross_entropy_loss expects {batch} targets, got {}",
+            target_inner.numel()
+        )));
+    }
     let log_probs = pred_inner.log_softmax(-1);
-    let target_flat = target_inner.reshape(vec![-1, 1]);
-    let gathered = log_probs.gather(1, &target_flat);
-    let nll = gathered.neg().reshape(vec![pred_inner.shape()[0]]);
+    // Gather is ONNX-style and inserts the entire index shape. Using [B, 1]
+    // indices on [B, C] would therefore produce [B, B, 1], not a row-wise
+    // gather. Flatten and add each row's base offset instead.
+    let row_offsets = Tensor::from_vec(
+        (0..batch).map(|row| (row * classes) as f32).collect(),
+        vec![batch],
+    );
+    let flat_indices = target_inner.reshape(vec![batch]).add(&row_offsets);
+    let nll = log_probs.reshape(vec![batch * classes]).gather(0, &flat_indices).neg();
     let output = match reduction_str.as_str() {
         "none" => nll,
         "mean" => reduce_mean_all(&nll),

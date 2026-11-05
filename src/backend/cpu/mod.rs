@@ -226,7 +226,7 @@ mod dispatch_helpers;
 use dispatch_helpers::*;
 
 mod elementwise;
-use elementwise::fused_binary_activation_dispatch;
+use elementwise::{broadcast_binary_dispatch, fused_binary_activation_dispatch};
 mod scalar;
 use scalar::{scalar_kernel_instruction, scalar_op_dispatch, unary_op_dispatch};
 #[cfg(feature = "parallel")]
@@ -821,8 +821,8 @@ impl Backend for CpuBackend {
                 .map(|&input_id| {
                     let input = graph.get_node(input_id).ok_or_else(|| {
                         BackendError::Compilation(format!(
-                            "node {node_id} ({:?}) references missing input node {input_id}",
-                            node.opcode
+                            "node {node_id} ({:?} '{}') references missing input node {input_id}",
+                            node.opcode, node.name
                         ))
                     })?;
                     let slot = memory_plan.slots.get(&input_id).ok_or_else(|| {
@@ -849,8 +849,8 @@ impl Backend for CpuBackend {
                 .map(|&input_id| {
                     graph.get_node(input_id).ok_or_else(|| {
                         BackendError::Compilation(format!(
-                            "node {node_id} ({:?}) references missing input node {input_id}",
-                            node.opcode
+                            "node {node_id} ({:?} '{}') references missing input node {input_id}",
+                            node.opcode, node.name
                         ))
                     })
                 })
@@ -1025,23 +1025,24 @@ impl Backend for CpuBackend {
                             // Quantized: F32 activation + Signed I8 weight
                             (_, true) => "matmul_i8",
                         };
-                    // Extract M, K, N from input shapes
-                    let m = input_shapes
-                        .first()
-                        .and_then(|s| s.get(s.len().saturating_sub(2)).copied())
+                    // Keep M as the lhs matrix-row dimension. Leading dimensions
+                    // are MatMul batch dimensions and are dispatched separately;
+                    // flattening them into M incorrectly broadcasts the first RHS
+                    // batch across every attention head.
+                    let activation_shape = input_shapes.first().map(Vec::as_slice).unwrap_or(&[]);
+                    let m = activation_shape
+                        .get(activation_shape.len().saturating_sub(2))
+                        .copied()
                         .unwrap_or(1) as usize;
-                    let k = input_shapes
-                        .first()
-                        .and_then(|s| s.last().copied())
-                        .unwrap_or(1) as usize;
+                    let k = activation_shape.last().copied().unwrap_or(1) as usize;
                     let n = input_shapes
                         .get(1)
                         .and_then(|s| s.last().copied())
                         .unwrap_or(1) as usize;
-                    // Capture symbolic dims for runtime resolution
+                    // Capture symbolic dims for runtime resolution.
                     let m_dim = input_shape_dims
                         .first()
-                        .and_then(|s| s.get(s.len().saturating_sub(2)).cloned())
+                        .and_then(|shape| shape.get(shape.len().saturating_sub(2)).cloned())
                         .unwrap_or(DimExpr::Known(m as u64));
                     let k_dim = input_shape_dims
                         .first()
@@ -1157,6 +1158,29 @@ impl Backend for CpuBackend {
                     } else {
                         None
                     };
+                    // Specialized projection kernels consume one row per leading
+                    // activation position and require a shared rank-two weight.
+                    let (m, m_dim) = if kernel_name != "matmul" {
+                        if input_shapes.get(1).is_none_or(|shape| shape.len() != 2) {
+                            return Err(BackendError::Compilation(format!(
+                                "{kernel_name} requires a shared rank-two weight"
+                            )));
+                        }
+                        let row_dims = &input_shape_dims[0][..activation_shape.len() - 1];
+                        let rows = row_dims
+                            .iter()
+                            .fold(DimExpr::Known(1), |rows, dim| rows.mul(dim));
+                        let count = activation_shape[..activation_shape.len() - 1]
+                            .iter()
+                            .try_fold(1usize, |count, value| {
+                                count.checked_mul(*value as usize).ok_or_else(|| {
+                                    BackendError::Compilation("matmul row count overflows".into())
+                                })
+                            })?;
+                        (count, rows)
+                    } else {
+                        (m, m_dim)
+                    };
                     // For non-quantized matmul, pass fusion params (has_bias, activation_type)
                     // Quantized kernels keep the original [M, K, N] params
                     let (params, param_dims) = if kernel_name == "matmul" {
@@ -1230,14 +1254,43 @@ impl Backend for CpuBackend {
                         }
                         _ => {}
                     }
+                    let mut params = vec![];
+                    let mut param_dims = None;
+                    if !node.attrs.contains_key("fused_op") && node.inputs.len() == 2 {
+                        let lhs_shape = graph
+                            .get_node(node.inputs[0])
+                            .map(|input| input.output_type.shape.clone())
+                            .unwrap_or_default();
+                        let rhs_shape = graph
+                            .get_node(node.inputs[1])
+                            .map(|input| input.output_type.shape.clone())
+                            .unwrap_or_default();
+                        let output_shape = node.output_type.shape.clone();
+                        if lhs_shape != output_shape || rhs_shape != output_shape {
+                            kernel = match node.opcode {
+                                Opcode::Add => "add_broadcast_f32",
+                                Opcode::Sub => "sub_broadcast_f32",
+                                Opcode::Mul => "mul_broadcast_f32",
+                                Opcode::Div => "div_broadcast_f32",
+                                Opcode::Maximum => "max_broadcast_f32",
+                                Opcode::Minimum => "min_broadcast_f32",
+                                _ => unreachable!(),
+                            };
+                            params = vec![lhs_shape.len(), rhs_shape.len(), output_shape.len()];
+                            let mut dimensions = lhs_shape;
+                            dimensions.extend(rhs_shape);
+                            dimensions.extend(output_shape);
+                            param_dims = Some(dimensions);
+                        }
+                    }
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: kernel.to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
+                        params,
+                        param_dims,
                         weight_meta: None,
                     });
                 }
@@ -1258,6 +1311,7 @@ impl Backend for CpuBackend {
                 | Opcode::Clamp
                 | Opcode::Sign
                 | Opcode::Round
+                | Opcode::IsNaN
                 | Opcode::LogicalNot
                 | Opcode::LogSoftmax
                 | Opcode::Mish => {
@@ -1279,6 +1333,7 @@ impl Backend for CpuBackend {
                         Opcode::Clamp => "clamp_f32",
                         Opcode::Sign => "sign_f32",
                         Opcode::Round => "round_f32",
+                        Opcode::IsNaN => "is_nan_f32",
                         Opcode::LogicalNot => "logical_not_f32",
                         Opcode::LogSoftmax => "log_softmax_f32",
                         Opcode::Mish => "mish_f32",
@@ -1329,16 +1384,64 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
-                Opcode::Reshape | Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
+                Opcode::Reshape => {
+                    if node.inputs.len() == 2 {
+                        let output_dims = node.output_type.shape.clone();
+                        let compile_time_dims = output_dims
+                            .iter()
+                            .map(|dimension| {
+                                dimension.evaluate().unwrap_or_else(|| {
+                                    crate::ir::SYMBOL_DIM_MAX
+                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                }) as usize
+                            })
+                            .collect();
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "runtime_reshape_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: compile_time_dims,
+                            param_dims: Some(output_dims),
+                            weight_meta: None,
+                        });
+                    } else if let Some(&input_id) = node.inputs.first() {
+                        if let (Some(in_slot), Some(out_slot)) = (
+                            memory_plan.slots.get(&input_id),
+                            memory_plan.slots.get(&node_id),
+                        ) {
+                            if in_slot.offset != out_slot.offset {
+                                instructions.push(Instruction::CallKernel {
+                                    node_id: Some(node_id),
+                                    kernel_name: "view_copy_f32".to_string(),
+                                    input_slices,
+                                    output_slice,
+                                    secondary_output_slice: None,
+                                    params: vec![],
+                                    param_dims: None,
+                                    weight_meta: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                Opcode::Flatten | Opcode::Squeeze | Opcode::Unsqueeze => {
                     if let Some(&input_id) = node.inputs.first() {
                         if let (Some(in_slot), Some(out_slot)) = (
                             memory_plan.slots.get(&input_id),
                             memory_plan.slots.get(&node_id),
                         ) {
-                            if in_slot.offset != out_slot.offset || in_slot.size != out_slot.size {
-                                instructions.push(Instruction::MemCopy {
-                                    dst: output_slice,
-                                    src: BufferSlice::new(in_slot.offset, in_slot.size),
+                            if in_slot.offset != out_slot.offset {
+                                instructions.push(Instruction::CallKernel {
+                                    node_id: Some(node_id),
+                                    kernel_name: "view_copy_f32".to_string(),
+                                    input_slices,
+                                    output_slice,
+                                    secondary_output_slice: None,
+                                    params: vec![],
+                                    param_dims: None,
+                                    weight_meta: None,
                                 });
                             }
                         }
@@ -1844,10 +1947,34 @@ impl Backend for CpuBackend {
                                 .try_fold(1u64, |count, size| count.checked_mul(*size))
                         })
                         .unwrap_or(0) as usize;
-                    let mut gather_params = Vec::with_capacity(data_shape.len() + 3);
+                    let index_dtype = graph
+                        .get_node(node.inputs[1])
+                        .map(|input| {
+                            let mut source = input;
+                            while matches!(
+                                source.opcode,
+                                Opcode::Reshape | Opcode::Squeeze | Opcode::Unsqueeze
+                            ) {
+                                let Some(parent) = source
+                                    .inputs
+                                    .first()
+                                    .and_then(|parent| graph.get_node(*parent))
+                                else {
+                                    break;
+                                };
+                                source = parent;
+                            }
+                            match input.output_type.dtype() {
+                                IrDType::I32 | IrDType::I64 => 1,
+                                _ if source.opcode == Opcode::Range => 1,
+                                _ => 0,
+                            }
+                        })
+                        .unwrap_or(0);
+                    let mut gather_params = Vec::with_capacity(data_shape.len() + 4);
                     gather_params.push(data_shape.len());
                     gather_params.extend(data_shape.into_iter().map(|size| size as usize));
-                    gather_params.extend([indices_numel, axis]);
+                    gather_params.extend([indices_numel, axis, index_dtype]);
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "gather".to_string(),
@@ -1860,89 +1987,118 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Slice => {
-                    let parse_attr = |name: &str| -> Result<i64, BackendError> {
-                        node.required_attr(name)
-                            .map_err(|error| BackendError::Compilation(error.to_string()))
-                    };
-                    let dim_value = parse_attr("dim")?;
-                    let start_value = parse_attr("start")?;
-                    let end_value = parse_attr("end")?;
-                    if dim_value < 0 || start_value < 0 {
-                        return Err(BackendError::Compilation(format!(
-                            "slice node {node_id} requires non-negative dim and start"
-                        )));
-                    }
-                    let dim = usize::try_from(dim_value).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} dimension does not fit usize"
-                        ))
-                    })?;
-                    let input_shape = input_shapes.first().ok_or_else(|| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} is missing its input shape"
-                        ))
-                    })?;
-                    if dim >= input_shape.len() {
-                        return Err(BackendError::Compilation(format!(
-                            "slice node {node_id} dimension {dim} is out of range for rank {}",
-                            input_shape.len()
-                        )));
-                    }
-                    let dimension_size = i64::try_from(input_shape[dim]).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} dimension size does not fit i64"
-                        ))
-                    })?;
-                    let normalized_end = if end_value < 0 {
-                        dimension_size
-                            .checked_add(end_value)
-                            .and_then(|value| value.checked_add(1))
+                    if node.inputs.len() > 1 {
+                        let input_dims = graph
+                            .get_node(node.inputs[0])
                             .ok_or_else(|| {
                                 BackendError::Compilation(format!(
-                                    "slice node {node_id} negative end overflows"
+                                    "runtime slice node {node_id} is missing data input"
                                 ))
                             })?
+                            .output_type
+                            .shape
+                            .clone();
+                        if input_dims.is_empty() || input_dims.len() != node.output_type.shape.len()
+                        {
+                            return Err(BackendError::Compilation(format!(
+                                "runtime slice node {node_id} requires equal non-zero input/output rank"
+                            )));
+                        }
+                        let mut runtime_dims = input_dims;
+                        runtime_dims.extend(node.output_type.shape.clone());
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "runtime_slice_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: vec![node.output_type.shape.len()],
+                            param_dims: Some(runtime_dims),
+                            weight_meta: None,
+                        });
                     } else {
-                        end_value
-                    };
-                    if start_value >= dimension_size
-                        || normalized_end > dimension_size
-                        || start_value >= normalized_end
-                    {
-                        return Err(BackendError::Compilation(format!(
+                        let parse_attr = |name: &str| -> Result<i64, BackendError> {
+                            node.required_attr(name)
+                                .map_err(|error| BackendError::Compilation(error.to_string()))
+                        };
+                        let dim_value = parse_attr("dim")?;
+                        let start_value = parse_attr("start")?;
+                        let end_value = parse_attr("end")?;
+                        if dim_value < 0 || start_value < 0 {
+                            return Err(BackendError::Compilation(format!(
+                                "slice node {node_id} requires non-negative dim and start"
+                            )));
+                        }
+                        let dim = usize::try_from(dim_value).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} dimension does not fit usize"
+                            ))
+                        })?;
+                        let input_shape = input_shapes.first().ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} is missing its input shape"
+                            ))
+                        })?;
+                        if dim >= input_shape.len() {
+                            return Err(BackendError::Compilation(format!(
+                                "slice node {node_id} dimension {dim} is out of range for rank {}",
+                                input_shape.len()
+                            )));
+                        }
+                        let dimension_size = i64::try_from(input_shape[dim]).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} dimension size does not fit i64"
+                            ))
+                        })?;
+                        let normalized_end = (if end_value < 0 {
+                            dimension_size
+                                .checked_add(end_value)
+                                .and_then(|value| value.checked_add(1))
+                                .ok_or_else(|| {
+                                    BackendError::Compilation(format!(
+                                        "slice node {node_id} negative end overflows"
+                                    ))
+                                })?
+                        } else {
+                            end_value
+                        })
+                        .min(dimension_size);
+                        if start_value >= dimension_size || start_value >= normalized_end {
+                            return Err(BackendError::Compilation(format!(
                             "slice node {node_id} has invalid range [{start_value}, {normalized_end}) for dimension size {dimension_size}"
                         )));
-                    }
-                    let start = usize::try_from(start_value).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} start does not fit usize"
-                        ))
-                    })?;
-                    let end = usize::try_from(normalized_end).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "slice node {node_id} end does not fit usize"
-                        ))
-                    })?;
-                    let mut slice_params = Vec::with_capacity(input_shape.len() + 4);
-                    slice_params.push(input_shape.len());
-                    for &size in input_shape {
-                        slice_params.push(usize::try_from(size).map_err(|_| {
+                        }
+                        let start = usize::try_from(start_value).map_err(|_| {
                             BackendError::Compilation(format!(
-                                "slice node {node_id} input dimension does not fit usize"
+                                "slice node {node_id} start does not fit usize"
                             ))
-                        })?);
+                        })?;
+                        let end = usize::try_from(normalized_end).map_err(|_| {
+                            BackendError::Compilation(format!(
+                                "slice node {node_id} end does not fit usize"
+                            ))
+                        })?;
+                        let mut slice_params = Vec::with_capacity(input_shape.len() + 4);
+                        slice_params.push(input_shape.len());
+                        for &size in input_shape {
+                            slice_params.push(usize::try_from(size).map_err(|_| {
+                                BackendError::Compilation(format!(
+                                    "slice node {node_id} input dimension does not fit usize"
+                                ))
+                            })?);
+                        }
+                        slice_params.extend([dim, start, end]);
+                        instructions.push(Instruction::CallKernel {
+                            node_id: Some(node_id),
+                            kernel_name: "slice_f32".to_string(),
+                            input_slices,
+                            output_slice,
+                            secondary_output_slice: None,
+                            params: slice_params,
+                            param_dims: None,
+                            weight_meta: None,
+                        });
                     }
-                    slice_params.extend([dim, start, end]);
-                    instructions.push(Instruction::CallKernel {
-                        node_id: Some(node_id),
-                        kernel_name: "slice_f32".to_string(),
-                        input_slices,
-                        output_slice,
-                        secondary_output_slice: None,
-                        params: slice_params,
-                        param_dims: None,
-                        weight_meta: None,
-                    });
                 }
                 Opcode::ScatterNd => {
                     let data_shape: Vec<u64> = input_shapes.first().cloned().unwrap_or_default();
@@ -1953,6 +2109,12 @@ impl Backend for CpuBackend {
                     };
                     let mut params: Vec<usize> = vec![index_depth];
                     params.extend(data_shape.iter().map(|&d| d as usize));
+                    params.push(0x5343_4154);
+                    params.push(usize::from(
+                        node.attrs
+                            .get("reduction")
+                            .is_some_and(|value| value == "add"),
+                    ));
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
                         kernel_name: "scatter_nd".to_string(),
@@ -2524,6 +2686,52 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::Sin | Opcode::Cos => {
+                    let kernel_name = if matches!(node.opcode, Opcode::Sin) {
+                        "sin_f32"
+                    } else {
+                        "cos_f32"
+                    };
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: kernel_name.to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: vec![],
+                        param_dims: None,
+                        weight_meta: None,
+                    });
+                }
+                Opcode::Trilu => {
+                    let dimensions = input_shape_dims.first().cloned().unwrap_or_default();
+                    if dimensions.len() < 2 {
+                        return Err(BackendError::Compilation(format!(
+                            "Trilu node {node_id} requires rank >= 2"
+                        )));
+                    }
+                    let upper = node
+                        .optional_attr::<usize>("upper")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?
+                        .unwrap_or(1);
+                    let mut param_dims = vec![DimExpr::Known(dimensions.len() as u64)];
+                    param_dims.extend(dimensions);
+                    param_dims.push(DimExpr::Known(upper as u64));
+                    let params = param_dims
+                        .iter()
+                        .map(|dimension| dimension.evaluate().unwrap_or(1) as usize)
+                        .collect();
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: "trilu_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params,
+                        param_dims: Some(param_dims),
+                        weight_meta: None,
+                    });
+                }
                 Opcode::Flip => {
                     let dims = node
                         .optional_attr_list::<usize>("dims")
@@ -2551,14 +2759,47 @@ impl Backend for CpuBackend {
                     });
                 }
                 Opcode::Where => {
+                    let condition_dims = input_shape_dims.first().cloned().unwrap_or_default();
+                    let x_dims = input_shape_dims.get(1).cloned().unwrap_or_default();
+                    let y_dims = input_shape_dims.get(2).cloned().unwrap_or_default();
+                    let output_dims = node.output_type.shape.clone();
+                    let mut param_dims = vec![
+                        DimExpr::Known(condition_dims.len() as u64),
+                        DimExpr::Known(x_dims.len() as u64),
+                        DimExpr::Known(y_dims.len() as u64),
+                        DimExpr::Known(output_dims.len() as u64),
+                    ];
+                    param_dims.extend(condition_dims);
+                    param_dims.extend(x_dims);
+                    param_dims.extend(y_dims);
+                    param_dims.extend(output_dims);
+                    let params = param_dims
+                        .iter()
+                        .map(|dimension| dimension.evaluate().unwrap_or(1) as usize)
+                        .collect();
+                    let condition_dtype = node
+                        .inputs
+                        .first()
+                        .and_then(|input| graph.get_node(*input))
+                        .map(|input| input.output_type.dtype())
+                        .unwrap_or(IrDType::F32);
+                    let kernel_name = match condition_dtype {
+                        IrDType::Bool => "where_bool_f32",
+                        IrDType::F32 => "where_f32",
+                        other => {
+                            return Err(BackendError::Compilation(format!(
+                                "Where node {node_id} condition dtype {other:?} is unsupported"
+                            )));
+                        }
+                    };
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
-                        kernel_name: "where_f32".to_string(),
+                        kernel_name: kernel_name.to_string(),
                         input_slices,
                         output_slice,
                         secondary_output_slice: None,
-                        params: vec![],
-                        param_dims: None,
+                        params,
+                        param_dims: Some(param_dims),
                         weight_meta: None,
                     });
                 }
@@ -2790,20 +3031,64 @@ impl Backend for CpuBackend {
                         weight_meta: None,
                     });
                 }
+                Opcode::ConstantOfShape => {
+                    let output_dims = node.output_type.shape.clone();
+                    if output_dims.is_empty() {
+                        return Err(BackendError::Compilation(format!(
+                            "ConstantOfShape node {node_id} has empty output rank"
+                        )));
+                    }
+                    let fill_value = node
+                        .required_attr::<f32>("value")
+                        .map_err(|error| BackendError::Compilation(error.to_string()))?;
+                    if !fill_value.is_finite() {
+                        return Err(BackendError::Compilation(format!(
+                            "ConstantOfShape node {node_id} has non-finite fill value"
+                        )));
+                    }
+                    let mut compile_time_dims: Vec<usize> = output_dims
+                        .iter()
+                        .map(|dimension| {
+                            dimension.evaluate().unwrap_or_else(|| {
+                                crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed)
+                            }) as usize
+                        })
+                        .collect();
+                    compile_time_dims.push(fill_value.to_bits() as usize);
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: "constant_of_shape_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: compile_time_dims,
+                        param_dims: Some(output_dims),
+                        weight_meta: None,
+                    });
+                }
                 Opcode::Shape => {
-                    // Write the shape of the input tensor as F32 values.
-                    // The arena stores all data as f32 (4 bytes/element), so we
-                    // write f32-le bytes.  Downstream ops (Gather, Concat, etc.)
-                    // read from the arena as f32 slices and get correct values.
-                    // Resolve input shape at compile time (known dims directly,
-                    // symbolic dims use SYMBOL_DIM_MAX â€” they'll be resolved
-                    // at dispatch by param_dims).
-                    let in_shape = input_shapes.first().ok_or_else(|| {
-                        BackendError::Compilation(format!(
-                            "shape node {node_id} has no resolved input shape"
-                        ))
-                    })?;
-                    let byte_len = in_shape.len().checked_mul(4).ok_or_else(|| {
+                    // Shape is runtime data: symbolic dimensions must be resolved from
+                    // the current ShapeEnv rather than frozen to compile-time capacity.
+                    let input_node = node
+                        .inputs
+                        .first()
+                        .and_then(|input_id| graph.get_node(*input_id))
+                        .ok_or_else(|| {
+                            BackendError::Compilation(format!(
+                                "shape node {node_id} has no typed input"
+                            ))
+                        })?;
+                    let input_dims = input_node.output_type.shape.clone();
+                    for dimension in &input_dims {
+                        if let DimExpr::Known(value) = dimension {
+                            if (*value as f32) as u64 != *value {
+                                return Err(BackendError::Compilation(format!(
+                                    "shape node {node_id} dimension {value} is not exactly representable as f32"
+                                )));
+                            }
+                        }
+                    }
+                    let byte_len = input_dims.len().checked_mul(4).ok_or_else(|| {
                         BackendError::Compilation(format!(
                             "shape node {node_id} output size overflows"
                         ))
@@ -2814,26 +3099,23 @@ impl Backend for CpuBackend {
                             output_slice.size
                         )));
                     }
-                    let mut shape_bytes = Vec::new();
-                    shape_bytes.try_reserve_exact(byte_len).map_err(|_| {
-                        BackendError::Compilation(format!(
-                            "shape node {node_id} output allocation failed"
-                        ))
-                    })?;
-                    for &dimension in in_shape {
-                        // Shape values currently use the legacy f32 tensor contract. Reject
-                        // dimensions that cannot round-trip instead of silently changing them.
-                        let encoded = dimension as f32;
-                        if encoded as u64 != dimension {
-                            return Err(BackendError::Compilation(format!(
-                                "shape node {node_id} dimension {dimension} is not exactly representable as f32"
-                            )));
-                        }
-                        shape_bytes.extend_from_slice(&encoded.to_le_bytes());
-                    }
-                    instructions.push(Instruction::WriteConst {
-                        dst: output_slice,
-                        data: shape_bytes,
+                    let compile_time_dims = input_dims
+                        .iter()
+                        .map(|dimension| {
+                            dimension.evaluate().unwrap_or_else(|| {
+                                crate::ir::SYMBOL_DIM_MAX.load(std::sync::atomic::Ordering::Relaxed)
+                            }) as usize
+                        })
+                        .collect();
+                    instructions.push(Instruction::CallKernel {
+                        node_id: Some(node_id),
+                        kernel_name: "shape_f32".to_string(),
+                        input_slices,
+                        output_slice,
+                        secondary_output_slice: None,
+                        params: compile_time_dims,
+                        param_dims: Some(input_dims),
+                        weight_meta: None,
                     });
                 }
                 Opcode::Cast => {
@@ -2861,6 +3143,8 @@ impl Backend for CpuBackend {
                         let kernel_name = match (&in_type, &out_type) {
                             (IrDType::F32, IrDType::I64) => "cast_f32_i64",
                             (IrDType::I64, IrDType::F32) => "cast_i64_f32",
+                            (IrDType::F32, IrDType::Bool) => "cast_f32_bool",
+                            (IrDType::Bool, IrDType::F32) => "cast_bool_f32",
                             _ => {
                                 return Err(BackendError::Compilation(format!(
                                     "Cast node {node_id} does not support {} -> {}",
@@ -3436,25 +3720,27 @@ impl Backend for CpuBackend {
                     let data_rank = data_shape_dims.len();
                     let max_rank = out_rank.max(data_rank);
 
-                    // Resolve to concrete values (Known dims, safe in YOLO pipeline)
-                    let resolve = |d: &DimExpr| d.evaluate().unwrap_or(1) as usize;
-
-                    // Build params: [max_rank, padded_in_dims..., padded_out_dims...]
-                    let mut params = vec![max_rank];
+                    // Build params and runtime-resolvable metadata:
+                    // [max_rank, padded_in_dims..., padded_out_dims...].
+                    let mut param_dims = vec![DimExpr::Known(max_rank as u64)];
                     for i in 0..max_rank {
                         if i < max_rank - data_rank {
-                            params.push(1);
+                            param_dims.push(DimExpr::Known(1));
                         } else {
-                            params.push(resolve(&data_shape_dims[i - (max_rank - data_rank)]));
+                            param_dims.push(data_shape_dims[i - (max_rank - data_rank)].clone());
                         }
                     }
                     for i in 0..max_rank {
                         if i < max_rank - out_rank {
-                            params.push(1);
+                            param_dims.push(DimExpr::Known(1));
                         } else {
-                            params.push(resolve(&out_shape_dims[i - (max_rank - out_rank)]));
+                            param_dims.push(out_shape_dims[i - (max_rank - out_rank)].clone());
                         }
                     }
+                    let params = param_dims
+                        .iter()
+                        .map(|dimension| dimension.evaluate().unwrap_or(1) as usize)
+                        .collect();
 
                     instructions.push(Instruction::CallKernel {
                         node_id: Some(node_id),
@@ -3463,7 +3749,7 @@ impl Backend for CpuBackend {
                         output_slice,
                         secondary_output_slice: None,
                         params,
-                        param_dims: None,
+                        param_dims: Some(param_dims),
                         weight_meta: None,
                     });
                 }
@@ -3603,10 +3889,13 @@ impl Backend for CpuBackend {
                             | "clamp_f32"
                             | "sign_f32"
                             | "round_f32"
+                            | "is_nan_f32"
                             | "logical_not_f32"
                             | "log_softmax_f32"
                             | "mish_f32"
                             | "erf_f32"
+                            | "sin_f32"
+                            | "cos_f32"
                     );
                     if is_unary_f32 {
                         let input = input_slices.first().copied();
@@ -3702,6 +3991,482 @@ impl Backend for CpuBackend {
                     }
 
                     match kernel_name.as_str() {
+                        "runtime_slice_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "runtime_slice_f32: missing runtime dimensions".into(),
+                                )
+                            })?;
+                            if input_slices.len() < 3 || input_slices.len() > 5 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: expected 3..=5 inputs, got {}",
+                                    input_slices.len()
+                                )));
+                            }
+                            if dimensions.is_empty() || dimensions.len() % 2 != 0 {
+                                return Err(BackendError::Dispatch(
+                                    "runtime_slice_f32: malformed input/output dimensions".into(),
+                                ));
+                            }
+                            let rank = dimensions.len() / 2;
+                            let resolved: Vec<usize> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension
+                                        .evaluate_with_env(shape_env)
+                                        .map_err(|error| {
+                                            BackendError::Dispatch(format!(
+                                                "runtime_slice_f32: {error}"
+                                            ))
+                                        })
+                                        .and_then(|value| {
+                                            usize::try_from(value).map_err(|_| {
+                                                BackendError::Dispatch(
+                                                    "runtime_slice_f32: dimension exceeds usize"
+                                                        .into(),
+                                                )
+                                            })
+                                        })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let input_shape = &resolved[..rank];
+                            let output_shape = &resolved[rank..];
+
+                            let read_scalar = |slice: BufferSlice| -> Result<i64, BackendError> {
+                                let end =
+                                    slice.offset.checked_add(slice.size).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "runtime_slice_f32: scalar input range overflows"
+                                                .into(),
+                                        )
+                                    })?;
+                                let data = arena.data_mut();
+                                let bytes = data.get(slice.offset..end).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "runtime_slice_f32: scalar input exceeds arena".into(),
+                                    )
+                                })?;
+                                match bytes.len() {
+                                    4 => {
+                                        let value = f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                            BackendError::Dispatch(
+                                                "runtime_slice_f32: malformed F32 scalar input".into(),
+                                            )
+                                        })?);
+                                        if !value.is_finite()
+                                            || value.fract() != 0.0
+                                            || value < i64::MIN as f32
+                                            || value > i64::MAX as f32
+                                        {
+                                            return Err(BackendError::Dispatch(format!(
+                                                "runtime_slice_f32: invalid integer scalar {value}"
+                                            )));
+                                        }
+                                        Ok(value as i64)
+                                    }
+                                    8 => Ok(i64::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "runtime_slice_f32: malformed I64 scalar input".into(),
+                                        )
+                                    })?)),
+                                    size => Err(BackendError::Dispatch(format!(
+                                        "runtime_slice_f32: expected a 4- or 8-byte scalar auxiliary input, got {size} bytes"
+                                    ))),
+                                }
+                            };
+
+                            let raw_start = read_scalar(input_slices[1])?;
+                            let raw_end = read_scalar(input_slices[2])?;
+                            let raw_axis = if input_slices.len() >= 4 {
+                                read_scalar(input_slices[3])?
+                            } else {
+                                0
+                            };
+                            let step = if input_slices.len() >= 5 {
+                                read_scalar(input_slices[4])?
+                            } else {
+                                1
+                            };
+                            if step != 1 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: only step=1 is supported, got {step}"
+                                )));
+                            }
+                            let rank_i64 = i64::try_from(rank).map_err(|_| {
+                                BackendError::Dispatch("runtime_slice_f32: rank exceeds i64".into())
+                            })?;
+                            let axis = if raw_axis < 0 {
+                                rank_i64.checked_add(raw_axis)
+                            } else {
+                                Some(raw_axis)
+                            }
+                            .filter(|axis| *axis >= 0 && *axis < rank_i64)
+                            .ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: axis {raw_axis} is out of range for rank {rank}"
+                                ))
+                            })? as usize;
+                            let extent = i64::try_from(input_shape[axis]).map_err(|_| {
+                                BackendError::Dispatch(
+                                    "runtime_slice_f32: axis extent exceeds i64".into(),
+                                )
+                            })?;
+                            let normalize = |value: i64| -> usize {
+                                let value = if value < 0 {
+                                    extent.saturating_add(value)
+                                } else {
+                                    value
+                                };
+                                value.clamp(0, extent) as usize
+                            };
+                            let start = normalize(raw_start);
+                            let end = normalize(raw_end);
+                            if end < start || output_shape[axis] != end - start {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_slice_f32: bounds {start}..{end} disagree with output extent {}",
+                                    output_shape[axis]
+                                )));
+                            }
+                            for dimension in 0..rank {
+                                if dimension != axis
+                                    && input_shape[dimension] != output_shape[dimension]
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "runtime_slice_f32: non-sliced dimension {dimension} changed from {} to {}",
+                                        input_shape[dimension], output_shape[dimension]
+                                    )));
+                                }
+                            }
+                            let input_elements = input_shape
+                                .iter()
+                                .try_fold(1usize, |product, &dimension| {
+                                    product.checked_mul(dimension)
+                                })
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "runtime_slice_f32: input element count overflows".into(),
+                                    )
+                                })?;
+                            let output_elements = output_shape
+                                .iter()
+                                .try_fold(1usize, |product, &dimension| {
+                                    product.checked_mul(dimension)
+                                })
+                                .ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "runtime_slice_f32: output element count overflows".into(),
+                                    )
+                                })?;
+                            let scalar_bytes = std::mem::size_of::<f32>();
+                            if input_slices[0].size != input_elements * scalar_bytes
+                                || output_slice.size != output_elements * scalar_bytes
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "runtime_slice_f32: semantic shapes disagree with storage"
+                                        .into(),
+                                ));
+                            }
+                            let inner = input_shape[axis + 1..].iter().product::<usize>();
+                            let outer = input_shape[..axis].iter().product::<usize>();
+                            let axis_size = input_shape[axis];
+                            let copy_elements = (end - start) * inner;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slices[0],
+                                *output_slice,
+                                |input, output| {
+                                    for outer_index in 0..outer {
+                                        let source = (outer_index * axis_size + start) * inner;
+                                        let destination = outer_index * copy_elements;
+                                        output[destination..destination + copy_elements]
+                                            .copy_from_slice(
+                                                &input[source..source + copy_elements],
+                                            );
+                                    }
+                                },
+                            );
+                        }
+                        "runtime_reshape_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "runtime_reshape_f32: missing runtime dimensions".into(),
+                                )
+                            })?;
+                            if input_slices.len() != 2
+                                || input_slices[1].size != dimensions.len() * 4
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_reshape_f32: invalid contract (inputs={}, shape_bytes={}, rank={})",
+                                    input_slices.len(),
+                                    input_slices.get(1).map_or(0, |slice| slice.size),
+                                    dimensions.len()
+                                )));
+                            }
+                            let resolved_dims: Vec<u64> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "runtime_reshape_f32: {error}"
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let data_slice = input_slices[0];
+                            if data_slice.size != output_slice.size {
+                                return Err(BackendError::Dispatch(format!(
+                                    "runtime_reshape_f32: input bytes {} do not match output bytes {}",
+                                    data_slice.size, output_slice.size
+                                )));
+                            }
+                            let shape_slice = input_slices[1];
+                            let shape_bytes = arena.data_mut()
+                                [shape_slice.offset..shape_slice.offset + shape_slice.size]
+                                .to_vec();
+                            for (index, (&expected, bytes)) in resolved_dims
+                                .iter()
+                                .zip(shape_bytes.chunks_exact(4))
+                                .enumerate()
+                            {
+                                let actual =
+                                    f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "runtime_reshape_f32: malformed shape payload".into(),
+                                        )
+                                    })?);
+                                let valid = actual.is_finite()
+                                    && actual.fract() == 0.0
+                                    && ((actual > 0.0 && actual as u64 == expected)
+                                        || actual == -1.0
+                                        || actual == 0.0);
+                                if !valid {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "runtime_reshape_f32: shape[{index}]={actual} is incompatible with resolved dimension {expected}"
+                                    )));
+                                }
+                            }
+                            let source = arena.data_mut()
+                                [data_slice.offset..data_slice.offset + data_slice.size]
+                                .to_vec();
+                            arena.data_mut()[out_start..out_end].copy_from_slice(&source);
+                        }
+                        "constant_of_shape_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "constant_of_shape_f32: missing runtime dimensions".into(),
+                                )
+                            })?;
+                            if input_slices.len() != 1
+                                || input_slices[0].size != dimensions.len() * 4
+                                || params.len() != dimensions.len() + 1
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "constant_of_shape_f32: invalid contract (inputs={}, input_bytes={}, params={}, dims={})",
+                                    input_slices.len(),
+                                    input_slices.first().map_or(0, |slice| slice.size),
+                                    params.len(),
+                                    dimensions.len()
+                                )));
+                            }
+                            let resolved_dims: Vec<u64> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                        BackendError::Dispatch(format!(
+                                            "constant_of_shape_f32: {error}"
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let live_elements =
+                                resolved_dims
+                                    .iter()
+                                    .try_fold(1usize, |product, &dimension| {
+                                        let dimension =
+                                            usize::try_from(dimension).map_err(|_| {
+                                                BackendError::Dispatch(
+                                            "constant_of_shape_f32: dimension exceeds usize".into(),
+                                        )
+                                            })?;
+                                        product.checked_mul(dimension).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "constant_of_shape_f32: element count overflows"
+                                                    .into(),
+                                            )
+                                        })
+                                    })?;
+                            let live_bytes = live_elements.checked_mul(4).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "constant_of_shape_f32: byte count overflows".into(),
+                                )
+                            })?;
+                            const MAX_RUNTIME_CONSTANT_OF_SHAPE_BYTES: usize = 256 * 1024 * 1024;
+                            if live_bytes > output_slice.size
+                                || live_bytes > MAX_RUNTIME_CONSTANT_OF_SHAPE_BYTES
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "constant_of_shape_f32: live output {live_bytes} bytes exceeds capacity {} or budget {MAX_RUNTIME_CONSTANT_OF_SHAPE_BYTES}",
+                                    output_slice.size
+                                )));
+                            }
+
+                            let shape_slice = input_slices[0];
+                            let shape_bytes = arena.data_mut()
+                                [shape_slice.offset..shape_slice.offset + shape_slice.size]
+                                .to_vec();
+                            for (index, (&expected, bytes)) in resolved_dims
+                                .iter()
+                                .zip(shape_bytes.chunks_exact(4))
+                                .enumerate()
+                            {
+                                let actual =
+                                    f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "constant_of_shape_f32: malformed shape payload".into(),
+                                        )
+                                    })?);
+                                if !actual.is_finite()
+                                    || actual < 0.0
+                                    || actual.fract() != 0.0
+                                    || actual as u64 != expected
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "constant_of_shape_f32: shape[{index}]={actual} does not match resolved dimension {expected}"
+                                    )));
+                                }
+                            }
+
+                            let fill_value = f32::from_bits(params[dimensions.len()] as u32);
+                            if !fill_value.is_finite() {
+                                return Err(BackendError::Dispatch(
+                                    "constant_of_shape_f32: non-finite fill value".into(),
+                                ));
+                            }
+                            let output_bytes = &mut arena.data_mut()[out_start..out_end];
+                            output_bytes.fill(0);
+                            for chunk in output_bytes[..live_bytes].chunks_exact_mut(4) {
+                                chunk.copy_from_slice(&fill_value.to_le_bytes());
+                            }
+                        }
+                        "shape_f32" => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "shape_f32: missing runtime dimension expressions".into(),
+                                )
+                            })?;
+                            if dimensions.len() != params.len()
+                                || output_slice.size != dimensions.len() * 4
+                            {
+                                return Err(BackendError::Dispatch(format!(
+                                    "shape_f32: invalid contract (params={}, dims={}, output_bytes={})",
+                                    params.len(),
+                                    dimensions.len(),
+                                    output_slice.size
+                                )));
+                            }
+                            let output_bytes = &mut arena.data_mut()[out_start..out_end];
+                            for (chunk, dimension) in
+                                output_bytes.chunks_exact_mut(4).zip(dimensions)
+                            {
+                                let resolved =
+                                    dimension.evaluate_with_env(shape_env).map_err(|error| {
+                                        BackendError::Dispatch(format!("shape_f32: {error}"))
+                                    })?;
+                                let encoded = resolved as f32;
+                                if encoded as u64 != resolved {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "shape_f32: dimension {resolved} is not exactly representable as f32"
+                                    )));
+                                }
+                                chunk.copy_from_slice(&encoded.to_le_bytes());
+                            }
+                        }
+                        "view_copy_f32" => {
+                            let [input] = input_slices.as_slice() else {
+                                return Err(BackendError::Dispatch(
+                                    "view_copy_f32 requires exactly one input".into(),
+                                ));
+                            };
+                            if input.size != output_slice.size {
+                                return Err(BackendError::Dispatch(format!(
+                                    "view_copy_f32 semantic size mismatch: input {} bytes, output {} bytes",
+                                    input.size, output_slice.size
+                                )));
+                            }
+                            let source_end =
+                                input.offset.checked_add(input.size).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "view_copy_f32 source range overflows".into(),
+                                    )
+                                })?;
+                            arena
+                                .data_mut()
+                                .copy_within(input.offset..source_end, output_slice.offset);
+                        }
+                        kernel @ ("add_broadcast_f32" | "sub_broadcast_f32"
+                        | "mul_broadcast_f32" | "div_broadcast_f32"
+                        | "max_broadcast_f32" | "min_broadcast_f32") => {
+                            let dimensions = param_dims.as_ref().ok_or_else(|| {
+                                BackendError::Dispatch(format!(
+                                    "{kernel}: missing runtime broadcast dimensions"
+                                ))
+                            })?;
+                            if params.len() != 3 {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel}: expected three rank parameters, got {}",
+                                    params.len()
+                                )));
+                            }
+                            let (lhs_rank, rhs_rank, output_rank) =
+                                (params[0], params[1], params[2]);
+                            if dimensions.len() != lhs_rank + rhs_rank + output_rank {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel}: rank metadata disagrees with {} dimensions",
+                                    dimensions.len()
+                                )));
+                            }
+                            let resolved: Vec<usize> = dimensions
+                                .iter()
+                                .map(|dimension| {
+                                    dimension
+                                        .evaluate_with_env(shape_env)
+                                        .map_err(|error| {
+                                            BackendError::Dispatch(format!("{kernel}: {error}"))
+                                        })
+                                        .and_then(|value| {
+                                            usize::try_from(value).map_err(|_| {
+                                                BackendError::Dispatch(format!(
+                                                    "{kernel}: dimension exceeds usize"
+                                                ))
+                                            })
+                                        })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let lhs_shape = &resolved[..lhs_rank];
+                            let rhs_shape = &resolved[lhs_rank..lhs_rank + rhs_rank];
+                            let output_shape = &resolved[lhs_rank + rhs_rank..];
+                            let op: fn(f32, f32) -> f32 = match kernel {
+                                "add_broadcast_f32" => |a, b| a + b,
+                                "sub_broadcast_f32" => |a, b| a - b,
+                                "mul_broadcast_f32" => |a, b| a * b,
+                                "div_broadcast_f32" => |a, b| a / b,
+                                "max_broadcast_f32" => f32::max,
+                                "min_broadcast_f32" => f32::min,
+                                _ => unreachable!(),
+                            };
+                            broadcast_binary_dispatch(
+                                input_slices,
+                                arena,
+                                *output_slice,
+                                lhs_shape,
+                                rhs_shape,
+                                output_shape,
+                                op,
+                            )
+                            .map_err(|error| {
+                                BackendError::Dispatch(format!("{kernel}: {error}"))
+                            })?;
+                        }
                         "add_f32" => {
                             fused_binary_activation_dispatch(
                                 "add_f32",
@@ -3847,6 +4612,9 @@ impl Backend for CpuBackend {
                         }
                         "round_f32" => {
                             unary_op_dispatch(input_slices, arena, out_start, out_end, round_f32);
+                        }
+                        "is_nan_f32" => {
+                            unary_op_dispatch(input_slices, arena, out_start, out_end, is_nan_f32);
                         }
                         "logical_not_f32" => {
                             unary_op_dispatch(
@@ -6628,7 +7396,7 @@ impl Backend for CpuBackend {
                                 ));
                             }
                             let rank = params[0];
-                            let expected_params = rank.checked_add(3).ok_or_else(|| {
+                            let expected_params = rank.checked_add(4).ok_or_else(|| {
                                 BackendError::Dispatch("gather: parameter count overflows".into())
                             })?;
                             if rank == 0 || params.len() != expected_params {
@@ -6639,6 +7407,7 @@ impl Backend for CpuBackend {
                             let data_shape = &params[1..1 + rank];
                             let indices_numel = params[1 + rank];
                             let axis = params[2 + rank];
+                            let index_dtype = params[3 + rank];
                             if axis >= rank {
                                 return Err(BackendError::Dispatch(
                                     "gather: axis is outside data rank".into(),
@@ -6681,13 +7450,21 @@ impl Backend for CpuBackend {
                                         "gather: output geometry overflows".into(),
                                     )
                                 })?;
-                            let scalar_bytes = std::mem::size_of::<f32>();
-                            let expected_data =
-                                data_elements.checked_mul(scalar_bytes).ok_or_else(|| {
-                                    BackendError::Dispatch("gather: data size overflows".into())
-                                })?;
-                            let expected_indices =
-                                indices_numel.checked_mul(scalar_bytes).ok_or_else(|| {
+                            if data_elements == 0 || input_slices[0].size % data_elements != 0 {
+                                return Err(BackendError::Dispatch(
+                                    "gather: data storage is not divisible by its geometry".into(),
+                                ));
+                            }
+                            let scalar_bytes = input_slices[0].size / data_elements;
+                            if !matches!(scalar_bytes, 1 | 2 | 4 | 8) {
+                                return Err(BackendError::Dispatch(format!(
+                                    "gather: unsupported element width {scalar_bytes}"
+                                )));
+                            }
+                            let expected_data = input_slices[0].size;
+                            let expected_indices = indices_numel
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .ok_or_else(|| {
                                     BackendError::Dispatch("gather: index size overflows".into())
                                 })?;
                             let expected_output =
@@ -6698,50 +7475,109 @@ impl Backend for CpuBackend {
                             if input_slices[0].size != expected_data
                                 || input_slices[1].size != expected_indices
                                 || output_slice.size != expected_output
-                                || input_slices.iter().any(|slice| {
-                                    !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
-                                })
-                                || !output_slice
+                                || !input_slices[1]
                                     .offset
                                     .is_multiple_of(std::mem::align_of::<f32>())
                             {
-                                return Err(BackendError::Dispatch(
-                                    "gather: geometry and f32 storage disagree".into(),
-                                ));
+                                return Err(BackendError::Dispatch(format!(
+                                    "gather: geometry and storage disagree: data shape {data_shape:?}, indices numel {indices_numel}, element width {scalar_bytes}, actual bytes [{}, {}] -> {}, expected [{expected_data}, {expected_indices}] -> {expected_output}",
+                                    input_slices[0].size,
+                                    input_slices[1].size,
+                                    output_slice.size,
+                                )));
                             }
-                            let indices = unsafe {
+                            let raw_indices = unsafe {
                                 arena.view_f32(input_slices[1].offset, input_slices[1].size)
                             };
-                            if indices.iter().any(|index| {
-                                !index.is_finite()
-                                    || *index < 0.0
-                                    || index.fract() != 0.0
-                                    || *index >= axis_size as f32
-                            }) {
-                                return Err(BackendError::Dispatch(
-                                    "gather: indices must be integral and within the axis".into(),
-                                ));
-                            }
-                            arena::with_nary_f32_slices(
-                                arena,
-                                input_slices,
-                                output_slice,
-                                |inputs, output| {
-                                    let data = inputs[0];
-                                    let indices = inputs[1];
-                                    for outer_index in 0..outer {
-                                        for (index_position, index) in indices.iter().enumerate() {
-                                            let source =
-                                                (outer_index * axis_size + *index as usize) * inner;
-                                            let destination = (outer_index * indices_numel
-                                                + index_position)
-                                                * inner;
-                                            output[destination..destination + inner]
-                                                .copy_from_slice(&data[source..source + inner]);
-                                        }
+                            let mut normalized_indices = Vec::with_capacity(raw_indices.len());
+                            for raw_index in raw_indices {
+                                let index = if index_dtype == 1 {
+                                    raw_index.to_bits() as i32 as i64
+                                } else {
+                                    if !raw_index.is_finite() || raw_index.fract() != 0.0 {
+                                        return Err(BackendError::Dispatch(format!(
+                                            "gather: index {raw_index} must be integral"
+                                        )));
                                     }
-                                },
-                            );
+                                    *raw_index as i64
+                                };
+                                let normalized = if index < 0 {
+                                    axis_size as i64 + index
+                                } else {
+                                    index
+                                };
+                                if normalized < 0 || normalized >= axis_size as i64 {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "gather: index {index} is outside axis extent {axis_size}"
+                                    )));
+                                }
+                                normalized_indices.push(normalized as usize);
+                            }
+                            if scalar_bytes == std::mem::size_of::<f32>() {
+                                arena::with_nary_f32_slices(
+                                    arena,
+                                    input_slices,
+                                    output_slice,
+                                    |inputs, output| {
+                                        let data = inputs[0];
+                                        for outer_index in 0..outer {
+                                            for (index_position, index) in
+                                                normalized_indices.iter().enumerate()
+                                            {
+                                                let source =
+                                                    (outer_index * axis_size + *index) * inner;
+                                                let destination = (outer_index * indices_numel
+                                                    + index_position)
+                                                    * inner;
+                                                output[destination..destination + inner]
+                                                    .copy_from_slice(&data[source..source + inner]);
+                                            }
+                                        }
+                                    },
+                                );
+                            } else {
+                                // Shape/mask graphs commonly Gather Bool or integer-width
+                                // storage. Copy by element bytes while retaining the same
+                                // checked geometry as the F32 path.
+                                let data = unsafe {
+                                    arena
+                                        .view_u8(input_slices[0].offset, input_slices[0].size)
+                                        .to_vec()
+                                };
+                                let output = unsafe {
+                                    arena.view_u8_mut(output_slice.offset, output_slice.size)
+                                };
+                                let inner_bytes =
+                                    inner.checked_mul(scalar_bytes).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "gather: inner byte geometry overflows".into(),
+                                        )
+                                    })?;
+                                for outer_index in 0..outer {
+                                    for (index_position, index) in
+                                        normalized_indices.iter().enumerate()
+                                    {
+                                        let source = (outer_index * axis_size + *index)
+                                            .checked_mul(inner_bytes)
+                                            .ok_or_else(|| {
+                                                BackendError::Dispatch(
+                                                    "gather: source byte offset overflows".into(),
+                                                )
+                                            })?;
+                                        let destination = (outer_index * indices_numel
+                                            + index_position)
+                                            .checked_mul(inner_bytes)
+                                            .ok_or_else(|| {
+                                                BackendError::Dispatch(
+                                                    "gather: destination byte offset overflows"
+                                                        .into(),
+                                                )
+                                            })?;
+                                        output[destination..destination + inner_bytes]
+                                            .copy_from_slice(&data[source..source + inner_bytes]);
+                                    }
+                                }
+                            }
                         }
                         "slice_f32" => {
                             if input_slices.len() != 1 || params.is_empty() {
@@ -6762,9 +7598,14 @@ impl Backend for CpuBackend {
                             }
                             let input_shape = &params[1..1 + rank];
                             let dim = params[1 + rank];
+                            if dim >= rank {
+                                return Err(BackendError::Dispatch(
+                                    "slice_f32: invalid dimension or range".into(),
+                                ));
+                            }
                             let start = params[2 + rank];
-                            let end = params[3 + rank];
-                            if dim >= rank || start > end || end > input_shape[dim] {
+                            let end = params[3 + rank].min(input_shape[dim]);
+                            if start > end {
                                 return Err(BackendError::Dispatch(
                                     "slice_f32: invalid dimension or range".into(),
                                 ));
@@ -6828,9 +7669,10 @@ impl Backend for CpuBackend {
                                     .offset
                                     .is_multiple_of(std::mem::align_of::<f32>())
                             {
-                                return Err(BackendError::Dispatch(
-                                    "slice_f32: shape and f32 storage disagree".into(),
-                                ));
+                                return Err(BackendError::Dispatch(format!(
+                                    "slice_f32: shape and f32 storage disagree (input {} vs {}, output {} vs {})",
+                                    input_slice.size, input_bytes, output_slice.size, output_bytes
+                                )));
                             }
                             let axis_size = input_shape[dim];
                             let copy_elements = range * inner;
@@ -6851,14 +7693,21 @@ impl Backend for CpuBackend {
                             );
                         }
                         "scatter_nd" => {
-                            if input_slices.len() != 3 || params.len() < 2 {
+                            if input_slices.len() != 3 || params.len() < 3 {
                                 return Err(BackendError::Dispatch(
                                     "scatter_nd: expected data, indices, updates, and geometry"
                                         .into(),
                                 ));
                             }
                             let index_depth = params[0];
-                            let data_dims = &params[1..];
+                            let has_reduction =
+                                params.len() >= 4 && params[params.len() - 2] == 0x5343_4154;
+                            let reduction_add = has_reduction && params[params.len() - 1] != 0;
+                            let data_dims = if has_reduction {
+                                &params[1..params.len() - 2]
+                            } else {
+                                &params[1..]
+                            };
                             if index_depth == 0 || index_depth > data_dims.len() {
                                 return Err(BackendError::Dispatch(
                                     "scatter_nd: invalid index depth".into(),
@@ -6966,10 +7815,24 @@ impl Backend for CpuBackend {
                                             linear_offset += *index as usize * stride;
                                         }
                                         let update_start = tuple_index * inner_size;
-                                        output[linear_offset..linear_offset + inner_size]
-                                            .copy_from_slice(
-                                                &updates[update_start..update_start + inner_size],
-                                            );
+                                        if reduction_add {
+                                            for (destination, update) in output
+                                                [linear_offset..linear_offset + inner_size]
+                                                .iter_mut()
+                                                .zip(
+                                                    &updates
+                                                        [update_start..update_start + inner_size],
+                                                )
+                                            {
+                                                *destination += *update;
+                                            }
+                                        } else {
+                                            output[linear_offset..linear_offset + inner_size]
+                                                .copy_from_slice(
+                                                    &updates
+                                                        [update_start..update_start + inner_size],
+                                                );
+                                        }
                                     }
                                 },
                             );
@@ -8847,6 +9710,110 @@ impl Backend for CpuBackend {
                                 );
                             }
                         }
+                        kernel @ ("sin_f32" | "cos_f32") => {
+                            if !params.is_empty() {
+                                return Err(BackendError::Dispatch(format!(
+                                    "{kernel}: expected no parameters"
+                                )));
+                            }
+                            let input_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            arena::with_unary_f32_slices(
+                                arena,
+                                input_slice,
+                                output_slice,
+                                |input, output| {
+                                    for (source, destination) in input.iter().zip(output.iter_mut())
+                                    {
+                                        *destination = if kernel == "sin_f32" {
+                                            source.sin()
+                                        } else {
+                                            source.cos()
+                                        };
+                                    }
+                                },
+                            );
+                        }
+                        "trilu_f32" => {
+                            if !(1..=2).contains(&input_slices.len()) || params.len() < 4 {
+                                return Err(BackendError::Dispatch(
+                                    "trilu_f32: expected data, optional k, and shape metadata"
+                                        .into(),
+                                ));
+                            }
+                            let rank = params[0];
+                            if rank < 2 || params.len() != rank + 2 {
+                                return Err(BackendError::Dispatch(
+                                    "trilu_f32: malformed rank/shape metadata".into(),
+                                ));
+                            }
+                            let shape = &params[1..1 + rank];
+                            let upper = params[1 + rank] != 0;
+                            let elements = shape.iter().try_fold(1usize, |count, dimension| {
+                                count.checked_mul(*dimension).ok_or_else(|| {
+                                    BackendError::Dispatch(
+                                        "trilu_f32: element count overflows".into(),
+                                    )
+                                })
+                            })?;
+                            let data_slice = input_slices[0];
+                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
+                            if data_slice.size != elements.saturating_mul(4)
+                                || output_slice.size != data_slice.size
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "trilu_f32: live shape disagrees with f32 storage".into(),
+                                ));
+                            }
+                            let diagonal = if let Some(diagonal_slice) = input_slices.get(1) {
+                                let bytes = &arena.data_mut()[diagonal_slice.offset
+                                    ..diagonal_slice.offset + diagonal_slice.size];
+                                match bytes.len() {
+                                    8 => i64::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "trilu_f32: invalid i64 diagonal".into(),
+                                        )
+                                    })?),
+                                    4 => f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                                        BackendError::Dispatch(
+                                            "trilu_f32: invalid f32 diagonal".into(),
+                                        )
+                                    })?) as i64,
+                                    _ => {
+                                        return Err(BackendError::Dispatch(
+                                            "trilu_f32: diagonal must be scalar i64 or f32".into(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                0
+                            };
+                            let rows = shape[rank - 2];
+                            let columns = shape[rank - 1];
+                            let matrix_elements = rows.checked_mul(columns).ok_or_else(|| {
+                                BackendError::Dispatch(
+                                    "trilu_f32: matrix element count overflows".into(),
+                                )
+                            })?;
+                            arena::with_unary_f32_slices(
+                                arena,
+                                data_slice,
+                                output_slice,
+                                |input, output| {
+                                    for index in 0..elements {
+                                        let matrix_index = index % matrix_elements;
+                                        let row = (matrix_index / columns) as i64;
+                                        let column = (matrix_index % columns) as i64;
+                                        let keep = if upper {
+                                            column - row >= diagonal
+                                        } else {
+                                            column - row <= diagonal
+                                        };
+                                        output[index] = if keep { input[index] } else { 0.0 };
+                                    }
+                                },
+                            );
+                        }
                         "flip" => {
                             if input_slices.len() != 1 || params.is_empty() {
                                 return Err(BackendError::Dispatch(
@@ -8925,51 +9892,132 @@ impl Backend for CpuBackend {
                                 },
                             );
                         }
-                        "where_f32" => {
-                            if input_slices.len() != 3 || !params.is_empty() {
+                        kernel @ ("where_f32" | "where_bool_f32") => {
+                            if input_slices.len() != 3 || params.len() < 4 {
                                 return Err(BackendError::Dispatch(
-                                    "where_f32: expected condition, x, and y without parameters"
-                                        .into(),
+                                    "where: expected condition, x, y and rank metadata".into(),
                                 ));
                             }
-                            let output_slice = BufferSlice::new(out_start, out_end - out_start);
-                            let scalar_bytes = std::mem::size_of::<f32>();
-                            let output_elements = output_slice.size / scalar_bytes;
-                            let malformed_input = input_slices.iter().any(|slice| {
-                                !slice.offset.is_multiple_of(std::mem::align_of::<f32>())
-                                    || !slice.size.is_multiple_of(scalar_bytes)
-                                    || (output_elements > 0 && slice.size == 0)
-                                    || (output_elements == 0 && slice.size != 0)
-                                    || (slice.size > 0
-                                        && !output_slice.size.is_multiple_of(slice.size))
-                            });
-                            if malformed_input
-                                || !output_slice
-                                    .offset
-                                    .is_multiple_of(std::mem::align_of::<f32>())
-                                || !output_slice.size.is_multiple_of(scalar_bytes)
+                            let ranks = [params[0], params[1], params[2], params[3]];
+                            let expected_params = 4usize
+                                .checked_add(ranks.iter().sum::<usize>())
+                                .ok_or_else(|| {
+                                BackendError::Dispatch("where: parameter count overflows".into())
+                            })?;
+                            if params.len() != expected_params {
+                                return Err(BackendError::Dispatch(format!(
+                                    "where: expected {expected_params} parameters, got {}",
+                                    params.len()
+                                )));
+                            }
+                            let mut cursor = 4;
+                            let mut shapes = Vec::with_capacity(4);
+                            for rank in ranks {
+                                shapes.push(params[cursor..cursor + rank].to_vec());
+                                cursor += rank;
+                            }
+                            let output_shape = &shapes[3];
+                            let output_elements =
+                                output_shape.iter().try_fold(1usize, |count, dimension| {
+                                    count.checked_mul(*dimension).ok_or_else(|| {
+                                        BackendError::Dispatch(
+                                            "where: output element count overflows".into(),
+                                        )
+                                    })
+                                })?;
+                            if output_slice.size != output_elements.saturating_mul(4)
+                                || !output_slice.offset.is_multiple_of(4)
                             {
                                 return Err(BackendError::Dispatch(
-                                    "where_f32: invalid broadcasting or f32 storage".into(),
+                                    "where: output storage disagrees with live shape".into(),
                                 ));
                             }
-                            arena::with_nary_f32_slices(
-                                arena,
-                                input_slices,
-                                output_slice,
-                                |inputs, out_f32| {
-                                    let cond = inputs[0];
-                                    let x = inputs[1];
-                                    let y = inputs[2];
-                                    for (index, output) in out_f32.iter_mut().enumerate() {
-                                        *output = if cond[index % cond.len()] != 0.0 {
-                                            x[index % x.len()]
-                                        } else {
-                                            y[index % y.len()]
-                                        };
+                            for (input_index, shape) in shapes[..3].iter().enumerate() {
+                                if shape.len() > output_shape.len() {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "where: input {input_index} rank exceeds output rank"
+                                    )));
+                                }
+                                let offset = output_shape.len() - shape.len();
+                                for (axis, dimension) in shape.iter().enumerate() {
+                                    let output_dimension = output_shape[offset + axis];
+                                    if *dimension != 1 && *dimension != output_dimension {
+                                        return Err(BackendError::Dispatch(format!(
+                                            "where: input {input_index} dimension {dimension} cannot broadcast to {output_dimension}"
+                                        )));
                                     }
-                                },
+                                }
+                            }
+                            let condition_width = if kernel == "where_bool_f32" { 1 } else { 4 };
+                            let expected_sizes = [
+                                shapes[0].iter().product::<usize>() * condition_width,
+                                shapes[1].iter().product::<usize>() * 4,
+                                shapes[2].iter().product::<usize>() * 4,
+                            ];
+                            if input_slices
+                                .iter()
+                                .zip(expected_sizes)
+                                .any(|(slice, expected)| slice.size != expected)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "where: input storage disagrees with live shapes".into(),
+                                ));
+                            }
+                            let (condition, x, y) = {
+                                let data = arena.data_mut();
+                                let condition = data[input_slices[0].offset
+                                    ..input_slices[0].offset + input_slices[0].size]
+                                    .to_vec();
+                                let x = bytemuck::cast_slice::<u8, f32>(
+                                    &data[input_slices[1].offset
+                                        ..input_slices[1].offset + input_slices[1].size],
+                                )
+                                .to_vec();
+                                let y = bytemuck::cast_slice::<u8, f32>(
+                                    &data[input_slices[2].offset
+                                        ..input_slices[2].offset + input_slices[2].size],
+                                )
+                                .to_vec();
+                                (condition, x, y)
+                            };
+                            let source_index = |output_index: usize, shape: &[usize]| {
+                                let leading = output_shape.len() - shape.len();
+                                let mut remaining = output_index;
+                                let mut index = 0usize;
+                                let mut stride = 1usize;
+                                for axis in (0..output_shape.len()).rev() {
+                                    let coordinate = remaining % output_shape[axis];
+                                    remaining /= output_shape[axis];
+                                    if axis >= leading {
+                                        let dimension = shape[axis - leading];
+                                        if dimension != 1 {
+                                            index += coordinate * stride;
+                                        }
+                                        stride *= dimension;
+                                    }
+                                }
+                                index
+                            };
+                            let output = bytemuck::cast_slice_mut::<u8, f32>(
+                                &mut arena.data_mut()
+                                    [output_slice.offset..output_slice.offset + output_slice.size],
                             );
+                            for (output_index, value) in output.iter_mut().enumerate() {
+                                let condition_index = source_index(output_index, &shapes[0]);
+                                let selected = if kernel == "where_bool_f32" {
+                                    condition[condition_index] != 0
+                                } else {
+                                    let start = condition_index * 4;
+                                    f32::from_le_bytes(
+                                        condition[start..start + 4].try_into().unwrap(),
+                                    ) != 0.0
+                                };
+                                *value = if selected {
+                                    x[source_index(output_index, &shapes[1])]
+                                } else {
+                                    y[source_index(output_index, &shapes[2])]
+                                };
+                            }
                         }
                         // â”€â”€ Optimizer kernels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                         "sgd_update_f32" => {
@@ -9869,7 +10917,7 @@ impl Backend for CpuBackend {
                                 chunk.copy_from_slice(&half::f16::from_f32(*value).to_le_bytes());
                             }
                         }
-                        "cast_f32_i64" | "cast_i64_f32" => {
+                        "cast_f32_i64" | "cast_i64_f32" | "cast_f32_bool" | "cast_bool_f32" => {
                             if input_slices.len() != 1 || !params.is_empty() {
                                 return Err(BackendError::Dispatch(
                                     "cast: expected one input and no untyped width parameters"
@@ -9951,6 +10999,50 @@ impl Backend for CpuBackend {
                                         *output = input as f32;
                                     }
                                 }
+                                "cast_f32_bool" => {
+                                    let numel = input_slice.size / 4;
+                                    if !input_slice.offset.is_multiple_of(4)
+                                        || !input_slice.size.is_multiple_of(4)
+                                        || output_size != numel
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "cast: invalid f32-to-bool storage contract".into(),
+                                        ));
+                                    }
+                                    let input = unsafe {
+                                        arena.view_f32(input_slice.offset, input_slice.size)
+                                    }
+                                    .to_vec();
+                                    let output = &mut arena.data_mut()[out_start..out_end];
+                                    for (output, input) in output.iter_mut().zip(input) {
+                                        *output = u8::from(input != 0.0);
+                                    }
+                                }
+                                "cast_bool_f32" => {
+                                    let numel = input_slice.size;
+                                    let expected_output =
+                                        numel.checked_mul(4).ok_or_else(|| {
+                                            BackendError::Dispatch(
+                                                "cast: bool-to-f32 output size overflows".into(),
+                                            )
+                                        })?;
+                                    if !out_start.is_multiple_of(4)
+                                        || output_size != expected_output
+                                    {
+                                        return Err(BackendError::Dispatch(
+                                            "cast: invalid bool-to-f32 storage contract".into(),
+                                        ));
+                                    }
+                                    let input = arena.data_mut()
+                                        [input_slice.offset..input_slice.offset + input_slice.size]
+                                        .to_vec();
+                                    let output = bytemuck::cast_slice_mut::<_, f32>(
+                                        &mut arena.data_mut()[out_start..out_end],
+                                    );
+                                    for (output, input) in output.iter_mut().zip(input) {
+                                        *output = f32::from(input != 0);
+                                    }
+                                }
                                 _ => {
                                     return Err(BackendError::Dispatch(format!(
                                         "unsupported typed cast kernel {kernel_name}"
@@ -9997,7 +11089,37 @@ impl Backend for CpuBackend {
                                 params[1 + max_rank..1 + max_rank * 2].to_vec();
 
                             let data_slice = &input_slices[0];
-                            let _shape_slice = &input_slices[1];
+                            let shape_slice = &input_slices[1];
+                            if !shape_slice.offset.is_multiple_of(4)
+                                || !shape_slice.size.is_multiple_of(4)
+                            {
+                                return Err(BackendError::Dispatch(
+                                    "expand_f32: shape tensor must use aligned F32 storage".into(),
+                                ));
+                            }
+                            let target_rank = shape_slice.size / 4;
+                            if target_rank == 0 || target_rank > max_rank {
+                                return Err(BackendError::Dispatch(format!(
+                                    "expand_f32: runtime target rank {target_rank} is incompatible with rank {max_rank}"
+                                )));
+                            }
+                            let shape_values =
+                                unsafe { arena.view_f32(shape_slice.offset, shape_slice.size) };
+                            for (axis, (&value, expected)) in shape_values
+                                .iter()
+                                .zip(&out_dims[max_rank - target_rank..])
+                                .enumerate()
+                            {
+                                if !value.is_finite()
+                                    || value < 0.0
+                                    || value.fract() != 0.0
+                                    || (value as usize != *expected && value != 1.0)
+                                {
+                                    return Err(BackendError::Dispatch(format!(
+                                        "expand_f32: runtime target dimension {axis} value {value} cannot broadcast to resolved extent {expected}"
+                                    )));
+                                }
+                            }
                             for (input_dim, output_dim) in in_dims.iter().zip(&out_dims) {
                                 if input_dim != output_dim && *input_dim != 1 {
                                     return Err(BackendError::Dispatch(format!(
@@ -10177,7 +11299,7 @@ impl Backend for CpuBackend {
                             }
                             let read_scalar = |slice: BufferSlice| {
                                 let data = arena.data_mut();
-                                bytemuck::try_cast_slice::<_, f32>(
+                                let value = bytemuck::try_cast_slice::<_, f32>(
                                     &data[slice.offset..slice.offset + scalar_bytes],
                                 )
                                 .ok()
@@ -10186,7 +11308,12 @@ impl Backend for CpuBackend {
                                     BackendError::Dispatch(
                                         "range_f32: scalar storage cannot be read as f32".into(),
                                     )
-                                })
+                                })?;
+                                if value != 0.0 && value.abs() < f32::MIN_POSITIVE {
+                                    Ok(i32::from_le_bytes(value.to_le_bytes()) as f32)
+                                } else {
+                                    Ok(value)
+                                }
                             };
                             let start_value = read_scalar(input_slices[0])?;
                             let limit_value = read_scalar(input_slices[1])?;
@@ -11422,6 +12549,63 @@ impl Backend for CpuBackend {
             ))
         })?;
         Ok(source.to_vec())
+    }
+
+    fn try_read_arena_into(
+        &self,
+        arena: &CpuBuffer,
+        offset: usize,
+        size: usize,
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| BackendError::Dispatch("CPU arena read range overflows".into()))?;
+        let buf = arena.data_mut();
+        let source = buf.get(offset..end).ok_or_else(|| {
+            BackendError::Dispatch(format!(
+                "CPU arena read range {offset}..{end} exceeds {} bytes",
+                buf.len()
+            ))
+        })?;
+        destination.clear();
+        destination.try_reserve_exact(size).map_err(|error| {
+            BackendError::Dispatch(format!("CPU output allocation failed: {error}"))
+        })?;
+        destination.extend_from_slice(source);
+        Ok(())
+    }
+
+    fn try_read_arena_ranges_into(
+        &self,
+        arena: &CpuBuffer,
+        ranges: &[(usize, usize)],
+        destination: &mut Vec<u8>,
+    ) -> Result<(), BackendError> {
+        let total_size = ranges
+            .iter()
+            .try_fold(0usize, |total, (_, size)| total.checked_add(*size))
+            .ok_or_else(|| BackendError::Dispatch("CPU output range size overflows".into()))?;
+        let buf = arena.data_mut();
+        for &(offset, size) in ranges {
+            let end = offset
+                .checked_add(size)
+                .ok_or_else(|| BackendError::Dispatch("CPU arena read range overflows".into()))?;
+            if end > buf.len() {
+                return Err(BackendError::Dispatch(format!(
+                    "CPU arena read range {offset}..{end} exceeds {} bytes",
+                    buf.len()
+                )));
+            }
+        }
+        destination.clear();
+        destination.try_reserve_exact(total_size).map_err(|error| {
+            BackendError::Dispatch(format!("CPU output allocation failed: {error}"))
+        })?;
+        for &(offset, size) in ranges {
+            destination.extend_from_slice(&buf[offset..offset + size]);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "prepared-plan")]

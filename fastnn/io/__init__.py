@@ -24,6 +24,12 @@ DTYPE_I4  = 3  # PackedTensor<I4x8>
 DTYPE_F8  = 4  # PackedTensor<F8x4>
 DTYPE_F8R = 5  # PackedTensor<F8x4R>
 DTYPE_F4  = 6  # PackedTensor<F4x8>
+# Plain scalar tensor tags. These are intentionally separate from the packed
+# precision tags above: ONNX shape/index initializers must retain their exact
+# storage dtype instead of being reinterpreted as F32 payloads.
+DTYPE_I64 = 7
+DTYPE_I32 = 8
+DTYPE_BOOL = 9
 
 
 class SerializationError(Exception):
@@ -239,7 +245,7 @@ def write_tensor_v3(f, name: str, data, dtype: int = DTYPE_F32, scales=None, zer
     Args:
         f: File object opened in binary write mode.
         name: Parameter name.
-        data: Packed bytes (for quantized) or numpy f32 array (for F32).
+        data: Packed bytes (for quantized) or a numpy array for plain tensors.
         dtype: Dtype tag (DTYPE_F32/DTYPE_I4/DTYPE_I8/DTYPE_F16/DTYPE_F8/DTYPE_F8R/DTYPE_F4).
         scales: Optional list of per-channel scales (float).
         zeros: Optional list of per-channel zeros (float).
@@ -251,7 +257,17 @@ def write_tensor_v3(f, name: str, data, dtype: int = DTYPE_F32, scales=None, zer
 
     if isinstance(data, np.ndarray):
         shape = list(data.shape) if shape is None else shape
-        data_bytes = data.astype(np.float32, copy=False).ravel().tobytes()
+        plain_dtypes = {
+            DTYPE_F32: np.dtype("<f4"),
+            DTYPE_I64: np.dtype("<i8"),
+            DTYPE_I32: np.dtype("<i4"),
+            DTYPE_BOOL: np.dtype("?"),
+        }
+        if dtype not in plain_dtypes:
+            raise TypeError(
+                f"Packed dtype tag {dtype} requires an encoded bytes payload, not ndarray"
+            )
+        data_bytes = np.ascontiguousarray(data, dtype=plain_dtypes[dtype]).tobytes()
     elif isinstance(data, bytes):
         if shape is None:
             shape = []
@@ -312,13 +328,39 @@ def read_tensor_v3(f) -> tuple:
 
     data_len = _unpack_u64(f.read(8))
 
-    if dtype == DTYPE_F32:
-        # F32: data is stored as f32 values
-        n_floats = data_len // 4
-        data = np.frombuffer(f.read(n_floats * 4), dtype=np.float32).reshape(shape)
+    plain_dtypes = {
+        DTYPE_F32: np.dtype("<f4"),
+        DTYPE_I64: np.dtype("<i8"),
+        DTYPE_I32: np.dtype("<i4"),
+        DTYPE_BOOL: np.dtype("?"),
+    }
+    if dtype in plain_dtypes:
+        np_dtype = plain_dtypes[dtype]
+        if data_len % np_dtype.itemsize != 0:
+            raise ValueError(
+                f"Tensor '{name}' byte length {data_len} is not divisible by "
+                f"dtype item size {np_dtype.itemsize}"
+            )
+        raw = f.read(data_len)
+        if len(raw) != data_len:
+            raise ValueError(
+                f"Tensor '{name}' payload is truncated: expected {data_len} bytes, got {len(raw)}"
+            )
+        expected_elements = int(np.prod(shape, dtype=np.int64)) if shape else 1
+        actual_elements = data_len // np_dtype.itemsize
+        if actual_elements != expected_elements:
+            raise ValueError(
+                f"Tensor '{name}' shape {shape} requires {expected_elements} values, "
+                f"payload contains {actual_elements}"
+            )
+        data = np.frombuffer(raw, dtype=np_dtype).reshape(shape)
     else:
         # Packed: data is raw bytes
         data = f.read(data_len)
+        if len(data) != data_len:
+            raise ValueError(
+                f"Tensor '{name}' payload is truncated: expected {data_len} bytes, got {len(data)}"
+            )
 
     return name, data, dtype, scales, zeros, shape
 

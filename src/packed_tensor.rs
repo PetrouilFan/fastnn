@@ -1182,11 +1182,33 @@ impl<T: PackedWord> PackedTensor<T> {
         Self::from_f32_per_block_asymmetric(data, shape, group_size)
     }
 
+    /// K-grouped signed-I4 quantization with one calibrated clipping ratio per
+    /// output-row/K-group, in row-major metadata order.
+    pub fn from_f32_k_grouped_i4_with_clip_ratios(
+        data: &[f32],
+        shape: &[usize],
+        group_size: usize,
+        clip_ratios: &[f32],
+    ) -> Self {
+        assert!(matches!(T::SCALAR_TYPE, ScalarType::I4));
+        assert!(matches!(group_size, 32 | 64 | 128));
+        Self::from_f32_per_block_asymmetric_impl(data, shape, group_size, Some(clip_ratios))
+    }
+
     /// Per-block asymmetric quantization: each contiguous block of `qblock`
     /// elements within every row gets its own (scale, zero_point).
     /// Scales/zeros layout: `M * ceil(K / qblock)` entries, indexed as
     /// `scales[row * blocks_per_row + col / qblock]`.
     pub fn from_f32_per_block_asymmetric(data: &[f32], shape: &[usize], qblock: usize) -> Self {
+        Self::from_f32_per_block_asymmetric_impl(data, shape, qblock, None)
+    }
+
+    fn from_f32_per_block_asymmetric_impl(
+        data: &[f32],
+        shape: &[usize],
+        qblock: usize,
+        clip_ratios: Option<&[f32]>,
+    ) -> Self {
         assert!(qblock > 0, "quantization block size must be > 0");
         let numel: usize = shape.iter().product();
         assert_eq!(data.len(), numel);
@@ -1202,6 +1224,19 @@ impl<T: PackedWord> PackedTensor<T> {
         let signed_bias = (1u32 << (T::BIT_WIDTH - 1)) as f32;
         let is_unsigned = matches!(T::SCALAR_TYPE, ScalarType::U4 | ScalarType::U8);
         let num_blocks = m * blocks_per_row;
+        if let Some(ratios) = clip_ratios {
+            assert_eq!(
+                ratios.len(),
+                num_blocks,
+                "one clip ratio is required per K group"
+            );
+            assert!(
+                ratios
+                    .iter()
+                    .all(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio)),
+                "clip ratios must be finite and in [0, 1]"
+            );
+        }
 
         let mut scales = Vec::with_capacity(num_blocks);
         let mut zeros = Vec::with_capacity(num_blocks);
@@ -1216,6 +1251,16 @@ impl<T: PackedWord> PackedTensor<T> {
                 for &v in block_data {
                     bmin = bmin.min(v);
                     bmax = bmax.max(v);
+                }
+                let raw_range = bmax - bmin;
+                if raw_range != 0.0 {
+                    if let Some(ratios) = clip_ratios {
+                        let ratio = ratios[row * blocks_per_row + blk];
+                        let midpoint = 0.5 * (bmin + bmax);
+                        let half_range = 0.5 * raw_range * ratio;
+                        bmin = midpoint - half_range;
+                        bmax = midpoint + half_range;
+                    }
                 }
                 let range = bmax - bmin;
                 if range == 0.0 || unsigned_max == 0.0 {
@@ -1692,6 +1737,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn k_grouped_i4_calibrated_clipping_reduces_active_weight_error() {
+        let mut values: Vec<f32> = (0..32)
+            .map(|index| -1.0 + 2.0 * index as f32 / 31.0)
+            .collect();
+        values[0] = 10.0;
+        let baseline = PackedTensor::<I4x8>::from_f32_k_grouped_i4(&values, &[1, 32], 32);
+        let clipped = PackedTensor::<I4x8>::from_f32_k_grouped_i4_with_clip_ratios(
+            &values,
+            &[1, 32],
+            32,
+            &[0.84],
+        );
+        let baseline_error: f32 = (1..32)
+            .map(|index| (baseline.get(index) - values[index]).powi(2))
+            .sum();
+        let clipped_error: f32 = (1..32)
+            .map(|index| (clipped.get(index) - values[index]).powi(2))
+            .sum();
+
+        assert!(clipped_error < baseline_error * 0.9);
+        assert_eq!(clipped.blocks_per_row(), 1);
+        assert_eq!(clipped.quantized_group_sums().len(), 1);
     }
 
     #[test]
