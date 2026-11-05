@@ -16,23 +16,12 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
                         _ => false,
                     })
                 };
-                let is_zero = |id: NodeId| -> bool {
-                    graph_ref.get_node(id).is_some_and(|n| match &n.opcode {
-                        Opcode::Constant(TensorValue::Float(v)) => *v == 0.0,
-                        Opcode::Constant(TensorValue::Int(v)) => *v == 0,
-                        _ => false,
-                    })
-                };
 
                 if node.inputs.len() >= 2 {
                     if is_one(node.inputs[1]) {
                         Some(RewriteAction::ReplaceWith(node.inputs[0]))
                     } else if is_one(node.inputs[0]) {
                         Some(RewriteAction::ReplaceWith(node.inputs[1]))
-                    } else if is_zero(node.inputs[1]) {
-                        Some(RewriteAction::ReplaceWithZero(node.inputs[1]))
-                    } else if is_zero(node.inputs[0]) {
-                        Some(RewriteAction::ReplaceWithZero(node.inputs[0]))
                     } else {
                         None
                     }
@@ -141,37 +130,44 @@ pub fn arithmetic_simplify(graph: &mut ComputeGraph) -> usize {
     });
 
     for (node_id, action) in &rewrites {
-        match action {
-            RewriteAction::ReplaceWith(replacement) => {
-                rewire_consumers(graph, *node_id, *replacement);
-                graph.remove_node(*node_id);
-                simplified += 1;
-            }
-            RewriteAction::ReplaceWithZero(zero_const_id) => {
-                rewire_consumers(graph, *node_id, *zero_const_id);
-                graph.remove_node(*node_id);
-                simplified += 1;
-            }
+        let RewriteAction::ReplaceWith(replacement) = action;
+        let same_type = graph
+            .get_node(*node_id)
+            .zip(graph.get_node(*replacement))
+            .is_some_and(|(node, input)| {
+                node.output_type == input.output_type
+                    && node
+                        .output_type
+                        .shape
+                        .iter()
+                        .all(|d| matches!(d, crate::ir::DimExpr::Known(_)))
+            });
+        if !same_type {
+            continue;
+        }
+        if let Some(node) = graph.get_node_mut(*node_id) {
+            // Preserve output identity and chained consumers. DCE resolves these
+            // identity reshapes after all candidates have been collected.
+            let shape = node
+                .output_type
+                .shape
+                .iter()
+                .map(|d| d.evaluate().unwrap().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            node.opcode = Opcode::Reshape;
+            node.inputs = vec![*replacement];
+            node.attrs.clear();
+            node.attrs.insert("shape".into(), shape);
+            simplified += 1;
         }
     }
-
+    if simplified > 0 {
+        graph.mark_mutated();
+    }
     simplified
 }
 
 enum RewriteAction {
     ReplaceWith(NodeId),
-    ReplaceWithZero(NodeId),
-}
-
-fn rewire_consumers(graph: &mut ComputeGraph, from: NodeId, to: NodeId) {
-    let consumers: Vec<NodeId> = graph.consumers(from);
-    for consumer_id in consumers {
-        if let Some(consumer) = graph.get_node_mut(consumer_id) {
-            for input in consumer.inputs.iter_mut() {
-                if *input == from {
-                    *input = to;
-                }
-            }
-        }
-    }
 }

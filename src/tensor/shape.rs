@@ -438,7 +438,17 @@ impl Tensor {
     }
 
     pub fn try_contiguous(&self) -> FastnnResult<Tensor> {
-        self.inner.try_contiguous()
+        let output = self.inner.try_contiguous()?;
+        Ok(
+            if autograd::is_grad_enabled() && self.requires_grad() && output.id() != self.id() {
+                Self::attach_grad_fn(
+                    output,
+                    autograd::make_node_info("ViewBackward", vec![self.clone()]),
+                )
+            } else {
+                output
+            },
+        )
     }
 
     pub fn view(&self, shape: Vec<i64>) -> Tensor {
@@ -474,15 +484,7 @@ impl Tensor {
     }
 
     pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
-        let reshaped = self.reshape(shape);
-        let output = reshaped.permute(perm);
-
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
-        } else {
-            output
-        }
+        self.reshape(shape).permute(perm)
     }
 
     pub fn transpose(&self, dim0: usize, dim1: usize) -> Tensor {
@@ -497,7 +499,11 @@ impl Tensor {
             let inputs = vec![self.clone()];
             Self::attach_grad_fn(
                 output,
-                autograd::make_node_info("TransposeBackward", inputs),
+                autograd::make_node_info_with_params("TransposeBackward", inputs, {
+                    let mut perm: Vec<i64> = (0..self.ndim() as i64).collect();
+                    perm.swap(dim0, dim1);
+                    perm
+                }),
             )
         } else {
             output
@@ -509,12 +515,16 @@ impl Tensor {
     }
 
     pub fn try_permute(&self, dims: Vec<i64>) -> FastnnResult<Tensor> {
+        let params = dims.clone();
         let sizes: SmallVec<[i64; 8]> = dims.into();
         let output = self.inner.try_permute(sizes)?;
 
         Ok(if autograd::is_grad_enabled() && self.requires_grad() {
             let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("PermuteBackward", inputs))
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info_with_params("PermuteBackward", inputs, params),
+            )
         } else {
             output
         })

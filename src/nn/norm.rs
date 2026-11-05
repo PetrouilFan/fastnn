@@ -41,6 +41,17 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
+        if autograd::is_grad_enabled()
+            && (x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad())
+        {
+            let axis = x.ndim() as i32 - 1;
+            let centered = x.sub(&x.mean(axis, true));
+            let variance = centered.mul(&centered).mean(axis, true);
+            return centered
+                .div(&variance.add_scalar(self.eps as f32).sqrt())
+                .mul(&self.weight)
+                .add(&self.bias);
+        }
         let shape = x.shape_ref();
         let _ndim = shape.len();
 
@@ -48,26 +59,13 @@ impl Module for LayerNorm {
         let weight = &self.weight;
         let bias = &self.bias;
 
-        let output = Tensor::exec_aot(&[x, weight, bias], |g, ins| {
+        Tensor::exec_aot(&[x, weight, bias], |g, ins| {
             vec![g.layer_norm(&ins[0], &ins[1], &ins[2], self.eps)]
         })
         .expect("LayerNorm::forward: AOT failed")
         .into_iter()
         .next()
-        .unwrap();
-
-        // Set up gradient tracking for layer norm
-        if x.requires_grad() || weight.requires_grad() || bias.requires_grad() {
-            let inputs = vec![x.clone(), weight.clone(), bias.clone()];
-            let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(crate::autograd::make_node_info("LayerNormBackward", inputs));
-            let mut output = output.clone();
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-            output
-        } else {
-            output
-        }
+        .unwrap()
     }
 
     impl_norm!(weight, bias, training);

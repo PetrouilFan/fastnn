@@ -104,30 +104,36 @@ impl TransformerBlock {
         let x = attn_dropped.add(x);
 
         // Fused sub-layer AOT: norm2 → ff1 (matmul + bias + gelu) → ff2 (matmul + bias)
-        let ff_out = Tensor::exec_aot(
-            &[
-                &x,
-                &self.norm2.weight,
-                &self.norm2.bias,
-                &self.ff1.weight,
-                self.ff1.bias.as_ref().unwrap_or(&self.bias_fallback),
-                &self.ff2.weight,
-                self.ff2.bias.as_ref().unwrap_or(&self.bias_fallback),
-            ],
-            |g, ins| {
-                let x_norm2 = g.layer_norm(&ins[0], &ins[1], &ins[2], 1e-5);
-                let mm1 = g.matmul(&x_norm2, &ins[3]);
-                let biased1 = g.bias_add(&mm1, &ins[4]);
-                let gelu_out = g.gelu(&biased1);
-                let mm2 = g.matmul(&gelu_out, &ins[5]);
-                let out = g.bias_add(&mm2, &ins[6]);
-                vec![out]
-            },
-        )
-        .expect("TransformerBlock::forward: fused sub-layer AOT failed")
-        .into_iter()
-        .next()
-        .unwrap();
+        let ff_out = if crate::autograd::is_grad_enabled() {
+            let normalized = self.norm2.forward(&x);
+            let hidden = self.ff1.forward(&normalized).gelu();
+            self.ff2.forward(&hidden)
+        } else {
+            Tensor::exec_aot(
+                &[
+                    &x,
+                    &self.norm2.weight,
+                    &self.norm2.bias,
+                    &self.ff1.weight,
+                    self.ff1.bias.as_ref().unwrap_or(&self.bias_fallback),
+                    &self.ff2.weight,
+                    self.ff2.bias.as_ref().unwrap_or(&self.bias_fallback),
+                ],
+                |g, ins| {
+                    let x_norm2 = g.layer_norm(&ins[0], &ins[1], &ins[2], 1e-5);
+                    let mm1 = g.matmul(&x_norm2, &ins[3]);
+                    let biased1 = g.bias_add(&mm1, &ins[4]);
+                    let gelu_out = g.gelu(&biased1);
+                    let mm2 = g.matmul(&gelu_out, &ins[5]);
+                    let out = g.bias_add(&mm2, &ins[6]);
+                    vec![out]
+                },
+            )
+            .expect("TransformerBlock::forward: fused sub-layer AOT failed")
+            .into_iter()
+            .next()
+            .unwrap()
+        };
 
         let ff_dropped = self.dropout.forward(&ff_out);
         ff_dropped.add(&x)

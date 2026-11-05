@@ -462,6 +462,9 @@ impl Tensor {
     /// Non-in-place scalar multiplication without creating a scalar tensor.
     /// Avoids the 5-heap-alloc overhead of Tensor::from_scalar().
     pub fn mul_scalar(&self, scalar: f32) -> Tensor {
+        if autograd::is_grad_enabled() && self.requires_grad() {
+            return self.mul(&Tensor::from_scalar(scalar));
+        }
         let mut result = self.clone();
         result.mul_scalar_(scalar);
         result
@@ -744,7 +747,18 @@ impl Tensor {
         let output = exec_single(&[self], |graph, inputs| {
             vec![graph.softmax(&inputs[0], dim as i64)]
         })?;
-        Ok(self.attach_unary_grad(output, "SoftmaxBackward"))
+        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
+            Self::attach_grad_fn(
+                output,
+                autograd::make_node_info_with_params(
+                    "SoftmaxBackward",
+                    vec![self.clone()],
+                    vec![dim as i64],
+                ),
+            )
+        } else {
+            output
+        })
     }
 
     pub fn softmax(&self, dim: i32) -> Tensor {
