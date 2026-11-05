@@ -917,6 +917,33 @@ def test_aot_runtime_owned_state_reset_and_isolation(tmp_path):
     assert first.session_steps == 2
 
 
+
+def test_state_rejects_shared_writer_without_changing_configuration(tmp_path):
+    graph = helper.make_graph(
+        [helper.make_node("Add", ["left", "right"], ["next_state"])],
+        "shared_state_writer",
+        [helper.make_tensor_value_info(name, TensorProto.FLOAT, [1])
+         for name in ("left", "right")],
+        [helper.make_tensor_value_info("next_state", TensorProto.FLOAT, [1])],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)])
+    onnx_path = tmp_path / "shared-writer.onnx"
+    fnn_path = tmp_path / "shared-writer.fnn"
+    onnx.save(model, onnx_path)
+    fnn.convert_from_onnx(str(onnx_path), str(fnn_path))
+    executor = fnn.build_model_from_fnn(str(fnn_path))
+    executor.configure_state(
+        {"left": "next_state"}, {"left": fnn.tensor([1.0], [1])}
+    )
+    with pytest.raises(ValueError, match="multiple inputs"):
+        executor.configure_state(
+            {"left": "next_state", "right": "next_state"},
+            {"left": fnn.tensor([1.0], [1]), "right": fnn.tensor([2.0], [1])},
+        )
+    assert executor.state_sizes() == {"left": 4}
+    result = executor.forward_stateful({"right": fnn.tensor([2.0], [1])}, True)
+    np.testing.assert_array_equal(result["next_state"].numpy(), [3.0])
+
 def test_aot_runtime_owned_state_append_non_innermost_axis(tmp_path):
     state = helper.make_tensor_value_info(
         "state", TensorProto.FLOAT, [2, "state_length", 2]

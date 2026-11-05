@@ -1620,6 +1620,14 @@ impl AotExecutor {
                 "every state binding requires exactly one initial tensor",
             ));
         }
+        let mut bound_outputs = std::collections::HashSet::new();
+        for output_name in bindings.values() {
+            if !bound_outputs.insert(output_name) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "state output '{output_name}' cannot be bound to multiple inputs"
+                )));
+            }
+        }
         let mut configured = Vec::with_capacity(bindings.len());
         let mut values = std::collections::HashMap::with_capacity(bindings.len());
         let mut capacities = std::collections::HashMap::with_capacity(bindings.len());
@@ -2232,6 +2240,24 @@ impl AotExecutor {
         });
         let result = self.decode_outputs_filtered(&output_data, hidden_outputs.as_ref())?;
 
+        // Reserve all replacement destinations before committing any state.
+        // Vec reservation is relative to length, not the current capacity.
+        if !include_state_outputs {
+            for descriptor in &self.state_bindings {
+                if matches!(descriptor.update, StateUpdatePolicy::Replace) {
+                    let output = &mut output_data[descriptor.output_index];
+                    let capacity = self.state_capacities[&descriptor.input_name];
+                    if output.capacity() < capacity {
+                        output.try_reserve_exact(capacity - output.len()).map_err(|error| {
+                            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "failed to reserve replacement state: {error}"
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+
         for descriptor in &self.state_bindings {
             let input_name = &descriptor.input_name;
             let state = self.state_values.get_mut(input_name).ok_or_else(|| {
@@ -2247,11 +2273,7 @@ impl AotExecutor {
                         state.clear();
                         state.extend_from_slice(&output_data[output_index]);
                     } else {
-                        let capacity = self.state_capacities[input_name];
                         let output = &mut output_data[output_index];
-                        if output.capacity() < capacity {
-                            output.reserve_exact(capacity - output.capacity());
-                        }
                         std::mem::swap(state, output);
                     }
                     self.state_shapes.insert(input_name.clone(), shape);

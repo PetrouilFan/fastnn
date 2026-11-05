@@ -26,6 +26,9 @@
 //! See [`ir::builder::GraphBuilder`] and [`backend::executor::GraphExecutor`] for the
 //! full API.
 
+// Keep byte decoding on slice chunks: Clippy's array-chunk rewrite changes
+// TryInto inference in packed-type macros. This is a style lint, not validation.
+#![allow(clippy::chunks_exact_to_as_chunks)]
 #![allow(clippy::needless_range_loop)]
 // SIMD compute kernels require many raw pointer + dimension parameters for zero-overhead dispatch.
 #![allow(clippy::too_many_arguments)]

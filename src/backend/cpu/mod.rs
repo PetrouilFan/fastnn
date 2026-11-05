@@ -1158,6 +1158,29 @@ impl Backend for CpuBackend {
                     } else {
                         None
                     };
+                    // Specialized projection kernels consume one row per leading
+                    // activation position and require a shared rank-two weight.
+                    let (m, m_dim) = if kernel_name != "matmul" {
+                        if input_shapes.get(1).is_none_or(|shape| shape.len() != 2) {
+                            return Err(BackendError::Compilation(format!(
+                                "{kernel_name} requires a shared rank-two weight"
+                            )));
+                        }
+                        let row_dims = &input_shape_dims[0][..activation_shape.len() - 1];
+                        let rows = row_dims
+                            .iter()
+                            .fold(DimExpr::Known(1), |rows, dim| rows.mul(dim));
+                        let count = activation_shape[..activation_shape.len() - 1]
+                            .iter()
+                            .try_fold(1usize, |count, value| {
+                                count.checked_mul(*value as usize).ok_or_else(|| {
+                                    BackendError::Compilation("matmul row count overflows".into())
+                                })
+                            })?;
+                        (count, rows)
+                    } else {
+                        (m, m_dim)
+                    };
                     // For non-quantized matmul, pass fusion params (has_bias, activation_type)
                     // Quantized kernels keep the original [M, K, N] params
                     let (params, param_dims) = if kernel_name == "matmul" {
@@ -3056,6 +3079,15 @@ impl Backend for CpuBackend {
                             ))
                         })?;
                     let input_dims = input_node.output_type.shape.clone();
+                    for dimension in &input_dims {
+                        if let DimExpr::Known(value) = dimension {
+                            if (*value as f32) as u64 != *value {
+                                return Err(BackendError::Compilation(format!(
+                                    "shape node {node_id} dimension {value} is not exactly representable as f32"
+                                )));
+                            }
+                        }
+                    }
                     let byte_len = input_dims.len().checked_mul(4).ok_or_else(|| {
                         BackendError::Compilation(format!(
                             "shape node {node_id} output size overflows"

@@ -325,7 +325,37 @@ impl MemoryPlan {
                     if lhs.len() < 2 || rhs.len() < 2 {
                         return Err(format!("matmul node {node_id} requires rank-two inputs"));
                     }
-                    let m = to_usize(lhs[lhs.len() - 2], "matmul M")?;
+                    let specialized_projection = node
+                        .inputs
+                        .get(1)
+                        .and_then(|id| graph.get_node(*id))
+                        .is_some_and(|weight| {
+                            weight.output_type.dtype() != crate::ir::IrDType::F32
+                        })
+                        || matches!(
+                            node.attrs.get("fused_op").map(String::as_str),
+                            Some(
+                                "MatMulAddRelu"
+                                    | "MatMulAddGelu"
+                                    | "MatMulAddSilu"
+                                    | "OpRelu"
+                                    | "OpGelu"
+                                    | "OpSilu"
+                            )
+                        );
+                    let m = if specialized_projection {
+                        lhs[..lhs.len() - 1]
+                            .iter()
+                            .try_fold(1usize, |count, value| {
+                                count
+                                    .checked_mul(to_usize(*value, "matmul row extent")?)
+                                    .ok_or_else(|| {
+                                        format!("matmul node {node_id} row count overflows")
+                                    })
+                            })?
+                    } else {
+                        to_usize(lhs[lhs.len() - 2], "matmul M")?
+                    };
                     let k = to_usize(lhs[lhs.len() - 1], "matmul K")?;
                     let rhs_k = to_usize(rhs[rhs.len() - 2], "matmul rhs K")?;
                     let n = to_usize(rhs[rhs.len() - 1], "matmul N")?;
