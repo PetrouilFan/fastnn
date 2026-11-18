@@ -1409,10 +1409,6 @@ pub mod executor;
 /// CPU backend implementation (inline f32 kernels)
 pub mod cpu;
 
-/// Wgpu (GPU) backend implementation (WGSL compute shaders)
-#[cfg(feature = "gpu")]
-pub mod wgpu;
-
 /// Prepared executable plan for AOT inference compilation.
 pub mod prepared;
 

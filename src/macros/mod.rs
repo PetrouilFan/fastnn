@@ -13,5 +13,3 @@ pub mod optim; // impl_optim!, base_optimizer macros
 pub mod python_bindings; // impl_py_optim!
 #[macro_use]
 pub mod nn_common; // impl_norm!, impl_pooling!
-#[macro_use]
-pub mod wgpu; // dispatch_gpu_compute!, build_pipeline!

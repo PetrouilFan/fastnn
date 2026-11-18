@@ -110,7 +110,7 @@ use std::arch::x86_64::{
 macro_rules! impl_inplace_binary_op {
     ($fn_name:ident, $immutable_fn:ident, $simd_intrin:ident, $assign_op:tt, $binop:tt) => {
         pub fn $fn_name(&mut self, other: &Tensor) -> &mut Self {
-            if self.inner.is_gpu() || other.inner.is_gpu() || !self.is_contiguous() || self.inner.dtype != DType::F32 || other.inner.dtype != DType::F32 {
+            if !self.is_contiguous() || self.inner.dtype != DType::F32 || other.inner.dtype != DType::F32 {
                 let result = (self as &Tensor).$immutable_fn(other);
                 *self = result;
                 return self;
@@ -349,11 +349,7 @@ impl Tensor {
             {
                 let inner = Arc::make_mut(&mut output.inner);
                 let storage = Arc::make_mut(&mut inner.storage);
-                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-                let Storage::Cpu(cpu_storage) = storage
-                else {
-                    unreachable!("add fast path only runs when both tensors are on CPU")
-                };
+                let Storage::Cpu(cpu_storage) = storage;
                 let out_data = Arc::make_mut(&mut cpu_storage.data);
                 let a_ptr = self.data_ptr_f32();
                 let b_ptr = other.data_ptr_f32();
@@ -421,7 +417,7 @@ impl Tensor {
     /// In-place scalar multiplication: self *= scalar
     /// Avoids allocating a scalar tensor for optimizer hot paths.
     pub fn mul_scalar_(&mut self, scalar: f32) -> &mut Self {
-        if self.inner.is_gpu() || self.inner.dtype != DType::F32 {
+        if self.inner.dtype != DType::F32 {
             let scalar_t = Tensor::from_scalar(scalar);
             let result = (self as &Tensor).mul(&scalar_t);
             *self = result;
@@ -472,7 +468,7 @@ impl Tensor {
 
     /// In-place scalar addition: self += scalar
     pub fn add_scalar_(&mut self, scalar: f32) -> &mut Self {
-        if self.inner.is_gpu() || self.inner.dtype != DType::F32 {
+        if self.inner.dtype != DType::F32 {
             let scalar_t = Tensor::from_scalar(scalar);
             let result = (self as &Tensor).add(&scalar_t);
             *self = result;

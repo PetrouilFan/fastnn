@@ -102,10 +102,6 @@ impl PyTensor {
     }
 
     fn item(&self) -> PyResult<f32> {
-        #[cfg(feature = "gpu")]
-        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return self.inner.try_to_cpu()?.item().map_err(Into::into);
-        }
         self.inner.item().map_err(Into::into)
     }
 
@@ -155,8 +151,6 @@ impl PyTensor {
     fn __dlpack_device__(&self) -> (i32, i32) {
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
-            #[cfg(feature = "gpu")]
-            crate::storage::Device::Wgpu(device_id) => (2, device_id as i32),
         }
     }
 
@@ -488,14 +482,6 @@ impl PyTensor {
     fn __setitem__(&mut self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         use pyo3::types::PySlice;
 
-        // Ensure the tensor is on CPU
-        #[cfg(feature = "gpu")]
-        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "__setitem__ does not support GPU tensors; call .cpu() first",
-            ));
-        }
-
         let shape = self.inner.shape();
         if shape.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -576,11 +562,6 @@ impl PyTensor {
 
     fn cpu(&self) -> PyResult<PyTensor> {
         Ok(PyTensor::from_tensor(self.inner.try_to_cpu()?))
-    }
-
-    #[cfg(feature = "gpu")]
-    fn to_gpu(&self, device_id: usize) -> PyResult<PyTensor> {
-        Ok(PyTensor::from_tensor(self.inner.try_to_gpu(device_id)?))
     }
 
     fn contiguous(&self) -> PyResult<PyTensor> {

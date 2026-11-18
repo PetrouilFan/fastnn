@@ -1,14 +1,8 @@
 // Tensor factory/constructor methods
 
-#[cfg(feature = "gpu")]
-use crate::backend::wgpu::context::get_wgpu_context;
-#[cfg(feature = "gpu")]
-use crate::storage::GpuStorage;
 use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 use crate::{FastnnError, FastnnResult};
-#[cfg(feature = "gpu")]
-use parking_lot::RwLock;
 use smallvec::smallvec;
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI8, AtomicU64};
@@ -74,11 +68,7 @@ impl Tensor {
     pub fn from_scalar(value: f32) -> Self {
         let mut storage = get_storage_pool().acquire_uninit(4, Device::Cpu);
         let storage_mut = Arc::make_mut(&mut storage);
-        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-        let Storage::Cpu(cpu_storage) = storage_mut
-        else {
-            panic!("Expected CPU storage");
-        };
+        let Storage::Cpu(cpu_storage) = storage_mut;
         let data = Arc::make_mut(&mut cpu_storage.data);
         let ptr = data.as_mut_ptr() as *mut f32;
         // SAFETY: The pointer `ptr` is derived from a uniquely owned `Vec<u8>` via
@@ -105,12 +95,7 @@ impl Tensor {
             )));
         }
         let mut storage = get_storage_pool().acquire_uninit(nbytes, Device::Cpu);
-        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-        let Storage::Cpu(cpu) = Arc::make_mut(&mut storage) else {
-            return Err(FastnnError::device(
-                "CPU storage pool returned non-CPU storage",
-            ));
-        };
+        let Storage::Cpu(cpu) = Arc::make_mut(&mut storage);
         let data = Arc::make_mut(&mut cpu.data);
         // Copy bytes so empty storage does not require an f32-aligned pointer.
         data.copy_from_slice(bytemuck::cast_slice(&values));
@@ -139,25 +124,9 @@ impl Tensor {
                 values.len()
             )));
         }
+        let _ = _nbytes;
         match device {
             Device::Cpu => Self::try_from_vec(values, sizes.into_vec()),
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => {
-                let ctx = get_wgpu_context(device_id);
-                let buffer = ctx.create_gpu_buffer_from_data(&values, "from_vec");
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes: _nbytes,
-                    device_id,
-                    staging: RwLock::new(None),
-                }));
-                Ok(Tensor::new(TensorImpl::try_new_with_device(
-                    storage,
-                    sizes,
-                    device,
-                    DType::F32,
-                )?))
-            }
         }
     }
 
@@ -171,23 +140,10 @@ impl Tensor {
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_zeroed(nbytes, device),
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => {
-                let ctx = get_wgpu_context(device_id);
-                let buffer = ctx.create_buffer(nbytes, "zeros");
-                Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes,
-                    device_id,
-                    staging: RwLock::new(None),
-                }))
-            }
         };
 
         let inner = match device {
             Device::Cpu => TensorImpl::try_new(storage, sizes, dtype)?,
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => TensorImpl::try_new_with_device(storage, sizes, device, dtype)?,
         };
         Ok(Tensor::new(inner))
     }
@@ -202,23 +158,10 @@ impl Tensor {
 
         let storage = match device {
             Device::Cpu => get_storage_pool().acquire_uninit(nbytes, device),
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => {
-                let ctx = get_wgpu_context(device_id);
-                let buffer = ctx.create_buffer(nbytes, "empty");
-                Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes,
-                    device_id,
-                    staging: RwLock::new(None),
-                }))
-            }
         };
 
         let inner = match device {
             Device::Cpu => TensorImpl::try_new(storage, sizes, dtype)?,
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => TensorImpl::try_new_with_device(storage, sizes, device, dtype)?,
         };
         Ok(Tensor::new(inner))
     }
@@ -247,11 +190,7 @@ impl Tensor {
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
-                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-                let Storage::Cpu(cpu_storage) = inner
-                else {
-                    panic!("Expected CPU storage for ones()");
-                };
+                let Storage::Cpu(cpu_storage) = inner;
                 let data = Arc::make_mut(&mut cpu_storage.data);
                 match dtype {
                     DType::F32 => {
@@ -325,11 +264,6 @@ impl Tensor {
                     contiguous_cache: AtomicI8::new(1),
                 })
             }
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => {
-                let cpu_ones = Self::ones(shape.clone(), dtype, Device::Cpu);
-                cpu_ones.to_gpu(device_id)
-            }
         }
     }
 
@@ -366,11 +300,7 @@ impl Tensor {
 
                 let mut storage = get_storage_pool().acquire_uninit(nbytes, device);
                 let inner = Arc::make_mut(&mut storage);
-                #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-                let Storage::Cpu(cpu_storage) = inner
-                else {
-                    panic!("Expected CPU storage for full()");
-                };
+                let Storage::Cpu(cpu_storage) = inner;
                 let data = Arc::make_mut(&mut cpu_storage.data);
                 match dtype {
                     DType::F32 => {
@@ -430,33 +360,6 @@ impl Tensor {
                         panic!("full() does not support packed U4/U8 dtypes. Use zeros() or from_vec() with packed data.");
                     }
                 }
-                let strides = compute_strides(&sizes);
-                Tensor::new(TensorImpl {
-                    storage,
-                    sizes,
-                    strides,
-                    storage_offset: 0,
-                    dtype,
-                    device,
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
-                    requires_grad: false,
-                    contiguous_cache: AtomicI8::new(1),
-                })
-            }
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => {
-                let sizes: SmallVec<[i64; 8]> = shape.into();
-                let numel: i64 = sizes.iter().product();
-                let ctx = get_wgpu_context(device_id);
-                let data = vec![value; numel as usize];
-                let buffer = ctx.create_gpu_buffer_from_data(&data, "full");
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes: numel as usize * 4,
-                    device_id,
-                    staging: RwLock::new(None),
-                }));
                 let strides = compute_strides(&sizes);
                 Tensor::new(TensorImpl {
                     storage,

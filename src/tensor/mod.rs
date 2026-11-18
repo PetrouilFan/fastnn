@@ -295,10 +295,6 @@ impl TensorImpl {
                 // and the pointer lifetime remains tied to the borrowed tensor storage.
                 Ok(unsafe { cpu.data.as_ref().as_ptr().add(byte_offset) })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot get a CPU pointer from GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -377,10 +373,6 @@ impl TensorImpl {
                 // `&mut self` and `Arc::make_mut` establish exclusive backing access.
                 Ok(unsafe { data.as_mut_ptr().add(byte_offset) })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot get a mutable CPU pointer from GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -433,10 +425,6 @@ impl TensorImpl {
                     FastnnError::Internal(format!("CPU storage cannot be viewed as F32: {error}"))
                 })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot slice GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -494,10 +482,6 @@ impl TensorImpl {
                     ))
                 })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot mutably slice GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 }
@@ -607,12 +591,6 @@ impl Tensor {
 
         let ptr = match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                return Err(FastnnError::device(
-                    "item() requires CPU storage; transfer the tensor to CPU first",
-                ));
-            }
         };
         Ok(match self.inner.dtype {
             DType::F32 => {
@@ -823,12 +801,6 @@ impl Tensor {
                     }
                 }
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                return Err(FastnnError::device(
-                    "to_numpy() requires CPU storage; transfer the tensor to CPU first",
-                ));
-            }
         })
     }
 
@@ -921,10 +893,6 @@ impl Tensor {
                 }
                 Ok(&cpu.data[start..end])
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot slice GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 

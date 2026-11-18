@@ -72,7 +72,6 @@ from fastnn.tensor import (  # noqa: E402
     zeros, ones, full, eye, arange, linspace,
     rand, randn, randint, zeros_like, ones_like, full_like, _flatten,
 )
-from fastnn.parallel import DataParallel  # noqa: E402
 from fastnn.optimizers import (  # noqa: E402
     SGD, Adam, AdamW, Muon, Lion, RMSprop,
     clip_grad_norm_, clip_grad_value_,
@@ -265,7 +264,6 @@ __all__ = [
     "LearningRateScheduler",
     "CSVLogger",
     # Parallel
-    "DataParallel",
     # Models
     "models",
     # Exception hierarchy

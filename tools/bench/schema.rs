@@ -260,7 +260,7 @@ impl SampleBlock {
 pub struct DeviceTime {
     pub status: MetricStatus,
     pub reason: Option<String>,
-    /// Identifier of the reporting backend, e.g. `wgpu-timestamp-query`.
+    /// Identifier of the reporting backend, e.g. `vulkan-timestamp-query`.
     pub source: Option<String>,
     pub samples: Vec<f64>,
     pub stats: Option<crate::stats::Stats>,

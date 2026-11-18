@@ -43,21 +43,6 @@ macro_rules! impl_nn_module {
     };
 }
 
-macro_rules! impl_nn_module_with_gpu {
-    ($struct_name:ident { $($methods:tt)* }) => {
-        impl_nn_module!($struct_name {
-            #[cfg(feature = "gpu")]
-            #[pyo3(signature = (device_id))]
-            #[allow(clippy::wrong_self_convention)]
-            fn to_gpu(&mut self, device_id: usize) {
-                self.inner.weight = self.inner.weight.to_gpu(device_id);
-                self.inner.bias = self.inner.bias.as_ref().map(|b| b.to_gpu(device_id));
-            }
-
-            $($methods)*
-        });
-    };
-}
 
 macro_rules! impl_fused_conv_bn {
     ($name:ident, $inner_type:ty) => {
@@ -204,7 +189,7 @@ struct Linear {
     inner: core_nn::linear::Linear,
 }
 
-impl_nn_module_with_gpu!(Linear {
+impl_nn_module!(Linear {
     #[new]
     #[pyo3(signature = (in_features, out_features, bias = true))]
     fn new(in_features: i64, out_features: i64, bias: bool) -> Self {
@@ -243,7 +228,7 @@ struct Conv2d {
     inner: core_nn::conv::Conv2d,
 }
 
-impl_nn_module_with_gpu!(Conv2d {
+impl_nn_module!(Conv2d {
     #[new]
     #[pyo3(signature = (in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=true))]
     #[allow(clippy::too_many_arguments)]

@@ -43,7 +43,7 @@ def _to_scalar(value: Union[int, Tuple[int, int]], name: str) -> int:
 class _BaseModule(Module):
     """Base class for modules with common layer iteration logic."""
     __slots__ = ('_param_layers', '_zero_grad_layers', '_train_layers', 
-                 '_eval_layers', '_gpu_layers', '_named_param_pairs')
+                 '_eval_layers', '_named_param_pairs')
     
     def __init__(self):
         super().__init__()
@@ -51,7 +51,6 @@ class _BaseModule(Module):
         self._zero_grad_layers = []
         self._train_layers = []
         self._eval_layers = []
-        self._gpu_layers = []
         self._named_param_pairs = []
     
     def _register_layer(self, layer: Any, name: Optional[str] = None) -> None:
@@ -62,7 +61,6 @@ class _BaseModule(Module):
             mask |= (1 << 1) if hasattr(layer, "zero_grad") else 0
             mask |= (1 << 2) if hasattr(layer, "train_mode") else 0
             mask |= (1 << 3) if hasattr(layer, "eval_mode") else 0
-            mask |= (1 << 4) if hasattr(layer, "to_gpu") else 0
             # Cache the mask on the layer object (may fail for slotted classes like
             # Rust PyO3 types — that's fine; we'll recompute on next call via getattr).
             try:
@@ -78,8 +76,6 @@ class _BaseModule(Module):
             self._train_layers.append(layer)
         if mask & (1 << 3):
             self._eval_layers.append(layer)
-        if mask & (1 << 4):
-            self._gpu_layers.append(layer)
         if name and (mask & (1 << 0)) and hasattr(layer, "named_parameters"):
             self._named_param_pairs.append((name, layer))
     
@@ -121,10 +117,6 @@ class _BaseModule(Module):
     
     def eval(self) -> None:
         self.eval_mode()
-    
-    def to_gpu(self, device_id: int) -> None:
-        for layer in self._gpu_layers:
-            layer.to_gpu(device_id)
     
     def state_dict(self) -> Dict[str, Any]:
         result = {}

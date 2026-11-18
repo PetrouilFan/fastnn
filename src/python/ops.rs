@@ -817,15 +817,7 @@ fn im2col(
     dilation: i64,
 ) -> PyResult<PyTensor> {
     // Ensure the tensor is on CPU before accessing raw data pointer
-    let x_cpu = {
-        #[cfg(feature = "gpu")]
-        if matches!(x.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "im2col does not support GPU tensors; call .cpu() first",
-            ));
-        }
-        x.inner.clone()
-    };
+    let x_cpu = x.inner.clone();
     let shape = x_cpu.shape();
     if shape.len() != 4 {
         return Err(pyo3::exceptions::PyValueError::new_err(

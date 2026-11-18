@@ -78,7 +78,7 @@ def set_default_device(device: str):
     """Set the default device for tensor creation.
 
     Args:
-        device: Device string, e.g., "cpu", "gpu", "wgpu", "gpu:0"
+        device: Device string, e.g., "cpu"
     """
     _core._set_default_device(device)
 

@@ -126,12 +126,6 @@ impl TensorImpl {
         data.resize(nbytes, 0u8);
         let (src_ptr, source_len) = match self.storage.as_ref() {
             Storage::Cpu(cpu) => (cpu.data.as_ref().as_ptr(), cpu.data.len()),
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                return Err(FastnnError::device(
-                    "contiguous conversion requires CPU storage",
-                ));
-            }
         };
         let strides = &self.strides;
         let sizes = &self.sizes;

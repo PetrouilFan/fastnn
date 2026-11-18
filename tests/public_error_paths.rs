@@ -551,9 +551,6 @@ fn invalid_device_transfers_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
     let cpu = values.try_to_device(Device::Cpu).unwrap();
     assert_eq!(cpu.device(), Device::Cpu);
-
-    #[cfg(feature = "gpu")]
-    assert!(values.try_to_gpu(usize::MAX).is_err());
 }
 
 #[test]
