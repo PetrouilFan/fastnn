@@ -108,7 +108,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #54 | Model import | verified (integrated `5a055e1`) | `fn3/54-onnx-import-b` | `fastnn-wt-54b-import` | `27fc60d` | done; 27 import tests on the real model, 265 fn3 nodes, exact inventory |
 | #57 | Vulkan dispatch | verified (integrated `b3db105`) | `fn3/57-vulkan-dispatch` | `fastnn-wt-57-vulkan` | `cfea81b` | done; unblocks #59/#60/#61 |
 | #55 | Model format | verified (integrated `e3ac3e4`) | `fn3/55-model-format` | `fastnn-wt-55-model-format` | `456f3a3` | done; 38 format tests, 665 lib |
-| #56 | Planner | in progress | `fn3/56-planner` | `fastnn-wt-56-planner` | `456f3a3` | specialisation + bounded plans |
+| #56 | Planner | verified (integrated `b9a0de6`) | `fn3/56-planner` | `fastnn-wt-56-planner` | `456f3a3` | done; 11 planner tests, CPU prefill parity 5.96e-7 |
 | #59 | GPU pointwise | verified (integrated `3671a3c`) | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | done; 18 tests, byte-exact on 4 op families |
 | #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
 | #61 | GPU attention | verified (integrated `117e51a`) | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | done; `MaskedAttention` now Full, 19 tests, 0/0 validation |
@@ -185,7 +185,7 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #57 | Vulkan dispatch | ready | — | — | — | after #48, #51, #52 |
 | #58 | Session runtime | ready | — | — | — | after #48, #52, #53, #56 |
 | #55 | Model format | verified (integrated `e3ac3e4`) | `fn3/55-model-format` | `fastnn-wt-55-model-format` | `456f3a3` | done; 38 format tests, 665 lib |
-| #56 | Planner | in progress | `fn3/56-planner` | `fastnn-wt-56-planner` | `456f3a3` | specialisation + bounded plans |
+| #56 | Planner | verified (integrated `b9a0de6`) | `fn3/56-planner` | `fastnn-wt-56-planner` | `456f3a3` | done; 11 planner tests, CPU prefill parity 5.96e-7 |
 | #59 | GPU pointwise | ready | — | — | — | after #49, #53, #57 |
 | #60 | GPU matmul | ready | — | — | — | after #49, #53, #57 |
 | #61 | GPU attention | ready | — | — | — | after #49, #53, #57 |
@@ -253,6 +253,7 @@ matrix, and clean install verification.
 | `5a055e1` | #54 | strict ONNX import merged (`56852ca`) | 27 import tests on the pinned 27,897,974-byte model, 43 contracts, 637 lib; 9001 insertions, one shared line |
 | `456f3a3` | #54 fix | `model::weights` declared instead of reached into by `#[path]` | 27 import tests with the model present |
 | `e3ac3e4` | #55 | versioned prepared-model artifact merged (`48e4d46`) | 38 format tests, 27 import, 665 lib, fmt; pinned model round-trips byte-identically |
+| `b9a0de6` | #56 | bounded planner + specialisation merged (`4deca05`) | 11 planner tests, 43 contracts, 43 reference, 38 format, 27 import, 677 lib, vulkan build; CPU prefill parity 5.96e-7 |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
 | `4771083` | #46 | ledger: whole-tree gate run after #60/#61 | n/a |
@@ -345,7 +346,7 @@ Known non-blocking debt, both owned by #67:
 
 | Gate | State |
 |---|---|
-| CPU prefill + cached decode on the pinned tiny model, parity to the #49 fixtures | open — needs #56 + #58 |
+| CPU prefill on the pinned tiny model, parity to the #49 fixtures | **proven for prefill** (#56): `prefill.p1` max_abs 5.96e-7 / mean 9.77e-8, `prefill.p4.last` 5.16e-7 / 7.90e-8, argmax matches (tol 1e-5 / 2.5e-6). Cached decode still needs #58. |
 | Named physical Vulkan device, real execution | platform proven (#57); model path open — needs #59/#60/#61 + #62 |
 | Cache bounds and session isolation | open — needs #58 |
 | Residency record proves no silent CPU execution | proven for Add (#57) and MatMul (#60); full-model assertion is #62 |
@@ -381,6 +382,24 @@ Known non-blocking debt, both owned by #67:
   positions, epsilon 1e-5. A non-decoder graph, a non-`{past_key_values,
   present, logits}` interface, opset outside 13..=17 or external tensor data
   fails with a named error.
+- **The plan is bounded before it runs, and it has an identity.** `PlanBound`
+  is derived from the envelope corners; every plan must be admitted by it
+  (210 slots, 144 instructions, 28,507,141 peak bytes for the pinned model at
+  envelope `batch[1,1] seq[1,13] past[0,17]`), so a session cannot grow past
+  what was declared. `PlanId` is FNV-1a-128 over envelope, dims, slots,
+  constant bytes, instructions and parameter bits — no map iteration, no
+  addresses — so identical inputs give an identical id and a plan can be
+  cached or shared.
+- **Integer shape arithmetic is folded at plan time.** This is the constraint
+  #54 identified. Folding is pinned twice: by node index, and by the content
+  of the constants that depend on it (`[seq, total-seq]` and the 16-element
+  causal mask). A surviving integer arithmetic op is refused by name, and f32
+  is never folded, so there is exactly one numerical path.
+- **`PlanAttr` is the only writer of `OpParams`.** `OpParams` is core-owned and
+  still untyped; the fused-attention causal flag is isolated to two lines
+  behind `PlanAttr`, which round-trips every variant in a unit test. The
+  `OpAttributes` enum that should replace the encoding is specified in
+  `docs/reports/fn3-10-planner.md` §7.2 for #48 to adopt.
 - **The artifact stores the graph, not a specialised plan.** A plan is a
   function of graph + envelope + device, so caching one in a shareable file
   would bind the file to a device. `PreparedArtifact` therefore carries the
