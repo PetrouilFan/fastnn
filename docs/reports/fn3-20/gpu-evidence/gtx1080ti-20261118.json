@@ -3,7 +3,7 @@
   "kind": "fastnn-gpu-evidence",
   "lane": "gpu-physical",
   "ci_only": false,
-  "generated_utc": "2026-11-18T11:31:33Z",
+  "generated_utc": "2026-11-18T12:33:51Z",
   "host": {
     "hostname": "pixelbeast",
     "os": "Linux-7.2.14-arch1-1-x86_64-with-glibc2.44",
@@ -11,9 +11,9 @@
     "python": "3.14.9"
   },
   "git": {
-    "branch": "fn3/66-ci",
-    "head": "93fe6074cd7ccad152f6c02072aa19f0b2dcb36d",
-    "dirty": false
+    "branch": "rewrite/fastnn-3",
+    "head": "af1115c76b2a686c7ecfa9b0f0812dd76fa8b4fe",
+    "dirty": true
   },
   "device": {
     "kind": "physical",
@@ -33,9 +33,9 @@
     "enabled": true,
     "layer": "VK_LAYER_KHRONOS_validation",
     "errors": 0,
-    "warnings": 2,
+    "warnings": 0,
     "result": "clean",
-    "source": "spike/vk-bringup auxiliary run (NOT fastnn backend evidence)"
+    "source": "fastnn_vulkan_smoke"
   },
   "checks": [
     {
@@ -45,36 +45,56 @@
     },
     {
       "name": "fastnn_vulkan_smoke",
-      "status": "not_run",
-      "detail": "Vulkan backend not yet implemented (FN3-11 / #57): Cargo.toml declares no 'vulkan' feature; tests/fn3_vulkan_smoke.rs does not exist"
-    },
-    {
-      "name": "auxiliary_spike_bringup",
       "status": "passed",
-      "detail": "raw Vulkan loader/compute/validation bring-up; proves nothing about the fastnn backend"
+      "detail": "exit 0, validation errors 0, warnings 0",
+      "reproduce": "FN3_VK_REQUIRE_PHYSICAL=1 FN3_VK_DEVICE_UUID=471b2bda-51e1-6451-e692-ff5d1e146f1e cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture",
+      "output_tail": [
+        "[fn3vk][validation][INFO] Loader Message(0) (general) vkCreateDevice layer callstack setup to:",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)    <Application>",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)      ||",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)    <Loader>",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)      ||",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)    VK_LAYER_KHRONOS_validation",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)            Type: Explicit",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)            Enabled By: By the Application",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)            Manifest: /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)            Library:  /usr/lib/libVkLayer_khronos_validation.so",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)      ||",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)    <Device>",
+        "[fn3vk][validation][INFO] Loader Message(0) (general)        Using \"NVIDIA GeForce GTX 1080 Ti\" with driver: \"/usr/lib/libGLX_nvidia.so.580.196.07\"",
+        "[fn3vk] registered kernel \"smoke.add.f32\" (local_size=[64, 1, 1], 3 binding(s), 4 push-constant bytes, shape: two contiguous same-shape f32 inputs, one contiguous f32 output of that shape)",
+        "[fn3vk] backend=vulkan adapter=\"NVIDIA GeForce GTX 1080 Ti\" type=DISCRETE_GPU uuid=471b2bda-51e1-6451-e692-ff5d1e146f1e api=1.4.312 driver=580.196.7.0 queue_family=2 validation=true software=false maxMemoryAllocationSize=4292870144 maxStorageBufferRange=4294967295 chunk_cap=536870912",
+        "[fn3vk][test] device=\"NVIDIA GeForce GTX 1080 Ti\" uuid=471b2bda-51e1-6451-e692-ff5d1e146f1e api=1.4.312 driver=580.196.7.0 queue_family=2 validation=true",
+        "[fn3vk][proof] op=add count=100003 workgroups=[1563, 1, 1] submissions=1 gpu_ns=Some(107104) gpu_ticks=Some((1795005231933805984, 1795005231933913088)) host_ns=173671 max_abs_error=0 exact=100003/100003 chunks=2 reserved=83886080 live=12582912 peak_live=13782960 allocations=6",
+        "ok",
+        "",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s"
+      ]
     }
   ],
   "timings": {
-    "device_probe_seconds": 0.65,
-    "auxiliary_spike_seconds": 0.194,
-    "total_seconds": 0.86
+    "device_probe_seconds": 0.612,
+    "fastnn_vulkan_smoke_seconds": 0.635,
+    "auxiliary_spike_seconds": 0.178,
+    "total_seconds": 1.435
   },
   "result": {
-    "status": "not_verified",
-    "reason": "Vulkan backend not yet implemented (FN3-11 / #57): Cargo.toml declares no 'vulkan' feature; tests/fn3_vulkan_smoke.rs does not exist"
+    "status": "passed",
+    "reason": "fastnn Vulkan smoke passed on the named physical device with validation enabled"
   },
   "commands": [
-    "vulkaninfo -j"
+    "vulkaninfo -j",
+    "FN3_VK_REQUIRE_PHYSICAL=1 FN3_VK_DEVICE_UUID=471b2bda-51e1-6451-e692-ff5d1e146f1e cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
   ],
   "auxiliary": {
     "spike_vk_bringup": {
       "status": "passed",
       "reason": "raw Vulkan bring-up only; NOT fastnn backend evidence",
-      "command": "/home/petrouil/Projects/github/fastnn-wt-66-ci/spike/vk-bringup/target/release/vk-bringup --device-uuid 471b2bda-51e1-6451-e692-ff5d1e146f1e --validation",
+      "command": "/home/petrouil/Projects/github/fastnn-wt-integrate/spike/vk-bringup/target/release/vk-bringup --device-uuid 471b2bda-51e1-6451-e692-ff5d1e146f1e --validation",
       "exit_code": 0,
       "validation_errors": 0,
       "validation_warnings": 2,
-      "seconds": 0.194,
+      "seconds": 0.178,
       "output_tail": [
         "  device_memory: created=6 destroyed=6 bytes_allocated=8388736 bytes_freed=8388736",
         "  fence: created=1 destroyed=1",

@@ -45,11 +45,41 @@ fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// True when this process must produce a real device result rather than skip.
+///
+/// `tools/ci/gpu_evidence.py` sets this: a record that names a physical device
+/// must have been produced by a run that actually used one, so an incapable
+/// host has to fail rather than quietly skip into a green suite.
+fn require_physical() -> bool {
+    std::env::var("FN3_VK_REQUIRE_PHYSICAL").as_deref() == Ok("1")
+}
+
+/// The adapter UUID the caller pinned, if any.
+///
+/// Selection is by UUID and never by index: the loader enumerates a software
+/// ICD alongside the real GPU, so index 0 is not stable across machines.
+fn pinned_uuid() -> Option<String> {
+    let value = std::env::var("FN3_VK_DEVICE_UUID").ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
+}
+
 /// The first adapter that is a real (non-software) GPU with a compute queue.
+///
+/// When `FN3_VK_DEVICE_UUID` is set, only that device is eligible, so the run
+/// and the evidence record always name the same physical device.
 fn physical_adapter() -> Option<u32> {
+    let pinned = pinned_uuid();
     adapters()
         .iter()
-        .find(|adapter| adapter.has_compute_queue() && !adapter.is_software())
+        .find(|adapter| {
+            adapter.has_compute_queue()
+                && !adapter.is_software()
+                && pinned
+                    .as_deref()
+                    .map(|uuid| adapter.uuid_string().eq_ignore_ascii_case(uuid))
+                    .unwrap_or(true)
+        })
         .map(|adapter| adapter.index)
 }
 
@@ -72,13 +102,29 @@ fn open_backend(index: u32, config: VulkanConfig) -> Option<Arc<VulkanBackend>> 
 
 fn open_physical() -> Option<Arc<VulkanBackend>> {
     let Some(index) = physical_adapter() else {
+        if require_physical() {
+            panic!(
+                "FN3_VK_REQUIRE_PHYSICAL=1 but no physical Vulkan device with a compute queue is \
+                 present{}, so this run cannot produce physical-GPU evidence",
+                match pinned_uuid() {
+                    Some(uuid) => format!(" (pinned uuid {uuid})"),
+                    None => String::new(),
+                }
+            );
+        }
         eprintln!(
             "[fn3vk][skip] no physical Vulkan device with a compute queue is present; \
              run the lavapipe lane with FN3_VK_TEST_SOFTWARE=1 for software evidence"
         );
         return None;
     };
-    let backend = open_backend(index, VulkanConfig::validated())?;
+    let backend = match open_backend(index, VulkanConfig::validated()) {
+        Some(backend) => backend,
+        None if require_physical() => {
+            panic!("FN3_VK_REQUIRE_PHYSICAL=1 but adapter {index} could not be opened")
+        }
+        None => return None,
+    };
     let adapter = backend.adapter();
     eprintln!(
         "[fn3vk][test] device=\"{}\" uuid={} api={} driver={} queue_family={} validation={}",

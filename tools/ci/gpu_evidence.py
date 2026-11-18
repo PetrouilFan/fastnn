@@ -294,7 +294,6 @@ def collect(args: argparse.Namespace) -> int:
     smoke_test = ROOT / "tests" / "fn3_vulkan_smoke.rs"
     if feature_declared and smoke_test.exists():
         env = {
-            "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
             "FN3_VK_REQUIRE_PHYSICAL": "1",
             "FN3_VK_DEVICE_UUID": device["uuid"],
         }
@@ -314,14 +313,21 @@ def collect(args: argparse.Namespace) -> int:
         run = _run(command, env=env, timeout=args.timeout_seconds)
         seconds = time.monotonic() - step
         errors, warnings = _count_validation(run.stdout)
-        commands.append("VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation " + " ".join(command))
+        # Validation is enabled in code (VulkanConfig::validated) and asserted by
+        # the smoke test. Forcing VK_INSTANCE_LAYERS here would duplicate the
+        # layer and make the loader emit 'env var VK_INSTANCE_LAYERS defined'
+        # warnings, which the teardown test's zero-delta guard counts as a leak.
+        # The two FN3_VK_* variables make the run demand the record's device.
+        commands.append(
+            f"FN3_VK_REQUIRE_PHYSICAL=1 FN3_VK_DEVICE_UUID={device['uuid']} " + " ".join(command)
+        )
         smoke_passed = run.returncode == 0 and errors == 0
         checks.append(
             {
                 "name": "fastnn_vulkan_smoke",
                 "status": "passed" if smoke_passed else "failed",
                 "detail": f"exit {run.returncode}, validation errors {errors}, warnings {warnings}",
-                "reproduce": " ".join(command),
+                "reproduce": commands[-1],
                 "output_tail": run.stdout.strip().splitlines()[-20:],
             }
         )
