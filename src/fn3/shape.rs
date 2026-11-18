@@ -534,7 +534,15 @@ impl Strides {
     }
 
     fn check_no_overlap(&self, shape: &Shape, allow_zero_strides: bool) -> Result<(), Fn3Error> {
+        // An axis of extent 1 addresses only coordinate 0, so it can never
+        // overlap another axis and must not grow the covered element count.
+        // Counting it made a contiguous axis look overlapping with a preceding
+        // equal-stride axis: `[2, 1, 4, 4]` has default strides `[16, 16, 4, 1]`,
+        // and axis 1 would be rejected against a coverage of 32 contributed by
+        // axis 0. Extent-1 axes are ubiquitous in transformer shapes (`[N, 1]`,
+        // `[2, 1, 4, 4]`, `[1, 3, 1]`), so this is not an edge case.
         let mut axes: Vec<usize> = (0..self.rank())
+            .filter(|&axis| shape.dims()[axis] != 1)
             .filter(|&axis| !(allow_zero_strides && self.strides[axis] == 0))
             .collect();
         axes.sort_by_key(|&axis| self.strides[axis]);

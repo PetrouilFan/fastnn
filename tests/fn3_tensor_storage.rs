@@ -992,3 +992,58 @@ fn empty_tensors_report_zero_everywhere_and_iterate_zero_times() {
     assert!(empty.is_contiguous(&Strides::from_elements(vec![i64::MAX, 1])));
     assert_eq!(Shape::from_dims([0, 3, u64::MAX]).numel(), Ok(0));
 }
+
+/// An axis of extent 1 addresses only coordinate 0, so it cannot overlap any
+/// other axis. Regression: `check_no_overlap` used to multiply the covered
+/// element count by every axis extent, including extent-1 axes, which made a
+/// contiguous shape look overlapping whenever a preceding equal-stride axis
+/// existed. `[2, 1, 4, 4]` (the canonical `[batch, 1, seq, seq]` attention mask)
+/// has default strides `[16, 16, 4, 1]`, and axis 1 was rejected against a
+/// coverage of 32 contributed by axis 0. `[N, 1]`, `[128, 1]`, `[1, 3, 1]` and
+/// `[6, 1]` failed the same way, so this blocked every singleton axis.
+#[test]
+fn extent_one_axes_never_count_as_overlap() {
+    for dims in [
+        vec![2, 1, 4, 4],
+        vec![1, 3, 1],
+        vec![6, 1],
+        vec![128, 1],
+        vec![1],
+        vec![1, 1, 1],
+        vec![4, 1, 4, 1, 4],
+        vec![2, 2, 1],
+    ] {
+        let shape = Shape::from_dims(dims.clone());
+        let strides = shape.default_strides().unwrap();
+        strides.validate_for(&shape).unwrap_or_else(|error| {
+            panic!("default strides {strides} of contiguous {shape} were rejected: {error}")
+        });
+        assert!(
+            shape.is_contiguous(&strides),
+            "{shape} should be contiguous with its default strides"
+        );
+        // The same shape must also be constructible, which is what downstream
+        // planner and attention code actually does.
+        Tensor::zeros(shape.clone(), DType::F32, cpu())
+            .unwrap_or_else(|error| panic!("could not allocate {shape}: {error}"));
+    }
+
+    // Ignoring extent-1 axes must not weaken real overlap detection: two axes
+    // that genuinely address the same elements are still rejected, with and
+    // without a singleton axis present.
+    for (dims, bad) in [
+        (vec![2, 2], vec![1, 1]),
+        (vec![2, 1, 2], vec![1, 1, 1]),
+        (vec![3, 1, 3], vec![1, 0, 1]),
+        (vec![2, 4], vec![2, 1]),
+    ] {
+        let shape = Shape::from_dims(dims);
+        let error = Strides::from_elements(bad.clone())
+            .validate_for(&shape)
+            .unwrap_err();
+        assert!(
+            matches!(error, Fn3Error::InvalidStride { .. }),
+            "strides {bad:?} of {shape} must still be rejected, got {error}"
+        );
+    }
+}
