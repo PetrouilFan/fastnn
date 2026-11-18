@@ -24,7 +24,7 @@ OptFloat = Optional[float]
 OptBool = Optional[bool]
 
 # Device type
-Device = Literal["cpu", "wgpu", "gpu", "gpu:0", "gpu:1", "gpu:2", "gpu:3"]
+Device = Literal["cpu"]
 
 __all__ = [
     "Any", "Callable", "Dict", "List", "Optional", "Sequence", "Tuple", "Union",

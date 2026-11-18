@@ -1,11 +1,11 @@
 //! The FastNN 3.0 inference core.
 //!
-//! **Status: temporary module name.** `src/fn3/` exists so the 3.0 rewrite can
-//! land in parallel with the 2.x tree without touching `src/tensor`,
-//! `src/ir` or `src/backend`. FN3-19 (#65) promotes this tree to its final
-//! top-level name and deletes the 2.x modules in one reviewed change. Until
-//! then, nothing outside `src/fn3/` may depend on it and nothing inside it may
-//! depend on 2.x modules except through the standard library.
+//! **This is the primary 3.0 API.** FN3-19 (#65) promoted `src/fn3/` from a
+//! parallel tree to the crate's main surface and deleted training and wgpu.
+//! The module keeps its `fn3` name so downstream paths, the `fastnn.fn3`
+//! Python package and the CLI stay stable for the alpha. It depends on no 2.x
+//! module, and no 2.x module depends on it; `src/lib.rs` is the only shared
+//! file.
 //!
 //! # Layout
 //!
@@ -41,10 +41,9 @@
 //!
 //! # Scope
 //!
-//! FastNN 3.0 is inference-only. There is no autograd, no optimizer, no
-//! training state and no wgpu backend here, and there will not be. The old
-//! roadmap's training/autograd/wgpu structural gates are superseded; see
-//! `docs/roadmap/fn3-architecture.md` for the supersession table.
+//! FastNN 3.0 is inference-only. There is no autograd, no optimizer and no
+//! training state here. See `docs/roadmap/fn3-architecture.md` for the
+//! contract and the superseded 2.x gates.
 //!
 //! # Contract entry points
 //!

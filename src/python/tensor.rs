@@ -102,10 +102,6 @@ impl PyTensor {
     }
 
     fn item(&self) -> PyResult<f32> {
-        #[cfg(feature = "gpu")]
-        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return self.inner.try_to_cpu()?.item().map_err(Into::into);
-        }
         self.inner.item().map_err(Into::into)
     }
 
@@ -155,8 +151,6 @@ impl PyTensor {
     fn __dlpack_device__(&self) -> (i32, i32) {
         match self.inner.device() {
             crate::storage::Device::Cpu => (1, 0),
-            #[cfg(feature = "gpu")]
-            crate::storage::Device::Wgpu(device_id) => (2, device_id as i32),
         }
     }
 
@@ -189,71 +183,6 @@ impl PyTensor {
 
     fn debug_strides(&self) -> Vec<i64> {
         self.inner.strides()
-    }
-
-    #[pyo3(signature = (requires_grad))]
-    fn requires_grad_(&mut self, requires_grad: bool) -> PyTensor {
-        // Use Arc::make_mut to ensure exclusive ownership before modifying
-        let inner = Arc::make_mut(&mut self.inner.inner);
-        inner.set_requires_grad(requires_grad);
-        PyTensor {
-            inner: self.inner.clone(),
-        }
-    }
-
-    #[getter]
-    fn requires_grad(&self) -> bool {
-        self.inner.requires_grad()
-    }
-
-    #[getter]
-    fn grad(&self) -> Option<PyTensor> {
-        let g = self.inner.grad();
-        g.map(PyTensor::from_tensor)
-    }
-
-    #[getter]
-    fn grad_fn(&self) -> Option<&'static str> {
-        self.inner.grad_fn().map(|_| "grad_fn")
-    }
-
-    #[getter]
-    fn is_leaf(&self) -> bool {
-        self.inner.is_leaf()
-    }
-
-    #[pyo3(signature = (grad=None))]
-    fn backward(&self, py: Python<'_>, grad: Option<PyTensor>) -> PyResult<()> {
-        let inner = self.inner.clone();
-        let grad_tensor = grad.map(|g| g.inner);
-        let result = py.detach(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                crate::autograd::backward(&inner, grad_tensor)
-            }))
-        });
-        match result {
-            Ok(result) => result.map_err(PyErr::from),
-            Err(panic_err) => {
-                let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_err.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown panic during backward".to_string()
-                };
-                Err(pyo3::exceptions::PyRuntimeError::new_err(msg))
-            }
-        }
-    }
-
-    #[pyo3(signature = (grad))]
-    fn set_grad(&mut self, grad: Option<PyTensor>) {
-        let grad_tensor = grad.map(|g| g.inner);
-        crate::tensor::TensorImpl::set_grad_for_tensor(&self.inner, grad_tensor);
-    }
-
-    fn detach(&self) -> PyTensor {
-        PyTensor::from_tensor(self.inner.detach())
     }
 
     #[pyo3(signature = (dim = None, keepdim = false))]
@@ -488,14 +417,6 @@ impl PyTensor {
     fn __setitem__(&mut self, idx: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         use pyo3::types::PySlice;
 
-        // Ensure the tensor is on CPU
-        #[cfg(feature = "gpu")]
-        if matches!(self.inner.device(), crate::storage::Device::Wgpu(_)) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "__setitem__ does not support GPU tensors; call .cpu() first",
-            ));
-        }
-
         let shape = self.inner.shape();
         if shape.is_empty() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -576,11 +497,6 @@ impl PyTensor {
 
     fn cpu(&self) -> PyResult<PyTensor> {
         Ok(PyTensor::from_tensor(self.inner.try_to_cpu()?))
-    }
-
-    #[cfg(feature = "gpu")]
-    fn to_gpu(&self, device_id: usize) -> PyResult<PyTensor> {
-        Ok(PyTensor::from_tensor(self.inner.try_to_gpu(device_id)?))
     }
 
     fn contiguous(&self) -> PyResult<PyTensor> {

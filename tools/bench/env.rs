@@ -119,8 +119,6 @@ pub fn capture_build(warnings: &mut Vec<String>) -> BuildInfo {
     feature!("parallel");
     feature!("prepared-plan");
     feature!("fusion-forward");
-    feature!("fusion-backward");
-    feature!("gpu");
     feature!("openblas");
     feature!("blas");
     feature!("python");

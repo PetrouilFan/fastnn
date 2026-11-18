@@ -20,9 +20,6 @@ pub type NodeId = usize;
 pub enum GraphKind {
     #[default]
     Inference,
-    TrainingForward,
-    Backward,
-    OptimizerUpdate,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -658,7 +655,7 @@ impl ComputeGraph {
 
 #[cfg(test)]
 mod graph_kind_tests {
-    use super::{ComputeGraph, GraphKind, GraphResourceLimits, TensorValue};
+    use super::{ComputeGraph, GraphResourceLimits, TensorValue};
     use crate::ir::{IrDType, Opcode, TensorType};
     use std::collections::HashMap;
 
@@ -705,16 +702,6 @@ mod graph_kind_tests {
         assert_eq!(node.optional_bool_attr("keepdim").unwrap(), Some(false));
         node.attrs.insert("keepdim".into(), "sometimes".into());
         assert!(node.optional_bool_attr("keepdim").is_err());
-    }
-
-    #[test]
-    fn graph_kind_is_preserved_by_clone_and_serialization() {
-        let graph = ComputeGraph::with_kind(GraphKind::TrainingForward);
-        assert_eq!(graph.clone().kind, GraphKind::TrainingForward);
-
-        let bytes = bincode::serialize(&graph).unwrap();
-        let decoded: ComputeGraph = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(decoded.kind, GraphKind::TrainingForward);
     }
 
     #[test]

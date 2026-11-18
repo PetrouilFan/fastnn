@@ -26,7 +26,6 @@ pub trait Module: Send + Sync {
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
         vec![]
     }
-    fn zero_grad(&self) {}
     fn train_mode(&self) {}
     fn eval_mode(&self) {}
     fn is_training(&self) -> bool {
@@ -35,14 +34,6 @@ pub trait Module: Send + Sync {
 
     fn named_parameters_ref(&self) -> Vec<(&str, &Tensor)> {
         vec![]
-    }
-}
-
-/// Helper to clear gradient from a tensor.
-pub fn clear_grad(tensor: &Tensor) {
-    if let Some(meta) = &tensor.inner.autograd_meta {
-        let mut lock = meta.lock();
-        lock.grad = None;
     }
 }
 
@@ -79,24 +70,6 @@ impl Default for TrainingState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Macro to implement zero_grad for modules with weight/bias parameters.
-#[macro_export]
-macro_rules! impl_zero_grad {
-    ($self:ident, $weight:expr, $bias:expr) => {
-        fn zero_grad(&$self) {
-            $crate::nn::clear_grad(&$weight);
-            if let Some(b) = &$bias {
-                $crate::nn::clear_grad(b);
-            }
-        }
-    };
-    ($self:ident, $weight:expr) => {
-        fn zero_grad(&$self) {
-            $crate::nn::clear_grad(&$weight);
-        }
-    };
 }
 
 /// Macro to implement training state methods.

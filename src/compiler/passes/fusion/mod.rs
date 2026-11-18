@@ -1,7 +1,6 @@
 use crate::ir::ComputeGraph;
 use crate::FastnnError;
 
-pub mod backward;
 pub mod conv_silu;
 pub mod matmul_add_relu;
 pub mod op_relu;
@@ -68,24 +67,6 @@ fn apply_matmul_add_silu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError>
     Ok(false)
 }
 
-#[cfg(feature = "fusion-backward")]
-fn apply_backward_relu_matmul(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    backward::BackwardReluMatMul::fuse(graph)
-}
-#[cfg(not(feature = "fusion-backward"))]
-fn apply_backward_relu_matmul(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    Ok(false)
-}
-
-#[cfg(feature = "fusion-backward")]
-fn apply_backward_matmul_add_relu(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    backward::BackwardMatMulAddRelu::fuse(graph)
-}
-#[cfg(not(feature = "fusion-backward"))]
-fn apply_backward_matmul_add_relu(_graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
-    Ok(false)
-}
-
 #[cfg(feature = "fusion-residual-add-norm")]
 fn apply_residual_add_norm(graph: &mut ComputeGraph) -> Result<bool, FastnnError> {
     residual_add_norm::FusedResidualAddNorm::fuse(graph)
@@ -104,14 +85,12 @@ fn apply_pass(graph: &mut ComputeGraph, idx: usize) -> Result<bool, FastnnError>
         4 => apply_op_gelu(graph),
         5 => apply_op_silu(graph),
         6 => apply_residual_add_norm(graph),
-        7 => apply_backward_relu_matmul(graph),
-        8 => apply_backward_matmul_add_relu(graph),
         _ => Ok(false),
     }
 }
 
 pub fn fuse_operators(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
-    for i in 0..9 {
+    for i in 0..7 {
         while apply_pass(graph, i)? {}
     }
     Ok(())

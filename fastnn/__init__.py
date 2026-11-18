@@ -1,7 +1,8 @@
 """fastnn — High-Performance Neural Network Library in Rust with Python bindings.
 
-AOT-compiled inference and training pipeline with 90+ IR opcodes, operator fusion,
-per-channel weight quantization (U4/U8), and arena-based memory planning.
+AOT-compiled inference pipeline with a Rust IR, operator fusion, per-channel
+weight quantization (U4/U8), and arena-based memory planning, plus the 3.0
+`fastnn.fn3` session API.
 See https://github.com/PetrouilFan/fastnn for full documentation.
 """
 
@@ -21,28 +22,16 @@ FastnnError = _core.FastnnError
 ShapeError = _core.ShapeError
 DtypeError = _core.DtypeError
 DeviceError = _core.DeviceError
-AutogradError = _core.AutogradError
-OptimizerError = _core.OptimizerError
 IoError = _core.IoError
-CudaError = _core.CudaError
 
 # ---------------------------------------------------------------------------
 # Submodule imports — each submodule is the single source of truth for its
 # domain.  `__init__.py` only re-exports; it never defines `X = _core.X`.
 # ---------------------------------------------------------------------------
 from fastnn.core import (  # noqa: E402
-    no_grad,
     set_seed,
     set_num_threads,
     set_default_device,
-    checkpoint,
-)
-from fastnn.data import DataLoader, Dataset, TensorDataset  # noqa: E402
-from fastnn.callbacks import (  # noqa: E402
-    EarlyStopping,
-    ModelCheckpoint,
-    LearningRateScheduler,
-    CSVLogger,
 )
 from fastnn.ops import (  # noqa: E402  — functional operations
     relu, gelu, sigmoid, tanh, silu, leaky_relu, elu, softplus, hardswish,
@@ -53,9 +42,7 @@ from fastnn.ops import (  # noqa: E402  — functional operations
     argmax, argmin, cat, stack, sum, mean, max, min, maximum, minimum,
     where, where_, gather, repeat, expand, fnn_slice, topk,
     einsum, flash_attention, cumsum, erf,
-    mse_loss, cross_entropy_loss, bce_with_logits, huber_loss,
 )
-from fastnn.losses import mse_loss, cross_entropy_loss, bce_with_logits, huber_loss  # noqa: F403
 from fastnn.nn import (  # noqa: E402  — neural network modules
     Linear, Conv2d, Conv1d, Conv3d, ConvTranspose2d,
     LayerNorm, RMSNorm, GroupNorm, BatchNorm1d, BatchNorm2d,
@@ -72,14 +59,6 @@ from fastnn.tensor import (  # noqa: E402
     zeros, ones, full, eye, arange, linspace,
     rand, randn, randint, zeros_like, ones_like, full_like, _flatten,
 )
-from fastnn.parallel import DataParallel  # noqa: E402
-from fastnn.optimizers import (  # noqa: E402
-    SGD, Adam, AdamW, Muon, Lion, RMSprop,
-    clip_grad_norm_, clip_grad_value_,
-)
-from fastnn.schedulers import (  # noqa: E402
-    LRScheduler, StepLR, CosineAnnealingLR, ExponentialLR, ReduceLROnPlateau,
-)
 from fastnn.io import (  # noqa: E402
     save as io_save,
     load as io_load,
@@ -95,7 +74,6 @@ from fastnn.precision import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Rust-only utilities (not in any Python submodule)
 # ---------------------------------------------------------------------------
-compile_train_model = _core.compile_train_model
 allocator_stats = _core.allocator_stats
 list_registered_ops = getattr(_core, 'list_registered_ops', lambda: [])
 batched_mlp_forward = _core.batched_mlp_forward
@@ -228,13 +206,10 @@ if _tensor_module is not None:
 # __all__ — deduplicated, organized by domain
 # ---------------------------------------------------------------------------
 __all__ = [
-    # Context managers and utilities
-    "no_grad",
+    # Utilities
     "set_seed",
     "set_num_threads",
     "set_default_device",
-    "checkpoint",
-    "compile_train_model",
     "import_onnx",
     "allocator_stats",
     "list_registered_ops",
@@ -255,17 +230,6 @@ __all__ = [
     "zeros_like",
     "ones_like",
     "full_like",
-    # Data loading
-    "DataLoader",
-    "Dataset",
-    "TensorDataset",
-    # Callbacks
-    "EarlyStopping",
-    "ModelCheckpoint",
-    "LearningRateScheduler",
-    "CSVLogger",
-    # Parallel
-    "DataParallel",
     # Models
     "models",
     # Exception hierarchy
@@ -273,10 +237,7 @@ __all__ = [
     "ShapeError",
     "DtypeError",
     "DeviceError",
-    "AutogradError",
-    "OptimizerError",
     "IoError",
-    "CudaError",
     # Layers and modules
     "Linear",
     "Conv2d",
@@ -367,26 +328,6 @@ __all__ = [
     "flash_attention",
     "cumsum",
     "erf",
-    # Loss functions
-    "mse_loss",
-    "cross_entropy_loss",
-    "bce_with_logits",
-    "huber_loss",
-    # Optimizers
-    "SGD",
-    "Adam",
-    "AdamW",
-    "Muon",
-    "Lion",
-    "RMSprop",
-    "clip_grad_norm_",
-    "clip_grad_value_",
-    # Schedulers
-    "LRScheduler",
-    "StepLR",
-    "CosineAnnealingLR",
-    "ExponentialLR",
-    "ReduceLROnPlateau",
     # Activations module
     "activations",
     # IO functions
@@ -421,8 +362,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # 3.0 inference surface (FN3-18 / #64)
 # ---------------------------------------------------------------------------
-# `fastnn.fn3` is the API that survives the 2.x removal (#65):
-# prepare -> load -> session -> prefill/decode, with explicit devices and typed
-# errors. The 2.x training/autograd/AOT names above are frozen and are deleted
-# by #65; new code should use `fastnn.fn3` for inference.
+# `fastnn.fn3` is the FastNN 3.0 inference API: an explicit device, one
+# versioned artifact, and sessions that own their cache. New code should use
+# it; the 2.x eager/AOT names above are a secondary inference surface.
 from fastnn import fn3 as fn3  # noqa: E402

@@ -26,29 +26,26 @@ __all__ = [
 
 def uniform_(tensor: Tensor, a: float = 0.0, b: float = 1.0) -> Tensor:
     """Fill tensor with values drawn from Uniform(a, b)."""
-    with fastnn.no_grad():
-        data = _rng.uniform(a, b, tensor.shape).astype(np.float32)
-        new_tensor = fastnn.from_numpy(data)
-        tensor.copy_(new_tensor)
-        return tensor
+    data = _rng.uniform(a, b, tensor.shape).astype(np.float32)
+    new_tensor = fastnn.from_numpy(data)
+    tensor.copy_(new_tensor)
+    return tensor
 
 
 def normal_(tensor: Tensor, mean: float = 0.0, std: float = 1.0) -> Tensor:
     """Fill tensor with values drawn from Normal(mean, std)."""
-    with fastnn.no_grad():
-        data = _rng.normal(mean, std, tensor.shape).astype(np.float32)
-        new_tensor = fastnn.from_numpy(data)
-        tensor.copy_(new_tensor)
-        return tensor
+    data = _rng.normal(mean, std, tensor.shape).astype(np.float32)
+    new_tensor = fastnn.from_numpy(data)
+    tensor.copy_(new_tensor)
+    return tensor
 
 
 def constant_(tensor: Tensor, val: float) -> Tensor:
     """Fill tensor with constant value."""
-    with fastnn.no_grad():
-        data = np.full(tensor.shape, val, dtype=np.float32)
-        new_tensor = fastnn.from_numpy(data)
-        tensor.copy_(new_tensor)
-        return tensor
+    data = np.full(tensor.shape, val, dtype=np.float32)
+    new_tensor = fastnn.from_numpy(data)
+    tensor.copy_(new_tensor)
+    return tensor
 
 
 def ones_(tensor: Tensor) -> Tensor:
@@ -142,50 +139,47 @@ def kaiming_normal_(tensor: Tensor, a: float = 0.0, mode: str = 'fan_in',
 
 def orthogonal_(tensor: Tensor, gain: float = 1.0) -> Tensor:
     """Fill tensor with orthogonal matrix."""
-    with fastnn.no_grad():
-        shape = tensor.shape
-        flat_shape = (shape[-2], shape[-1])
-        if len(shape) > 2:
-            raise NotImplementedError("orthogonal_ for >2D tensors not yet implemented")
-        q, r = np.linalg.qr(_rng.normal(0.0, 1.0, flat_shape))
-        q *= np.sign(np.diag(r))
-        q *= gain
-        new_tensor = fastnn.from_numpy(q)
-        tensor.copy_(new_tensor)
-        return tensor
+    shape = tensor.shape
+    flat_shape = (shape[-2], shape[-1])
+    if len(shape) > 2:
+        raise NotImplementedError("orthogonal_ for >2D tensors not yet implemented")
+    q, r = np.linalg.qr(_rng.normal(0.0, 1.0, flat_shape))
+    q *= np.sign(np.diag(r))
+    q *= gain
+    new_tensor = fastnn.from_numpy(q)
+    tensor.copy_(new_tensor)
+    return tensor
 
 
 def eye_(tensor: Tensor) -> Tensor:
     """Fill 2D tensor with identity matrix."""
-    with fastnn.no_grad():
-        n = min(tensor.shape)
-        eye_data = [0.0] * (tensor.shape[0] * tensor.shape[1])
-        for i in range(n):
-            eye_data[i * tensor.shape[1] + i] = 1.0
-        new_tensor = fastnn.Tensor(eye_data, tensor.shape)
-        tensor.copy_(new_tensor)
-        return tensor
+    n = min(tensor.shape)
+    eye_data = [0.0] * (tensor.shape[0] * tensor.shape[1])
+    for i in range(n):
+        eye_data[i * tensor.shape[1] + i] = 1.0
+    new_tensor = fastnn.Tensor(eye_data, tensor.shape)
+    tensor.copy_(new_tensor)
+    return tensor
 
 
 def dirac_(tensor: Tensor) -> Tensor:
     """Fill tensor with Dirac delta function (for Conv layers)."""
-    with fastnn.no_grad():
-        shape = tensor.shape
-        if len(shape) < 2:
-            raise ValueError("dirac_ requires at least 2D tensor")
-        out_channels = shape[0]
-        in_channels = shape[1]
-        data = np.zeros(shape, dtype=np.float32)
-        min_dim = min(out_channels, in_channels)
-        for i in range(min_dim):
-            if len(shape) == 2:
-                data[i, i] = 1.0
-            elif len(shape) == 3:
-                data[i, i, shape[2] // 2] = 1.0
-            elif len(shape) == 4:
-                data[i, i, shape[2] // 2, shape[3] // 2] = 1.0
-            elif len(shape) == 5:
-                data[i, i, shape[2] // 2, shape[3] // 2, shape[4] // 2] = 1.0
-        new_tensor = fastnn.from_numpy(data)
-        tensor.copy_(new_tensor)
-        return tensor
+    shape = tensor.shape
+    if len(shape) < 2:
+        raise ValueError("dirac_ requires at least 2D tensor")
+    out_channels = shape[0]
+    in_channels = shape[1]
+    data = np.zeros(shape, dtype=np.float32)
+    min_dim = min(out_channels, in_channels)
+    for i in range(min_dim):
+        if len(shape) == 2:
+            data[i, i] = 1.0
+        elif len(shape) == 3:
+            data[i, i, shape[2] // 2] = 1.0
+        elif len(shape) == 4:
+            data[i, i, shape[2] // 2, shape[3] // 2] = 1.0
+        elif len(shape) == 5:
+            data[i, i, shape[2] // 2, shape[3] // 2, shape[4] // 2] = 1.0
+    new_tensor = fastnn.from_numpy(data)
+    tensor.copy_(new_tensor)
+    return tensor

@@ -1,18 +1,22 @@
 # Python package guide
 
-`fastnn/__init__.py` is the Python facade over `fastnn._core` and Python-level
-utilities. Its imports, lazy names, `__all__`, callable `fastnn.tensor`, and
-error behavior may be simplified because fastnn has no external users.
+`fastnn/fn3/` is the shipped inference API and a thin wrapper over
+`fastnn._core.fn3`. `fastnn/__init__.py` also re-exports the surviving 2.x
+forward facade. fastnn has no external users, so imports, lazy names, `__all__`
+and error behavior may be simplified.
 
 ## Ownership
 
-- Python facade modules provide ergonomic API composition and Python-only
-  behavior such as data loading, callbacks, model helpers, and user-facing I/O.
-- Compiled tensor, graph execution, and executable compiler semantics belong to
-  Rust unless the ownership matrix in the reorganization roadmap says
-  otherwise.
-- Keep package imports acyclic and avoid eager imports that change initialization
-  or optional-dependency behavior.
+- `fastnn/fn3/` owns path coercion, docstrings and `__all__` for the inference
+  API; the classes themselves are the extension's own objects.
+- Python facade modules provide ergonomic composition and Python-only behavior
+  such as model helpers and user-facing I/O.
+- Compiled tensor, graph execution and executable compiler semantics belong to
+  Rust.
+- There is no training, optimizer, scheduler, loss, data-loader or callback
+  module. Do not add one without a product decision.
+- Keep package imports acyclic and avoid eager imports that change
+  initialization or optional-dependency behavior.
 
 ## Compatibility
 
@@ -24,4 +28,4 @@ error behavior may be simplified because fastnn has no external users.
   parity evidence against the Rust compiled-IR path.
 
 Use targeted pytest modules for the changed API; package/facade changes require
-the modular API and import smoke tests in the roadmap.
+the modular API and import smoke tests.

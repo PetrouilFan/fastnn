@@ -8,15 +8,6 @@ LOCAL_LINK_RE = re.compile(r"!?\[[^\]]+\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 
 
-def training_doc_qualifies_data_parallel_as_experimental() -> None:
-    distributed_path = ROOT / "docs" / "guides" / "training" / "distributed.md"
-    if not distributed_path.exists():
-        raise AssertionError(f"Distributed training doc not found: {distributed_path}")
-    text = distributed_path.read_text(encoding="utf-8")
-
-    assert "experimental" in text.lower(), "Distributed training must be marked experimental"
-
-
 def _is_local_link(target: str) -> bool:
     if target.startswith(("http://", "https://", "mailto:", "tel:")):
         return False
@@ -101,10 +92,7 @@ def docs_have_resolvable_local_markdown_links() -> None:
 
 
 if __name__ == "__main__":
-    checks = [
-        training_doc_qualifies_data_parallel_as_experimental,
-        docs_have_resolvable_local_markdown_links,
-    ]
+    checks = [docs_have_resolvable_local_markdown_links]
     for check in checks:
         try:
             check()

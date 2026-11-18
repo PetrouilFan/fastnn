@@ -34,9 +34,9 @@ Model (ONNX / GraphBuilder API)
 ┌─────────────────────────────────────────────────────────┐
 │              Backend Code Generation                     │
 │                                                          │
-│   CpuBackend (7326-line mod.rs)     WgpuBackend (exp.)  │
-│   ISA dispatch: AVX-512 → AVX2 →    WGSL compute        │
-│   NEON → scalar fallback             shaders            │
+│   CpuBackend                          (2.x backend)      │
+│   ISA dispatch: AVX-512 → AVX2 →                        │
+│   NEON → scalar fallback                                │
 └─────────────────────────────────────────────────────────┘
            │
            ▼
@@ -78,7 +78,6 @@ The fusion pass scans the `ComputeGraph` for adjacent ops that can be merged:
 | `FusedMatMulAdd → ReLU` | `FusedMatMulAddRelu` |
 | `FusedConv2dAdd → ReLU` | `FusedConv2dAddRelu` |
 | `Residual → Add → LayerNorm` | `FusedResidualAddNorm` |
-| Backward fusion | Eliminates 3 intermediate allocations per fused backward chain |
 
 Fusion eliminates intermediate tensor materialization and reduces kernel launch overhead. Backward fusion combines `dRelu+Transpose+MatMul` into single fused kernels.
 
@@ -107,7 +106,6 @@ For models with symbolic dimensions, `tighten()` recomputes arena offsets from a
 Each `IRNode` is mapped to a concrete backend implementation:
 
 - **CpuBackend** (7326-line `mod.rs`) — Handles all opcodes including quantized matmul/conv (U4/U8, I4Codebook) with runtime ISA dispatch: AVX-512 → AVX2 → NEON → scalar fallback. I4Codebook dequantizes to f32 before GEMM. Leverages BLAS (`blas.rs`), im2col (`im2col.rs`), microkernels (`microkernels.rs`), optimized reductions (`reductions_fast.rs`), and FlashAttention SIMD (`flash_attn.rs`).
-- **WgpuBackend** (experimental) — Handles f32 ops and U4/U8 quantized ops via WGSL compute shaders. Manages a pipeline cache (`pipeline.rs`) and GPU context (`context.rs`).
 
 Both backends receive an `ExecutablePlan` with pre-planned arena offsets, eliminating runtime allocation.
 
@@ -129,7 +127,7 @@ A single operation in the graph with an `Opcode` variant (91 variants), `Vec<Nod
 
 ### Opcode Enum
 
-91 variants covering: arithmetic (Add, Sub, Mul, Div, Pow...), neural network (MatMul, Conv1d/2d/3d, ConvTranspose2d, BatchNorm, LayerNorm...), activations (Relu, Gelu, Silu, Sigmoid, Tanh, Mish...), reductions (ReduceSum, ReduceMean, ReduceMax, ArgMax...), shape ops (Reshape, Transpose, Concat, Slice, Gather...), quantization (Quantize, Dequantize, ToF16, ToF32...), and optimizer updates (SgdUpdate, AdamUpdate, AdamWUpdate, MuonUpdate, LionUpdate, RmspropUpdate).
+The 2.x IR has variants covering: arithmetic (Add, Sub, Mul, Div, Pow...), neural network (MatMul, Conv1d/2d/3d, ConvTranspose2d, BatchNorm, LayerNorm...), activations (Relu, Gelu, Silu, Sigmoid, Tanh, Mish...), reductions (ReduceSum, ReduceMean, ReduceMax, ArgMax...), shape ops (Reshape, Transpose, Concat, Slice, Gather...), and quantization (Quantize, Dequantize, ToF16, ToF32...).
 
 Backend kernel selection (e.g., `matmul_u4`, `matmul_u8`, `conv2d_u4`) happens at runtime based on quantized input dtypes, not via separate opcodes.
 

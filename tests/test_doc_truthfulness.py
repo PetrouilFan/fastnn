@@ -2,7 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DOC_FILE = "docs/guides/training/training-basics.md"
+DOC_FILE = "docs/guides/getting-started.md"
 
 
 def _run_doc_truthfulness(repo_root: Path) -> subprocess.CompletedProcess[str]:

@@ -104,11 +104,7 @@ impl TransformerBlock {
         let x = attn_dropped.add(x);
 
         // Fused sub-layer AOT: norm2 → ff1 (matmul + bias + gelu) → ff2 (matmul + bias)
-        let ff_out = if crate::autograd::is_grad_enabled() {
-            let normalized = self.norm2.forward(&x);
-            let hidden = self.ff1.forward(&normalized).gelu();
-            self.ff2.forward(&hidden)
-        } else {
+        let ff_out = {
             Tensor::exec_aot(
                 &[
                     &x,
@@ -173,14 +169,6 @@ impl Module for TransformerBlock {
             params.push((format!("ff2.{}", name), t));
         }
         params
-    }
-
-    fn zero_grad(&self) {
-        self.self_attn.zero_grad();
-        self.norm1.zero_grad();
-        self.norm2.zero_grad();
-        self.ff1.zero_grad();
-        self.ff2.zero_grad();
     }
 
     fn train_mode(&self) {
@@ -270,7 +258,7 @@ impl TransformerEncoder {
 
         // Precompute max-length position tensor for fast slice
         let positions: Vec<f32> = (0..max_seq_len).map(|i| i as f32).collect();
-        let pos_tensor = Tensor::from_vec(positions, vec![1, max_seq_len]).requires_grad_(false);
+        let pos_tensor = Tensor::from_vec(positions, vec![1, max_seq_len]);
 
         let transformer = TransformerEncoder {
             embedding,
@@ -372,16 +360,6 @@ impl Module for TransformerEncoder {
             params.push((format!("classifier.{}", name), t));
         }
         params
-    }
-
-    fn zero_grad(&self) {
-        self.embedding.zero_grad();
-        self.pos_embedding.zero_grad();
-        for layer in &self.layers {
-            layer.zero_grad();
-        }
-        self.norm.zero_grad();
-        self.classifier.zero_grad();
     }
 
     fn train_mode(&self) {

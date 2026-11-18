@@ -41,14 +41,6 @@ class Module(ABC):
         """Return True if module is in training mode."""
         return self._training
     
-    def zero_grad(self) -> None:
-        """Zero out gradients for all parameters."""
-        pass
-    
-    def to_gpu(self, device_id: int) -> None:
-        """Move module to GPU."""
-        pass
-    
     @abstractmethod
     def state_dict(self) -> Dict[str, Any]:
         """Return state dictionary of module."""

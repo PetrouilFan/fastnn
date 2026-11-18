@@ -24,11 +24,8 @@ rand          = "0.8"
 gemm          = { version = "0.19", default-features = false, features = ["std", "rayon"] }
 core_affinity = "0.8"
 raw-cpuid = "11.0"
-wgpu         = { version = "24", optional = true }
-pollster     = { version = "0.4", optional = true }
 openblas-src = { version = "0.10", optional = true }
 blas-src     = { version = "0.10", features = ["openblas"], optional = true }
-fnv          = "1.0"
 rustc-hash  = "2.0"
 clap         = { version = "4", features = ["derive"], optional = true }
 # FN3-11 (#57): raw Vulkan loader for the 3.0 Vulkan backend. Optional so a
@@ -39,21 +36,27 @@ ash          = { version = "0.38", optional = true }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports"] }
 
 [features]
+# Inference defaults: SIMD/threaded CPU kernels, forward fusion, PyO3 bindings
+# and the prepared-plan runtime.
 default = ["simd", "parallel", "fusion-forward", "python", "prepared-plan"]
-# FN3-11 (#57): the 3.0 Vulkan compute backend. Deliberately not in `default`:
-# an enabled feature advertises a device that must be able to allocate and
-# dispatch, so it is opt-in until the kernel owners land their shaders.
+
+# The 3.0 Vulkan compute backend. Opt-in because an enabled feature advertises
+# a device that must be able to allocate and dispatch; the four kernel families
+# are registered and tested on a physical GTX 1080 Ti.
 vulkan = ["dep:ash"]
+# FastNN 3.0 Python bindings (`fastnn._core.fn3`).
 python = ["dep:pyo3"]
-gpu = ["dep:wgpu", "dep:pollster"]
+# CPU acceleration.
 openblas = ["blas-src/openblas-src"]
 blas = []
 parallel = ["rayon"]
 simd = []
+# Extra runtime assertions in the CPU direct-convolution kernels.
 debug_canary = []
+# Prepared-plan construction and the persistent executor path.
 prepared-plan = []
 
-# ── Fusion passes (compile-time modular) ─────────────────────────────
+# ── Forward fusion passes (compile-time modular) ─────────────────────────────
 fusion-forward = [
   "fusion-op-relu",
   "fusion-op-gelu",
@@ -70,7 +73,6 @@ fusion-matmul-add-relu = []
 fusion-matmul-add-gelu = []
 fusion-matmul-add-silu = []
 fusion-residual-add-norm = []
-fusion-backward = []
 
 # ── CLI binary ────────────────────────────────────────────────────────
 cli = ["dep:clap"]

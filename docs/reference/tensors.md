@@ -151,75 +151,29 @@ b = fnn.randn([5])               # [5] -> [1, 5]
 c = a + b                        # result [3, 5]
 ```
 
-## Autograd
-
-### Computing Gradients
-
-```python
-x = fnn.tensor([1.0, 2.0])
-x.requires_grad_(True)
-
-y = x * 2
-z = y.sum()
-z.backward()                     # Compute gradients
-
-print(x.grad)                    # tensor([2., 2.])
-x.set_grad(None)                 # Clear gradients
-```
-
-### Disabling Gradient Tracking
-
-```python
-with fnn.no_grad():              # Context manager
-    result = model(x)            # No gradient tracked
-
-y = x.detach()                   # Detach from computation graph
-```
-
-### Numerical Gradient Checks
-
-Run finite-difference verification for eager autograd on CPU f32:
-
-```bash
-cargo +stable test --test autograd_gradient_checks
-```
-
-Tolerances: default ops `atol=2e-2, rtol=2e-2`; `silu` `3e-2`; `gelu` `4e-2`.
-
 ## Tensor Properties
 
 ```python
 x.shape              # [3, 4, 5]
 x.ndim               # 3
 x.dtype              # 'f32'
-x.device             # 'cpu' or Device.Wgpu(0)
+x.device             # 'cpu'
 x.numel              # 60
 x.stride             # [20, 5, 1]
 x.is_contiguous      # True
-x.requires_grad      # True/False
-x.grad               # Gradient tensor (after backward())
 ```
 
 ## Device Management
 
-Move tensors between CPU and GPU (WGPU backend):
+The 2.x eager tensors are host-resident; the only device is `cpu`:
 
 ```python
 x_cpu = fnn.randn([3, 4])
-x_gpu = x_cpu.to_gpu(0)          # CPU to GPU
-x_cpu = x_gpu.to_cpu()           # GPU to CPU
-fnn.set_default_device("wgpu:0") # Set default device globally
+fnn.set_default_device("cpu")
 ```
 
-## Gradient Clipping
-
-```python
-# Clip by norm
-fnn.clip_grad_norm_(params, max_norm=1.0, norm_type=2.0)
-
-# Clip by value
-fnn.clip_grad_value_(params, clip_value=0.1)
-```
+The 3.0 `fastnn.fn3` session API is where acceleration is selected; an
+explicit `device="vulkan"` either runs on that device or raises.
 
 ## FlashAttention
 
@@ -257,6 +211,5 @@ x = fnn.tensor_from_numpy(arr)
 
 - [API Reference](api-reference.md) -- Complete catalog of tensor functions
 - [Neural Network Modules](nn-modules.md) -- Layers that consume tensors
-- [Optimizers](optimizers.md) -- Optimizers that update tensor parameters
-- [Python API](python-api.md) -- Compiled training with tensors
+- [Python API](python-api.md) -- the `fastnn.fn3` inference API
 - [Index](../index.md) -- Full documentation index

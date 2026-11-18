@@ -1,10 +1,8 @@
-use crate::autograd::{self, AutogradMeta};
 use crate::tensor::Tensor;
 use crate::{
-    impl_nn_named_params, impl_nn_params, impl_training_state, impl_zero_grad,
+    impl_nn_named_params, impl_nn_params, impl_training_state,
     nn::{Module, TrainingState},
 };
-use std::sync::Arc;
 
 /// Generates a convolution struct definition + `new()` constructor.
 ///
@@ -93,16 +91,13 @@ macro_rules! impl_conv_type {
                     ],
                     _ => unreachable!(),
                 };
-                let weight = Tensor::from_vec(weight_data, weight_shape).requires_grad_(true);
+                let weight = Tensor::from_vec(weight_data, weight_shape);
                 let bias = if bias {
-                    Some(
-                        Tensor::zeros(
-                            vec![out_channels],
-                            crate::storage::DType::F32,
-                            crate::storage::Device::Cpu,
-                        )
-                        .requires_grad_(true),
-                    )
+                    Some(Tensor::zeros(
+                        vec![out_channels],
+                        crate::storage::DType::F32,
+                        crate::storage::Device::Cpu,
+                    ))
                 } else {
                     None
                 };
@@ -181,7 +176,7 @@ impl Module for Conv2d {
         } else {
             (x.clone(), self.padding_scalar.clone())
         };
-        let mut output = {
+        {
             let conv = Tensor::exec_aot(&[&input, &self.weight], |g, ins| {
                 vec![g.conv2d_with_params(
                     &ins[0],
@@ -202,33 +197,11 @@ impl Module for Conv2d {
             } else {
                 conv
             }
-        };
-
-        if x.requires_grad() || self.weight.requires_grad() {
-            let mut inputs = vec![
-                x.clone(),
-                self.weight.clone(),
-                Tensor::from_scalar(self.stride as f32),
-                Tensor::from_scalar(self.padding as f32),
-                Tensor::from_scalar(self.dilation as f32),
-                Tensor::from_scalar(self.groups as f32),
-            ];
-            if let Some(ref b) = self.bias {
-                inputs.push(b.clone());
-            }
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("Conv2dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-            output
-        } else {
-            output
         }
     }
 
     impl_nn_params!(weight, bias);
     impl_nn_named_params!(weight, bias, "weight", "bias");
-    impl_zero_grad!(self, self.weight, self.bias);
     impl_training_state!(self, self.training);
 }
 
@@ -274,24 +247,11 @@ impl Module for ConvTranspose2d {
             output = output.add(&bias_reshaped);
         }
 
-        // Set up autograd for ConvTranspose2d
-        if x.requires_grad() || self.weight.requires_grad() {
-            let mut inputs = vec![x.clone(), self.weight.clone()];
-            if let Some(ref b) = self.bias {
-                inputs.push(b.clone());
-            }
-            let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("ConvTranspose2dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
-
         output
     }
 
     impl_nn_params!(weight, bias);
     impl_nn_named_params!(weight, bias, "weight", "bias");
-    impl_zero_grad!(self, self.weight, self.bias);
     impl_training_state!(self, self.training);
 }
 
@@ -341,7 +301,7 @@ impl Module for Conv1d {
             .reshape(vec![w_shape[0], w_shape[1], 1, w_shape[2]]);
 
         // Use conv2d with padding=0 (since we pre-padded) and the user's stride/dilation
-        let mut output = {
+        let output = {
             let conv = Tensor::exec_aot(&[&x_4d, &w_4d], |g, ins| {
                 vec![g.conv2d_with_params(
                     &ins[0],
@@ -364,25 +324,6 @@ impl Module for Conv1d {
             }
         };
 
-        // Attach autograd before final reshape so the backward chain is complete
-        if x.requires_grad() || self.weight.requires_grad() {
-            let mut inputs = vec![
-                x.clone(),
-                self.weight.clone(),
-                Tensor::from_scalar(self.stride as f32),
-                Tensor::from_scalar(self.padding as f32),
-                Tensor::from_scalar(self.dilation as f32),
-                Tensor::from_scalar(self.groups as f32),
-            ];
-            if let Some(ref b) = self.bias {
-                inputs.push(b.clone());
-            }
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("Conv1dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
-
         // Reshape back to 3D: [B, C_out, 1, L_out] -> [B, C_out, L_out]
         let out_shape = output.shape_ref();
         let out_channels = out_shape[1];
@@ -392,7 +333,6 @@ impl Module for Conv1d {
 
     impl_nn_params!(weight, bias);
     impl_nn_named_params!(weight, bias, "weight", "bias");
-    impl_zero_grad!(self, self.weight, self.bias);
     impl_training_state!(self, self.training);
 }
 
@@ -422,28 +362,10 @@ impl Module for Conv3d {
             output = output.add(&bias_reshaped);
         }
 
-        // Attach autograd
-        if x.requires_grad() || self.weight.requires_grad() {
-            let mut inputs = vec![
-                x.clone(),
-                self.weight.clone(),
-                Tensor::from_scalar(self.stride as f32),
-                Tensor::from_scalar(self.padding as f32),
-            ];
-            if let Some(ref b) = self.bias {
-                inputs.push(b.clone());
-            }
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("Conv3dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
-
         output
     }
 
     impl_nn_params!(weight, bias);
     impl_nn_named_params!(weight, bias, "weight", "bias");
-    impl_zero_grad!(self, self.weight, self.bias);
     impl_training_state!(self, self.training);
 }

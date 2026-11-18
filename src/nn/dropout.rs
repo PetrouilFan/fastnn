@@ -57,16 +57,7 @@ impl Module for Dropout {
 
             let shape = x.shape_ref();
             let mask = Tensor::from_vec(mask_data, shape.to_vec());
-            let mut out = x.mul(&mask);
-
-            if x.requires_grad() {
-                let inputs = vec![x.clone(), mask.clone()];
-                let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(crate::autograd::make_node_info("DropoutBackward", inputs));
-                std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
-                    Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
-            }
-            out
+            x.mul(&mask)
         } else {
             x.clone()
         }
@@ -111,16 +102,7 @@ impl Module for Dropout2d {
 
             let channel_mask =
                 Tensor::from_vec(channel_mask_data, vec![batch as i64, channels as i64, 1, 1]);
-            let mut out = x.mul(&channel_mask);
-
-            if x.requires_grad() {
-                let inputs = vec![x.clone(), channel_mask.clone()];
-                let mut meta = crate::autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(crate::autograd::make_node_info("Dropout2dBackward", inputs));
-                std::sync::Arc::make_mut(&mut out.inner).autograd_meta =
-                    Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
-            }
-            out
+            x.mul(&channel_mask)
         } else {
             x.clone()
         }

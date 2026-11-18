@@ -548,16 +548,7 @@ pub fn infer_shapes(graph: &mut ComputeGraph) -> Result<(), FastnnError> {
             | Opcode::Cos
             | Opcode::Trilu
             | Opcode::Flip
-            | Opcode::Where
-            | Opcode::SgdUpdate
-            | Opcode::AdamUpdate
-            | Opcode::AdamWUpdate
-            | Opcode::MuonUpdate
-            | Opcode::LionUpdate
-            | Opcode::RmspropUpdate
-            | Opcode::GradientScale
-            | Opcode::QuantizeGradient
-            | Opcode::DequantizeGradient => None,
+            | Opcode::Where => None,
         };
 
         if let Some(shape) = inferred {

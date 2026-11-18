@@ -412,29 +412,6 @@ fn residual_add_norm(
     }
 }
 
-fn sgd_update(param: &mut [f32], grad: &[f32], lr: f32, weight_decay: f32) {
-    for i in 0..param.len() {
-        param[i] -= lr * (grad[i] + weight_decay * param[i]);
-    }
-}
-
-fn adamw_update(param: &mut [f32], grad: &[f32], m: &mut [f32], v: &mut [f32], t: f32) {
-    let lr: f32 = 1e-3;
-    let beta1: f32 = 0.9;
-    let beta2: f32 = 0.999;
-    let eps: f32 = 1e-8;
-    let weight_decay: f32 = 0.01;
-    let bias_correction1 = 1.0 - beta1.powf(t);
-    let bias_correction2 = 1.0 - beta2.powf(t);
-    for i in 0..param.len() {
-        m[i] = beta1 * m[i] + (1.0 - beta1) * grad[i];
-        v[i] = beta2 * v[i] + (1.0 - beta2) * grad[i] * grad[i];
-        let m_hat = m[i] / bias_correction1;
-        let v_hat = v[i] / bias_correction2;
-        param[i] -= lr * (m_hat / (v_hat.sqrt() + eps) + weight_decay * param[i]);
-    }
-}
-
 fn bench_fastnn_gemv<T: PackedWord>(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     label: &'static str,
@@ -886,57 +863,6 @@ fn bench_fusions(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_training_updates(c: &mut Criterion) {
-    let mut group = c.benchmark_group("cpu_training_updates");
-    group.warm_up_time(std::time::Duration::from_millis(300));
-    group.measurement_time(std::time::Duration::from_secs(1));
-    group.sample_size(10);
-
-    let cases = [
-        VecCase {
-            name: "64k",
-            len: 65_536,
-        },
-        VecCase {
-            name: "1m",
-            len: 1_048_576,
-        },
-    ];
-    for case in cases {
-        group.throughput(Throughput::Elements(case.len as u64));
-        let grad = vector_data(case.len, 61);
-        group.bench_with_input(BenchmarkId::new("sgd", case.name), &case, |bench, _| {
-            let mut param = vector_data(case.len, 59);
-            bench.iter(|| {
-                sgd_update(
-                    black_box(&mut param),
-                    black_box(&grad),
-                    black_box(1e-3),
-                    black_box(0.01),
-                );
-                black_box(&param);
-            });
-        });
-        group.bench_with_input(BenchmarkId::new("adamw", case.name), &case, |bench, _| {
-            let mut param = vector_data(case.len, 67);
-            let mut m = vec![0.0f32; case.len];
-            let mut v = vec![0.0f32; case.len];
-            bench.iter(|| {
-                adamw_update(
-                    black_box(&mut param),
-                    black_box(&grad),
-                    black_box(&mut m),
-                    black_box(&mut v),
-                    black_box(1.0),
-                );
-                black_box((&param, &m, &v));
-            });
-        });
-    }
-
-    group.finish();
-}
-
 fn bench_cpu_arena_telemetry(c: &mut Criterion) {
     let mut group = c.benchmark_group("cpu_arena_telemetry");
     group.warm_up_time(std::time::Duration::from_millis(200));
@@ -1210,7 +1136,6 @@ criterion_group!(
     bench_elementwise,
     bench_reductions,
     bench_fusions,
-    bench_training_updates,
     bench_cpu_arena_telemetry
 );
 criterion_main!(cpu_benchmarks);

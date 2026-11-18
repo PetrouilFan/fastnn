@@ -1,9 +1,8 @@
-import contextlib
 import fastnn._core as _core
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 from fastnn.tensor import Tensor
 
-__all__ = ["sum", "mean", "maximum", "minimum", "checkpoint"]
+__all__ = ["sum", "mean", "maximum", "minimum", "set_seed", "set_num_threads", "set_default_device"]
 
 # Utility functions that wrap _core with Python-friendly interfaces
 
@@ -57,15 +56,6 @@ def minimum(a: Tensor, b: Tensor) -> Tensor:
     return a.minimum(b)
 
 
-@contextlib.contextmanager
-def no_grad():
-    _core._no_grad_enter()
-    try:
-        yield
-    finally:
-        _core._no_grad_exit()
-
-
 def set_seed(seed: int):
     _core._set_seed(seed)
 
@@ -78,16 +68,6 @@ def set_default_device(device: str):
     """Set the default device for tensor creation.
 
     Args:
-        device: Device string, e.g., "cpu", "gpu", "wgpu", "gpu:0"
+        device: Device string, e.g., "cpu"
     """
     _core._set_default_device(device)
-
-
-def checkpoint(fn: Callable, *tensors: Tensor) -> List[Tensor]:
-    """Passthrough wrapper for API compatibility.
-
-    Currently a no-op — calls ``fn(*tensors)`` directly without gradient
-    checkpointing.  A future release may add actual memory-saving
-    recomputation logic here.
-    """
-    return fn(*tensors)

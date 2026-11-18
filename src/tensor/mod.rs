@@ -1,4 +1,3 @@
-use crate::autograd::{self, AutogradMeta};
 use crate::backend::cpu::CpuBackend;
 use crate::backend::BackendError;
 use crate::error::{FastnnError, FastnnResult};
@@ -8,7 +7,7 @@ use crate::storage::{DType, Device, Storage};
 use crate::storage_pool::get_storage_pool;
 use crate::types::{RepresentationTransform, ScalarType, ValueRepresentation};
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI8, Ordering};
 use std::sync::Arc;
 
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -52,9 +51,6 @@ pub struct TensorImpl {
     pub storage_offset: i64,
     pub dtype: DType,
     pub device: Device,
-    pub version_counter: Arc<AtomicU64>,
-    pub autograd_meta: Option<Arc<parking_lot::Mutex<AutogradMeta>>>,
-    pub requires_grad: bool,
     /// Cached contiguity: -1=unknown, 0=false, 1=true.
     /// Set to 1 when strides are known to be contiguous (new tensors from factories),
     /// set to -1 when strides may be non-contiguous (views, clones, device transfers).
@@ -89,9 +85,6 @@ impl TensorImpl {
             storage_offset: 0,
             dtype,
             device,
-            version_counter: Arc::new(AtomicU64::new(0)),
-            autograd_meta: None,
-            requires_grad: false,
             contiguous_cache: AtomicI8::new(1),
         })
     }
@@ -130,9 +123,6 @@ impl TensorImpl {
             storage_offset: 0,
             dtype,
             device,
-            version_counter: Arc::new(AtomicU64::new(0)),
-            autograd_meta: None,
-            requires_grad: false,
             contiguous_cache: AtomicI8::new(1),
         })
     }
@@ -142,20 +132,13 @@ impl TensorImpl {
         ptr as usize
     }
 
-    /// Create a view sharing storage and version_counter from self.
-    /// Creates a fresh autograd_meta for the view to prevent the view from modifying the source's grad_fn.
+    /// Create a view sharing storage from self.
     pub(crate) fn new_view_from(
         &self,
         sizes: SmallVec<[i64; 8]>,
         strides: SmallVec<[i64; 8]>,
         storage_offset: i64,
     ) -> Self {
-        let autograd_meta = self.autograd_meta.as_ref().map(|meta| {
-            let lock = meta.lock();
-            Arc::new(parking_lot::Mutex::new(AutogradMeta::new(
-                lock.requires_grad,
-            )))
-        });
         Self {
             storage: Arc::clone(&self.storage),
             sizes,
@@ -163,14 +146,11 @@ impl TensorImpl {
             storage_offset,
             dtype: self.dtype,
             device: self.device,
-            version_counter: Arc::clone(&self.version_counter),
-            autograd_meta,
-            requires_grad: self.requires_grad,
             contiguous_cache: AtomicI8::new(-1), // strides may be non-contiguous
         }
     }
 
-    /// Create a tensor on a different device (fresh version_counter, shares autograd_meta).
+    /// Create a tensor on a different device.
     fn new_on_device(&self, storage: Arc<Storage>, device: Device) -> Self {
         Self {
             storage,
@@ -179,90 +159,8 @@ impl TensorImpl {
             storage_offset: self.storage_offset,
             dtype: self.dtype,
             device,
-            version_counter: Arc::new(AtomicU64::new(0)),
-            autograd_meta: self.autograd_meta.clone(),
-            requires_grad: self.requires_grad,
             contiguous_cache: AtomicI8::new(-1), // strides copied from self, may be non-contiguous
         }
-    }
-
-    pub fn requires_grad(&self) -> bool {
-        self.requires_grad
-    }
-
-    /// Set autograd_meta and sync the cached requires_grad bool in one call.
-    /// Prefer this over writing to `autograd_meta` directly to keep the
-    /// cached `requires_grad` field consistent.
-    pub fn set_autograd_meta(&mut self, meta: AutogradMeta) {
-        let rg = meta.requires_grad;
-        self.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(meta)));
-        self.requires_grad = rg;
-    }
-
-    pub fn set_requires_grad(&mut self, requires_grad: bool) {
-        self.requires_grad = requires_grad;
-        if self.autograd_meta.is_none() {
-            self.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(AutogradMeta::new(
-                requires_grad,
-            ))));
-        } else if let Some(meta) = &mut self.autograd_meta {
-            let mut lock = meta.lock();
-            lock.requires_grad = requires_grad;
-        }
-    }
-
-    pub fn requires_grad_(mut self, requires_grad: bool) -> Tensor {
-        self.requires_grad = requires_grad;
-        if let Some(meta) = &mut self.autograd_meta {
-            let mut lock = meta.lock();
-            lock.requires_grad = requires_grad;
-        }
-        self.into()
-    }
-
-    pub fn grad(&self) -> Option<Tensor> {
-        self.autograd_meta.as_ref()?.lock().grad.clone()
-    }
-
-    pub fn set_grad(&mut self, grad: Option<Tensor>) {
-        if let Some(meta) = &mut self.autograd_meta {
-            let mut lock = meta.lock();
-            lock.grad = grad;
-        }
-    }
-
-    pub fn set_grad_for_tensor(tensor: &Tensor, grad: Option<Tensor>) {
-        if let Some(meta) = &tensor.inner.autograd_meta {
-            let mut lock = meta.lock();
-            lock.grad = grad;
-        }
-    }
-
-    pub fn is_leaf(&self) -> bool {
-        self.autograd_meta
-            .as_ref()
-            .map(|m| m.lock())
-            .map(|m| m.is_leaf)
-            .unwrap_or(true)
-    }
-
-    pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
-        self.autograd_meta.as_ref()?.lock().grad_fn.clone()
-    }
-
-    pub fn detach(&self) -> Tensor {
-        let mut new = self.clone();
-        new.autograd_meta = None;
-        new.requires_grad = false;
-        new.into()
-    }
-
-    pub fn increment_version(&self) {
-        self.version_counter.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn version(&self) -> u64 {
-        self.version_counter.load(Ordering::Relaxed)
     }
 
     #[track_caller]
@@ -295,10 +193,6 @@ impl TensorImpl {
                 // and the pointer lifetime remains tied to the borrowed tensor storage.
                 Ok(unsafe { cpu.data.as_ref().as_ptr().add(byte_offset) })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot get a CPU pointer from GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -377,10 +271,6 @@ impl TensorImpl {
                 // `&mut self` and `Arc::make_mut` establish exclusive backing access.
                 Ok(unsafe { data.as_mut_ptr().add(byte_offset) })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot get a mutable CPU pointer from GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -433,10 +323,6 @@ impl TensorImpl {
                     FastnnError::Internal(format!("CPU storage cannot be viewed as F32: {error}"))
                 })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot slice GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -494,10 +380,6 @@ impl TensorImpl {
                     ))
                 })
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot mutably slice GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 }
@@ -513,9 +395,6 @@ impl Clone for TensorImpl {
             storage_offset: self.storage_offset,
             dtype: self.dtype,
             device: self.device,
-            version_counter: Arc::clone(&self.version_counter),
-            autograd_meta: self.autograd_meta.clone(),
-            requires_grad: self.requires_grad,
             contiguous_cache: AtomicI8::new(self.contiguous_cache.load(Ordering::Relaxed)),
         }
     }
@@ -555,48 +434,6 @@ impl Tensor {
         self.inner.device
     }
 
-    pub(crate) fn attach_grad_fn(mut output: Tensor, backward: Arc<autograd::NodeInfo>) -> Tensor {
-        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(backward);
-        let inner = Arc::make_mut(&mut output.inner);
-        inner.autograd_meta = Some(Arc::new(parking_lot::Mutex::new(meta)));
-        inner.requires_grad = true;
-        output
-    }
-
-    pub fn requires_grad(&self) -> bool {
-        self.inner.requires_grad()
-    }
-
-    pub fn requires_grad_(&self, requires_grad: bool) -> Tensor {
-        let mut inner = self.inner.clone();
-        Arc::make_mut(&mut inner).set_requires_grad(requires_grad);
-        Tensor { inner }
-    }
-
-    pub fn grad(&self) -> Option<Tensor> {
-        self.inner.grad()
-    }
-
-    pub fn set_grad(&self, grad: Option<Tensor>) {
-        if let Some(meta) = &self.inner.autograd_meta {
-            let mut lock = meta.lock();
-            lock.grad = grad;
-        }
-    }
-
-    pub fn is_leaf(&self) -> bool {
-        self.inner.is_leaf()
-    }
-
-    pub fn grad_fn(&self) -> Option<Arc<autograd::NodeInfo>> {
-        self.inner.grad_fn()
-    }
-
-    pub fn detach(&self) -> Tensor {
-        self.inner.detach()
-    }
-
     pub fn item(&self) -> FastnnResult<f32> {
         if self.inner.numel() != 1 {
             return Err(FastnnError::shape(format!(
@@ -607,12 +444,6 @@ impl Tensor {
 
         let ptr = match self.inner.storage.as_ref() {
             Storage::Cpu(cpu) => cpu.data.as_ref().as_ptr(),
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                return Err(FastnnError::device(
-                    "item() requires CPU storage; transfer the tensor to CPU first",
-                ));
-            }
         };
         Ok(match self.inner.dtype {
             DType::F32 => {
@@ -823,12 +654,6 @@ impl Tensor {
                     }
                 }
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                return Err(FastnnError::device(
-                    "to_numpy() requires CPU storage; transfer the tensor to CPU first",
-                ));
-            }
         })
     }
 
@@ -921,10 +746,6 @@ impl Tensor {
                 }
                 Ok(&cpu.data[start..end])
             }
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => Err(FastnnError::device(
-                "cannot slice GPU storage; move the tensor to CPU first",
-            )),
         }
     }
 
@@ -935,14 +756,6 @@ impl Tensor {
 
     pub fn try_as_f32_slice_mut(&mut self) -> FastnnResult<&mut [f32]> {
         Arc::make_mut(&mut self.inner).try_as_f32_slice_mut()
-    }
-
-    pub fn increment_version(&self) {
-        self.inner.increment_version();
-    }
-
-    pub fn version(&self) -> u64 {
-        self.inner.version()
     }
 }
 
@@ -1170,82 +983,6 @@ fn einsum_validated(equation: &str, tensors: &[Tensor]) -> Tensor {
         result_2d.reshape(out_shape.to_vec())
     }
 }
-
-pub fn clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> f32 {
-    try_clip_grad_norm_(tensors, max_norm, norm_type).expect("clip_grad_norm_ failed")
-}
-
-pub fn try_clip_grad_norm_(tensors: &[Tensor], max_norm: f32, norm_type: f32) -> FastnnResult<f32> {
-    if !max_norm.is_finite() || max_norm < 0.0 {
-        return Err(FastnnError::shape(
-            "gradient maximum norm must be finite and non-negative",
-        ));
-    }
-    if !norm_type.is_finite() || norm_type <= 0.0 {
-        return Err(FastnnError::shape(
-            "gradient norm type must be finite and positive",
-        ));
-    }
-    let mut total_norm = 0.0f32;
-    for t in tensors {
-        if let Some(g) = t.grad() {
-            let g_data = g.try_as_f32_slice()?;
-            if norm_type == 2.0 {
-                let param_norm = g_data.iter().map(|x| x * x).sum::<f32>().sqrt();
-                total_norm += param_norm * param_norm;
-            } else {
-                total_norm += g_data.iter().map(|x| x.abs().powf(norm_type)).sum::<f32>();
-            }
-        }
-    }
-    if norm_type == 2.0 {
-        total_norm = total_norm.sqrt();
-    } else {
-        total_norm = total_norm.powf(1.0 / norm_type);
-    }
-    if !total_norm.is_finite() {
-        return Err(FastnnError::Computation(
-            "gradient norm is not finite".into(),
-        ));
-    }
-    let clip_coef = max_norm / total_norm.max(1e-6);
-    if clip_coef < 1.0 {
-        for t in tensors {
-            if let Some(mut g) = t.grad() {
-                for x in g.try_as_f32_slice_mut()?.iter_mut() {
-                    *x *= clip_coef;
-                }
-                t.set_grad(Some(g));
-            }
-        }
-    }
-    Ok(total_norm)
-}
-
-pub fn clip_grad_value_(tensors: &[Tensor], clip_value: f32) {
-    try_clip_grad_value_(tensors, clip_value).expect("clip_grad_value_ failed")
-}
-
-pub fn try_clip_grad_value_(tensors: &[Tensor], clip_value: f32) -> FastnnResult<()> {
-    if !clip_value.is_finite() || clip_value < 0.0 {
-        return Err(FastnnError::shape(
-            "gradient clip value must be finite and non-negative",
-        ));
-    }
-    for t in tensors {
-        if let Some(mut g) = t.grad() {
-            for x in g.try_as_f32_slice_mut()?.iter_mut() {
-                *x = x.max(-clip_value).min(clip_value);
-            }
-            t.set_grad(Some(g));
-        }
-    }
-    Ok(())
-}
-
-// =============================================================================
-// AOT pipeline bridge — replace eager dispatcher calls with graph lowering
-// =============================================================================
 
 pub fn dtype_to_ir(dt: DType) -> FastnnResult<IrDType> {
     Ok(match dt {

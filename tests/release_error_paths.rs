@@ -15,7 +15,7 @@ fn run_malformed_dispatch() {
     let backend = CpuBackend;
     let plan = ExecutablePlan {
         instructions: vec![Instruction::CallKernel {
-            kernel_name: "adam_update_f32".into(),
+            kernel_name: "erf_f32".into(),
             input_slices: vec![],
             output_slice: BufferSlice::new(0, 4),
             secondary_output_slice: None,
@@ -54,7 +54,7 @@ fn run_malformed_dispatch() {
 
     let persistent_plan = ExecutablePlan {
         instructions: vec![Instruction::CallKernel {
-            kernel_name: "matmul".into(),
+            kernel_name: "erf_f32".into(),
             input_slices: vec![BufferSlice::new(0, 4), BufferSlice::new(4, 4)],
             output_slice: BufferSlice::new(8, 4),
             secondary_output_slice: None,

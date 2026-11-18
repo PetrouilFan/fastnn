@@ -15,6 +15,8 @@ metadata, `GraphBuilder`, and `GraphTensor`.
   them together with their consumers.
 - Graph serialization may be redesigned or removed if the resulting graph
   ownership is clearer; cover the replacement behavior with tests.
+- The graph is inferred to be an inference graph. There is no backward graph
+  kind and no autograd hook to maintain.
 
 ## Boundaries
 
@@ -22,10 +24,9 @@ metadata, `GraphBuilder`, and `GraphTensor`.
   operations, compilation/cache helpers, and builder tests as distinct
   ownership domains.
 - Remove obsolete `ir::node` paths when the new layout is complete.
-- `GraphBuilder` may construct backward graphs through autograd, but backend
-  compilation belongs in explicit compile/cache ownership rather than general
-  operation builders.
+- Backend compilation belongs in explicit compile/cache ownership rather than
+  general operation builders.
 
 Any new operation requires a traced implementation path through IR, inference,
-lowering, execution, and relevant import/training support. Use targeted IR,
-shape, quantized-pipeline, and graph-executor tests.
+lowering, execution, and relevant import support. Use targeted IR, shape,
+quantized-pipeline, and graph-executor tests.

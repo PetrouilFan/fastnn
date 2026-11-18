@@ -2,13 +2,7 @@ import sys
 import pytest
 import numpy as np
 import fastnn as fnn
-from tests.test_utils import (
-    training_step,
-    train_model,
-    assert_shape_equal,
-    assert_has_grad,
-    make_tensor,
-)
+from tests.test_utils import assert_shape_equal, make_tensor
 
 
 def test_linear_forward():
@@ -49,75 +43,9 @@ def test_mlp_forward():
     sys.platform == "win32",
     reason="heap corruption (0xc0000374) in release mode on Windows",
 )
-def test_mlp_training_step():
-    model = fnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1)
-    optimizer = fnn.Adam(model.parameters(), lr=0.01)
-
-    x = make_tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]], [4, 2])
-    y = make_tensor([[0.0], [1.0], [1.0], [0.0]], [4, 1])
-
-    initial_loss = None
-    for _ in range(10):
-        loss_val = training_step(model, x, y, optimizer, loss_fn=fnn.mse_loss)
-        initial_loss = loss_val
-        break
-
-    assert initial_loss is not None
-
-
 @pytest.mark.skipif(
     sys.platform == "win32", reason="heap corruption in release mode on Windows"
 )
-@pytest.mark.xfail(reason="Muon Python binding updates cloned parameter handles; optimizer rewrite pending")
-def test_muon_optimizer():
-    # Test Muon optimizer with 2D weight matrix
-    linear = fnn.Linear(10, 5)
-    # Use non-zero input to avoid numerical issues with very small gradients
-    x = make_tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]], [1, 10])
-    y = make_tensor([[1.0, 1.0, 1.0, 1.0, 1.0]], [1, 5])
-
-    # Get initial parameters
-    initial_params = [p.numpy().copy() for p in linear.parameters()]
-
-    # Use Muon optimizer
-    optimizer = fnn.Muon(
-        linear.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0, nesterov=True
-    )
-
-    # Training loop
-    initial_loss = None
-    for _ in range(5):
-        pred = linear(x)
-        # Use mean reduction to get a scalar loss
-        loss = fnn.mse_loss(pred, y, reduction="mean")
-        # loss should be a scalar tensor (shape [1])
-        assert_shape_equal(loss, [1])
-        initial_loss = loss.item()
-
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-    assert initial_loss is not None
-    # Check that weights are updated (not all zero)
-    for i, param in enumerate(linear.parameters()):
-        param_data = param.numpy()
-        # Check that parameters have changed from initial values
-        assert not np.allclose(param_data, initial_params[i]), (
-            f"Parameter {i} was not updated"
-        )
-
-
-def test_zero_grad():
-    linear = fnn.Linear(10, 5)
-    x = fnn.ones([2, 10])
-    y = linear(x)
-    y.sum().backward()
-    linear.zero_grad()
-    for param in linear.parameters():
-        assert param.grad is None or (param.grad == 0).all()
-
-
 def test_batchnorm_train_eval():
     bn = fnn.BatchNorm1d(10)
     x = fnn.ones([4, 10])
@@ -211,29 +139,6 @@ def test_embedding():
     indices = fnn.tensor([0, 1, 2, 3], [4])
     output = emb(indices)
     assert_shape_equal(output, [4, 32])
-
-
-def test_embedding_backward_accumulates_duplicate_indices():
-    emb = fnn.Embedding(5, 3)
-    weight = list(emb.parameters())[0]
-    indices = fnn.tensor([1, 1, 3], [3])
-
-    emb(indices).sum().backward()
-
-    assert weight.grad is not None
-    np.testing.assert_array_equal(
-        weight.grad.numpy(),
-        np.array(
-            [
-                [0.0, 0.0, 0.0],
-                [2.0, 2.0, 2.0],
-                [0.0, 0.0, 0.0],
-                [1.0, 1.0, 1.0],
-                [0.0, 0.0, 0.0],
-            ],
-            dtype=np.float32,
-        ),
-    )
 
 
 def test_dropout():

@@ -11,7 +11,7 @@ use crate::compiler::passes::{
 use crate::compiler::plan::MemoryPlan;
 use crate::compiler::report::CompileReport;
 use crate::compiler::{CompilerError, CompilerResult};
-use crate::ir::{ComputeGraph, GraphKind, GraphResourceLimits};
+use crate::ir::{ComputeGraph, GraphResourceLimits};
 use crate::types::{CompileTarget, QuantTarget};
 
 pub struct CompilerPipeline {
@@ -35,7 +35,6 @@ impl CompilerPipeline {
 
     pub fn run(self, mut graph: ComputeGraph) -> CompilerResult<CompiledGraph> {
         let mut report = CompileReport::new(graph.kind, graph.nodes.len());
-        validate_target_for_graph_kind(&self.target, graph.kind)?;
         graph
             .validate_with_limits(&GraphResourceLimits::default())
             .map_err(|error| CompilerError::pass("graph validation", error))?;
@@ -72,11 +71,6 @@ impl CompilerPipeline {
                 Some(target)
             }
             CompileTarget::DynamicW4A8 { .. } => None,
-            CompileTarget::TrainingMixedPrecision { .. } => {
-                return Err(CompilerError::InvalidTarget(
-                    "mixed-precision training compilation is not implemented".into(),
-                ));
-            }
         };
 
         let mut before = graph.nodes.len();
@@ -110,10 +104,6 @@ impl CompilerPipeline {
                 apply_weight_quantization(&mut graph, target)?;
                 report.record("weight quantization", before, graph.nodes.len());
             }
-            before = graph.nodes.len();
-            quantization::wrap_quantized_optimizer(&mut graph)
-                .map_err(|error| CompilerError::pass("optimizer wrapping", error))?;
-            report.record("optimizer wrapping", before, graph.nodes.len());
             if let Some(calibration) = self.calibration.as_ref() {
                 before = graph.nodes.len();
                 activation_quantization::quantize_activations_with_calibration(
@@ -162,25 +152,6 @@ impl CompilerPipeline {
             report,
         })
     }
-}
-
-fn validate_target_for_graph_kind(
-    target: &CompileTarget,
-    graph_kind: GraphKind,
-) -> CompilerResult<()> {
-    if matches!(graph_kind, GraphKind::Backward | GraphKind::OptimizerUpdate)
-        && matches!(
-            target,
-            CompileTarget::WeightOnly(_)
-                | CompileTarget::IntegerInference(_)
-                | CompileTarget::DynamicW4A8 { .. }
-        )
-    {
-        return Err(CompilerError::InvalidTarget(format!(
-            "{target:?} is not valid for {graph_kind:?} graphs; backward and optimizer graphs require an explicit training compile policy"
-        )));
-    }
-    Ok(())
 }
 
 fn apply_weight_quantization(graph: &mut ComputeGraph, target: QuantTarget) -> CompilerResult<()> {

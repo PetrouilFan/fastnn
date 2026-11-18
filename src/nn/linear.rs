@@ -24,13 +24,10 @@ impl Linear {
             .map(|_| (crate::random_f32() - 0.5) * 2.0 * scale)
             .collect();
         let weight = Tensor::from_vec(weight_data, vec![in_features, out_features]);
-        let weight = weight.requires_grad_(true);
 
         let bias = if bias {
             let bias_data: Vec<f32> = (0..out_features).map(|_| 0.0).collect();
-            let b = Tensor::from_vec(bias_data, vec![out_features]);
-            let b = b.requires_grad_(true);
-            Some(b)
+            Some(Tensor::from_vec(bias_data, vec![out_features]))
         } else {
             None
         };
@@ -61,6 +58,5 @@ impl Module for Linear {
 
     crate::impl_nn_params!(weight, bias);
     crate::impl_nn_named_params!(weight, bias, "weight", "bias");
-    crate::impl_zero_grad!(self, self.weight, self.bias);
     crate::impl_training_state!(self, self.training);
 }

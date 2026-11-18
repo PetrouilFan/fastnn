@@ -61,8 +61,6 @@ impl StoragePool {
                 }
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => Arc::new(Storage::new_cpu(DType::F32, nbytes)),
         }
     }
 
@@ -86,8 +84,6 @@ impl StoragePool {
                                             let data = Arc::make_mut(&mut cpu.data);
                                             data.fill(0);
                                         }
-                                        #[cfg(feature = "gpu")]
-                                        Storage::Wgpu(_) => {}
                                     }
                                     return Some(storage);
                                 }
@@ -110,8 +106,6 @@ impl StoragePool {
                                     let data = Arc::make_mut(&mut cpu.data);
                                     data.fill(0);
                                 }
-                                #[cfg(feature = "gpu")]
-                                Storage::Wgpu(_) => {}
                             }
                             return storage;
                         }
@@ -119,8 +113,6 @@ impl StoragePool {
                 }
                 Arc::new(Storage::new_cpu(DType::F32, nbytes))
             }
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => Arc::new(Storage::new_cpu(DType::F32, nbytes)),
         }
     }
 
@@ -162,8 +154,6 @@ impl StoragePool {
                     self.buffers.insert(key, vec![storage]);
                 }
             }
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(_) => {}
         }
     }
 

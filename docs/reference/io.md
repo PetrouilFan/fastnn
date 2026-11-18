@@ -54,17 +54,17 @@ Imports an ONNX model and saves it as `.fnn`. Returns metadata.
 
 ## Serialization Format
 
-Custom binary with magic bytes (`b"FNN\x00"` for models, `b"FNO\x00"` for optimizers).
+Custom binary with magic bytes (`b"FNN\x00"`).
 
 | Version | Save | Load | Features |
 |---------|------|------|----------|
 | v1 | -- | Yes | Basic f32 parameters |
-| v2 | Yes | Yes | f32 + optional gradient storage |
+| v2 | Yes | Yes | f32 parameters (gradient flag is read for archived files) |
 | v3 | Yes | Yes | Dtype-tagged packed tensors (F32, F16, U8, U4, I4Codebook) |
 
 ### Version 2 (fnn-v2)
 
-All parameters stored as float32 with optional per-parameter gradient storage. Backward compatible with v1. Suitable for full-precision training checkpoints.
+All parameters stored as float32, with a per-parameter flag byte kept for compatibility with archived files. Suitable for full-precision inference checkpoints.
 
 ### Version 3 (fnn-v3)
 
@@ -74,10 +74,9 @@ Dtype-tagged tensors: each parameter carries a precision tag (F32=0, F16=1, U8=2
 
 The ONNX importer supports standard operators including Conv, BatchNorm, ReLU, GELU, Sigmoid, Tanh, Add, and MatMul. Custom operators can be added via the fastnn op registration API.
 
-For detailed operator coverage, troubleshooting tips, and the training export contract:
+For detailed operator coverage and troubleshooting tips:
 
 - [ONNX Support](../models/onnx.md) -- Operator coverage and import guide
-- [ONNX Training Export](../models/onnx-training-export.md) -- Training export workflow
 
 ## Utilities
 
@@ -93,7 +92,6 @@ fnn.clear_storage_pool()            # Clear storage pool cache
 
 ## See also
 
-- [Optimizers](optimizers.md) -- Saving optimizer state with model checkpoints
 - [API Reference](api-reference.md) -- Complete IO function signatures
 - [Architecture](../internals/architecture.md) -- AOT compiler pipeline
 - [Performance Roadmap](../internals/performance-roadmap.md) -- Packed precision types

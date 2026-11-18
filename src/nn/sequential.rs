@@ -41,12 +41,6 @@ impl Module for Sequential {
         params
     }
 
-    fn zero_grad(&self) {
-        for layer in &self.layers {
-            layer.zero_grad();
-        }
-    }
-
     fn train_mode(&self) {
         for layer in &self.layers {
             layer.train_mode();

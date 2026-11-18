@@ -107,30 +107,6 @@ impl Module for ResidualBlock {
         params
     }
 
-    fn zero_grad(&self) {
-        for t in self
-            .conv1
-            .parameters()
-            .iter()
-            .chain(self.bn1.parameters().iter())
-            .chain(self.conv2.parameters().iter())
-            .chain(self.bn2.parameters().iter())
-        {
-            if let Some(meta) = &t.inner.autograd_meta {
-                let mut lock = meta.lock();
-                lock.grad = None;
-            }
-        }
-        if let Some((ref ds_conv, ref ds_bn)) = self.downsample {
-            for t in ds_conv.parameters().iter().chain(ds_bn.parameters().iter()) {
-                if let Some(meta) = &t.inner.autograd_meta {
-                    let mut lock = meta.lock();
-                    lock.grad = None;
-                }
-            }
-        }
-    }
-
     fn train_mode(&self) {
         self.conv1.train_mode();
         self.bn1.train_mode();

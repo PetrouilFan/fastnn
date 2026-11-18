@@ -104,22 +104,6 @@ fnn.fused_add_relu(a, b)                  # Add + ReLU
 fnn.fused_conv_bn_silu(conv, bn, x)       # Conv + BN + SiLU
 ```
 
-### Gradient Clipping
-
-```python
-fnn.clip_grad_norm_(params, max_norm, norm_type=2.0)
-fnn.clip_grad_value_(params, clip_value)
-```
-
-## Loss Functions
-
-```python
-fnn.mse_loss(pred, target)              # Mean squared error
-fnn.cross_entropy_loss(logits, target)  # Cross entropy
-fnn.bce_with_logits(pred, target)       # Binary CE with logits
-fnn.huber_loss(pred, target, delta=1.0) # Huber (smooth L1)
-```
-
 ## Neural Network Modules
 
 | Module | Description |
@@ -148,45 +132,6 @@ fnn.huber_loss(pred, target, delta=1.0) # Huber (smooth L1)
 **Activation layer classes:** `fnn.ReLU()`, `fnn.GELU()`, `fnn.Sigmoid()`, `fnn.Tanh()`, `fnn.SiLU()` (Swish), `fnn.LeakyReLU(negative_slope)`, `fnn.Softplus(beta, threshold)`, `fnn.Hardswish()`, `fnn.Elu(alpha)`, `fnn.Mish()`, `fnn.PReLU()`
 
 **Recurrent layers:** `fnn.RNN(input_size, hidden_size, num_layers, ...)`, `fnn.LSTM(...)`, `fnn.GRU(...)` all support `batch_first`, `dropout`, `bidirectional`, and return `(output, hidden)` tuples.
-
-## Optimizers
-
-```python
-fnn.SGD(params, lr, momentum=0, weight_decay=0, nesterov=False)
-fnn.Adam(params, lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
-fnn.AdamW(params, lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
-fnn.Muon(params, lr, momentum=0.95, weight_decay=0, nesterov=True)
-fnn.Lion(params, lr, betas=(0.95, 0.98), weight_decay=0)
-fnn.RMSprop(params, lr, alpha=0.99, eps=1e-8, weight_decay=0, momentum=0, centered=False)
-```
-
-See [Optimizers](optimizers.md) for details.
-
-## LR Schedulers
-
-```python
-fnn.StepLR(optimizer, step_size, gamma)
-fnn.CosineAnnealingLR(optimizer, T_max, eta_min)
-fnn.ExponentialLR(optimizer, gamma)
-fnn.ReduceLROnPlateau(optimizer, mode, factor, patience, min_lr)
-```
-
-## Data
-
-```python
-fnn.Dataset                              # Base dataset class
-fnn.TensorDataset(*tensors)              # Dataset from tensors
-fnn.DataLoader(dataset, batch_size, shuffle, drop_last, num_workers)
-```
-
-## Callbacks
-
-```python
-fnn.EarlyStopping(monitor, patience, min_delta, restore_best_weights)
-fnn.ModelCheckpoint(dir_path, monitor, mode, save_best_only, verbose)
-fnn.LearningRateScheduler(scheduler, **kwargs)
-fnn.CSVLogger(filepath)
-```
 
 ## Model I/O
 
@@ -220,10 +165,9 @@ fnn.scale_boxes(img1_shape, boxes, img0_shape)     # Rescale boxes
 ## Utilities
 
 ```python
-fnn.no_grad()                   # Disable autograd
 fnn.set_seed(n)                 # Set random seed
 fnn.set_num_threads(n)          # Set CPU thread count
-fnn.set_default_device(device)  # Set default device (cpu/wgpu)
+fnn.set_default_device("cpu")   # Set default device
 fnn.allocator_stats()           # Memory stats
 fnn.list_registered_ops()       # List all tensor operations
 fnn.load_state_dict(model, d)   # Load parameter state
@@ -233,19 +177,16 @@ fnn.load_state_dict(model, d)   # Load parameter state
 
 Every tensor exposes these properties and methods:
 
-**Metadata:** `tensor.shape`, `.dtype`, `.device`, `.ndim`, `.numel`, `.stride`, `.is_contiguous`, `.requires_grad`, `.grad`
+**Metadata:** `tensor.shape`, `.dtype`, `.device`, `.ndim`, `.numel`, `.stride`, `.is_contiguous`
 
-**Conversion:** `.numpy()` to numpy array, `.item()` to Python scalar, `.to_cpu()` to CPU, `.to_gpu(id)` to GPU
-
-**Autograd:** `.backward()` computes gradients, `.detach()` detaches from graph, `.requires_grad_(bool)` sets gradient tracking
+**Conversion:** `.numpy()` to numpy array, `.item()` to Python scalar, `.to_cpu()`
 
 **Indexing:** Standard Python slicing via `tensor[slice]`
 
 ## See also
 
-- [Tensors](tensors.md) -- Tensor creation, ops, autograd
+- [Tensors](tensors.md) -- Tensor creation and ops
 - [Neural Network Modules](nn-modules.md) -- Module catalog with examples
-- [Optimizers](optimizers.md) -- Optimizer and scheduler details
 - [IO & Serialization](io.md) -- Save/load and format conversion
-- [Python API](python-api.md) -- Compiled training and GPU backend
+- [Python API](python-api.md) -- the `fastnn.fn3` inference API
 - [Index](../index.md) -- Full documentation index

@@ -1,4 +1,3 @@
-use crate::autograd::{self, Edge};
 use crate::error::{FastnnError, FastnnResult};
 use crate::impl_cpu_fast_path;
 use crate::impl_scalar_op;
@@ -17,11 +16,7 @@ fn cpu_f32_fast_path_setup(t: &Tensor) -> Option<(usize, *const f32, *mut f32, T
         let mut output = Tensor::empty(t.shape(), DType::F32, Device::Cpu);
         let inner = Arc::make_mut(&mut output.inner);
         let storage = Arc::make_mut(&mut inner.storage);
-        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-        let Storage::Cpu(cpu_storage) = storage
-        else {
-            unreachable!()
-        };
+        let Storage::Cpu(cpu_storage) = storage;
         let out_data = Arc::make_mut(&mut cpu_storage.data);
         let a_ptr = t.data_ptr_f32();
         let out_ptr = out_data.as_mut_ptr() as *mut f32;
@@ -102,9 +97,7 @@ impl TensorImpl {
             .checked_mul(step)
             .ok_or_else(|| FastnnError::Overflow("slice stride overflow".into()))?;
 
-        let mut tensor = self.new_view_from(sizes, strides, storage_offset);
-        tensor.autograd_meta = None;
-        tensor.requires_grad = false;
+        let tensor = self.new_view_from(sizes, strides, storage_offset);
         Ok(tensor.into())
     }
 }
@@ -116,29 +109,7 @@ impl Tensor {
     }
 
     pub fn try_slice(&self, dim: usize, start: i64, end: i64, step: i64) -> FastnnResult<Tensor> {
-        let output = self.inner.try_slice(dim, start, end, step)?;
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let _edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            let node = autograd::make_node_info_with_params("SliceBackward", inputs, {
-                let extent = self.shape()[dim];
-                let normalized_start = if start < 0 {
-                    (extent + start).max(0)
-                } else {
-                    start.min(extent)
-                };
-                vec![
-                    dim as i64,
-                    normalized_start,
-                    normalized_start + output.shape()[dim] * step,
-                    step,
-                ]
-            });
-            Self::attach_grad_fn(output, node)
-        } else {
-            output
-        })
+        self.inner.try_slice(dim, start, end, step)
     }
 
     pub fn maximum(&self, other: &Tensor) -> Tensor {
@@ -153,14 +124,7 @@ impl Tensor {
             .into_iter()
             .next()
             .ok_or_else(|| FastnnError::Internal("maximum execution returned no output".into()))?;
-        Ok(
-            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-                let inputs = vec![self.clone(), other.clone()];
-                Self::attach_grad_fn(output, autograd::make_node_info("MaximumBackward", inputs))
-            } else {
-                output
-            },
-        )
+        Ok(output)
     }
 
     impl_scalar_op!(gt_scalar, _CMP_GT_OQ, >);
@@ -189,14 +153,7 @@ impl Tensor {
             .into_iter()
             .next()
             .ok_or_else(|| FastnnError::Internal("minimum execution returned no output".into()))?;
-        Ok(
-            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-                let inputs = vec![self.clone(), other.clone()];
-                Self::attach_grad_fn(output, autograd::make_node_info("MinimumBackward", inputs))
-            } else {
-                output
-            },
-        )
+        Ok(output)
     }
 
     pub fn ge_tensor(&self, other: &Tensor) -> Tensor {
@@ -333,25 +290,7 @@ impl Tensor {
         .next()
         .ok_or_else(|| FastnnError::Internal("cat execution returned no output".into()))?;
 
-        if autograd::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad()) {
-            let _split_sizes: Vec<usize> = tensors
-                .iter()
-                .map(|t| t.inner.sizes[dim] as usize)
-                .collect();
-            let mut edges = Vec::new();
-            for (i, t) in tensors.iter().enumerate() {
-                if let Some(node) = t.grad_fn() {
-                    edges.push(Edge(node, i));
-                }
-            }
-            let inputs = tensors.to_vec();
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("CatBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn stack(tensors: &[Tensor], dim: i32) -> Tensor {
@@ -417,16 +356,7 @@ impl Tensor {
             .next()
             .ok_or_else(|| FastnnError::Internal("repeat execution returned no output".into()))?;
 
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let _edges = autograd::make_edge(self);
-            let inputs = vec![self.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("RepeatBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn where_tensor(&self, condition: &Tensor, other: &Tensor) -> Tensor {
@@ -451,14 +381,7 @@ impl Tensor {
         .next()
         .ok_or_else(|| FastnnError::Internal("where execution returned no output".into()))?;
 
-        Ok(
-            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-                let inputs = vec![self.clone(), other.clone()];
-                Self::attach_grad_fn(output, autograd::make_node_info("WhereBackward", inputs))
-            } else {
-                output
-            },
-        )
+        Ok(output)
     }
 
     pub fn gather(&self, axis: i64, indices: &Tensor) -> Tensor {
@@ -492,14 +415,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("gather execution returned no output".into()))?;
-        Ok(
-            if autograd::is_grad_enabled() && (self.requires_grad() || indices.requires_grad()) {
-                let inputs = vec![self.clone(), indices.clone()];
-                Self::attach_grad_fn(output, autograd::make_node_info("GatherBackward", inputs))
-            } else {
-                output
-            },
-        )
+        Ok(output)
     }
 
     pub fn nonzero(&self) -> Vec<i64> {

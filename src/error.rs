@@ -19,14 +19,6 @@ pub enum FastnnError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Autograd/backward pass error
-    #[error("Autograd error: {0}")]
-    Autograd(String),
-
-    /// Optimizer error
-    #[error("Optim error: {0}")]
-    Optim(String),
-
     /// Invalid argument or parameter
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
@@ -54,10 +46,6 @@ pub enum FastnnError {
     /// Memory allocation error
     #[error("Memory allocation error: {0}")]
     Allocation(String),
-
-    /// CUDA/GPU computation error
-    #[error("CUDA error: {0}")]
-    Cuda(String),
 
     /// Computation error (e.g., kernel execution failed)
     #[error("Computation error: {0}")]
@@ -110,16 +98,6 @@ impl FastnnError {
         FastnnError::Serialization(msg.into())
     }
 
-    /// Create an autograd error with context
-    pub fn autograd(msg: impl Into<String>) -> Self {
-        FastnnError::Autograd(msg.into())
-    }
-
-    /// Create an optim error with context
-    pub fn optim(msg: impl Into<String>) -> Self {
-        FastnnError::Optim(msg.into())
-    }
-
     /// Create a compilation error with context
     pub fn compilation(msg: impl Into<String>) -> Self {
         FastnnError::Compilation(msg.into())
@@ -137,12 +115,9 @@ impl From<FastnnError> for PyErr {
             FastnnError::Shape(_) => PyRuntimeError::new_err(msg),
             FastnnError::Dtype(_) => PyRuntimeError::new_err(msg),
             FastnnError::Device(_) => PyRuntimeError::new_err(msg),
-            FastnnError::Autograd(_) => PyRuntimeError::new_err(msg),
-            FastnnError::Optim(_) => PyRuntimeError::new_err(msg),
             FastnnError::Io(_) => PyRuntimeError::new_err(msg),
             FastnnError::Utf8(_) => PyRuntimeError::new_err(msg),
             FastnnError::Serialization(_) => PyRuntimeError::new_err(msg),
-            FastnnError::Cuda(_) => PyRuntimeError::new_err(msg),
             FastnnError::TensorOp(_) => PyRuntimeError::new_err(msg),
             FastnnError::DataLoader(_) => PyRuntimeError::new_err(msg),
             FastnnError::Computation(_) => PyRuntimeError::new_err(msg),
@@ -172,14 +147,11 @@ impl<T> Context<T> for Result<T, FastnnError> {
             FastnnError::Dtype(msg) => FastnnError::dtype(format!("{}: {}", f(), msg)),
             FastnnError::Device(msg) => FastnnError::device(format!("{}: {}", f(), msg)),
             FastnnError::TensorOp(msg) => FastnnError::tensor_op(format!("{}: {}", f(), msg)),
-            FastnnError::Autograd(msg) => FastnnError::Autograd(format!("{}: {}", f(), msg)),
-            FastnnError::Optim(msg) => FastnnError::Optim(format!("{}: {}", f(), msg)),
             FastnnError::Io(err) => FastnnError::Serialization(format!("{}: {}", f(), err)),
             FastnnError::Utf8(err) => FastnnError::Serialization(format!("{}: {}", f(), err)),
             FastnnError::Serialization(msg) => {
                 FastnnError::Serialization(format!("{}: {}", f(), msg))
             }
-            FastnnError::Cuda(msg) => FastnnError::Cuda(format!("{}: {}", f(), msg)),
             FastnnError::DataLoader(msg) => FastnnError::DataLoader(format!("{}: {}", f(), msg)),
             FastnnError::Computation(msg) => FastnnError::Computation(format!("{}: {}", f(), msg)),
             FastnnError::Internal(msg) => FastnnError::Internal(format!("{}: {}", f(), msg)),

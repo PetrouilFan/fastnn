@@ -3,10 +3,6 @@ use crate::storage::{CpuStorage, DType, Device, Storage};
 use std::sync::Arc;
 
 use super::{Tensor, TensorImpl};
-#[cfg(feature = "gpu")]
-use crate::storage::GpuStorage;
-#[cfg(feature = "gpu")]
-use parking_lot::RwLock;
 
 impl TensorImpl {
     pub fn to_dtype(&self, dtype: DType) -> Tensor {
@@ -35,10 +31,7 @@ impl TensorImpl {
     }
 
     fn to_dtype_validated(&self, dtype: DType) -> FastnnResult<Tensor> {
-        #[cfg_attr(not(feature = "gpu"), allow(irrefutable_let_patterns))]
-        let Storage::Cpu(cpu) = self.storage.as_ref() else {
-            return Err(FastnnError::device("dtype conversion requires CPU storage"));
-        };
+        let Storage::Cpu(cpu) = self.storage.as_ref();
         let numel = usize::try_from(self.numel())
             .map_err(|_| FastnnError::Overflow("dtype conversion element count overflow".into()))?;
         let source_width = self.dtype.scalar_byte_width().ok_or_else(|| {
@@ -147,58 +140,16 @@ impl TensorImpl {
         let tensor: Tensor = self.clone().into();
         match device {
             Device::Cpu => tensor.try_to_cpu(),
-            #[cfg(feature = "gpu")]
-            Device::Wgpu(device_id) => tensor.try_to_gpu(device_id),
         }
-    }
-
-    pub fn is_gpu(&self) -> bool {
-        #[cfg(feature = "gpu")]
-        if matches!(self.device, Device::Wgpu(_)) {
-            return true;
-        }
-        false
     }
 
     pub fn is_cpu(&self) -> bool {
         matches!(self.device, Device::Cpu)
     }
 
-    #[cfg(feature = "gpu")]
-    pub fn gpu_buffer(&self) -> Option<Arc<wgpu::Buffer>> {
-        match self.storage.as_ref() {
-            Storage::Wgpu(gpu) => Some(gpu.buffer.clone()),
-            Storage::Cpu(cpu) => {
-                let cache = cpu.gpu_buffer_cache.read();
-                cache.values().next().cloned()
-            }
-        }
-    }
-
-    #[cfg(feature = "gpu")]
-    pub fn get_or_create_gpu_buffer(&self, device_id: usize) -> Option<Arc<wgpu::Buffer>> {
-        match self.storage.as_ref() {
-            Storage::Wgpu(gpu) if gpu.device_id == device_id => Some(gpu.buffer.clone()),
-            Storage::Wgpu(_) => None,
-            Storage::Cpu(_) => {
-                if let Some(buffer) = self.storage.get_or_create_gpu_buffer(device_id) {
-                    return Some(buffer);
-                }
-                None
-            }
-        }
-    }
-
-    #[cfg(feature = "gpu")]
-    pub fn cache_gpu_buffer(&self, device_id: usize, buffer: Arc<wgpu::Buffer>) {
-        self.storage.cache_gpu_buffer(device_id, buffer);
-    }
-
     pub fn cpu_data(&self) -> Option<&[u8]> {
         match self.storage.as_ref() {
             Storage::Cpu(cpu) => Some(&cpu.data),
-            #[cfg_attr(not(feature = "gpu"), allow(unreachable_patterns))]
-            _ => None,
         }
     }
 }
@@ -231,98 +182,6 @@ impl Tensor {
                 self.inner
                     .new_on_device(self.inner.storage.clone(), Device::Cpu),
             )),
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(gpu) => {
-                use crate::backend::wgpu::context::try_get_wgpu_context;
-                let ctx = try_get_wgpu_context(gpu.device_id).ok_or_else(|| {
-                    FastnnError::device(format!("WGPU device {} is not initialized", gpu.device_id))
-                })?;
-                let data = ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
-                let byte_data = bytemuck::cast_slice(&data).to_vec();
-                let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(byte_data, gpu.nbytes)));
-                Ok(Tensor::new(self.inner.new_on_device(storage, Device::Cpu)))
-            }
-        }
-    }
-
-    #[cfg(feature = "gpu")]
-    pub fn to_gpu(&self, device_id: usize) -> Tensor {
-        self.try_to_gpu(device_id).expect("Tensor::to_gpu failed")
-    }
-
-    #[cfg(feature = "gpu")]
-    pub fn try_to_gpu(&self, device_id: usize) -> FastnnResult<Tensor> {
-        if matches!(self.device(), Device::Wgpu(current) if current == device_id) {
-            return Ok(self.clone());
-        }
-        if self.dtype() != DType::F32 {
-            return Err(FastnnError::dtype(
-                "WGPU transfer currently requires F32 tensors",
-            ));
-        }
-        if !self.is_contiguous() {
-            return Err(FastnnError::shape(
-                "WGPU transfer currently requires contiguous tensors",
-            ));
-        }
-        if let Device::Wgpu(current) = self.device() {
-            if crate::backend::wgpu::context::try_get_wgpu_context(current).is_none() {
-                return Err(FastnnError::device(format!(
-                    "source WGPU device {current} is not initialized"
-                )));
-            }
-        }
-        if crate::backend::wgpu::context::try_get_wgpu_context(device_id).is_none() {
-            return Err(FastnnError::device(format!(
-                "WGPU device {device_id} is not initialized"
-            )));
-        }
-        Ok(self.to_gpu_validated(device_id))
-    }
-
-    #[cfg(feature = "gpu")]
-    fn to_gpu_validated(&self, device_id: usize) -> Tensor {
-        match self.inner.storage.as_ref() {
-            Storage::Wgpu(gpu) if gpu.device_id == device_id => self.clone(),
-            Storage::Wgpu(gpu) => {
-                use crate::backend::wgpu::context::get_wgpu_context;
-                let src_ctx = get_wgpu_context(gpu.device_id);
-                let f32_data = src_ctx.read_buffer_from_arc(&gpu.buffer, gpu.nbytes);
-                let byte_data = bytemuck::cast_slice(&f32_data);
-
-                let Some(dst_ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id)
-                else {
-                    let cpu_data: Vec<f32> = bytemuck::cast_slice(&f32_data).to_vec();
-                    return Tensor::from_vec(cpu_data, self.shape().to_vec());
-                };
-                let buffer = dst_ctx.create_gpu_buffer_from_bytes(byte_data, "to_gpu");
-
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes: gpu.nbytes,
-                    device_id,
-                    staging: RwLock::new(None),
-                }));
-
-                Tensor::new(self.inner.new_on_device(storage, Device::Wgpu(device_id)))
-            }
-            _ => {
-                let cpu_data = self.as_f32_slice().to_vec();
-                let Some(ctx) = crate::backend::wgpu::context::try_get_wgpu_context(device_id)
-                else {
-                    return self.clone();
-                };
-                let buffer = ctx.create_gpu_buffer_from_data(&cpu_data, "to_gpu");
-
-                let storage = Arc::new(Storage::Wgpu(GpuStorage {
-                    buffer: buffer.buffer,
-                    nbytes: cpu_data.len() * 4,
-                    device_id,
-                    staging: RwLock::new(None),
-                }));
-
-                Tensor::new(self.inner.new_on_device(storage, Device::Wgpu(device_id)))
-            }
         }
     }
 }

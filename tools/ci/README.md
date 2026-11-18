@@ -26,7 +26,7 @@ record.
 | `run-gpu-lane.sh` | Local/protected physical-GPU evidence path; refused on hosted runners |
 | `gpu_evidence.py` | Implementation behind `run-gpu-lane.sh` |
 | `lane-lib.sh` | Shared bash helpers: lane identity, reproduction output, status recording |
-| `cpu-lane.sh`, `python-lane.sh`, `frozen-2x-lane.sh` | Lane entry points |
+| `cpu-lane.sh`, `python-lane.sh` | Lane entry points |
 | `vulkan-build-lane.sh`, `vulkan-software-lane.sh` | Vulkan lanes |
 | `model-pin-lane.sh` | Offline pinned-model lane |
 | `gpu-evidence-status.sh` | Hosted job: validates committed evidence, never runs a GPU |
@@ -37,7 +37,6 @@ record.
 ```bash
 tools/ci/cpu-lane.sh                    # fmt, clippy budget, build, Rust tests
 tools/ci/python-lane.sh                 # maturin develop + pytest -m "not slow"
-tools/ci/frozen-2x-lane.sh              # transitional 2.x gate (removed by #65)
 tools/ci/vulkan-build-lane.sh           # spirv-val + feature build (no device)
 tools/ci/vulkan-software-lane.sh        # CI-ONLY lavapipe smoke (no GPU)
 tools/ci/model-pin-lane.sh              # offline; NOT VERIFIED until #49

@@ -1,100 +1,67 @@
 # Python API Reference
 
-Python-facing APIs for compiled execution, flash attention, and GPU backend.
+The 3.0 inference API is `fastnn.fn3`: one versioned artifact, an explicit
+device, and sessions that own their KV cache. The 2.x eager tensor/nn forward
+facade remains importable as a secondary surface; it has no training names.
 
-## Compiled Training
-
-Compiles a forward+backward+optimizer pipeline into a single-dispatch `PyCompiledTrainingModel`.
-
-### compile_train_model()
+## `fastnn.fn3`
 
 ```python
-model = fnn.compile_train_model(
-    graph_bytes,            # Serialized ComputeGraph (bytes)
-    loss_node_id,           # Node ID of the loss tensor
-    param_ids,              # Node IDs of trainable parameters
-    param_data,             # Raw weight data per parameter
-    batch_input_ids,        # Node IDs of batch inputs
-    optimizer,              # "sgd" | "adamw" | "muon" | "lion" | "rmsprop"
-    lr=0.001,
-    weight_decay=0.0,
-    beta1=None,             # Adam/AdamW/Lion beta1
-    beta2=None,             # Adam/AdamW/Lion beta2
-    eps=None,               # Adam/AdamW/RMSprop epsilon
-    quantize=None,          # Quantization: 4 or 8 for standard, "i4cb" for codebook INT4
-) -> PyCompiledTrainingModel
+import fastnn.fn3 as fn3
+
+fn3.devices() -> list[Device]
+
+fn3.prepare(onnx, artifact, *, max_total=None, max_seq=None, max_past=None,
+            overwrite=False) -> PrepareReport
+fn3.inspect(artifact) -> ArtifactInfo
+fn3.load(artifact, source=None, *, device=None, capacity=None) -> Model
+
+Model.session() -> Session
+Session.prefill(tokens) -> Logits          # [batch, 1, vocab]
+Session.decode(tokens) -> Logits           # [batch, 1, vocab]
+Session.reset() -> None
 ```
 
-**Supported optimizer strings:**
-
-| String | Required Params |
-|--------|-----------------|
-| `"sgd"` | lr, weight_decay |
-| `"adamw"` | lr, beta1, beta2, eps, weight_decay |
-| `"muon"` | lr, weight_decay |
-| `"lion"` | lr, beta1, beta2 |
-| `"rmsprop"` | lr, beta1, eps |
-
-### train_step()
-
-```python
-loss: float = model.train_step(inputs: list[bytes])
-```
-
-Executes forward + backward + optimizer update in a single dispatch call. Returns scalar loss.
+`Device.id / kind / index / name`; `Geometry`, `Envelope`, `Metadata`,
+`PrepareReport`, `ArtifactInfo`, `SessionStats` and `Logits` are documented in
+`fastnn/fn3/__init__.py` and expose the same fields as the Rust types.
 
 ### Example
 
 ```python
-graph_bytes = build_my_graph()
-model = fnn.compile_train_model(
-    graph_bytes=graph_bytes, loss_node_id=3,
-    param_ids=[1, 2], param_data=[w_bytes, b_bytes],
-    batch_input_ids=[0], optimizer="lion",
-    lr=0.0001, beta1=0.95, beta2=0.98,
-)
-for epoch in range(100):
-    for batch_x in data:
-        loss = model.train_step([batch_x])
+import fastnn.fn3 as fn3
+
+report = fn3.prepare("model.onnx", "model.fn3prep")
+print(report.status, report.size_bytes, report.sha256)
+
+model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+session = model.session()
+logits = session.prefill([464, 2068, 7586, 21831])
+print(int(logits.argmax()), session.cache_len)
 ```
 
-## FlashAttention
+### Devices
 
-Memory-efficient attention using tiled online-softmax with SIMD tile matmul (AVX2/AVX-512). 2-4x speedup over baseline.
+`device="cpu"` is always available. `device="vulkan"` requires a build with the
+`vulkan` feature and a physical device; otherwise `Fn3DeviceError` names the
+request and the available devices. The API never falls back to CPU silently.
 
-```python
-output = fnn.flash_attention(
-    q,                        # [batch, heads, seq_len, head_dim]
-    k,                        # [batch, heads, seq_len, head_dim]
-    v,                        # [batch, heads, seq_len, head_dim]
-    scale=None,               # Default: 1/sqrt(head_dim)
-    causal=False,             # Causal masking for autoregressive models
-) -> Tensor
-```
+### Errors
 
-## WGPU Backend
+Every core failure maps to a typed exception (`Fn3DeviceError`,
+`Fn3ArtifactError`, `Fn3ImportError`, `Fn3SessionError`, `Fn3UnsupportedError`,
+...). No panic crosses the FFI boundary.
 
-### Device Selection
+## Eager forward surface
 
-```python
-fnn.set_default_device("wgpu:0")   # Set default GPU
-x_gpu = x_cpu.to_gpu(0)            # Move tensor to GPU
-x_cpu = x_gpu.to_cpu()             # Move tensor back to CPU
-```
-
-### Quantized GPU Inference
-
-WGPU supports U4/U8 quantized inference via WGSL compute shaders with per-channel dequantization. Models run entirely on GPU with no CPU copy during dispatch.
-
-```python
-executor = fnn.AotExecutor(nodes, params, input_names, output_names, quantize=4)
-outputs = executor.forward({"input": x_gpu})
-```
+`fastnn.tensor`, `fastnn.nn`, `fastnn.io` and `fastnn.AotExecutor` remain for
+the 2.x compiled path. They expose forward operations only; `requires_grad`,
+`backward`, optimizers, schedulers, losses, data loaders and callbacks were
+deleted with the training stack (FN3-19 / #65).
 
 ## See also
 
-- [API Reference](api-reference.md) -- Complete Python API table
-- [Tensors](tensors.md) -- Tensor operations, autograd, GPU support
-- [Optimizers](optimizers.md) -- Optimizer parameter details
-- [ONNX Support](../models/onnx.md) -- Quantized model inference
-- [Index](../index.md) -- Full documentation index
+- [API Reference](api-reference.md) -- forward Python API table
+- [Tensors](tensors.md) -- tensor creation and operations
+- [ONNX Support](../models/onnx.md) -- ONNX import and quantized inference
+- [Index](../index.md) -- full documentation index

@@ -1,11 +1,9 @@
 #![allow(clippy::too_many_arguments)]
-use crate::autograd::{no_grad_enter, no_grad_exit};
 use crate::nn::{self as core_nn, Module};
-use crate::optim::{self as core_optim, Optimizer};
 use crate::storage::allocator_stats as storage_allocator_stats;
 use crate::storage::{DType, Device};
 use crate::tensor::{self as core_tensor, Tensor};
-use crate::{autograd, residual, set_seeded_rng};
+use crate::{residual, set_seeded_rng};
 use parking_lot::RwLock;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -13,8 +11,6 @@ use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
 use pyo3::PyAny;
 use std::collections::HashMap;
-#[cfg(feature = "gpu")]
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -45,39 +41,17 @@ pyo3::create_exception!(
 );
 pyo3::create_exception!(
     fastnn,
-    AutogradError,
-    FastnnError,
-    "Error during autograd/backward pass."
-);
-pyo3::create_exception!(
-    fastnn,
-    OptimizerError,
-    FastnnError,
-    "Error in optimizer step."
-);
-pyo3::create_exception!(
-    fastnn,
     IoError,
     FastnnError,
     "Error during serialization/deserialization."
 );
-pyo3::create_exception!(
-    fastnn,
-    CudaError,
-    FastnnError,
-    "CUDA/GPU computation error."
-);
 
 // Lock-free default device storage (AtomicU8 for variant, AtomicUsize for device_id)
 static DEFAULT_DEVICE_VARIANT: AtomicU8 = AtomicU8::new(0);
-#[cfg(feature = "gpu")]
-static DEFAULT_DEVICE_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn get_default_device() -> Device {
     match DEFAULT_DEVICE_VARIANT.load(Ordering::Relaxed) {
         0 => Device::Cpu,
-        #[cfg(feature = "gpu")]
-        1 => Device::Wgpu(DEFAULT_DEVICE_ID.load(Ordering::Relaxed)),
         _ => Device::Cpu,
     }
 }
@@ -85,11 +59,6 @@ pub(crate) fn get_default_device() -> Device {
 pub(crate) fn set_default_device_internal(device: Device) {
     match device {
         Device::Cpu => DEFAULT_DEVICE_VARIANT.store(0, Ordering::Relaxed),
-        #[cfg(feature = "gpu")]
-        Device::Wgpu(id) => {
-            DEFAULT_DEVICE_VARIANT.store(1, Ordering::Relaxed);
-            DEFAULT_DEVICE_ID.store(id, Ordering::Relaxed);
-        }
     }
 }
 
@@ -97,9 +66,7 @@ include!("tensor.rs");
 include!("factories.rs");
 include!("ops.rs");
 include!("nn.rs");
-include!("optim.rs");
 include!("io.rs");
-include!("trainer.rs");
 
 // FN3-18 (#64): the 3.0 inference surface. Declared by path so the binding
 // source lives under `src/fn3/python/` (the ADR's reserved path for #64) while
@@ -130,10 +97,7 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ShapeError", py.get_type::<ShapeError>())?;
     m.add("DtypeError", py.get_type::<DtypeError>())?;
     m.add("DeviceError", py.get_type::<DeviceError>())?;
-    m.add("AutogradError", py.get_type::<AutogradError>())?;
-    m.add("OptimizerError", py.get_type::<OptimizerError>())?;
     m.add("IoError", py.get_type::<IoError>())?;
-    m.add("CudaError", py.get_type::<CudaError>())?;
 
     m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_bytes, py)?)?;
@@ -187,11 +151,6 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minimum, py)?)?;
     m.add_function(wrap_pyfunction!(argmax, py)?)?;
     m.add_function(wrap_pyfunction!(argmin, py)?)?;
-    m.add_function(wrap_pyfunction!(mse_loss, py)?)?;
-    m.add_function(wrap_pyfunction!(cross_entropy_loss, py)?)?;
-    m.add_function(wrap_pyfunction!(_no_grad_enter, py)?)?;
-    m.add_function(wrap_pyfunction!(_no_grad_exit, py)?)?;
-    m.add_function(wrap_pyfunction!(checkpoint, py)?)?;
     m.add_function(wrap_pyfunction!(_set_seed, py)?)?;
     m.add_function(wrap_pyfunction!(_set_num_threads, py)?)?;
     m.add_function(wrap_pyfunction!(_get_num_threads, py)?)?;
@@ -238,21 +197,11 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AdaptiveAvgPool2d>()?;
     m.add_class::<Sequential>()?;
     m.add_class::<ModuleList>()?;
-    m.add_class::<PySGD>()?;
-    m.add_class::<PyAdam>()?;
-    m.add_class::<PyAdamW>()?;
-    m.add_class::<PyMuon>()?;
-    m.add_class::<PyLion>()?;
-    m.add_class::<PyRMSprop>()?;
     m.add_class::<PyTransformerEncoder>()?;
     m.add_class::<AotExecutor>()?;
 
     m.add_class::<PyTensor>()?;
-    m.add_class::<PyCompiledTrainingModel>()?;
 
-    m.add_function(wrap_pyfunction!(bucket_allreduce, py)?)?;
-
-    m.add_function(wrap_pyfunction!(compile_train_model, py)?)?;
     m.add_function(wrap_pyfunction!(cat, py)?)?;
     m.add_function(wrap_pyfunction!(stack, py)?)?;
     m.add_function(wrap_pyfunction!(where_, py)?)?;
@@ -264,16 +213,12 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(einsum, py)?)?;
     m.add_function(wrap_pyfunction!(im2col, py)?)?;
 
-    m.add_function(wrap_pyfunction!(bce_with_logits, py)?)?;
-    m.add_function(wrap_pyfunction!(huber_loss, py)?)?;
     m.add_function(wrap_pyfunction!(flash_attention, py)?)?;
-    m.add_function(wrap_pyfunction!(clip_grad_norm_, py)?)?;
-    m.add_function(wrap_pyfunction!(clip_grad_value_, py)?)?;
     m.add_function(wrap_pyfunction!(cumsum, py)?)?;
     m.add_function(wrap_pyfunction!(erf, py)?)?;
 
-    // FN3-18 (#64): `_core.fn3`, the 3.0 inference surface. The 2.x entry
-    // points above are frozen and removed by #65.
+    // `_core.fn3` is the 3.0 inference surface. The 2.x entry points above are
+    // the secondary eager/AOT API and carry no training names.
     fn3::register(m)?;
     Ok(())
 }

@@ -6,24 +6,40 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://rustup.rs)
 [![Downloads](https://img.shields.io/github/downloads/PetrouilFan/fastnn/total)](https://github.com/PetrouilFan/fastnn)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/PetrouilFan/fastnn)](https://github.com/PetrouilFan/fastnn)
-[![Last Commit](https://img.shields.io/github/last-commit/PetrouilFan/fastnn)](https://github.com/PetrouilFan/fastnn)
 
-**Fast, compiled neural networks in Rust with Python bindings.**
+**Inference-only neural networks in Rust, with a Python binding and a Vulkan
+compute backend.**
 
-fastnn is an ahead-of-time compiled neural network runtime with eager-mode training. Write models in Python or Rust, compile through a 90+ op IR with 6 optimization passes, and deploy on CPU (ARM NEON, x86 SIMD) with optional WGPU GPU acceleration.
+fastnn 3.0 imports an ONNX decoder, compiles it into a versioned prepared-model
+artifact, plans it for a bounded shape envelope, and runs prefill plus cached
+decode on a CPU reference backend or on a physical Vulkan device. It is a
+deletion-first rewrite: there is no autograd, no optimizer, no training loop and
+no wgpu backend in this tree.
 
-> ⚠️ Under active development. APIs, supported graph paths, and performance characteristics may change between minor versions.
+> ⚠️ Alpha. APIs, the prepared-model format and performance may change before
+> the stable release.
 
 ---
 
 ## Highlights
 
-- **AOT-compiled graphs** — Write with an eager-like API, deploy with compiled graph performance. Shape inference, fusion, quantization, and memory planning happen at compile time.
-- **90+ IR ops, 6 compiler passes** — Operator fusion (ReLU, GELU, SiLU, MatMul+Add), weight quantization (I4/I8/FP4/FP8, I4Codebook per-block), constant folding, dead code elimination, and arena memory planning.
-- **CPU + GPU backends** — ARM NEON and x86 SIMD CPU kernels with runtime dispatch, plus an experimental WGPU backend (Vulkan, Metal, DX12).
-- **ONNX import/export** — Import 90+ ONNX ops, export trained models. Full YOLOv5/v8/v10/v11 pipeline with NMS post-processing.
-- **Python bindings (PyO3) + Rust native API** — Use from Python with numpy interop, or embed directly in Rust projects.
+- **One inference path** — `PreparedModel` is immutable and shareable; each
+  `Session` owns its KV cache, step counter and plan cache. CPU and Vulkan run
+  the same plan through the same backend trait.
+- **No silent fallback** — an explicit device request either resolves to that
+  device or fails naming the request and the available devices. A backend that
+  cannot run an op returns `UnsupportedOp`; it never returns an approximation.
+- **Strict ONNX import** — a bounds-checked protobuf reader maps the pinned
+  GPT-2 decoder to a bounded graph, folds integer shape arithmetic at plan
+  time, and rejects unsupported ops by name.
+- **Versioned artifact** — the `.fn3prep` payload carries a format version,
+  dtype codes, the value/node tables and weight bytes with CRC and SHA-256
+  verification.
+- **CPU + Vulkan** — a portable FP32 reference backend, plus Vulkan transform,
+  embedding, pointwise, matmul, norm, reduce and fused-attention kernels with
+  validation-layer-clean dispatch.
+- **Rust, CLI and Python share one engine** — `fn3-infer` and `fastnn.fn3`
+  call the same `Session::prefill` / `Session::decode`.
 
 ## Installation
 
@@ -37,92 +53,82 @@ uv pip install -e .
 
 **Prerequisites:** Rust stable, Python ≥ 3.11, [uv](https://github.com/astral-sh/uv).
 
-The Python package is built with `maturin` and exposes the Rust extension as `fastnn._core`.
+The Python package is built with `maturin` and exposes the Rust extension as
+`fastnn._core`.
 
 ## Quick Start
 
-### Python: Eager-mode training
+### Python: prepare once, then decode
 
 ```python
-import fastnn as fnn
+import fastnn.fn3 as fn3
 
-model = fnn.models.MLP(input_dim=2, hidden_dims=[16, 16], output_dim=1)
-optimizer = fnn.Adam(model.parameters(), lr=1e-2)
+report = fn3.prepare("model.onnx", "model.fn3prep")
+print(report.status, report.geometry)
 
-for epoch in range(100):
-    pred = model(batch_x)
-    loss = fnn.mse_loss(pred, batch_y)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
+model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+session = model.session()
+
+logits = session.prefill([464, 2068, 7586, 21831])
+print(int(logits.argmax()), session.cache_len)
+
+for token in [640, 11, 612]:
+    logits = session.decode([token])
+    print(int(logits.argmax()), session.cache_len)
 ```
 
-### Python: Compiled AOT inference
+Pass `device="vulkan"` on a build with `--features vulkan` to run the same
+session on a physical GPU. A request the build or the machine cannot satisfy
+raises `Fn3DeviceError`; it never falls back to CPU.
 
-```python
-from fastnn.io import AotExecutor
+### CLI
 
-executor = AotExecutor(
-    nodes=model_nodes,
-    params=model_params,
-    input_names=["input"],
-    output_names=["output"],
-    quantize=4,                    # 4-bit weight quantization (or "i4cb" for codebook)
-)
-outputs = executor.forward({"input": input_tensor})
+```bash
+cargo build --release --features cli
+fn3-infer prepare model.onnx model.fn3prep
+fn3-infer inspect model.fn3prep
+fn3-infer run model.fn3prep --source model.onnx --tokens 464,2068,7586
+fn3-infer generate model.fn3prep --source model.onnx --tokens 464,2068 --steps 4
 ```
 
-### Rust: GraphBuilder API
+### Rust
 
 ```rust
-use fastnn::ir::builder::GraphBuilder;
-use fastnn::ir::node::{DimExpr, IrDType};
-use fastnn::backend::cpu::CpuBackend;
+use fastnn::fn3::model::PreparedModel;
+use fastnn::fn3::DeviceRequest;
 
-let gb = GraphBuilder::new();
-let input = gb.input_with_dims(&[DimExpr::Known(1), DimExpr::Known(784)], IrDType::F32);
-let weight = gb.parameter(&[784, 10], IrDType::F32);
-let mm = gb.matmul(&input, &weight);
-
-let result = gb.compile_and_execute_with_quantize(
-    &[&mm], CpuBackend, Some(8),
-    &[input_data, weight_data],
-);
+let request = DeviceRequest::parse("cpu")?;
+let model = PreparedModel::load("model.fn3prep", None, request)?;
+let mut session = model.session()?;
+let logits = session.prefill(&[464, 2068, 7586, 21831])?;
 ```
+
+See `src/fn3/AGENTS.md` and `docs/roadmap/fn3-architecture.md` for the contract.
 
 ## Project Components
 
 | Component | Description |
 |-----------|-------------|
-| Rust core | Tensor ops, autograd, graph IR, compiler passes, CPU + WGPU backends |
-| Python bindings | Python-facing tensor, module, optimizer, data, callback, and I/O APIs |
-| AOT compiler | Graph IR → shape/type inference → fusion → quantization → memory planning |
-| Eager mode | Imperative tensor/autograd with nn modules, losses, and optimizers |
-| Backends | CPU (ARM NEON/x86 SIMD, OpenBLAS) + experimental WGPU (Vulkan/Metal/DX12) |
-| Import/export | `.fnn` format, ONNX import (90+ ops), PyTorch model conversion |
+| 3.0 inference core | `src/fn3/`: contracts, storage, CPU reference, Vulkan platform and kernels, ONNX import, prepared artifact, planner, session/KV |
+| CLI | `src/bin/fn3-infer.rs`: prepare, inspect, run, generate, diagnose |
+| Python | `fastnn/fn3/` over `fastnn._core.fn3`; CPU and honest Vulkan refusal |
+| Secondary 2.x AOT tree | `src/ir/`, `src/compiler/`, `src/backend/`, eager `src/tensor/`/`src/nn/` forward API, ONNX conversion, `.fnn` I/O. Inference only; kept for the legacy compiled path and its quantized CPU pipeline |
 
 ## Documentation
 
-Full documentation is in the [`docs/index.md`](docs/index.md) directory:
-
-- [Getting Started](docs/guides/getting-started.md) — First steps and examples
-- [API Reference](docs/reference/api-reference.md) — Complete API documentation
-- [Architecture](docs/internals/architecture.md) — Compiler pipeline internals
-- [Development](docs/internals/development.md) — Contributing guide and codebase walkthrough
-- [CHANGELOG](CHANGELOG.md) — Release history
+- [Getting Started](docs/guides/getting-started.md) — build, prepare a model, run a session
+- [Architecture](docs/internals/architecture.md) — the 3.0 inference core and the secondary AOT pipeline
+- [API Reference](docs/reference/api-reference.md) — Rust and Python surface
+- [CHANGELOG](CHANGELOG.md) — release history
 
 ## Testing
 
 ```bash
-cargo test                           # Rust tests
-uv run pytest tests/ -v              # Python tests
+cargo test --lib
+cargo test --test fn3_contracts
+uv run pytest tests/ -m "not slow"       # Python binding and tooling
+cargo test --features vulkan --test fn3_vulkan_smoke   # physical GPU
 ```
 
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for repository layout, coding standards, and the PR workflow.
-
-## License
-
-fastnn is licensed under the [MIT License](LICENSE).
-Copyright © 2026 Petros Fanioudakis
+The pinned model and parity fixtures live under `fixtures/` and
+`tools/parity/`; they are never committed as weights.

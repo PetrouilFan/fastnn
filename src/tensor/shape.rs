@@ -1,5 +1,3 @@
-use crate::autograd;
-use crate::autograd::AutogradMeta;
 use crate::error::{FastnnError, FastnnResult};
 use crate::storage::{CpuStorage, Storage};
 use smallvec::smallvec;
@@ -126,12 +124,6 @@ impl TensorImpl {
         data.resize(nbytes, 0u8);
         let (src_ptr, source_len) = match self.storage.as_ref() {
             Storage::Cpu(cpu) => (cpu.data.as_ref().as_ptr(), cpu.data.len()),
-            #[cfg(feature = "gpu")]
-            Storage::Wgpu(_) => {
-                return Err(FastnnError::device(
-                    "contiguous conversion requires CPU storage",
-                ));
-            }
         };
         let strides = &self.strides;
         let sizes = &self.sizes;
@@ -180,15 +172,9 @@ impl TensorImpl {
         }
         let sizes = self.sizes.clone();
         let storage = Arc::new(Storage::Cpu(CpuStorage::from_vec(data, nbytes)));
-        let mut new_tensor = Tensor::new(TensorImpl::try_new(storage, sizes, self.dtype)?);
-        if let Some(meta) = &self.autograd_meta {
-            let meta_lock = meta.lock();
-            if meta_lock.requires_grad {
-                let new_meta = AutogradMeta::new_non_leaf(true);
-                Arc::make_mut(&mut new_tensor.inner).set_autograd_meta(new_meta);
-            }
-        }
-        Ok(new_tensor)
+        Ok(Tensor::new(TensorImpl::try_new(
+            storage, sizes, self.dtype,
+        )?))
     }
 
     pub fn view(&self, sizes: SmallVec<[i64; 8]>) -> TensorImpl {
@@ -297,22 +283,9 @@ impl TensorImpl {
         sizes.insert(dim, 1);
         strides.insert(dim, if dim == ndim { 1 } else { self.strides[dim] });
 
-        let _input_tensor = Tensor::new(self.clone());
-
-        let mut tensor = self.new_view_from(sizes, strides, self.storage_offset);
-
-        if self.requires_grad() {
-            let inputs = vec![_input_tensor.clone()];
-            let meta = AutogradMeta {
-                grad: None,
-                grad_fn: Some(autograd::make_node_info("UnsqueezeBackward", inputs)),
-                requires_grad: true,
-                is_leaf: false,
-            };
-            tensor.set_autograd_meta(meta);
-        }
-
-        Ok(tensor.into())
+        Ok(self
+            .new_view_from(sizes, strides, self.storage_offset)
+            .into())
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
@@ -438,17 +411,7 @@ impl Tensor {
     }
 
     pub fn try_contiguous(&self) -> FastnnResult<Tensor> {
-        let output = self.inner.try_contiguous()?;
-        Ok(
-            if autograd::is_grad_enabled() && self.requires_grad() && output.id() != self.id() {
-                Self::attach_grad_fn(
-                    output,
-                    autograd::make_node_info("ViewBackward", vec![self.clone()]),
-                )
-            } else {
-                output
-            },
-        )
+        self.inner.try_contiguous()
     }
 
     pub fn view(&self, shape: Vec<i64>) -> Tensor {
@@ -457,14 +420,7 @@ impl Tensor {
 
     pub fn try_view(&self, shape: Vec<i64>) -> FastnnResult<Tensor> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output: Tensor = self.inner.try_view(sizes)?.into();
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
-        } else {
-            output
-        })
+        Ok(self.inner.try_view(sizes)?.into())
     }
 
     pub fn reshape(&self, shape: Vec<i64>) -> Tensor {
@@ -473,14 +429,7 @@ impl Tensor {
 
     pub fn try_reshape(&self, shape: Vec<i64>) -> FastnnResult<Tensor> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output = self.inner.try_reshape(sizes)?;
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
-        } else {
-            output
-        })
+        self.inner.try_reshape(sizes)
     }
 
     pub fn reshape_permute(&self, shape: Vec<i64>, perm: Vec<i64>) -> Tensor {
@@ -493,21 +442,7 @@ impl Tensor {
     }
 
     pub fn try_transpose(&self, dim0: usize, dim1: usize) -> FastnnResult<Tensor> {
-        let output = self.inner.try_transpose(dim0, dim1)?;
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(
-                output,
-                autograd::make_node_info_with_params("TransposeBackward", inputs, {
-                    let mut perm: Vec<i64> = (0..self.ndim() as i64).collect();
-                    perm.swap(dim0, dim1);
-                    perm
-                }),
-            )
-        } else {
-            output
-        })
+        self.inner.try_transpose(dim0, dim1)
     }
 
     pub fn permute(&self, dims: Vec<i64>) -> Tensor {
@@ -515,19 +450,8 @@ impl Tensor {
     }
 
     pub fn try_permute(&self, dims: Vec<i64>) -> FastnnResult<Tensor> {
-        let params = dims.clone();
         let sizes: SmallVec<[i64; 8]> = dims.into();
-        let output = self.inner.try_permute(sizes)?;
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(
-                output,
-                autograd::make_node_info_with_params("PermuteBackward", inputs, params),
-            )
-        } else {
-            output
-        })
+        self.inner.try_permute(sizes)
     }
 
     pub fn squeeze(&self, dim: Option<usize>) -> Tensor {
@@ -535,14 +459,7 @@ impl Tensor {
     }
 
     pub fn try_squeeze(&self, dim: Option<usize>) -> FastnnResult<Tensor> {
-        let output = self.inner.try_squeeze(dim)?;
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("ViewBackward", inputs))
-        } else {
-            output
-        })
+        self.inner.try_squeeze(dim)
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
@@ -559,14 +476,7 @@ impl Tensor {
 
     pub fn try_expand(&self, shape: Vec<i64>) -> FastnnResult<Tensor> {
         let sizes: SmallVec<[i64; 8]> = shape.into();
-        let output = self.inner.try_expand(sizes)?;
-
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(output, autograd::make_node_info("ExpandBackward", inputs))
-        } else {
-            output
-        })
+        self.inner.try_expand(sizes)
     }
 
     pub fn flip(&self, dims: &[usize]) -> Tensor {

@@ -10,10 +10,7 @@ use std::sync::Arc;
 
 // Magic bytes to identify fastnn checkpoint format
 const MAGIC_BYTES: [u8; 4] = [0x46, 0x4E, 0x4E, 0x00]; // "FNN\0"
-                                                       // Magic bytes to identify fastnn optimizer state format
-#[allow(dead_code)] // Reserved for future optimizer state serialization
-const OPTIMIZER_MAGIC: [u8; 4] = [0x46, 0x4E, 0x4F, 0x00]; // "FNO\0"
-                                                           // Format version for forward compatibility
+                                                       // Format version for forward compatibility
 const FORMAT_VERSION: u32 = 3;
 
 /// Write a length-prefixed byte slice (length as little-endian u64, then data).

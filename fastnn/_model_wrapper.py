@@ -43,10 +43,6 @@ class ModuleWrapperMixin:
     # Note: train and eval aliases removed to avoid shadowing built-in names
     # Use train_mode() and eval_mode() directly
     
-    def zero_grad(self):
-        """Zero gradients of the wrapped model."""
-        return self._get_wrapped_model().zero_grad()
-    
     def __call__(self, x):
         """Forward pass through the wrapped model."""
         return self.forward(x)

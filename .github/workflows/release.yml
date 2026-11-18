@@ -2,13 +2,12 @@
 #
 # FN3-20 (#66) changes here:
 #   * tags may be prereleases (v3.0.0-alpha.1); the old regex rejected them;
-#   * quality reuses tools/ci/cpu-lane.sh and tools/ci/frozen-2x-lane.sh instead
-#     of a second hand-maintained command list;
+#   * quality reuses tools/ci/cpu-lane.sh instead of a second hand-maintained
+#     command list;
 #   * portable-build uses --no-default-features: the 2.x feature list is deleted
 #     by FN3-19 (#65) and no 3.0 feature is assumed;
 #   * the wheel smoke is tools/ci/packaging_lane.py (outside-the-tree install),
-#     not an inline snippet tied to the 2.x AotExecutor API. FN3-17 (#63) and
-#     FN3-18 (#64) must update this smoke when the 3.0 CLI/Python API lands.
+#     which imports the fastnn.fn3 inference surface.
 #
 # Nothing here is enabled by this change; it only alters the committed files.
 
@@ -71,8 +70,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run the CPU lane
         run: tools/ci/cpu-lane.sh
-      - name: Run the frozen 2.x lane
-        run: tools/ci/frozen-2x-lane.sh
 
   portable-build:
     needs: validate-tag

@@ -1,9 +1,7 @@
-# 3.0 inference core guide
+# FastNN inference core guide
 
-`src/fn3/` is the FastNN 3.0 inference-only core. It is a new tree built beside
-2.x so parallel work never edits 2.x paths; FN3-19 (#65) promotes and renames it
-when the 2.x modules are deleted. The contract authority is
-`docs/roadmap/fn3-architecture.md`.
+`src/fn3/` is the inference-only core and the crate's primary API. The contract
+authority is `docs/roadmap/fn3-architecture.md`.
 
 ## Ownership
 
@@ -13,18 +11,21 @@ when the 2.x modules are deleted. The contract authority is
 - `shape.rs`, `storage.rs`: shape/stride/bound algebra and the aligned buffer.
 - `tensor.rs`: metadata, views and owned tensors.
 - `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
-- `backend/cpu/`: the alpha reference backend.
+- `backend/cpu/`: the portable reference backend.
+- `backend/vulkan/`: the Vulkan platform and kernel families.
+- `import/`: strict ONNX reader and graph construction.
 - `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
-- `model/kv.rs`: `KvCacheConfig`, `KvCacheLayout`, `KvCacheState` — the bounded
-  per-layer key/value buffers, the live extent and the two-phase append
-  protocol (FN3-12 / #58).
+- `model/kv.rs`: `KvCacheConfig`, `KvCacheLayout`, `KvCacheState` — bounded
+  per-layer buffers, the live extent and the two-phase append protocol.
 - `model/session.rs`: `Session`, `SessionPhase` — `prefill`/`decode`, the
-  per-session plan cache and slot pool, and the step commit ordering (FN3-12 /
-  #58).
+  per-session plan cache and slot pool, and the step commit ordering.
 - `model/plan.rs`: bounded `Plan`, slot table, folded constants, `PlanId`,
-  `PlanBound`, `PlanCache` (FN3-10 / #56).
+  `PlanBound`, `PlanCache`.
 - `model/specialize.rs`: shape resolution, integer constant folding, typed
-  `OpParams` mapping and the `Planner` that builds plans (FN3-10 / #56).
+  `OpParams` mapping and the `Planner` that builds plans.
+- `model/format/`: the versioned prepared-model artifact.
+- `python/`: the PyO3 binding, declared by path from `src/python/mod.rs`.
+- `cli/`: the `fn3-infer` implementation.
 - `mod.rs`: facade and re-exports.
 
 ## Invariants
@@ -40,7 +41,7 @@ when the 2.x modules are deleted. The contract authority is
 - Explicit `DeviceRequest` values never resolve to another device. Only `Auto`
   chooses. Explicit device failures name the request and list available devices.
 - A backend that cannot run an op returns `UnsupportedOp`; it never returns an
-  input, a zero, or an approximation. `Support::Partial` names its subset and the
+  input, a zero or an approximation. `Support::Partial` names its subset and the
   op still rejects everything outside it.
 - Plan preflight asks `Backend::admits` for the plan's concrete operand shapes
   and dtypes; the default body is `supports`, so a backend with no concrete
@@ -52,8 +53,7 @@ when the 2.x modules are deleted. The contract authority is
 - A `Session` executes every instruction through the one backend it was opened
   with; a backend whose device differs from the model's is rejected before any
   work. KV buffers and value slots for a Vulkan device are host-staged
-  (`host_staged = true` in the backend's residency record) — that is not a CPU
-  compute path, and no session code owns a second backend.
+  (`host_staged = true`); that is not a CPU compute path.
 - Unsafe code is confined to `storage.rs` and every block carries a `SAFETY:`
   comment covering alignment, bounds, aliasing and lifetime.
 
@@ -63,10 +63,11 @@ when the 2.x modules are deleted. The contract authority is
 cargo fmt --check
 cargo build --no-default-features
 cargo build
-cargo test --test fn3_contracts
 cargo test --lib fn3
+cargo test --test fn3_contracts
+cargo test --test fn3_cpu_reference
 ```
 
-`cargo test --lib` must also keep passing: it proves the frozen 2.x tree still
-compiles while `src/fn3/` coexists. Contract changes require a new or updated
-case in `tests/fn3_contracts.rs`.
+`cargo test --lib` must also keep passing: it proves the secondary 2.x tree
+still compiles beside `src/fn3/`. Contract changes require a new or updated case
+in `tests/fn3_contracts.rs`.
