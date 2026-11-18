@@ -49,8 +49,15 @@
 
 use ash::vk;
 
+pub mod attention;
+pub mod embedding;
+pub mod matmul;
+pub mod norm;
+pub mod pointwise;
+pub mod reduce;
 pub mod reflect;
 pub mod smoke;
+pub mod transform;
 
 use super::error::{Error, Result};
 use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
@@ -321,10 +328,15 @@ impl KernelSet {
     pub fn alpha() -> KernelSet {
         let mut set = KernelSet::new();
         smoke::register(&mut set);
-        // FN3-13 (#59): pointwise::register(&mut set);
-        // FN3-14 (#60): matmul::register(&mut set);
-        // FN3-15 (#61): norm::register(&mut set); reduce::register(&mut set);
-        //               attention::register(&mut set);
+        // Order matters only for readability: register() replaces by op id, so
+        // a later registration supersedes an earlier kernel for the same op.
+        pointwise::register(&mut set);
+        transform::register(&mut set);
+        embedding::register(&mut set);
+        matmul::register(&mut set);
+        norm::register(&mut set);
+        reduce::register(&mut set);
+        attention::register(&mut set);
         set
     }
 
