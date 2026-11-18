@@ -25,6 +25,12 @@ mkdir -p "$(dirname "$CLIPPY_LOG")"
 
 ci::describe cpu
 
+# Pre-existing at the base SHA: scripts/ci/check-agents-freshness.py rejects the
+# product-version literal "3.0" in src/fn3/AGENTS.md (owned by #48). It is not a
+# gate here until that false positive is fixed, but it must not be silent.
+echo "::warning title=cpu::AGENTS freshness check is red at the base SHA (src/fn3/AGENTS.md '3.0', #48); it is not run as a gate in this lane"
+echo
+
 ci::run "Format check" "cargo fmt --check"
 
 echo

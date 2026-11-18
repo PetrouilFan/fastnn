@@ -42,7 +42,7 @@ job that now carries the surviving intent; “gap” means nothing covers it yet
 
 | Job | Still applies under inference-only 3.0? | Replacement / action |
 |---|---|---|
-| `quality` | Partly. `cargo fmt --check`, AGENTS freshness and `cargo test --lib` apply. `clippy --all-targets -- -D warnings` **already fails at the base SHA** (unused `TensorView` import in `tests/fn3_contracts.rs`, owned by #48), so it is not a usable gate today. The quantized/optimizer/autograd targets are 2.x-only. | Split into `cpu-rust` (fmt, clippy budget, build, lib, fn3 tests) and `frozen-2x` (2.x suites + `--tests`). `release_error_paths` is covered by `cargo test --tests` in the frozen lane. |
+| `quality` | Partly. `cargo fmt --check` and `cargo test --lib` apply. `clippy --all-targets -- -D warnings` **already fails at the base SHA** (unused `TensorView` import in `tests/fn3_contracts.rs`, owned by #48), and `scripts/ci/check-agents-freshness.py` **also fails at the base SHA** (it rejects the version literal “3.0” in `src/fn3/AGENTS.md`). Neither is a usable gate today. The quantized/optimizer/autograd targets are 2.x-only. | Split into `cpu-rust` (fmt, clippy budget, build, lib, fn3 tests) and `frozen-2x` (2.x suites + `--tests`). The freshness script is not run by the new CPU lane until its false positive is fixed (owned by #48/#65). `release_error_paths` is covered by `cargo test --tests` in the frozen lane. |
 | `feature-profiles` (`core`, `runtime`, `gpu`) | **No.** `simd`/`parallel`/`fusion-forward`/`prepared-plan`/`cli` are 2.x feature policy; `gpu` is wgpu, which 3.0 removes. | Removed. `cpu` uses `--no-default-features`; `vulkan-build` owns the only accelerated feature. Do not re-add `--all-features` or `--features gpu`. |
 | `python` (3 OSes) | Only as the frozen 2.x facade. The pinned `onnx==1.17.0` / `onnxruntime==1.20.1` stack is 2.x test infrastructure. | `cpu-python` on Linux preserves the suite until #65; `packaging` covers wheel install on 3 OSes. #64 rewrites the suite and #67 the smoke. |
 | `aarch64` | **No as written**: builds with default features (incl. `python`) and a 2.x feature list. Cross-compilation itself is still meaningful. | **Gap.** Removed in this change. #65/#67 should add `cargo build --target aarch64-unknown-linux-gnu --no-default-features` as part of the portable lane. |
@@ -87,6 +87,7 @@ referenced status records.
 | `cargo fmt --check` | exit 0 |
 | `cargo clippy --all-targets -- -D warnings` | **FAILED at base**: unused import `TensorView` in `tests/fn3_contracts.rs:14` (#48-owned) |
 | `cargo clippy --all-targets` | 4 warnings, all pre-existing: 3 in `src/backend/{cpu,executor}.rs` (2.x), 1 in `tests/fn3_contracts.rs`; **0 in `src/fn3/` or the new test** |
+| `python3 scripts/ci/check-agents-freshness.py` | **FAILED at base**: `src/fn3/AGENTS.md: volatile version literal '3.0'` (#48-owned; the new lane does not hide it) |
 | `cargo build --no-default-features` | success (manifest note: `fnv` unused in this profile) |
 | `cargo test --lib -- --test-threads=1` | **583 passed**, 0 failed |
 | `cargo test --test fn3_contracts` | **43 passed**, 0 failed |
@@ -160,7 +161,10 @@ SwiftShader names, missing UUID/driver/API fields, non-clean validation, a
 `ci_only: true` record. A committed record with `result=not_verified` is valid
 to keep (it is truthful) but never satisfies the lane.
 
-Local record from the GTX 1080 Ti (full JSON committed alongside this report):
+Local record from the GTX 1080 Ti (committed as
+`docs/reports/fn3-20/gpu-evidence/gtx1080ti-20261118.json`, generated on a clean
+tree at `93fe607`; `verify_evidence.py --require-pass` rejects it because the
+backend is absent):
 
 | Field | Value |
 |---|---|
@@ -171,6 +175,10 @@ Local record from the GTX 1080 Ti (full JSON committed alongside this report):
 | validation | `VK_LAYER_KHRONOS_validation`, 0 errors (auxiliary bring-up run) |
 | fastnn smoke | `not_run` — no `vulkan` feature, no `tests/fn3_vulkan_smoke.rs` (#57) |
 | result | `not_verified`, with the reason naming #57 |
+
+The hosted `gpu-evidence` job validates that committed record and reports
+**NOT VERIFIED** — it does not turn a truthful “not implemented” record into a
+green GPU claim.
 
 ## 7. Skipped checks, risks, and handoff
 
@@ -188,6 +196,10 @@ Local record from the GTX 1080 Ti (full JSON committed alongside this report):
 1. **Clippy is not denied globally.** The base SHA has 4 pre-existing warnings
    (3 in 2.x, 1 in #48’s test). The lane forbids *any* `src/fn3/` warning and
    enforces a total budget of 4. #65 must set the budget to 0 and `-D warnings`.
+2. **The AGENTS freshness check is red at the base SHA.** It rejects the “3.0”
+   literal in `src/fn3/AGENTS.md`; the new CPU lane does not run it, so the
+   failure is reported here rather than quietly inherited. #48/#65 must fix the
+   script or the guide, then add it back to `cpu-rust`.
 2. **ADR: `vulkan-software-smoke` is green while NOT VERIFIED.** That is
    intentional: the job finishes and records an honest status. Branch protection
    must require **`lane-summary`**, not the individual lane jobs, or a skipped
