@@ -1,0 +1,2921 @@
+{
+  "cases": [
+    {
+      "features": [
+        "duplicate indices",
+        "last table row",
+        "zero row"
+      ],
+      "operator": "embedding",
+      "self_check_max_abs": 0.0,
+      "shapes": {
+        "indices": [
+          2,
+          5
+        ],
+        "out": [
+          2,
+          5,
+          7
+        ],
+        "table": [
+          17,
+          7
+        ]
+      }
+    },
+    {
+      "epsilon": 1e-05,
+      "features": [
+        "zero-variance row",
+        "odd hidden size 5"
+      ],
+      "operator": "layernorm",
+      "self_check_max_abs": 2.384185791015625e-07,
+      "shape": [
+        2,
+        3,
+        5
+      ]
+    },
+    {
+      "epsilon": 1e-05,
+      "features": [
+        "GPT-2 hidden size"
+      ],
+      "operator": "layernorm",
+      "self_check_max_abs": 3.5762786865234375e-07,
+      "shape": [
+        1,
+        4,
+        128
+      ]
+    },
+    {
+      "bias": false,
+      "case": "2d_k3",
+      "operator": "matmul",
+      "self_check_max_abs": 1.9185245037078857e-07,
+      "shapes": {
+        "a": [
+          2,
+          3
+        ],
+        "b": [
+          3,
+          4
+        ],
+        "out": [
+          2,
+          4
+        ]
+      }
+    },
+    {
+      "bias": true,
+      "case": "gemm_k13_bias",
+      "operator": "gemm",
+      "self_check_max_abs": 9.5367431640625e-07,
+      "shapes": {
+        "a": [
+          7,
+          13
+        ],
+        "b": [
+          5,
+          13
+        ],
+        "out": [
+          7,
+          5
+        ]
+      }
+    },
+    {
+      "bias": false,
+      "case": "batched_4d",
+      "operator": "matmul",
+      "self_check_max_abs": 9.5367431640625e-07,
+      "shapes": {
+        "a": [
+          2,
+          3,
+          5,
+          7
+        ],
+        "b": [
+          2,
+          3,
+          7,
+          11
+        ],
+        "out": [
+          2,
+          3,
+          5,
+          11
+        ]
+      }
+    },
+    {
+      "bias": false,
+      "case": "model_proj",
+      "operator": "matmul",
+      "self_check_max_abs": 4.76837158203125e-06,
+      "shapes": {
+        "a": [
+          1,
+          13,
+          128
+        ],
+        "b": [
+          128,
+          8
+        ],
+        "out": [
+          1,
+          13,
+          8
+        ]
+      }
+    },
+    {
+      "bias": false,
+      "case": "tail_k65",
+      "operator": "matmul",
+      "self_check_max_abs": 3.814697265625e-06,
+      "shapes": {
+        "a": [
+          3,
+          65
+        ],
+        "b": [
+          65,
+          7
+        ],
+        "out": [
+          3,
+          7
+        ]
+      }
+    },
+    {
+      "case": "erf",
+      "model_uses": false,
+      "operator": "gelu",
+      "self_check_max_abs": 4.76837158203125e-07,
+      "shape": [
+        69
+      ]
+    },
+    {
+      "case": "tanh",
+      "model_uses": true,
+      "operator": "gelu",
+      "self_check_max_abs": 1.4968289008265856e-07,
+      "shape": [
+        69
+      ]
+    },
+    {
+      "case": "unmasked",
+      "masked": false,
+      "operator": "softmax",
+      "self_check_max_abs": 5.960464477539063e-08,
+      "shape": [
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "case": "causal",
+      "masked": true,
+      "operator": "softmax",
+      "self_check_max_abs": 5.960464477539063e-08,
+      "shape": [
+        1,
+        2,
+        4,
+        4
+      ]
+    },
+    {
+      "case": "all_masked",
+      "masked": true,
+      "operator": "softmax",
+      "self_check_max_abs": 5.960464477539063e-08,
+      "shape": [
+        1,
+        1,
+        2,
+        4
+      ]
+    },
+    {
+      "case": "padded",
+      "masked": true,
+      "operator": "softmax",
+      "self_check_max_abs": 5.960464477539063e-08,
+      "shape": [
+        1,
+        1,
+        3,
+        5
+      ]
+    },
+    {
+      "all_masked_row_probs": [
+        [
+          0.25,
+          0.25,
+          0.25,
+          0.25
+        ],
+        [
+          0.25,
+          0.25,
+          0.25,
+          0.25
+        ]
+      ],
+      "all_masked_row_uniform": true,
+      "features": [
+        "causal mask",
+        "head dim 5",
+        "all-masked query row"
+      ],
+      "operator": "masked_multi_head_attention",
+      "self_check_max_abs": 5.960464477539063e-08,
+      "shape": {
+        "k": [
+          2,
+          2,
+          4,
+          5
+        ],
+        "out": [
+          2,
+          2,
+          4,
+          5
+        ],
+        "q": [
+          2,
+          2,
+          4,
+          5
+        ],
+        "v": [
+          2,
+          2,
+          4,
+          5
+        ]
+      }
+    }
+  ],
+  "description": "Small independent operator references for kernel conformance: embedding, LayerNorm, MatMul/Gemm, GELU, masked Softmax, and masked multi-head attention with an all-masked query row.",
+  "endianness": "little",
+  "format": "fastnn-parity-tensors",
+  "format_version": 1,
+  "layout": "row-major (C order)",
+  "provenance": {
+    "environment": {
+      "cpu_model": "AMD Ryzen 7 3700X 8-Core Processor",
+      "machine": "x86_64",
+      "numpy": "2.5.5",
+      "onnx": "1.23.2",
+      "onnxruntime": "1.32.0",
+      "python": "3.13.15",
+      "system": "Linux",
+      "torch": "2.15.0+cpu"
+    },
+    "mask_policy": {
+      "all_masked_row": "A row whose additive mask is entirely -FLT_MAX produces a uniform distribution.  This is the GPT-2 ONNX mask convention and is stable under max-subtraction; it is not NaN.",
+      "fill_dtype": "f32",
+      "fill_value": -3.4028234663852886e+38
+    },
+    "producer": "explicit float64 reference, rounded once to float32",
+    "self_check": "PyTorch 2.15.0+cpu float32"
+  },
+  "suite": "ops",
+  "tensors": [
+    {
+      "bytes": 80,
+      "dtype": "i64",
+      "name": "embedding.indices",
+      "path": "tensors/embedding.indices.i64",
+      "provenance": {
+        "call": "indices",
+        "kind": "input",
+        "tolerance": {
+          "atol": 0.0,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 0.0
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "39e0ff365d4719c0967199c1c5372e8b342461f2a0202639cd4c990e6ec19a84",
+      "shape": [
+        2,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 1,
+        "count": 10,
+        "first": [
+          0,
+          16,
+          3,
+          3,
+          7,
+          9,
+          1,
+          9
+        ],
+        "inf_count": 0,
+        "last": [
+          3,
+          3,
+          7,
+          9,
+          1,
+          9,
+          0,
+          16
+        ],
+        "max": 16,
+        "max_abs": 16.0,
+        "mean_abs": 6.4,
+        "min": 0,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 476,
+      "dtype": "f32",
+      "name": "embedding.table",
+      "path": "tensors/embedding.table.f32",
+      "provenance": {
+        "call": "embedding weight [17,7]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 0.0,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 0.0
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "c54ef9482c917bf622784a31ad6e2010024c0a5168f354c7b8a6831d85d3d357",
+      "shape": [
+        17,
+        7
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 4,
+        "count": 119,
+        "first": [
+          -1.7826950550079346,
+          0.8378711342811584,
+          1.1817858219146729,
+          -0.19107167422771454,
+          1.9864081144332886,
+          -1.6160558462142944,
+          -0.6101097464561462,
+          -0.19022944569587708
+        ],
+        "inf_count": 0,
+        "last": [
+          0.9232515692710876,
+          1.5212019681930542,
+          -1.7458487749099731,
+          0.12891194224357605,
+          0.14960582554340363,
+          -0.7260496616363525,
+          1.951483130455017,
+          0.5425587892532349
+        ],
+        "max": 1.9864081144332886,
+        "max_abs": 1.9864081144332886,
+        "mean_abs": 1.1113996291337456,
+        "min": -1.9779459238052368,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 280,
+      "dtype": "f32",
+      "name": "embedding.out",
+      "path": "tensors/embedding.out.f32",
+      "provenance": {
+        "call": "Gather(axis=0, table, indices)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 0.0,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 0.0
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "cfe393daa66f5ed79a43ceb1a9cee51a07cd54891f7534ffa24653c0c09f6c3e",
+      "shape": [
+        2,
+        5,
+        7
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 4,
+        "count": 70,
+        "first": [
+          -1.7826950550079346,
+          0.8378711342811584,
+          1.1817858219146729,
+          -0.19107167422771454,
+          1.9864081144332886,
+          -1.6160558462142944,
+          -0.6101097464561462,
+          1.5212019681930542
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.6101097464561462,
+          1.5212019681930542,
+          -1.7458487749099731,
+          0.12891194224357605,
+          0.14960582554340363,
+          -0.7260496616363525,
+          1.951483130455017,
+          0.5425587892532349
+        ],
+        "max": 1.9864081144332886,
+        "max_abs": 1.9864081144332886,
+        "mean_abs": 1.0413171221102988,
+        "min": -1.86775803565979,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 120,
+      "dtype": "f32",
+      "name": "layernorm.input",
+      "path": "tensors/layernorm.input.f32",
+      "provenance": {
+        "call": "x [2,3,5]",
+        "contains_zero_variance_row": true,
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "c5806c31b0fbd5b395427a3aef27dcbc131f87ba6645390de84830b3d0bacf98",
+      "shape": [
+        2,
+        3,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 25,
+        "count": 30,
+        "first": [
+          1.5563756227493286,
+          0.5590514540672302,
+          2.3963210582733154,
+          0.25657713413238525,
+          -0.3817104995250702,
+          0.6689322590827942,
+          -1.4208711385726929,
+          0.21722684800624847
+        ],
+        "inf_count": 0,
+        "last": [
+          0.25538408756256104,
+          2.015961170196533,
+          -0.45322853326797485,
+          3.25,
+          3.25,
+          3.25,
+          3.25,
+          3.25
+        ],
+        "max": 3.25,
+        "max_abs": 3.25,
+        "mean_abs": 1.5273884262889623,
+        "min": -2.269096851348877,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 20,
+      "dtype": "f32",
+      "name": "layernorm.weight",
+      "path": "tensors/layernorm.weight.f32",
+      "provenance": {
+        "call": "weight [5]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "f1381519b91fc4d9f1c9c9c2c887b1d6ed73318bfbf1dc3a593670ef380c24d7",
+      "shape": [
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 1,
+        "count": 5,
+        "first": [
+          0.781496524810791,
+          1.381860375404358,
+          0.5918136835098267,
+          0.6726998090744019,
+          0.78481525182724
+        ],
+        "inf_count": 0,
+        "last": [
+          0.781496524810791,
+          1.381860375404358,
+          0.5918136835098267,
+          0.6726998090744019,
+          0.78481525182724
+        ],
+        "max": 1.381860375404358,
+        "max_abs": 1.381860375404358,
+        "mean_abs": 0.8425371289253235,
+        "min": 0.5918136835098267,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 20,
+      "dtype": "f32",
+      "name": "layernorm.bias",
+      "path": "tensors/layernorm.bias.f32",
+      "provenance": {
+        "call": "bias [5]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "7153af6bd0d00d750c6cc62270430702bbb99c0d8ddf8ba8a262c4ccae477a8a",
+      "shape": [
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 1,
+        "count": 5,
+        "first": [
+          0.11215882003307343,
+          0.13356392085552216,
+          -0.06468610465526581,
+          0.0019527358235791326,
+          -0.14505872130393982
+        ],
+        "inf_count": 0,
+        "last": [
+          0.11215882003307343,
+          0.13356392085552216,
+          -0.06468610465526581,
+          0.0019527358235791326,
+          -0.14505872130393982
+        ],
+        "max": 0.13356392085552216,
+        "max_abs": 0.14505872130393982,
+        "mean_abs": 0.09148406053427607,
+        "min": -0.14505872130393982,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 120,
+      "dtype": "f32",
+      "name": "layernorm.out",
+      "path": "tensors/layernorm.out.f32",
+      "provenance": {
+        "call": "LayerNorm(x, weight, bias, eps=1e-5)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "a6b0cfad03ac258edc7266ee1a2f7479fbd7832bcbec38db52dd96f13c798534",
+      "shape": [
+        2,
+        3,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 23,
+        "count": 30,
+        "first": [
+          0.6515192985534668,
+          -0.31343919038772583,
+          0.8489870429039001,
+          -0.42245543003082275,
+          -1.149335265159607,
+          0.1508871167898178,
+          -2.140970468521118,
+          -0.25225090980529785
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.22930823266506195,
+          1.2328435182571411,
+          -1.029222846031189,
+          0.11215882003307343,
+          0.13356392085552216,
+          -0.06468610465526581,
+          0.0019527358235791326,
+          -0.14505872130393982
+        ],
+        "max": 1.2328435182571411,
+        "max_abs": 2.2073118686676025,
+        "mean_abs": 0.6127160477335565,
+        "min": -2.2073118686676025,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 2048,
+      "dtype": "f32",
+      "name": "layernorm.model_shape.input",
+      "path": "tensors/layernorm.model_shape.input.f32",
+      "provenance": {
+        "call": "x [1,4,128]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "7e1b9311d5ef02d4f5024159d25d9c4d5e37bb144e75e4863dcba84fbb97febd",
+      "shape": [
+        1,
+        4,
+        128
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 232,
+        "count": 512,
+        "first": [
+          0.5526867508888245,
+          0.42411673069000244,
+          1.4357693195343018,
+          -1.5772454738616943,
+          -0.24630479514598846,
+          -1.7906264066696167,
+          -1.6729328632354736,
+          0.879474401473999
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.768546462059021,
+          -0.5208239555358887,
+          -0.822619616985321,
+          -1.593374490737915,
+          1.4874430894851685,
+          1.6738970279693604,
+          0.08905979245901108,
+          1.3948192596435547
+        ],
+        "max": 1.9643187522888184,
+        "max_abs": 1.9984878301620483,
+        "mean_abs": 0.9771150189364448,
+        "min": -1.9984878301620483,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 512,
+      "dtype": "f32",
+      "name": "layernorm.model_shape.weight",
+      "path": "tensors/layernorm.model_shape.weight.f32",
+      "provenance": {
+        "call": "weight [128]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "355f94740e04b713317baba47cf6bdc883b7b315ea75f42beeb73705fd32081a",
+      "shape": [
+        128
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 123,
+        "count": 128,
+        "first": [
+          0.9290013313293457,
+          1.068008303642273,
+          0.9613243937492371,
+          0.9059805274009705,
+          1.0921831130981445,
+          0.9683871269226074,
+          1.2270673513412476,
+          1.0524247884750366
+        ],
+        "inf_count": 0,
+        "last": [
+          1.027197003364563,
+          1.161887288093567,
+          1.005071759223938,
+          1.2494786977767944,
+          0.8647415041923523,
+          1.0366281270980835,
+          0.755717396736145,
+          0.8837302327156067
+        ],
+        "max": 1.2494786977767944,
+        "max_abs": 1.2494786977767944,
+        "mean_abs": 1.0041011944413185,
+        "min": 0.755717396736145,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 512,
+      "dtype": "f32",
+      "name": "layernorm.model_shape.bias",
+      "path": "tensors/layernorm.model_shape.bias.f32",
+      "provenance": {
+        "call": "bias [128]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "6005c59b30c37942e8948c4ecda582f3a57dc95d763f5f5330182b903a4320f9",
+      "shape": [
+        128
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 2,
+        "count": 128,
+        "first": [
+          -0.008796715177595615,
+          0.01666981354355812,
+          0.09875603020191193,
+          -0.0805031806230545,
+          0.0571458637714386,
+          -0.035693660378456116,
+          -0.01176612637937069,
+          -0.013227415271103382
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.0993877574801445,
+          0.0790395513176918,
+          0.06661039590835571,
+          0.03461279720067978,
+          -0.08176247775554657,
+          0.03567458316683769,
+          0.07811237871646881,
+          0.07939496636390686
+        ],
+        "max": 0.09875603020191193,
+        "max_abs": 0.0999327003955841,
+        "mean_abs": 0.05222465761653439,
+        "min": -0.0999327003955841,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 2048,
+      "dtype": "f32",
+      "name": "layernorm.model_shape.out",
+      "path": "tensors/layernorm.model_shape.out.f32",
+      "provenance": {
+        "call": "LayerNorm(x, weight, bias, eps=1e-5)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "5840b90650aea0357e3c670df7afb10cc3cfcc69f644c7ddd7db2e7a7b0a8c5f",
+      "shape": [
+        1,
+        4,
+        128
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 190,
+        "count": 512,
+        "first": [
+          0.5312491059303284,
+          0.5228118896484375,
+          1.3667813539505005,
+          -1.165879249572754,
+          -0.036949604749679565,
+          -1.368455410003662,
+          -1.5798958539962769,
+          0.8858747482299805
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.8166396617889404,
+          -0.48362088203430176,
+          -0.6821407675743103,
+          -1.7281461954116821,
+          0.9996774792671204,
+          1.4990442991256714,
+          0.11029743403196335,
+          1.113871455192566
+        ],
+        "max": 2.1590306758880615,
+        "max_abs": 2.252561092376709,
+        "mean_abs": 0.8623076892581594,
+        "min": -2.252561092376709,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 24,
+      "dtype": "f32",
+      "name": "matmul.2d_k3.a",
+      "path": "tensors/matmul.2d_k3.a.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "83a3d4b005b2afa7703f646cfd15f8bbe144d0f13858caf40ad8bf5ce2b9fe2d",
+      "shape": [
+        2,
+        3
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 2,
+        "count": 6,
+        "first": [
+          1.3753105401992798,
+          -0.6894251108169556,
+          1.5536640882492065,
+          1.2259747982025146,
+          0.11768274754285812,
+          -1.756325602531433
+        ],
+        "inf_count": 0,
+        "last": [
+          1.3753105401992798,
+          -0.6894251108169556,
+          1.5536640882492065,
+          1.2259747982025146,
+          0.11768274754285812,
+          -1.756325602531433
+        ],
+        "max": 1.5536640882492065,
+        "max_abs": 1.756325602531433,
+        "mean_abs": 1.1197304812570412,
+        "min": -1.756325602531433,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 48,
+      "dtype": "f32",
+      "name": "matmul.2d_k3.b",
+      "path": "tensors/matmul.2d_k3.b.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "c4294ecb448ddf2667fa592535686b0a3eb3d77b80e289991171d4a33917509a",
+      "shape": [
+        3,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 1,
+        "count": 12,
+        "first": [
+          -1.4096788167953491,
+          1.895096778869629,
+          -1.6070802211761475,
+          -0.18240287899971008,
+          -1.7363477945327759,
+          0.7393662929534912,
+          -0.4104982316493988,
+          -0.43574419617652893
+        ],
+        "inf_count": 0,
+        "last": [
+          -1.7363477945327759,
+          0.7393662929534912,
+          -0.4104982316493988,
+          -0.43574419617652893,
+          -0.06874676793813705,
+          0.548206627368927,
+          -1.1638891696929932,
+          1.6278914213180542
+        ],
+        "max": 1.895096778869629,
+        "max_abs": 1.895096778869629,
+        "mean_abs": 0.9854124331225952,
+        "min": -1.7363477945327759,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 32,
+      "dtype": "f32",
+      "name": "matmul.2d_k3.out",
+      "path": "tensors/matmul.2d_k3.out.f32",
+      "provenance": {
+        "call": "MatMul A[2, 3] @ B[3, 4]",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "662e561fae4406fd28fd8e22fbf1971ca75b2efb0f47a7e69ea6a92f5f3c36bd",
+      "shape": [
+        2,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 1,
+        "count": 8,
+        "first": [
+          -0.8484737277030945,
+          2.9483377933502197,
+          -3.7355194091796875,
+          2.578748941421509,
+          -1.8118271827697754,
+          1.4475221633911133,
+          0.025619937106966972,
+          -3.1340084075927734
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.8484737277030945,
+          2.9483377933502197,
+          -3.7355194091796875,
+          2.578748941421509,
+          -1.8118271827697754,
+          1.4475221633911133,
+          0.025619937106966972,
+          -3.1340084075927734
+        ],
+        "max": 2.9483377933502197,
+        "max_abs": 3.7355194091796875,
+        "mean_abs": 2.0662571953143924,
+        "min": -3.7355194091796875,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 364,
+      "dtype": "f32",
+      "name": "matmul.gemm_k13_bias.a",
+      "path": "tensors/matmul.gemm_k13_bias.a.f32",
+      "provenance": {
+        "call": "A @ W.T + b",
+        "kind": "input",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "9c8d7fa70f77dd0d796278c7c0be51277d54c4a2c2e5ca77c1a07a34d9aac3e3",
+      "shape": [
+        7,
+        13
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 26,
+        "count": 91,
+        "first": [
+          0.788770318031311,
+          0.8405337333679199,
+          -0.4014568328857422,
+          -1.3899027109146118,
+          -1.6276637315750122,
+          -0.26884815096855164,
+          0.005432939622551203,
+          -1.4485363960266113
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.5480573773384094,
+          0.3101506233215332,
+          -1.989405870437622,
+          1.68629789352417,
+          1.5681496858596802,
+          1.5735481977462769,
+          -0.8983219861984253,
+          -1.8314188718795776
+        ],
+        "max": 1.9805012941360474,
+        "max_abs": 1.989405870437622,
+        "mean_abs": 1.0413298397529667,
+        "min": -1.989405870437622,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 260,
+      "dtype": "f32",
+      "name": "matmul.gemm_k13_bias.w",
+      "path": "tensors/matmul.gemm_k13_bias.w.f32",
+      "provenance": {
+        "call": "A @ W.T + b",
+        "kind": "input",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "f1c7040acf69f0028914055bf7215306d17dcedebf629b802e1b816bbedbd46c",
+      "shape": [
+        5,
+        13
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 51,
+        "count": 65,
+        "first": [
+          -1.2974029779434204,
+          0.9678001999855042,
+          0.3781530261039734,
+          -1.0483378171920776,
+          -0.3729955554008484,
+          0.4516485631465912,
+          0.2506517767906189,
+          0.9842015504837036
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.6733344793319702,
+          -1.7607089281082153,
+          1.0888510942459106,
+          0.5001859068870544,
+          -0.817482054233551,
+          -1.0654704570770264,
+          -0.5871021747589111,
+          0.9932703375816345
+        ],
+        "max": 1.9610755443572998,
+        "max_abs": 1.9610755443572998,
+        "mean_abs": 0.9440038670714085,
+        "min": -1.938206672668457,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 20,
+      "dtype": "f32",
+      "name": "matmul.gemm_k13_bias.bias",
+      "path": "tensors/matmul.gemm_k13_bias.bias.f32",
+      "provenance": {
+        "call": "A @ W.T + b",
+        "kind": "input",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "3681173147478eb5e9eda8fa71c95284836db594f1a382ce1cb9f81f74864ab5",
+      "shape": [
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 5,
+        "first": [
+          0.7709776163101196,
+          -0.5942588448524475,
+          0.562384843826294,
+          -0.7141716480255127,
+          0.577576756477356
+        ],
+        "inf_count": 0,
+        "last": [
+          0.7709776163101196,
+          -0.5942588448524475,
+          0.562384843826294,
+          -0.7141716480255127,
+          0.577576756477356
+        ],
+        "max": 0.7709776163101196,
+        "max_abs": 0.7709776163101196,
+        "mean_abs": 0.6438739418983459,
+        "min": -0.7141716480255127,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 140,
+      "dtype": "f32",
+      "name": "matmul.gemm_k13_bias.out",
+      "path": "tensors/matmul.gemm_k13_bias.out.f32",
+      "provenance": {
+        "call": "Gemm A[7, 13] @ W[5, 13].T + b[5] (transB=1)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 5e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "b1ed0ad2cda86abb1ba48c880869e19540d57bd0c5bf670813151180d9238f86",
+      "shape": [
+        7,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 25,
+        "count": 35,
+        "first": [
+          3.485644817352295,
+          -4.706033229827881,
+          -4.784013748168945,
+          -0.7306278944015503,
+          -7.362775802612305,
+          2.687722682952881,
+          -5.491297245025635,
+          -0.49058425426483154
+        ],
+        "inf_count": 0,
+        "last": [
+          0.1848440021276474,
+          -3.9624438285827637,
+          -3.264427423477173,
+          2.9660534858703613,
+          -8.642959594726562,
+          2.6055917739868164,
+          -4.77202033996582,
+          -7.054373264312744
+        ],
+        "max": 5.624640464782715,
+        "max_abs": 11.875126838684082,
+        "mean_abs": 3.609302671466555,
+        "min": -11.875126838684082,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 840,
+      "dtype": "f32",
+      "name": "matmul.batched_4d.a",
+      "path": "tensors/matmul.batched_4d.a.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 1e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "e0942ad3477380d9f5c1abc3fc34177305b6bcbc1b4cba20c8e3b99263b930a6",
+      "shape": [
+        2,
+        3,
+        5,
+        7
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 70,
+        "count": 210,
+        "first": [
+          -1.2152119874954224,
+          0.08942050486803055,
+          0.12889817357063293,
+          0.6609575748443604,
+          1.986968994140625,
+          0.10254515707492828,
+          0.9715259075164795,
+          -0.04993538558483124
+        ],
+        "inf_count": 0,
+        "last": [
+          -1.2192469835281372,
+          0.08174722641706467,
+          1.1042085886001587,
+          1.27922523021698,
+          -0.3803673982620239,
+          0.42201152443885803,
+          1.7251255512237549,
+          1.624219298362732
+        ],
+        "max": 1.9938111305236816,
+        "max_abs": 1.995316743850708,
+        "mean_abs": 0.9532540779915594,
+        "min": -1.995316743850708,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 1848,
+      "dtype": "f32",
+      "name": "matmul.batched_4d.b",
+      "path": "tensors/matmul.batched_4d.b.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 1e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "22549e1c865065a8c9dc7286642c83b7adf2460f9da6681c7ac1511c69bb8cdf",
+      "shape": [
+        2,
+        3,
+        7,
+        11
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 122,
+        "count": 462,
+        "first": [
+          0.9460430145263672,
+          -1.3260420560836792,
+          0.448150634765625,
+          -1.468911051750183,
+          1.8553212881088257,
+          0.824760377407074,
+          1.5653156042099,
+          1.2784483432769775
+        ],
+        "inf_count": 0,
+        "last": [
+          -1.881827712059021,
+          1.2595371007919312,
+          -0.5009221434593201,
+          0.34419840574264526,
+          0.07377085834741592,
+          -1.6381325721740723,
+          -0.774334192276001,
+          0.16019825637340546
+        ],
+        "max": 1.9986002445220947,
+        "max_abs": 1.9986002445220947,
+        "mean_abs": 1.0363594835724388,
+        "min": -1.9774069786071777,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 1320,
+      "dtype": "f32",
+      "name": "matmul.batched_4d.out",
+      "path": "tensors/matmul.batched_4d.out.f32",
+      "provenance": {
+        "call": "MatMul A[2, 3, 5, 7] @ B[2, 3, 7, 11]",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 1e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "c7da3ad840be322a8c013f11b399b13ff36dbd4db8607623577d993eacb8ac82",
+      "shape": [
+        2,
+        3,
+        5,
+        11
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 184,
+        "count": 330,
+        "first": [
+          -2.600574016571045,
+          3.835707664489746,
+          1.915467381477356,
+          5.267236232757568,
+          0.3024582862854004,
+          -4.121325969696045,
+          -5.231561660766602,
+          -2.504319667816162
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.9322818517684937,
+          0.5723152160644531,
+          -1.4758363962173462,
+          5.856124401092529,
+          -5.159854412078857,
+          -4.226220607757568,
+          -1.3890222311019897,
+          -2.016874313354492
+        ],
+        "max": 9.089428901672363,
+        "max_abs": 10.942619323730469,
+        "mean_abs": 2.740098103533753,
+        "min": -10.942619323730469,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 6656,
+      "dtype": "f32",
+      "name": "matmul.model_proj.a",
+      "path": "tensors/matmul.model_proj.a.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "4faad8e63d009789dee5fbf4bdfda5a9202c3616cf249011fada9b6fd4cf4a24",
+      "shape": [
+        1,
+        13,
+        128
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 1488,
+        "count": 1664,
+        "first": [
+          -0.8323914408683777,
+          0.08516108244657516,
+          -1.5013132095336914,
+          -1.451129674911499,
+          -0.40808841586112976,
+          0.016959091648459435,
+          0.007971099577844143,
+          1.6921099424362183
+        ],
+        "inf_count": 0,
+        "last": [
+          1.2732371091842651,
+          1.7385774850845337,
+          1.4533421993255615,
+          1.3234692811965942,
+          0.6089075803756714,
+          1.7509150505065918,
+          -1.0245945453643799,
+          0.6607396602630615
+        ],
+        "max": 1.9946633577346802,
+        "max_abs": 1.9996803998947144,
+        "mean_abs": 1.000572619918575,
+        "min": -1.9996803998947144,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 4096,
+      "dtype": "f32",
+      "name": "matmul.model_proj.b",
+      "path": "tensors/matmul.model_proj.b.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "d6a84d14a76838b44b69b1fb79b39b9e0a2c7bae0dec36b373e8f8181b1c80f4",
+      "shape": [
+        128,
+        8
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 580,
+        "count": 1024,
+        "first": [
+          0.6903903484344482,
+          -0.23517294228076935,
+          -0.08969564735889435,
+          -0.5877183079719543,
+          -0.897428572177887,
+          0.14371785521507263,
+          0.06912025809288025,
+          -0.8107126951217651
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.3388775587081909,
+          0.23800846934318542,
+          -0.22396531701087952,
+          -0.5838640928268433,
+          0.3191227912902832,
+          -0.19742126762866974,
+          0.2700423300266266,
+          0.39544180035591125
+        ],
+        "max": 0.9983834028244019,
+        "max_abs": 0.9998100399971008,
+        "mean_abs": 0.4901770745224212,
+        "min": -0.9998100399971008,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 416,
+      "dtype": "f32",
+      "name": "matmul.model_proj.out",
+      "path": "tensors/matmul.model_proj.out.f32",
+      "provenance": {
+        "call": "MatMul A[1, 13, 128] @ B[128, 8]",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "3f683ecf7bec08a6343ecdbcdde0d5c7d84488875302686fb25cde2d560eb166",
+      "shape": [
+        1,
+        13,
+        8
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 50,
+        "count": 104,
+        "first": [
+          3.739291191101074,
+          -2.2985663414001465,
+          8.17499828338623,
+          -1.283602237701416,
+          10.353608131408691,
+          -1.2918188571929932,
+          -1.747843623161316,
+          2.9026503562927246
+        ],
+        "inf_count": 0,
+        "last": [
+          -3.421921968460083,
+          -10.782671928405762,
+          -16.912471771240234,
+          -0.6674183011054993,
+          1.7361297607421875,
+          -3.7901153564453125,
+          4.843265533447266,
+          2.3104259967803955
+        ],
+        "max": 16.9281005859375,
+        "max_abs": 16.9281005859375,
+        "mean_abs": 5.682037885838117,
+        "min": -16.912471771240234,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 780,
+      "dtype": "f32",
+      "name": "matmul.tail_k65.a",
+      "path": "tensors/matmul.tail_k65.a.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "333cf5b63844189f04be2e0715bfd0b117923db836494658e3aa901442187dcb",
+      "shape": [
+        3,
+        65
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 90,
+        "count": 195,
+        "first": [
+          1.5469154119491577,
+          1.6229299306869507,
+          0.31930655241012573,
+          0.2557281255722046,
+          -0.20800724625587463,
+          1.4747464656829834,
+          0.879283607006073,
+          1.4598629474639893
+        ],
+        "inf_count": 0,
+        "last": [
+          1.7463364601135254,
+          1.7444021701812744,
+          1.8814953565597534,
+          -0.353668212890625,
+          0.11305304616689682,
+          0.45394861698150635,
+          0.16359563171863556,
+          0.06583352386951447
+        ],
+        "max": 1.898754358291626,
+        "max_abs": 1.992514729499817,
+        "mean_abs": 0.9287443233224062,
+        "min": -1.992514729499817,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 1820,
+      "dtype": "f32",
+      "name": "matmul.tail_k65.b",
+      "path": "tensors/matmul.tail_k65.b.f32",
+      "provenance": {
+        "call": "A @ B",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "5987d659d7c325c7095411ea6bc65498e8d3c0684762056060a6e6a96cc2e2a7",
+      "shape": [
+        65,
+        7
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 388,
+        "count": 455,
+        "first": [
+          -1.054733395576477,
+          0.4582161605358124,
+          -0.12332610785961151,
+          1.8743653297424316,
+          -1.163927674293518,
+          0.9860262274742126,
+          -1.5187735557556152,
+          0.0264729056507349
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.07560882717370987,
+          0.6103435158729553,
+          1.4051696062088013,
+          1.8316396474838257,
+          -1.6074315309524536,
+          -0.3602277636528015,
+          1.8211199045181274,
+          1.6546868085861206
+        ],
+        "max": 1.9928182363510132,
+        "max_abs": 1.999409556388855,
+        "mean_abs": 1.0049202336162164,
+        "min": -1.999409556388855,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 84,
+      "dtype": "f32",
+      "name": "matmul.tail_k65.out",
+      "path": "tensors/matmul.tail_k65.out.f32",
+      "provenance": {
+        "call": "MatMul A[3, 65] @ B[65, 7]",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-05,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-05
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "ed8af869368de78f16e6bbb89e5da66844f08a9b52ca5a499083d46fc243117d",
+      "shape": [
+        3,
+        7
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 10,
+        "count": 21,
+        "first": [
+          -11.810189247131348,
+          5.19903564453125,
+          -0.4644209146499634,
+          3.2641801834106445,
+          -4.090448379516602,
+          -3.744091272354126,
+          3.404736042022705,
+          3.713914155960083
+        ],
+        "inf_count": 0,
+        "last": [
+          -9.24567985534668,
+          -3.9948012828826904,
+          5.32411527633667,
+          7.62838077545166,
+          -6.889744281768799,
+          7.55372953414917,
+          -10.725379943847656,
+          -18.094099044799805
+        ],
+        "max": 10.114489555358887,
+        "max_abs": 18.094099044799805,
+        "mean_abs": 6.144938152460825,
+        "min": -18.094099044799805,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 276,
+      "dtype": "f32",
+      "name": "gelu.input",
+      "path": "tensors/gelu.input.f32",
+      "provenance": {
+        "call": "x [69]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "2899097d7b9312877f3da7394ff5a46f4b4d8445276299a2374d7c8e9b467aeb",
+      "shape": [
+        69
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 68,
+        "count": 69,
+        "first": [
+          -6.0,
+          -5.8125,
+          -5.625,
+          -5.4375,
+          -5.25,
+          -5.0625,
+          -4.875,
+          -4.6875
+        ],
+        "inf_count": 0,
+        "last": [
+          5.4375,
+          5.625,
+          5.8125,
+          6.0,
+          -10000.0,
+          -10.0,
+          10.0,
+          10000.0
+        ],
+        "max": 10000.0,
+        "max_abs": 10000.0,
+        "mean_abs": 293.0144927536232,
+        "min": -10000.0,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 276,
+      "dtype": "f32",
+      "name": "gelu.erf.out",
+      "path": "tensors/gelu.erf.out.f32",
+      "provenance": {
+        "call": "0.5*x*(1+erf(x/sqrt(2)))",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "9351893f73f05231699b8d4be4b0200ba80f519e19cb16dc983ba4e33f24e3ab",
+      "shape": [
+        69
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 68,
+        "count": 69,
+        "first": [
+          -5.919525758457667e-09,
+          -1.788700565441559e-08,
+          -5.2174119247183626e-08,
+          -1.4690317584609147e-07,
+          -3.99260414951641e-07,
+          -1.0474162763784989e-06,
+          -2.652206148923142e-06,
+          -6.48193827146315e-06
+        ],
+        "inf_count": 0,
+        "last": [
+          5.4375,
+          5.625,
+          5.8125,
+          6.0,
+          -0.0,
+          -0.0,
+          10.0,
+          10000.0
+        ],
+        "max": 10000.0,
+        "max_abs": 10000.0,
+        "mean_abs": 146.5072463753317,
+        "min": -0.16997051239013672,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 276,
+      "dtype": "f32",
+      "name": "gelu.tanh.out",
+      "path": "tensors/gelu.tanh.out.f32",
+      "provenance": {
+        "call": "0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "6b39644310a8f12b53a7bc819faa6f337bebf6431e85d0aad0c31432b0df33fa",
+      "shape": [
+        69
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 68,
+        "count": 69,
+        "first": [
+          -8.43964897967453e-11,
+          -4.473025283502352e-10,
+          -2.1698571828210333e-09,
+          -9.660708677472485e-09,
+          -3.958463778985788e-08,
+          -1.4968289008265856e-07,
+          -5.237562277216057e-07,
+          -1.7004998653646908e-06
+        ],
+        "inf_count": 0,
+        "last": [
+          5.4375,
+          5.625,
+          5.8125,
+          6.0,
+          -0.0,
+          -0.0,
+          10.0,
+          10000.0
+        ],
+        "max": 10000.0,
+        "max_abs": 10000.0,
+        "mean_abs": 146.5072463766491,
+        "min": -0.17003944516181946,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 480,
+      "dtype": "f32",
+      "name": "softmax.unmasked.input",
+      "path": "tensors/softmax.unmasked.input.f32",
+      "provenance": {
+        "call": "logits",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "3eadeb5fdbe92a3a8d3e988cd388404cdd2c2300b163b4591dedaa994d251b30",
+      "shape": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 120,
+        "first": [
+          4.970248699188232,
+          -1.2321780920028687,
+          -4.156870365142822,
+          3.6945297718048096,
+          -2.0330119132995605,
+          1.1984171867370605,
+          0.9145779013633728,
+          -4.16046142578125
+        ],
+        "inf_count": 0,
+        "last": [
+          -4.485541820526123,
+          4.262948989868164,
+          -2.009293794631958,
+          -2.0731256008148193,
+          4.419832706451416,
+          -2.9128835201263428,
+          -2.2098214626312256,
+          -3.21101450920105
+        ],
+        "max": 4.970248699188232,
+        "max_abs": 4.970248699188232,
+        "mean_abs": 2.573977822153635,
+        "min": -4.787208080291748,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 480,
+      "dtype": "f32",
+      "name": "softmax.unmasked.out",
+      "path": "tensors/softmax.unmasked.out.f32",
+      "provenance": {
+        "call": "Softmax(additive(logits, mask), axis=-1)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "8c40215bd95159352bac875ce5438b8327a928a7735a73d4b2d5014b069aa1ae",
+      "shape": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 116,
+        "count": 120,
+        "first": [
+          0.779865562915802,
+          0.0015788469463586807,
+          8.475441427435726e-05,
+          0.21776197850704193,
+          0.0007088303682394326,
+          0.031028565019369125,
+          0.023361023515462875,
+          0.00014602603914681822
+        ],
+        "inf_count": 0,
+        "last": [
+          0.00014454108895733953,
+          0.9107781648635864,
+          0.0017195396358147264,
+          0.0015080706216394901,
+          0.996042013168335,
+          0.0006512075779028237,
+          0.0013153926702216268,
+          0.0004833289422094822
+        ],
+        "max": 0.996042013168335,
+        "max_abs": 0.996042013168335,
+        "mean_abs": 0.19999999977014038,
+        "min": 8.475441427435726e-05,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 128,
+      "dtype": "f32",
+      "name": "softmax.causal.input",
+      "path": "tensors/softmax.causal.input.f32",
+      "provenance": {
+        "call": "logits",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "abdc7a6925d5021accd870f63f6c5c6de7e69caddb6ba0db0dfd351f489ede4e",
+      "shape": [
+        1,
+        2,
+        4,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 5,
+        "count": 32,
+        "first": [
+          -1.2856709957122803,
+          -4.1867451667785645,
+          0.455705851316452,
+          -3.595003128051758,
+          -3.5645086765289307,
+          4.98621129989624,
+          3.1097359657287598,
+          -3.138728380203247
+        ],
+        "inf_count": 0,
+        "last": [
+          2.1499788761138916,
+          0.5395729541778564,
+          0.6865491271018982,
+          -0.13823924958705902,
+          1.0873850584030151,
+          1.6934428215026855,
+          4.571492671966553,
+          2.6113333702087402
+        ],
+        "max": 4.98621129989624,
+        "max_abs": 4.98621129989624,
+        "mean_abs": 2.327866694657132,
+        "min": -4.644361972808838,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 128,
+      "dtype": "f32",
+      "name": "softmax.causal.mask",
+      "path": "tensors/softmax.causal.mask.f32",
+      "provenance": {
+        "all_masked_rows": 0,
+        "call": "additive mask",
+        "fill_value": -3.4028234663852886e+38,
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "514e52ced7037655361522e07fcd0f2fb5f3672926f42f9c5f4eff36c2717836",
+      "shape": [
+        1,
+        2,
+        4,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 32,
+        "first": [
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38
+        ],
+        "inf_count": 0,
+        "last": [
+          0.0,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": 0.0,
+        "max_abs": 3.4028234663852886e+38,
+        "mean_abs": 1.2760587998944832e+38,
+        "min": -3.4028234663852886e+38,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 128,
+      "dtype": "f32",
+      "name": "softmax.causal.out",
+      "path": "tensors/softmax.causal.out.f32",
+      "provenance": {
+        "call": "Softmax(additive(logits, mask), axis=-1)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "159a41139cebfe27981ef146b60286a4e4f2a6af4a95a88d3fde31fd162d52b5",
+      "shape": [
+        1,
+        2,
+        4,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 32,
+        "first": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0001933683961397037,
+          0.9998066425323486,
+          0.0,
+          0.0
+        ],
+        "inf_count": 0,
+        "last": [
+          0.6986911296844482,
+          0.13960301876068115,
+          0.1617058664560318,
+          0.0,
+          0.024989483878016472,
+          0.045810479670763016,
+          0.8144904971122742,
+          0.11470956355333328
+        ],
+        "max": 1.0,
+        "max_abs": 1.0,
+        "mean_abs": 0.2500000018571882,
+        "min": 0.0,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 32,
+      "dtype": "f32",
+      "name": "softmax.all_masked.input",
+      "path": "tensors/softmax.all_masked.input.f32",
+      "provenance": {
+        "call": "logits",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "dec21ce7225769bb7cdb4fc3bcce389a645b3444a721e2475f9d79dada1b9cdf",
+      "shape": [
+        1,
+        1,
+        2,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 8,
+        "first": [
+          1.844319462776184,
+          -0.8970620036125183,
+          1.3158231973648071,
+          -1.523382306098938,
+          -1.9499945640563965,
+          0.9868105053901672,
+          1.6574327945709229,
+          -1.0159357786178589
+        ],
+        "inf_count": 0,
+        "last": [
+          1.844319462776184,
+          -0.8970620036125183,
+          1.3158231973648071,
+          -1.523382306098938,
+          -1.9499945640563965,
+          0.9868105053901672,
+          1.6574327945709229,
+          -1.0159357786178589
+        ],
+        "max": 1.844319462776184,
+        "max_abs": 1.9499945640563965,
+        "mean_abs": 1.3988450765609741,
+        "min": -1.9499945640563965,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 32,
+      "dtype": "f32",
+      "name": "softmax.all_masked.mask",
+      "path": "tensors/softmax.all_masked.mask.f32",
+      "provenance": {
+        "all_masked_rows": 1,
+        "call": "additive mask",
+        "fill_value": -3.4028234663852886e+38,
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "b0355ae2fb845aca1ee39a682c4e23dc42a53a58331703b096364de794b9e362",
+      "shape": [
+        1,
+        1,
+        2,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 8,
+        "first": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38
+        ],
+        "inf_count": 0,
+        "last": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38
+        ],
+        "max": 0.0,
+        "max_abs": 3.4028234663852886e+38,
+        "mean_abs": 1.7014117331926443e+38,
+        "min": -3.4028234663852886e+38,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 32,
+      "dtype": "f32",
+      "name": "softmax.all_masked.out",
+      "path": "tensors/softmax.all_masked.out.f32",
+      "provenance": {
+        "call": "Softmax(additive(logits, mask), axis=-1)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "765a35bf0587a915cdc57434fde0cb75505236d8c4bf208829cc55eddb7a179f",
+      "shape": [
+        1,
+        1,
+        2,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 8,
+        "first": [
+          0.5922624468803406,
+          0.03818979486823082,
+          0.3491332232952118,
+          0.020414553582668304,
+          0.25,
+          0.25,
+          0.25,
+          0.25
+        ],
+        "inf_count": 0,
+        "last": [
+          0.5922624468803406,
+          0.03818979486823082,
+          0.3491332232952118,
+          0.020414553582668304,
+          0.25,
+          0.25,
+          0.25,
+          0.25
+        ],
+        "max": 0.5922624468803406,
+        "max_abs": 0.5922624468803406,
+        "mean_abs": 0.25000000232830644,
+        "min": 0.020414553582668304,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 60,
+      "dtype": "f32",
+      "name": "softmax.padded.input",
+      "path": "tensors/softmax.padded.input.f32",
+      "provenance": {
+        "call": "logits",
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "da22c21dec0baeaba1ad6d6ff523116283bab7bc1ca20c959c027ee65198ba53",
+      "shape": [
+        1,
+        1,
+        3,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 14,
+        "count": 15,
+        "first": [
+          -1.7943446636199951,
+          0.8245633840560913,
+          0.9780336618423462,
+          2.053361654281616,
+          2.978200674057007,
+          1.3928375244140625,
+          -2.919137477874756,
+          2.63928484916687
+        ],
+        "inf_count": 0,
+        "last": [
+          2.63928484916687,
+          -0.11884322762489319,
+          -2.4199283123016357,
+          -3.660482168197632,
+          2.3141329288482666,
+          -0.3374621272087097,
+          3.548163414001465,
+          3.7463085651397705
+        ],
+        "max": 3.7463085651397705,
+        "max_abs": 3.7463085651397705,
+        "mean_abs": 2.1150056421756744,
+        "min": -3.660482168197632,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 60,
+      "dtype": "f32",
+      "name": "softmax.padded.mask",
+      "path": "tensors/softmax.padded.mask.f32",
+      "provenance": {
+        "all_masked_rows": 0,
+        "call": "additive mask",
+        "fill_value": -3.4028234663852886e+38,
+        "kind": "input",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "4fd352ca6a8034801e46fa27a05f2cf25e651531683402706baf55ecbb5fecd6",
+      "shape": [
+        1,
+        1,
+        3,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 15,
+        "first": [
+          0.0,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "inf_count": 0,
+        "last": [
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          0.0,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38
+        ],
+        "max": 0.0,
+        "max_abs": 3.4028234663852886e+38,
+        "mean_abs": 1.3611293865541154e+38,
+        "min": -3.4028234663852886e+38,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 60,
+      "dtype": "f32",
+      "name": "softmax.padded.out",
+      "path": "tensors/softmax.padded.out.f32",
+      "provenance": {
+        "call": "Softmax(additive(logits, mask), axis=-1)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 2e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "49a5a362a520f0d426d1d8bec4dabc3cf7503e95a74e5a0a95ef9c4a445be97f",
+      "shape": [
+        1,
+        1,
+        3,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 11,
+        "count": 15,
+        "first": [
+          0.03255487233400345,
+          0.44667673110961914,
+          0.520768404006958,
+          0.0,
+          0.0,
+          0.22264911234378815,
+          0.00298506673425436,
+          0.7743658423423767
+        ],
+        "inf_count": 0,
+        "last": [
+          0.7743658423423767,
+          0.0,
+          0.0,
+          0.0023693274706602097,
+          0.9318960309028625,
+          0.06573464721441269,
+          0.0,
+          0.0
+        ],
+        "max": 0.9318960309028625,
+        "max_abs": 0.9318960309028625,
+        "mean_abs": 0.20000000229726236,
+        "min": 0.0,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 320,
+      "dtype": "f32",
+      "name": "attention.q",
+      "path": "tensors/attention.q.f32",
+      "provenance": {
+        "call": "Q [B=2,H=2,S=4,D=5]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 3e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "96d07c4786e6a34976cea24108ab64ce29ca75b97d4b6c66600070399bb87190",
+      "shape": [
+        2,
+        2,
+        4,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 52,
+        "count": 80,
+        "first": [
+          -0.4438086450099945,
+          0.23846174776554108,
+          0.6963168382644653,
+          0.18789805471897125,
+          -0.06343904882669449,
+          -0.5876997709274292,
+          -0.9380470514297485,
+          -0.500796914100647
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.7662529945373535,
+          -0.3974500000476837,
+          -0.906734824180603,
+          0.22198736667633057,
+          -0.8704902529716492,
+          0.761586606502533,
+          0.05721765384078026,
+          -0.2361147403717041
+        ],
+        "max": 0.9623836874961853,
+        "max_abs": 0.9801812171936035,
+        "mean_abs": 0.4637378126499243,
+        "min": -0.9801812171936035,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 320,
+      "dtype": "f32",
+      "name": "attention.k",
+      "path": "tensors/attention.k.f32",
+      "provenance": {
+        "call": "K [B=2,H=2,S=4,D=5]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 3e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "418eae2eb885dc12089a32edaf240c5ce1bc32dbdb38167c2fe4d19655ba682f",
+      "shape": [
+        2,
+        2,
+        4,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 9,
+        "count": 80,
+        "first": [
+          0.39925941824913025,
+          -0.6765280365943909,
+          -0.12390679866075516,
+          0.04863601550459862,
+          0.13595817983150482,
+          0.2900872528553009,
+          -0.16108258068561554,
+          0.5554643869400024
+        ],
+        "inf_count": 0,
+        "last": [
+          0.5544434785842896,
+          -0.03844566270709038,
+          0.7556141018867493,
+          0.2032245546579361,
+          -0.18856222927570343,
+          -0.2249772995710373,
+          -0.5331676006317139,
+          -0.17208246886730194
+        ],
+        "max": 0.9054961204528809,
+        "max_abs": 0.952386200428009,
+        "mean_abs": 0.4545609906403115,
+        "min": -0.952386200428009,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 320,
+      "dtype": "f32",
+      "name": "attention.v",
+      "path": "tensors/attention.v.f32",
+      "provenance": {
+        "call": "V [B=2,H=2,S=4,D=5]",
+        "kind": "input",
+        "tolerance": {
+          "atol": 3e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "7961d941f389428b59d771fc5e3fb6bf0fb5b03430c39dc45b3e113b54632846",
+      "shape": [
+        2,
+        2,
+        4,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 27,
+        "count": 80,
+        "first": [
+          -0.14196597039699554,
+          0.8184863328933716,
+          0.315083771944046,
+          0.43546581268310547,
+          0.5721010565757751,
+          0.3371613919734955,
+          -0.7477468252182007,
+          -0.018702132627367973
+        ],
+        "inf_count": 0,
+        "last": [
+          0.2800734043121338,
+          0.8250575661659241,
+          -0.1188882440328598,
+          -0.09270473569631577,
+          -0.8346408605575562,
+          -0.22832000255584717,
+          0.5470880270004272,
+          0.9417374730110168
+        ],
+        "max": 0.997523844242096,
+        "max_abs": 0.997523844242096,
+        "mean_abs": 0.4988302829908207,
+        "min": -0.9858773350715637,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 128,
+      "dtype": "f32",
+      "name": "attention.mask",
+      "path": "tensors/attention.mask.f32",
+      "provenance": {
+        "all_masked": {
+          "batch": 1,
+          "keys": 4,
+          "query": 2
+        },
+        "call": "additive causal + all-masked mask",
+        "fill_value": -3.4028234663852886e+38,
+        "kind": "input",
+        "tolerance": {
+          "atol": 3e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "6ba2c58c492d20ef32058aa45e2329f9183d90bcdc29a04da0d9a59ae1b1a754",
+      "shape": [
+        2,
+        1,
+        4,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 32,
+        "first": [
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          0.0,
+          0.0,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38
+        ],
+        "inf_count": 0,
+        "last": [
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          -3.4028234663852886e+38,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "max": 0.0,
+        "max_abs": 3.4028234663852886e+38,
+        "mean_abs": 1.595073499868104e+38,
+        "min": -3.4028234663852886e+38,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 256,
+      "dtype": "f32",
+      "name": "attention.probs",
+      "path": "tensors/attention.probs.f32",
+      "provenance": {
+        "call": "Softmax(Q @ K.T / sqrt(5) + mask)",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 3e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "a4ef26ce74e213eabbf1fafea19ec6d6ab9d34f555b08b85c0e6d5fb6749a6ef",
+      "shape": [
+        2,
+        2,
+        4,
+        4
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 0,
+        "count": 64,
+        "first": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.6594834923744202,
+          0.3405165374279022,
+          0.0,
+          0.0
+        ],
+        "inf_count": 0,
+        "last": [
+          0.25,
+          0.25,
+          0.25,
+          0.25,
+          0.2593095302581787,
+          0.20993317663669586,
+          0.26515623927116394,
+          0.2656010687351227
+        ],
+        "max": 1.0,
+        "max_abs": 1.0,
+        "mean_abs": 0.2500000004656613,
+        "min": 0.0,
+        "nan_count": 0
+      }
+    },
+    {
+      "bytes": 320,
+      "dtype": "f32",
+      "name": "attention.out",
+      "path": "tensors/attention.out.f32",
+      "provenance": {
+        "call": "probs @ V",
+        "kind": "reference",
+        "tolerance": {
+          "atol": 3e-06,
+          "form": "abs(actual - ref) <= atol + rtol * abs(ref)",
+          "rtol": 1e-06
+        },
+        "tool_versions": {
+          "numpy": "2.5.5",
+          "torch": "2.15.0+cpu"
+        }
+      },
+      "sha256": "dde597663c430e0e1cdaa057b4aabd2e2a371fd3ee39fda54493c0c7cabf456f",
+      "shape": [
+        2,
+        2,
+        4,
+        5
+      ],
+      "stored": true,
+      "summary": {
+        "argmax_flat": 44,
+        "count": 80,
+        "first": [
+          -0.14196597039699554,
+          0.8184863328933716,
+          0.315083771944046,
+          0.43546581268310547,
+          0.5721010565757751,
+          0.02118481881916523,
+          0.28515803813934326,
+          0.20142415165901184
+        ],
+        "inf_count": 0,
+        "last": [
+          -0.3468570113182068,
+          0.05732044577598572,
+          0.15267139673233032,
+          0.09842707216739655,
+          -0.12870994210243225,
+          -0.32005515694618225,
+          0.09545263648033142,
+          0.16268591582775116
+        ],
+        "max": 0.9220283627510071,
+        "max_abs": 0.9326379895210266,
+        "mean_abs": 0.32702330213505776,
+        "min": -0.9326379895210266,
+        "nan_count": 0
+      }
+    }
+  ]
+}

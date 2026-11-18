@@ -1,0 +1,3 @@
+# Model cache, virtual environment, and scratch data for the parity tooling.
+.cache/
+__pycache__/

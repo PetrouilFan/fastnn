@@ -1,0 +1,299 @@
+{
+  "files": [
+    {
+      "bytes": 1519,
+      "lfs": false,
+      "path": ".gitattributes",
+      "role": "repo_metadata",
+      "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 347,
+      "lfs": false,
+      "path": "README.md",
+      "role": "model_card",
+      "sha256": "799bdd318fb17ccb1d8d554875e410d9cbe8c97cc5cde54d7efc9d0401ed8685",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 969,
+      "lfs": false,
+      "path": "config.json",
+      "role": "config",
+      "sha256": "935121200917262375ee8a179461219005d4992767823a4f7460dbd4b648023b",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 119,
+      "lfs": false,
+      "path": "generation_config.json",
+      "role": "generation_config",
+      "sha256": "e7f6144153c0e1c0ccd6c327134b1bcc8f4e36e164d903935b08753947126636",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 456318,
+      "lfs": false,
+      "path": "merges.txt",
+      "role": "tokenizer_support",
+      "sha256": "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 27897974,
+      "lfs": true,
+      "path": "onnx/model.onnx",
+      "role": "graph",
+      "sha256": "e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 27897993,
+      "lfs": true,
+      "path": "onnx/model_bnb4.onnx",
+      "role": "unused_variant",
+      "sha256": "1a9d2b878d676d715f0f0d2ac8d466f2c6b59b8e15c381c5788c688f6355068e",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 13983109,
+      "lfs": true,
+      "path": "onnx/model_fp16.onnx",
+      "role": "unused_variant",
+      "sha256": "931ff378adcc54584725bae42fe79e891097954c566075d99bd2263fc9e39352",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 32770730,
+      "lfs": true,
+      "path": "onnx/model_int8.onnx",
+      "role": "unused_variant",
+      "sha256": "d479a74f7f74df91b77def2aee5e64cadf1c82d2b6c9d99fd68833009cf11a64",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 27897993,
+      "lfs": true,
+      "path": "onnx/model_q4.onnx",
+      "role": "unused_variant",
+      "sha256": "1a9d2b878d676d715f0f0d2ac8d466f2c6b59b8e15c381c5788c688f6355068e",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 13983128,
+      "lfs": true,
+      "path": "onnx/model_q4f16.onnx",
+      "role": "unused_variant",
+      "sha256": "452d5f7ecdf55abd896f8e6d0ee35d50ce35c6cf93f1fb1764d0f48aa484b348",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 32770730,
+      "lfs": true,
+      "path": "onnx/model_quantized.onnx",
+      "role": "unused_variant",
+      "sha256": "d479a74f7f74df91b77def2aee5e64cadf1c82d2b6c9d99fd68833009cf11a64",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 32770733,
+      "lfs": true,
+      "path": "onnx/model_uint8.onnx",
+      "role": "unused_variant",
+      "sha256": "648708f78f13747f478cd1475c1143bfdcd1b44c9a48b8250d63362edc9b6349",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 312,
+      "lfs": false,
+      "path": "quantize_config.json",
+      "role": "quantization_metadata",
+      "sha256": "70f61db8708568fa3ee6e66ecbcfdb8a89b9069feadff679dea00b097e521c98",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 438,
+      "lfs": false,
+      "path": "special_tokens_map.json",
+      "role": "tokenizer_support",
+      "sha256": "98412137ae43c77f8af52eb51b19c3536d3242cb55339167d841005fa94a23b7",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 3557680,
+      "lfs": false,
+      "path": "tokenizer.json",
+      "role": "tokenizer",
+      "sha256": "1fe93b6152957cf9cfd6d89002467f789ce8b3f3e000b3a2edf27c808ddd0b9e",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 474,
+      "lfs": false,
+      "path": "tokenizer_config.json",
+      "role": "tokenizer_support",
+      "sha256": "70049a392a6fd4dd1343d076e1f0e64d98ae821287c80638f603364ae21e64d7",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 798156,
+      "lfs": false,
+      "path": "vocab.json",
+      "role": "tokenizer_support",
+      "sha256": "3ba3c3109ff33976c4bd966589c11ee14fcaa1f4c9e5e154c2ed7f99d80709e7",
+      "verification": "local_sha256"
+    }
+  ],
+  "format": "fastnn-model-lock",
+  "format_version": 1,
+  "graph": {
+    "activation": "gelu_new (tanh approximation)",
+    "cache_layout": "[batch, kv_heads, sequence, head_dim]",
+    "head_dim": 64,
+    "hidden_size": 128,
+    "initializers": {
+      "f32": 24,
+      "i64": 24
+    },
+    "inputs": [
+      "input_ids",
+      "past_key_values.0.key",
+      "past_key_values.0.value",
+      "past_key_values.1.key",
+      "past_key_values.1.value",
+      "attention_mask",
+      "position_ids"
+    ],
+    "ir_version": 7,
+    "kv_heads": 2,
+    "layer_norm_epsilon": 1e-05,
+    "layers": 2,
+    "mask_fill_value": -3.4028234663852886e+38,
+    "nodes": 257,
+    "opset": 14,
+    "outputs": [
+      "logits",
+      "present.0.key",
+      "present.0.value",
+      "present.1.key",
+      "present.1.value"
+    ],
+    "position_embedding": "learned, n_positions=1024",
+    "query_heads": 2,
+    "vocab_size": 50257
+  },
+  "hub_url": "https://huggingface.co/onnx-community/tiny-random-gpt2-ONNX/tree/90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f",
+  "license": {
+    "base_declaration": "The base checkpoint also declares no license; its model card is the auto-generated template with every field marked '[More Information Needed]'.",
+    "base_license": null,
+    "base_model": "hyper-accel/tiny-random-gpt2",
+    "base_revision": "26bf7041497544bbd014ffdc245f3c60c0b05179",
+    "ci_use": "CI consumes only committed numeric fixtures and never downloads the model, so the undeclared weight license does not block CI. Regeneration is opt-in.",
+    "declaration": "The pinned ONNX repository has no license field, no LICENSE file, and no license statement in README.md at the pinned revision.",
+    "declared_spdx": null,
+    "redistribution": "FastNN does not commit or redistribute model weights. Committed fixtures are numeric outputs derived from the weights plus checksums of the weight files. Redistribution of the weight files themselves is unresolved.",
+    "tokenizer_provenance": "The tokenizer/vocab/merges files are GPT-2 BPE assets; the canonical openai-community/gpt2 repository declares MIT."
+  },
+  "model_id": "onnx-community/tiny-random-gpt2-ONNX",
+  "reference_checkpoint": {
+    "files": [
+      {
+        "bytes": 1519,
+        "lfs": false,
+        "path": ".gitattributes",
+        "role": "repo_metadata",
+        "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 5174,
+        "lfs": false,
+        "path": "README.md",
+        "role": "model_card",
+        "sha256": "0336368f8274a5ed09f54cee8d56a851ecee96026d9f391a6735762c16608a60",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 946,
+        "lfs": false,
+        "path": "config.json",
+        "role": "config",
+        "sha256": "0b5ad0d47ad3a9a9409ffa05553dd0294f017eba5c3ab4d060f79ac809a0e477",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 119,
+        "lfs": false,
+        "path": "generation_config.json",
+        "role": "generation_config",
+        "sha256": "576b5ac34bfed3b58775e722b0f7d9c7d8fef43ee5a9980b85f6b87ae447cb09",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 456318,
+        "lfs": false,
+        "path": "merges.txt",
+        "role": "tokenizer_support",
+        "sha256": "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 27845776,
+        "lfs": true,
+        "path": "model.safetensors",
+        "role": "pytorch_weights",
+        "sha256": "41a64ede13b6f741a26b8cd2e2332796c4165cab81ec37056a6fe9336b8a492e",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 99,
+        "lfs": false,
+        "path": "special_tokens_map.json",
+        "role": "tokenizer_support",
+        "sha256": "6f50ab5a5a509a1c309d6171f339b196a900dc9c99ad0408ff23bb615fdae7ad",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 2107680,
+        "lfs": false,
+        "path": "tokenizer.json",
+        "role": "tokenizer",
+        "sha256": "a6aa29bf8416d74ad795a73262b1aa3f985564ee338adbee7ffbc5861f78b6b8",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 444,
+        "lfs": false,
+        "path": "tokenizer_config.json",
+        "role": "tokenizer_support",
+        "sha256": "acb93ce659b9d31eb7792367ef683668844dc0a7fc5d5a0873e87556b1c08b40",
+        "verification": "local_sha256"
+      },
+      {
+        "bytes": 798156,
+        "lfs": false,
+        "path": "vocab.json",
+        "role": "tokenizer_support",
+        "sha256": "3ba3c3109ff33976c4bd966589c11ee14fcaa1f4c9e5e154c2ed7f99d80709e7",
+        "verification": "local_sha256"
+      }
+    ],
+    "model_id": "hyper-accel/tiny-random-gpt2",
+    "purpose": "independent PyTorch cross-check of the ONNX Runtime reference",
+    "revision": "26bf7041497544bbd014ffdc245f3c60c0b05179"
+  },
+  "revision": "90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f",
+  "suite": "tiny-gpt2",
+  "tokenizer": {
+    "add_prefix_space": false,
+    "bos_token": "<|endoftext|>",
+    "class": "GPT2Tokenizer",
+    "eos_token": "<|endoftext|>",
+    "model_max_length": 1024,
+    "pad_token": null,
+    "tokenizer_json_bytes": 3557680,
+    "tokenizer_json_sha256": "1fe93b6152957cf9cfd6d89002467f789ce8b3f3e000b3a2edf27c808ddd0b9e",
+    "vocab_size": 50257
+  }
+}
