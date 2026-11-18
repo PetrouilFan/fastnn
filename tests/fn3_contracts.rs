@@ -919,14 +919,23 @@ fn session_phase_rules_and_atomic_failures() {
     let error = session.decode(&[]).unwrap_err();
     assert!(matches!(error, Fn3Error::SessionState { .. }));
 
+    // A session built without a runtime cannot step a model. This used to be
+    // `NotImplemented` because the whole path was unimplemented; FN3-12 (#58)
+    // implemented it, so the honest answer is now that this particular session
+    // has no executor and must be built with `Session::with_runtime`. The
+    // assertion is deliberately about the reported action and the named
+    // remedy, not about a message string, so it survives rewording.
     let error = session.prefill(&[1, 2]).unwrap_err();
-    assert!(matches!(
-        error,
-        Fn3Error::NotImplemented {
-            what: "Session::prefill",
-            owner: "FN3-12 (#58)"
-        }
-    ));
+    assert!(
+        matches!(error, Fn3Error::SessionState { .. }),
+        "expected a session-state error, got {error}"
+    );
+    let text = error.to_string();
+    assert!(text.contains("prefill"), "{text}");
+    assert!(
+        text.contains("with_runtime"),
+        "a hero session must name the constructor that would make it work: {text}"
+    );
     // A failed step leaves the cache extent and the counter unchanged.
     assert_eq!(session.cache_len(), 0);
     assert_eq!(session.step(), 0);
