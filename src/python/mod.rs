@@ -100,6 +100,14 @@ include!("nn.rs");
 include!("optim.rs");
 include!("io.rs");
 include!("trainer.rs");
+
+// FN3-18 (#64): the 3.0 inference surface. Declared by path so the binding
+// source lives under `src/fn3/python/` (the ADR's reserved path for #64) while
+// still being a module of `crate::python`, which is the only tree compiled with
+// the `python` feature. `src/fn3/` itself stays free of PyO3.
+#[path = "../fn3/python/mod.rs"]
+pub mod fn3;
+
 #[pymodule]
 pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Set OpenBLAS and OMP to single-threaded mode by default for optimal
@@ -263,5 +271,9 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clip_grad_value_, py)?)?;
     m.add_function(wrap_pyfunction!(cumsum, py)?)?;
     m.add_function(wrap_pyfunction!(erf, py)?)?;
+
+    // FN3-18 (#64): `_core.fn3`, the 3.0 inference surface. The 2.x entry
+    // points above are frozen and removed by #65.
+    fn3::register(m)?;
     Ok(())
 }

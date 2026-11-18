@@ -414,4 +414,15 @@ __all__ = [
     "yolo_dfl_decode",
     "xywh2xyxy",
     "scale_boxes",
+    # 3.0 inference surface (FN3-18 / #64)
+    "fn3",
 ]
+
+# ---------------------------------------------------------------------------
+# 3.0 inference surface (FN3-18 / #64)
+# ---------------------------------------------------------------------------
+# `fastnn.fn3` is the API that survives the 2.x removal (#65):
+# prepare -> load -> session -> prefill/decode, with explicit devices and typed
+# errors. The 2.x training/autograd/AOT names above are frozen and are deleted
+# by #65; new code should use `fastnn.fn3` for inference.
+from fastnn import fn3 as fn3  # noqa: E402
