@@ -112,6 +112,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #59 | GPU pointwise | verified (integrated `3671a3c`) | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | done; 18 tests, byte-exact on 4 op families |
 | #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
 | #61 | GPU attention | verified (integrated `117e51a`) | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | done; `MaskedAttention` now Full, 19 tests, 0/0 validation |
+| #64 | Python API | verified (integrated `db94d6c`) | `fn3/64-python` | `fastnn-wt-64-python` | `c5b69c2` | done; wheel installs clean outside the checkout, 27 Python tests |
 | #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
 
 ### #47 finding that changes the alpha story
@@ -193,6 +194,7 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #63 | CLI/docs | ready | — | — | — | after #54, #55, #58 |
 | #64 | Python | ready | — | — | — | after #48, #55, #58 |
 | #65 | Cleanup | ready | — | — | — | after #62, #64 |
+| #64 | Python API | verified (integrated `db94d6c`) | `fn3/64-python` | `fastnn-wt-64-python` | `c5b69c2` | done; wheel installs clean outside the checkout, 27 Python tests |
 | #66 | CI | ready | — | — | — | after #48 |
 | #67 | Alpha release | ready | — | — | — | after #50, #62-#66 |
 | #68 | Quant format | deferred (stable) | — | — | — | after #62 |
@@ -257,6 +259,7 @@ matrix, and clean install verification.
 | `c5b69c2` | #58 fix | a session without a runtime names the constructor that works | 43 contracts |
 | `15f6177` | #52/#57 fix | device enumeration asserted as a rule, not a snapshot | 36 storage tests in both configurations |
 | `304d0f8` | #63 | inference CLI and offline quickstart merged (`669833b`) | 6 CLI tests, 24 CLI unit, 707 lib, 43 contracts; real 10-token prefill, honest Vulkan refusal |
+| `db94d6c` | #64 | Python facade `fastnn.fn3` merged (`1e32752`) | 27 Python tests, 710 lib, 43 contracts, 36 storage, 5 ci-smoke; wheel installed in a clean venv outside the checkout reproduces the CLI's top-5 exactly |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
 | `4771083` | #46 | ledger: whole-tree gate run after #60/#61 | n/a |
@@ -357,7 +360,7 @@ Known non-blocking debt, both owned by #67:
 | GPU norm/softmax/attention on the pinned shapes | proven (#61): LayerNorm 2.384e-7, softmax 5.960e-8, fused attention 5.960e-8, ReduceSum bit-exact, all-masked row exactly uniform and finite |
 | GPU pointwise/transform/embedding | proven (#59): Add/Sub/Mul/Neg/Relu/Cast/comparisons/layout byte-exact, Gelu 4.77e-7, embedding exact |
 | Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
-| Python facade | open — #64 |
+| Python facade | **proven** (#64): `fastnn.fn3` prepare/load/session/prefill/decode. From a wheel installed in a fresh venv outside the checkout, a 10-token prefill gives the same top-5 as the Rust CLI (46737, 28597, 16571, 7868, 13); GIL released on every long call. |
 | CLI + quickstart | **proven** (#63): `fn3-infer prepare/inspect/run/generate/diagnose`, 27,879,928-byte artifact with verified CRC, 10-token prefill to top-5 [46737, 28597, 16571, 7868, 13]; token IDs only, no approximate tokeniser. `--device vulkan` opens the GPU then refuses at plan instruction 1 instead of falling back to CPU. |
 | Package versions 3.0.0-alpha.1 / 3.0.0a1 | open — #67 |
 | CI lanes | machinery merged (#66); vulkan lanes now genuinely execute |
