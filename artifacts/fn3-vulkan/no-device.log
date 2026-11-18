@@ -1,0 +1,11 @@
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-57-vulkan)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.75s
+     Running tests/fn3_vulkan_smoke.rs (target/debug/build/fastnn/b1cedaeaf3801b22/out/fn3_vulkan_smoke-b1cedaeaf3801b22)
+
+running 1 test
+test no_device_is_reported_with_an_actionable_message ... [fn3vk][warn] Vulkan device discovery unavailable: Vulkan loader unavailable: vkCreateInstance failed: ERROR_INCOMPATIBLE_DRIVER (-9): requesting Vulkan 1.1 with layers [] and extensions []
+[fn3vk][failure] no-device: device unavailable: requested device vulkan is unavailable: no Vulkan device is usable: Vulkan loader unavailable: vkCreateInstance failed: ERROR_INCOMPATIBLE_DRIVER (-9): requesting Vulkan 1.1 with layers [] and extensions []. Install a Vulkan ICD (`vulkan-icd-loader` and the GPU driver package), or point VK_ICD_FILENAMES at a valid ICD; `vulkaninfo --summary` shows what the loader sees; available devices: [cpu]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+

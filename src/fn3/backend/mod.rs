@@ -39,6 +39,9 @@ use crate::fn3::tensor::{TensorMut, TensorView};
 
 pub mod cpu;
 
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
+
 /// What a backend can execute.
 ///
 /// A backend reports these once at construction; plans validate against them

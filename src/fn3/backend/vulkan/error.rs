@@ -1,0 +1,354 @@
+//! Typed errors for the Vulkan platform layer.
+//!
+//! Every fallible Vulkan call is funnelled through [`check`] or an explicit
+//! match, so a non-success `VkResult` never reaches `unwrap`/`expect`. The
+//! shape is the one proven by the FN3-05 spike: **call name + `VkResult` +
+//! detail**, plus a hint where the fix is known. [`Error::hint`] is what turns a
+//! driver failure into an actionable message.
+//!
+//! The platform layer never invents an `Fn3Error`. Conversion happens once, in
+//! [`Error::to_fn3`], so the `Backend` contract keeps its single error type
+//! while this module keeps driver-level context.
+
+use std::fmt;
+
+use ash::vk;
+
+use crate::fn3::error::Fn3Error;
+
+/// Result alias for the Vulkan platform layer.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// A failure in the Vulkan platform layer.
+#[derive(Debug)]
+pub enum Error {
+    /// The Vulkan loader itself could not be loaded, or the loader reports an
+    /// unusable API version.
+    Loader(String),
+    /// A Vulkan call returned a non-success result.
+    Vk {
+        /// Vulkan entry point that failed (`"vkCreateBuffer"`).
+        call: &'static str,
+        /// Raw result code.
+        code: vk::Result,
+        /// What was being attempted, with the values that matter.
+        detail: String,
+    },
+    /// A request was refused by a device limit before any Vulkan object was
+    /// created. `requested` and `limit` are the numbers the caller must change.
+    Limit {
+        /// What is bounded (`"buffer size"`, `"device allocation size"`).
+        what: String,
+        /// Requested amount in bytes.
+        requested: u64,
+        /// Device or policy limit in bytes.
+        limit: u64,
+        /// Device name and any policy context.
+        detail: String,
+    },
+    /// A kernel declaration did not match its SPIR-V or the device limits.
+    Registration {
+        /// Declared kernel name.
+        kernel: &'static str,
+        /// What mismatched, with both values.
+        detail: String,
+    },
+    /// A logical precondition failed (range check, missing capability, ...).
+    Internal(String),
+}
+
+impl Error {
+    /// A Vulkan call failed.
+    pub fn vk(call: &'static str, code: vk::Result, detail: impl Into<String>) -> Self {
+        Error::Vk {
+            call,
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    /// A limit refused the request.
+    pub fn limit(
+        what: impl Into<String>,
+        requested: u64,
+        limit: u64,
+        detail: impl Into<String>,
+    ) -> Self {
+        Error::Limit {
+            what: what.into(),
+            requested,
+            limit,
+            detail: detail.into(),
+        }
+    }
+
+    /// A logical precondition failed.
+    pub fn internal(detail: impl Into<String>) -> Self {
+        Error::Internal(detail.into())
+    }
+
+    /// A kernel declaration failed validation.
+    pub fn registration(kernel: &'static str, detail: impl Into<String>) -> Self {
+        Error::Registration {
+            kernel,
+            detail: detail.into(),
+        }
+    }
+
+    /// `true` when the GPU was lost and the device cannot be used again.
+    pub fn is_device_lost(&self) -> bool {
+        matches!(
+            self,
+            Error::Vk {
+                code: vk::Result::ERROR_DEVICE_LOST,
+                ..
+            }
+        )
+    }
+
+    /// An actionable hint for the failure, when one is known.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Error::Loader(_) => Some(
+                "the Vulkan loader library could not be opened; install the loader \
+                 (`vulkan-icd-loader` on Arch), or point VK_ICD_FILENAMES at a valid ICD",
+            ),
+            Error::Vk {
+                code: vk::Result::ERROR_INCOMPATIBLE_DRIVER,
+                ..
+            } => Some(
+                "the loader found no usable Vulkan ICD; check VK_ICD_FILENAMES, \
+                 /usr/share/vulkan/icd.d/ and `vulkaninfo --summary`",
+            ),
+            Error::Vk {
+                code: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+                ..
+            } => Some(
+                "the device is out of memory; free GPU memory or reduce the buffer sizes. \
+                 The 3.0 Vulkan allocator suballocates from chunks, so this is heap pressure, \
+                 not the per-allocation cap",
+            ),
+            Error::Vk {
+                code: vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+                ..
+            } => Some("the host is out of memory; reduce the buffer sizes"),
+            Error::Vk {
+                code: vk::Result::ERROR_DEVICE_LOST,
+                ..
+            } => Some(
+                "the GPU was lost (driver reset or hang); the device is poisoned and must be \
+                 recreated. Check `dmesg` for the driver's report",
+            ),
+            Error::Vk {
+                code: vk::Result::TIMEOUT,
+                ..
+            } => Some(
+                "the GPU did not signal the fence in time; a dispatch may have hung. \
+                 Increase the timeout only after ruling out an infinite shader loop",
+            ),
+            Error::Vk {
+                code: vk::Result::ERROR_LAYER_NOT_PRESENT,
+                ..
+            } => Some(
+                "install the validation layer (`vulkan-validation-layers` on Arch) or disable \
+                 FN3_VK_VALIDATION",
+            ),
+            Error::Vk {
+                code: vk::Result::ERROR_EXTENSION_NOT_PRESENT,
+                ..
+            } => Some("the driver or loader does not expose this extension; see the adapter dump"),
+            Error::Limit { .. } => Some(
+                "the request exceeds a device limit; the message names the limit and the device, \
+                 so a plan can be rebounded instead of retried",
+            ),
+            Error::Registration { .. } => Some(
+                "the kernel declaration and its SPIR-V disagree; fix the spec, not the pipeline",
+            ),
+            Error::Internal(_) => None,
+            _ => None,
+        }
+    }
+
+    /// Convert to the 3.0 core error type.
+    ///
+    /// # Contract note
+    ///
+    /// `Fn3Error` (owned by FN3-02 / #48) has no generic "backend execution
+    /// failed" variant. Mapping is therefore explicit:
+    ///
+    /// | Vulkan error | `Fn3Error` |
+    /// |---|---|
+    /// | loader / device open | `DeviceUnavailable` |
+    /// | limit | `CapacityExceeded` |
+    /// | allocation | `Allocation` |
+    /// | registration | `InvalidShape { context: "vulkan kernel registration" }` |
+    /// | other Vulkan call | `InvalidShape { context: "vulkan runtime" }` |
+    ///
+    /// The full driver message is preserved in the detail string, so no context
+    /// is lost. #48 is the owner of a first-class backend-failure variant.
+    pub fn to_fn3(&self) -> Fn3Error {
+        match self {
+            Error::Loader(detail) => {
+                Fn3Error::DeviceUnavailable(crate::fn3::device::DeviceResolveError::new(
+                    "vulkan",
+                    &crate::fn3::device::available_devices(),
+                    format!("the Vulkan loader is unavailable: {detail}"),
+                ))
+            }
+            Error::Limit {
+                what,
+                requested,
+                limit,
+                ..
+            } => {
+                let allocation_limit = matches!(
+                    what.as_str(),
+                    "vulkan buffer size"
+                        | "vulkan device allocation size"
+                        | "vulkan storage buffer range"
+                        | "vulkan staging block"
+                );
+                if allocation_limit {
+                    // `Fn3Error::CapacityExceeded` has no detail field, and an
+                    // allocation-limit message without the device name and both
+                    // numbers is not actionable. `Allocation` carries the full
+                    // rendered text.
+                    Fn3Error::Allocation {
+                        bytes: *requested,
+                        detail: format!(
+                            "{self} (limit {limit} on this device; requested {requested})"
+                        ),
+                    }
+                } else {
+                    Fn3Error::CapacityExceeded {
+                        what: leak_static(what),
+                        requested: *requested,
+                        capacity: *limit,
+                    }
+                }
+            }
+            Error::Registration { kernel, detail } => Fn3Error::InvalidShape {
+                context: "vulkan kernel registration",
+                detail: format!("kernel {kernel} registration failed: {detail}"),
+            },
+            Error::Vk {
+                code: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+                detail,
+                ..
+            }
+            | Error::Vk {
+                code: vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+                detail,
+                ..
+            } => Fn3Error::Allocation {
+                bytes: 0,
+                detail: detail.clone(),
+            },
+            Error::Vk {
+                code: vk::Result::ERROR_DEVICE_LOST,
+                detail,
+                ..
+            } => Fn3Error::DeviceUnavailable(crate::fn3::device::DeviceResolveError::new(
+                "the Vulkan device",
+                &crate::fn3::device::available_devices(),
+                format!("the device was lost and is unusable: {detail}"),
+            )),
+            Error::Vk { call, code, detail } => Fn3Error::InvalidShape {
+                context: "vulkan runtime",
+                detail: format!("{call} failed: {code:?} ({}): {detail}", code.as_raw()),
+            },
+            Error::Internal(detail) => Fn3Error::InvalidShape {
+                context: "vulkan runtime",
+                detail: detail.clone(),
+            },
+        }
+    }
+}
+
+/// `Fn3Error::CapacityExceeded::what` is `&'static str`; the allocator builds
+/// its description dynamically. The small set of names is interned here so a
+/// useful label survives the conversion without leaking.
+fn leak_static(what: &str) -> &'static str {
+    const NAMES: &[&str] = &[
+        "vulkan buffer size",
+        "vulkan device allocation size",
+        "vulkan storage buffer range",
+        "vulkan staging block",
+        "vulkan descriptor binding",
+    ];
+    for name in NAMES {
+        if *name == what {
+            return name;
+        }
+    }
+    "vulkan capacity"
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Loader(message) => write!(f, "Vulkan loader unavailable: {message}"),
+            Error::Vk { call, code, detail } => {
+                write!(f, "{call} failed: {code:?} ({}): {detail}", code.as_raw())
+            }
+            Error::Limit {
+                what,
+                requested,
+                limit,
+                detail,
+            } => write!(
+                f,
+                "{what} of {requested} bytes exceeds the limit of {limit} bytes: {detail}"
+            ),
+            Error::Registration { kernel, detail } => {
+                write!(f, "kernel {kernel} registration failed: {detail}")
+            }
+            Error::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Accept `VK_SUCCESS` and convert everything else into a typed error.
+///
+/// ash returns `Result<(), vk::Result>` from commands that produce no value;
+/// this helper keeps every call site uniform.
+pub fn check(
+    call: &'static str,
+    result: std::result::Result<(), vk::Result>,
+    detail: impl Into<String>,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(code) => Err(Error::vk(call, code, detail)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_keeps_call_result_and_detail() {
+        let error = Error::vk(
+            "vkCreateBuffer",
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            "8 GiB",
+        );
+        let text = error.to_string();
+        assert!(text.contains("vkCreateBuffer"), "{text}");
+        assert!(text.contains("ERROR_OUT_OF_DEVICE_MEMORY"), "{text}");
+        assert!(text.contains("8 GiB"), "{text}");
+        assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn limit_display_names_both_numbers() {
+        let error = Error::limit("buffer size", 5_000_000_000, 4_292_870_144, "GTX 1080 Ti");
+        let text = error.to_string();
+        assert!(text.contains("5000000000"), "{text}");
+        assert!(text.contains("4292870144"), "{text}");
+        assert!(text.contains("GTX 1080 Ti"), "{text}");
+    }
+}
