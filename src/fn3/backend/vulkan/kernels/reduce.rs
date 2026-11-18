@@ -106,6 +106,7 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32],
+        admits: None,
         kernel: &REDUCE_SUM_MEAN,
         launch: launch_reduce,
     });
@@ -114,6 +115,7 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32],
+        admits: None,
         kernel: &REDUCE_SUM_MEAN,
         launch: launch_reduce_mean,
     });
@@ -126,9 +128,40 @@ pub fn register(set: &mut KernelSet) {
         ),
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32, DType::I32],
+        admits: Some(admits_argmax),
         kernel: &ARGMAX,
         launch: launch_argmax,
     });
+}
+
+/// Concrete admission for `ArgMax`: a 4-byte f32/i32 input, one axis, i64 out.
+fn admits_argmax(
+    _shapes: &[Shape],
+    dtypes: &[DType],
+    params: &OpParams,
+) -> std::result::Result<(), String> {
+    let mut operands = dtypes.iter();
+    let Some(input) = operands.next() else {
+        return Err("no operands were supplied".to_string());
+    };
+    let Some(output) = operands.next() else {
+        return Err("argmax writes an i64 index but no output was supplied".to_string());
+    };
+    if !matches!(input, DType::F32 | DType::I32) {
+        return Err(format!(
+            "{input} input; this kernel compares f32 and i32 (i64 needs shaderInt64)"
+        ));
+    }
+    if *output != DType::I64 {
+        return Err(format!("{output} output; argmax writes an i64 index"));
+    }
+    if params.axes.len() > 1 {
+        return Err(format!(
+            "{} axes were supplied; this kernel reduces one axis",
+            params.axes.len()
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

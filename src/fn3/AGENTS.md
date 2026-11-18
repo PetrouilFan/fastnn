@@ -42,6 +42,10 @@ when the 2.x modules are deleted. The contract authority is
 - A backend that cannot run an op returns `UnsupportedOp`; it never returns an
   input, a zero, or an approximation. `Support::Partial` names its subset and the
   op still rejects everything outside it.
+- Plan preflight asks `Backend::admits` for the plan's concrete operand shapes
+  and dtypes; the default body is `supports`, so a backend with no concrete
+  rule keeps its op-level verdicts. An `admits` override may confirm a
+  `Partial` subset for these operands, never widen `Unsupported`.
 - `PreparedModel` is immutable and `Send + Sync`; all mutable inference state
   lives in `Session`, which is `Send` but deliberately `!Sync`. A failed step
   changes neither the KV live extent nor the step counter.

@@ -27,7 +27,14 @@ use crate::fn3::backend::vulkan::pipeline::Kernel;
 /// What a buffer will be used for. Drives usage flags and the memory class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferDesc {
-    /// Size in bytes; must be non-zero.
+    /// Logical size in bytes.
+    ///
+    /// Zero is legal: a zero-element tensor needs a name, not storage. Such a
+    /// buffer is backed by at least [`EMPTY_BUFFER_BYTES`] bytes of device
+    /// memory because Vulkan forbids a size-0 `vkCreateBuffer`, but it reports
+    /// [`Buffer::size`] `0`, every range check rejects a non-empty access, and
+    /// a dispatch that binds it is rejected before recording. The dummy bytes
+    /// are unreachable through the public API.
     pub size: u64,
     /// Vulkan usage flags.
     pub usage: vk::BufferUsageFlags,
@@ -36,6 +43,14 @@ pub struct BufferDesc {
     /// Diagnostic name used in errors and residency records.
     pub name: &'static str,
 }
+
+/// Device bytes reserved for a zero-length logical buffer.
+///
+/// `vkCreateBuffer` requires `size > 0`, so an empty operand gets one aligned
+/// word instead of no allocation. It is a real bound allocation (not a null
+/// handle), which keeps binding, ownership and teardown uniform; the logical
+/// length stays zero so no command can address it.
+pub const EMPTY_BUFFER_BYTES: u64 = 4;
 
 impl BufferDesc {
     /// Device-local storage buffer that kernels read and write, and that can be
@@ -74,6 +89,16 @@ impl BufferDesc {
 
 /// A buffer bound to a suballocated range of device memory.
 ///
+/// # Zero-length buffers
+///
+/// A zero-element tensor owns a buffer whose logical [`Buffer::size`] is `0`
+/// and whose backing allocation is at least [`EMPTY_BUFFER_BYTES`] bytes. The
+/// dummy word exists because `vkCreateBuffer` rejects `size = 0`; the logical
+/// size is what every range check and every residency record sees, so nothing
+/// can read or write past it. A dispatch must not bind an empty buffer: the
+/// recorder rejects a zero descriptor range before recording, which is how a
+/// kernel bug becomes a message instead of undefined behaviour.
+///
 /// # Lifetime
 ///
 /// A `Buffer` must not be dropped while a submission that references it is in
@@ -100,20 +125,17 @@ pub struct Buffer {
 impl Buffer {
     /// Create and bind a buffer.
     pub fn new(device: &Arc<Device>, desc: &BufferDesc) -> Result<Buffer> {
-        if desc.size == 0 {
-            return Err(Error::internal(format!(
-                "{}: refusing a zero-byte Vulkan buffer; a zero-element tensor must be \
-                 handled before allocation",
-                desc.name
-            )));
-        }
+        // Vulkan has no zero-size buffer. Keep the logical size in `size` and
+        // reserve one aligned word so the handle is real and bindable; every
+        // access is checked against `size`, not against the reservation.
+        let allocation_bytes = desc.size.max(EMPTY_BUFFER_BYTES);
         let limits = device.limits();
         if desc.usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER) {
             let limit = u64::from(limits.max_storage_buffer_range);
-            if desc.size > limit {
+            if allocation_bytes > limit {
                 return Err(Error::limit(
                     "vulkan storage buffer range",
-                    desc.size,
+                    allocation_bytes,
                     limit,
                     format!(
                         "{} on \"{}\": one storage-buffer binding cannot address more than \
@@ -125,10 +147,10 @@ impl Buffer {
                 ));
             }
         }
-        if desc.size > limits.max_memory_allocation_size {
+        if allocation_bytes > limits.max_memory_allocation_size {
             return Err(Error::limit(
                 "vulkan device allocation size",
-                desc.size,
+                allocation_bytes,
                 limits.max_memory_allocation_size,
                 format!("{} on \"{}\"", desc.name, device.adapter().name),
             ));
@@ -148,17 +170,21 @@ impl Buffer {
         }
 
         let create_info = vk::BufferCreateInfo::default()
-            .size(desc.size)
+            .size(allocation_bytes)
             .usage(desc.usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: plain buffer creation with a zeroed allocation-callback
-        // optional and a validated non-zero size; the buffer is destroyed in
-        // `Drop` (or on the error paths below) exactly once.
+        // optional and a validated positive size (`allocation_bytes` is at
+        // least `EMPTY_BUFFER_BYTES`); the buffer is destroyed in `Drop` (or on
+        // the error paths below) exactly once.
         let raw = unsafe { device.ash().create_buffer(&create_info, None) }.map_err(|code| {
             Error::vk(
                 "vkCreateBuffer",
                 code,
-                format!("{}: {} bytes, usage {:?}", desc.name, desc.size, desc.usage),
+                format!(
+                    "{}: {} bytes logical, {} bytes reserved, usage {:?}",
+                    desc.name, desc.size, allocation_bytes, desc.usage
+                ),
             )
         })?;
 
@@ -230,6 +256,14 @@ impl Buffer {
         self.size
     }
 
+    /// `true` for a zero-element buffer.
+    ///
+    /// Such a buffer owns a dummy allocation but no addressable byte; see the
+    /// type-level documentation.
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
     /// Suballocation size in bytes (at least [`Buffer::size`], alignment
     /// padding included).
     pub fn allocation_size(&self) -> u64 {
@@ -274,6 +308,11 @@ impl Buffer {
     /// Write host bytes into a mapped buffer and flush if necessary.
     pub fn write_from(&self, offset: u64, bytes: &[u8]) -> Result<()> {
         self.check_range(offset, bytes.len() as u64, "host upload")?;
+        if bytes.is_empty() {
+            // A zero-length write to a zero-length buffer is legal and must not
+            // ask a device-local buffer for a host mapping.
+            return Ok(());
+        }
         let pointer = self.mapped_pointer()?;
         // SAFETY: `pointer` addresses `self.size` bytes of a host-visible
         // mapping owned by the chunk; the range was checked against the buffer
@@ -294,6 +333,9 @@ impl Buffer {
     /// Invalidate (if necessary) and copy device-written bytes into `dst`.
     pub fn read_into(&self, offset: u64, dst: &mut [u8]) -> Result<()> {
         self.check_range(offset, dst.len() as u64, "host readback")?;
+        if dst.is_empty() {
+            return Ok(());
+        }
         self.invalidate(offset, dst.len() as u64)?;
         let pointer = self.mapped_pointer()?;
         // SAFETY: as `write_from`, with the direction reversed; the range was

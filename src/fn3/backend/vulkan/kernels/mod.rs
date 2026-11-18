@@ -64,6 +64,7 @@ use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Result;
 use crate::fn3::ops::OpId;
+use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
 
 /// The dtypes the registered kernels can move and compute on.
@@ -290,6 +291,20 @@ impl KernelSpec {
 pub type LaunchFn =
     fn(&super::VulkanBackend, &[TensorView<'_>], &mut [TensorMut<'_>], &OpParams) -> Fn3Result<()>;
 
+/// A kernel's concrete-operand admission rule.
+///
+/// Consulted only for a [`Support::Partial`] registration. It returns `Ok(())`
+/// when every operand of one instruction lies inside the subset the
+/// registration's reason names, or `Err(detail)` naming the operand that does
+/// not. Because [`KernelSet::admits`] composes the answer, a rule can only
+/// *narrow* the registration: it is never consulted for `Full` or
+/// `Unsupported`, and `Ok(())` becomes [`Support::Full`] only for an op the
+/// kernel is already registered to handle.
+///
+/// `shapes` and `dtypes` are the instruction's operands in plan order (inputs
+/// then outputs) and have the same length.
+pub type AdmitFn = fn(&[Shape], &[DType], &OpParams) -> std::result::Result<(), String>;
+
 /// One op implementation registered against the Vulkan backend.
 #[derive(Debug, Clone)]
 pub struct OpKernel {
@@ -301,6 +316,10 @@ pub struct OpKernel {
     pub features: CapabilityFeatures,
     /// Dtypes this op accepts through this kernel.
     pub dtypes: &'static [DType],
+    /// Concrete-operand refinement of a `Partial` verdict, when the kernel can
+    /// decide it from shapes, dtypes and attributes. `None` means the op-level
+    /// verdict is the answer for every operand set.
+    pub admits: Option<AdmitFn>,
     /// The declared and compiled kernel this op dispatches.
     pub kernel: &'static KernelSpec,
     /// The launch function.
@@ -377,6 +396,38 @@ impl KernelSet {
                 op.name(),
                 super::device_info::op_owner(op)
             )),
+        }
+    }
+
+    /// Support answer for one concrete instruction.
+    ///
+    /// `Full` and `Unsupported` registrations answer exactly as
+    /// [`KernelSet::supports`] does. A `Partial` registration is refined by its
+    /// [`OpKernel::admits`] rule, and only then: a kernel can confirm that the
+    /// plan's tensors are inside its documented subset, never widen the subset.
+    /// Without a rule the op-level verdict stands.
+    pub fn admits(
+        &self,
+        op: OpId,
+        shapes: &[Shape],
+        dtypes: &[DType],
+        params: &OpParams,
+    ) -> Support {
+        let Some(kernel) = self.get(op) else {
+            return self.supports(op);
+        };
+        match &kernel.support {
+            Support::Full => Support::Full,
+            Support::Unsupported { .. } => kernel.support.clone(),
+            Support::Partial { reason } => match kernel.admits {
+                Some(rule) => match rule(shapes, dtypes, params) {
+                    Ok(()) => Support::Full,
+                    Err(detail) => {
+                        Support::partial(format!("{reason}; concrete operands: {detail}"))
+                    }
+                },
+                None => kernel.support.clone(),
+            },
         }
     }
 
@@ -466,6 +517,7 @@ mod tests {
                 ..CapabilityFeatures::default()
             },
             dtypes: &[DType::F32],
+            admits: None,
             kernel: &smoke::SMOKE_ADD,
             launch: smoke::launch_add,
         };
@@ -487,6 +539,137 @@ mod tests {
             ..input
         };
         assert_eq!(grid::elementwise(&input).unwrap(), [2, 1, 1]);
+    }
+
+    fn shape(dims: &[u64]) -> Shape {
+        Shape::from_dims(dims.iter().copied())
+    }
+
+    #[test]
+    fn a_partial_verdict_is_refined_by_its_concrete_rule_only() {
+        let set = KernelSet::alpha();
+        let params = OpParams::default();
+
+        // Transpose: f32 and i64 are inside the documented subset, Bool is not.
+        let f32_shapes = [shape(&[2, 3]), shape(&[3, 2])];
+        assert_eq!(
+            set.admits(
+                OpId::Transpose,
+                &f32_shapes,
+                &[DType::F32, DType::F32],
+                &params
+            ),
+            Support::Full
+        );
+        let i64_shapes = [shape(&[2, 3]), shape(&[3, 2])];
+        assert_eq!(
+            set.admits(
+                OpId::Transpose,
+                &i64_shapes,
+                &[DType::I64, DType::I64],
+                &params
+            ),
+            Support::Full
+        );
+        let bool_shapes = [shape(&[2, 3]), shape(&[3, 2])];
+        let verdict = set.admits(
+            OpId::Transpose,
+            &bool_shapes,
+            &[DType::Bool, DType::Bool],
+            &params,
+        );
+        assert!(matches!(verdict, Support::Partial { .. }), "{verdict}");
+        assert!(verdict.reason().unwrap().contains("#59"), "{verdict}");
+        // The op-level verdict itself is untouched: the refinement is per
+        // instruction, never a claim about every operand set.
+        assert!(matches!(
+            set.supports(OpId::Transpose),
+            Support::Partial { .. }
+        ));
+
+        // Softmax: the trailing axis is admitted, another axis is not.
+        let shapes = [shape(&[1, 2, 4, 4]), shape(&[1, 2, 4, 4])];
+        let types = [DType::F32, DType::F32];
+        assert_eq!(
+            set.admits(
+                OpId::Softmax,
+                &shapes,
+                &types,
+                &OpParams::new().with_axes([-1])
+            ),
+            Support::Full
+        );
+        let verdict = set.admits(
+            OpId::Softmax,
+            &shapes,
+            &types,
+            &OpParams::new().with_axes([2]),
+        );
+        assert!(matches!(verdict, Support::Partial { .. }), "{verdict}");
+
+        // Where: a Bool condition with f32 values is the documented subset.
+        let shapes = [
+            shape(&[1, 4]),
+            shape(&[1, 4]),
+            shape(&[1, 4]),
+            shape(&[1, 4]),
+        ];
+        assert_eq!(
+            set.admits(
+                OpId::Where,
+                &shapes,
+                &[DType::Bool, DType::F32, DType::F32, DType::F32],
+                &params
+            ),
+            Support::Full
+        );
+        let verdict = set.admits(
+            OpId::Where,
+            &shapes,
+            &[DType::Bool, DType::Bool, DType::Bool, DType::Bool],
+            &params,
+        );
+        assert!(matches!(verdict, Support::Partial { .. }), "{verdict}");
+
+        // A `Full` registration answers `Full` without consulting a rule.
+        assert_eq!(
+            set.admits(OpId::Add, &shapes, &[DType::F32; 4], &params),
+            Support::Full
+        );
+    }
+
+    #[test]
+    fn a_rule_can_only_narrow_a_registration() {
+        fn always_ok(
+            _shapes: &[Shape],
+            _dtypes: &[DType],
+            _params: &OpParams,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        let mut set = KernelSet::alpha();
+        let params = OpParams::default();
+        let shapes = [shape(&[2, 3]), shape(&[3, 2])];
+        let types = [DType::F32, DType::F32];
+
+        // `Full` ignores a rule even if one is attached.
+        let mut kernel = set.get(OpId::Add).unwrap().clone();
+        kernel.admits = Some(always_ok);
+        set.register(kernel);
+        assert_eq!(
+            set.admits(OpId::Add, &shapes, &types, &params),
+            Support::Full
+        );
+
+        // `Unsupported` ignores a rule too: no concrete operand set can turn a
+        // missing kernel into a promise.
+        let mut kernel = set.get(OpId::Sub).unwrap().clone();
+        kernel.op = OpId::Gelu;
+        kernel.support = Support::unsupported("test: deliberately missing (owner: test)");
+        kernel.admits = Some(always_ok);
+        set.register(kernel);
+        let verdict = set.admits(OpId::Gelu, &shapes, &[DType::F32, DType::F32], &params);
+        assert!(matches!(verdict, Support::Unsupported { .. }), "{verdict}");
     }
 
     static DUPLICATE_BINDINGS: [BindingSpec; 2] =

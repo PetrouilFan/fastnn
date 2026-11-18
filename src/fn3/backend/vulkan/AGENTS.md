@@ -53,6 +53,16 @@ FN3-14 (#60) and FN3-15 (#61); the end-to-end proof belongs to FN3-16 (#62).
 - `supports` is honest: `Full`, `Partial` naming the implemented subset, or
   `Unsupported` naming the owning issue. `execute_op` never computes an op on
   the host and never approximates one.
+- `KernelSet::admits` is the concrete refinement of a `Partial` verdict: a
+  registration's `AdmitFn` may lift it to `Full` only for operands inside the
+  documented subset, and it is never consulted for `Full` or `Unsupported`.
+  A rule that disagrees with its launch function can only make a step fail, not
+  make an unsupported shape succeed.
+- A zero-element tensor owns a buffer whose logical size is `0` and whose
+  reservation is at least one aligned word (`vkCreateBuffer` rejects size 0).
+  The logical size is what every range check sees, so a non-empty access is
+  refused and a dispatch must never bind one: a zero descriptor range is
+  rejected before recording.
 - Every unsafe block carries a `SAFETY:` comment covering handle validity,
   bounds, alignment, aliasing and lifetime.
 

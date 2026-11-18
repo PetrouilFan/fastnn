@@ -64,6 +64,7 @@ use crate::fn3::backend::vulkan::context::{
 use crate::fn3::backend::vulkan::kernels::{grid, BindingSpec, KernelSet, KernelSpec, OpKernel};
 use crate::fn3::backend::vulkan::pipeline::Kernel;
 use crate::fn3::backend::vulkan::residency::ExecutionRecord;
+use crate::fn3::backend::vulkan::staging::StagingLease;
 use crate::fn3::backend::vulkan::submission::DispatchInfo;
 use crate::fn3::backend::vulkan::VulkanBackend;
 use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
@@ -377,18 +378,32 @@ impl<'a> Job<'a> {
             });
         }
         let staging = self.backend.staging();
-        let mut upload_leases = Vec::with_capacity(self.uploads.len());
+        // A zero-element operand owns a logical zero-byte buffer (see
+        // `context::Buffer`); there is nothing to transfer for it, and
+        // `vkCmdCopyBuffer` cannot move zero bytes. Skipping the lease keeps
+        // the empty case out of the transfer path entirely.
+        let mut upload_leases: Vec<Option<StagingLease<'_>>> =
+            Vec::with_capacity(self.uploads.len());
         for (_, bytes) in &self.uploads {
+            if bytes.is_empty() {
+                upload_leases.push(None);
+                continue;
+            }
             let lease = staging
                 .acquire(bytes.len() as u64)
                 .map_err(|e| e.to_fn3())?;
             lease.write(bytes).map_err(|e| e.to_fn3())?;
-            upload_leases.push(lease);
+            upload_leases.push(Some(lease));
         }
-        let mut readback_leases = Vec::with_capacity(self.readbacks.len());
+        let mut readback_leases: Vec<Option<StagingLease<'_>>> =
+            Vec::with_capacity(self.readbacks.len());
         for (index, _) in &self.readbacks {
             let bytes = self.buffers[*index].size();
-            readback_leases.push(staging.acquire(bytes).map_err(|e| e.to_fn3())?);
+            if bytes == 0 {
+                readback_leases.push(None);
+                continue;
+            }
+            readback_leases.push(Some(staging.acquire(bytes).map_err(|e| e.to_fn3())?));
         }
 
         let mut submitter = self.backend.checkout_submitter()?;
@@ -397,10 +412,16 @@ impl<'a> Job<'a> {
             submitter
                 .record(|recorder| {
                     for ((index, _), lease) in self.uploads.iter().zip(upload_leases.iter()) {
+                        let Some(lease) = lease else {
+                            continue;
+                        };
                         let buffer = &self.buffers[*index];
                         recorder.copy_buffer(lease.buffer(), 0, buffer, 0, buffer.size())?;
                     }
-                    for (index, _) in &self.uploads {
+                    for ((index, _), lease) in self.uploads.iter().zip(upload_leases.iter()) {
+                        if lease.is_none() {
+                            continue;
+                        }
                         recorder.barrier(
                             &self.buffers[*index],
                             vk::PipelineStageFlags::TRANSFER,
@@ -449,6 +470,9 @@ impl<'a> Job<'a> {
                         }
                     }
                     for ((index, _), lease) in self.readbacks.iter().zip(readback_leases.iter()) {
+                        let Some(lease) = lease else {
+                            continue;
+                        };
                         let buffer = &self.buffers[*index];
                         recorder.barrier(
                             buffer,
@@ -473,9 +497,6 @@ impl<'a> Job<'a> {
             .zip(readback_leases.iter())
             .zip(outputs.iter_mut())
         {
-            let device_len = self.buffers[*index].size() as usize;
-            let mut bytes = vec![0u8; device_len];
-            lease.read_into(&mut bytes).map_err(|e| e.to_fn3())?;
             if destination.len() != *host_len {
                 return Err(Fn3Error::CapacityExceeded {
                     what: "vulkan kernel readback destination",
@@ -483,6 +504,14 @@ impl<'a> Job<'a> {
                     capacity: destination.len() as u64,
                 });
             }
+            // A zero-element output has no bytes to read and no lease.
+            let Some(lease) = lease else {
+                debug_assert_eq!(*host_len, 0);
+                continue;
+            };
+            let device_len = self.buffers[*index].size() as usize;
+            let mut bytes = vec![0u8; device_len];
+            lease.read_into(&mut bytes).map_err(|e| e.to_fn3())?;
             destination.copy_from_slice(&bytes[..*host_len]);
         }
 
@@ -1349,6 +1378,7 @@ pub fn register(set: &mut KernelSet) {
                 ..CapabilityFeatures::default()
             },
             dtypes: &[DType::F32],
+            admits: None,
             kernel: &BINARY,
             launch,
         });
@@ -1368,6 +1398,7 @@ pub fn register(set: &mut KernelSet) {
             support: Support::Full,
             features: CapabilityFeatures::default(),
             dtypes: &[DType::F32],
+            admits: None,
             kernel: &UNARY,
             launch,
         });
@@ -1383,6 +1414,7 @@ pub fn register(set: &mut KernelSet) {
         ),
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32, DType::I32, DType::I64],
+        admits: Some(admits_where),
         kernel: &WHERE,
         launch: launch_where,
     });
@@ -1396,6 +1428,7 @@ pub fn register(set: &mut KernelSet) {
             support: Support::Full,
             features: CapabilityFeatures::default(),
             dtypes: &[DType::F32, DType::I32, DType::I64],
+            admits: None,
             kernel: &COMPARE,
             launch,
         });
@@ -1405,9 +1438,43 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32, DType::I32, DType::I64, DType::Bool],
+        admits: None,
         // The four destination-typed shaders share one registration; `launch`
         // selects the compiled pipeline from the output dtype.
         kernel: &CAST_TO_F32,
         launch: launch_cast,
     });
+}
+
+/// Concrete admission for `Where`: a Bool condition and a 4- or 8-byte value.
+///
+/// The condition is necessarily `Bool` (the kernel rejects anything else) and
+/// the value operands are the two the `Partial` reason names. The element type
+/// of a value operand is the only plan-visible part of the subset.
+fn admits_where(
+    _shapes: &[Shape],
+    dtypes: &[DType],
+    _params: &OpParams,
+) -> std::result::Result<(), String> {
+    let [condition, x, y, output, ..] = dtypes else {
+        return Err(format!(
+            "{} operands were supplied; where takes 4",
+            dtypes.len()
+        ));
+    };
+    if *condition != DType::Bool {
+        return Err(format!(
+            "{condition} condition; where needs a Bool condition"
+        ));
+    }
+    if !matches!(x, DType::F32 | DType::I32 | DType::I64) {
+        return Err(format!("{x} value operand is a 1-byte element"));
+    }
+    if y != x {
+        return Err(format!("{y} value operand does not match {x}"));
+    }
+    if output != x {
+        return Err(format!("{output} output does not match {x}"));
+    }
+    Ok(())
 }

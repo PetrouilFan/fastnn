@@ -118,6 +118,7 @@ pub fn register(set: &mut KernelSet) {
         // elementwise `broadcasting` flag.
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32],
+        admits: None,
         kernel: &MATMUL_TILED,
         launch: launch_matmul,
     });

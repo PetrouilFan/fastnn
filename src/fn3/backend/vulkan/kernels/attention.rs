@@ -158,6 +158,7 @@ pub fn register(set: &mut KernelSet) {
             ..CapabilityFeatures::default()
         },
         dtypes: &[DType::F32],
+        admits: None,
         kernel: &ATTENTION_FUSED,
         launch: launch_attention,
     });
