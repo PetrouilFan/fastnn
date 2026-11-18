@@ -1,0 +1,188 @@
+{
+  "files": [
+    {
+      "bytes": 1519,
+      "lfs": false,
+      "path": ".gitattributes",
+      "role": "repo_metadata",
+      "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 896,
+      "lfs": false,
+      "path": "config.json",
+      "role": "config",
+      "sha256": "d23d70079d44f51bca546fd5bab31268642283337950681cf136ec94665d4a1b",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 119,
+      "lfs": false,
+      "path": "generation_config.json",
+      "role": "generation_config",
+      "sha256": "6588807eba4137ddf98463ec0a4e2adea525ecf72512ac703e1d70b6e443d40b",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 456318,
+      "lfs": false,
+      "path": "merges.txt",
+      "role": "tokenizer_support",
+      "sha256": "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 498126358,
+      "lfs": true,
+      "path": "onnx/model.onnx",
+      "role": "graph",
+      "sha256": "42c1e92a21c41ebd3c536d4c6f09732450a43db35977593236f696d3346c7c0d",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 498126377,
+      "lfs": true,
+      "path": "onnx/model_bnb4.onnx",
+      "role": "unused_variant",
+      "sha256": "adf198f0dbed6f3d7338afcd7f75abe25e1140b3062ab24f802e03eb08a77068",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 249252545,
+      "lfs": true,
+      "path": "onnx/model_fp16.onnx",
+      "role": "unused_variant",
+      "sha256": "5e3a317ecbf78f55e75a3a059adc208abf5a336b23f6b415c7f92271127925ee",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 279633549,
+      "lfs": true,
+      "path": "onnx/model_int8.onnx",
+      "role": "unused_variant",
+      "sha256": "98545cbc4b922ac4779114143af17820b0b74da86f2d68a23cefa0faf376a8ae",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 498126377,
+      "lfs": true,
+      "path": "onnx/model_q4.onnx",
+      "role": "unused_variant",
+      "sha256": "adf198f0dbed6f3d7338afcd7f75abe25e1140b3062ab24f802e03eb08a77068",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 249252564,
+      "lfs": true,
+      "path": "onnx/model_q4f16.onnx",
+      "role": "unused_variant",
+      "sha256": "c4b2c1fb045d81a6c4266c9d4e77743c0c5a698d9faf63c6c8110d872328747c",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 279633549,
+      "lfs": true,
+      "path": "onnx/model_quantized.onnx",
+      "role": "unused_variant",
+      "sha256": "98545cbc4b922ac4779114143af17820b0b74da86f2d68a23cefa0faf376a8ae",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 279633573,
+      "lfs": true,
+      "path": "onnx/model_uint8.onnx",
+      "role": "unused_variant",
+      "sha256": "a53fd694214c4697009b86e0c86e9574a636cee951ddb26f4cf9a63f6238dd23",
+      "verification": "upstream_lfs_sha256"
+    },
+    {
+      "bytes": 285,
+      "lfs": false,
+      "path": "quantize_config.json",
+      "role": "quantization_metadata",
+      "sha256": "8da6e4e50ef7c210ba66a98a4256e6d60e38cef8a9a9c74d327251aaf4e78767",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 99,
+      "lfs": false,
+      "path": "special_tokens_map.json",
+      "role": "tokenizer_support",
+      "sha256": "6f50ab5a5a509a1c309d6171f339b196a900dc9c99ad0408ff23bb615fdae7ad",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 2107680,
+      "lfs": false,
+      "path": "tokenizer.json",
+      "role": "tokenizer",
+      "sha256": "a6aa29bf8416d74ad795a73262b1aa3f985564ee338adbee7ffbc5861f78b6b8",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 444,
+      "lfs": false,
+      "path": "tokenizer_config.json",
+      "role": "tokenizer_support",
+      "sha256": "acb93ce659b9d31eb7792367ef683668844dc0a7fc5d5a0873e87556b1c08b40",
+      "verification": "local_sha256"
+    },
+    {
+      "bytes": 798156,
+      "lfs": false,
+      "path": "vocab.json",
+      "role": "tokenizer_support",
+      "sha256": "3ba3c3109ff33976c4bd966589c11ee14fcaa1f4c9e5e154c2ed7f99d80709e7",
+      "verification": "local_sha256"
+    }
+  ],
+  "format": "fastnn-model-lock",
+  "format_version": 1,
+  "graph": {
+    "activation": "gelu_new (tanh approximation)",
+    "cache_layout": "[batch, kv_heads, sequence, head_dim]",
+    "head_dim": 64,
+    "hidden_size": 768,
+    "initializers": {
+      "f32": 286,
+      "i64": 564
+    },
+    "ir_version": 7,
+    "kv_heads": 12,
+    "layer_norm_epsilon": 1e-05,
+    "layers": 12,
+    "mask_fill_value": -3.4028234663852886e+38,
+    "nodes": 1282,
+    "opset": 14,
+    "position_embedding": "learned, n_positions=1024",
+    "query_heads": 12,
+    "vocab_size": 50257
+  },
+  "hub_url": "https://huggingface.co/onnx-community/gpt2-ONNX/tree/1975fb9b4a2a92bd99f457407337ee25ab6cfde0",
+  "license": {
+    "base_declaration": "openai-community/gpt2 declares 'license: mit' in its Hugging Face model-card metadata. The ONNX repository is a conversion of those weights but does not repeat the license in its own metadata or files.",
+    "base_license": "MIT",
+    "base_model": "openai-community/gpt2",
+    "base_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    "ci_use": "Not a CI dependency: the graph is ~498 MB and the ONNX repository does not repeat the MIT declaration. Demos and benchmarks fetch it explicitly.",
+    "declaration": "The pinned ONNX repository has no license field, no LICENSE file, and no README at the pinned revision.",
+    "declared_spdx": null,
+    "redistribution": "Weights are not committed. The trained ONNX graph is a 498,126,358-byte opt-in download; only a small numeric logits fixture is committed.",
+    "tokenizer_provenance": "GPT-2 BPE assets from the same GPT-2 family."
+  },
+  "model_id": "onnx-community/gpt2-ONNX",
+  "revision": "1975fb9b4a2a92bd99f457407337ee25ab6cfde0",
+  "suite": "trained-gpt2",
+  "tokenizer": {
+    "add_prefix_space": false,
+    "bos_token": "<|endoftext|>",
+    "class": "GPT2Tokenizer",
+    "eos_token": "<|endoftext|>",
+    "model_max_length": 1024,
+    "pad_token": null,
+    "tokenizer_json_bytes": 2107680,
+    "tokenizer_json_sha256": "a6aa29bf8416d74ad795a73262b1aa3f985564ee338adbee7ffbc5861f78b6b8",
+    "vocab_size": 50257
+  }
+}
