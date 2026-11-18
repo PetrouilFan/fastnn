@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "issue": 47,
+  "backlog_id": "FN3-01",
+  "branch": "fn3/47-baseline",
+  "base_sha": "a2c0759fff8bdcb7c943e53442f3382b86e59b66",
+  "head_sha_at_measurement": "a2c0759fff8bdcb7c943e53442f3382b86e59b66",
+  "git_describe": "v2.6.0-71-ga2c0759",
+  "crate_version": "2.6.0",
+  "profile": "release for Python/CLI; default test profile for Rust gates",
+  "environment": {
+    "os": "Arch Linux rolling",
+    "kernel": "Linux 7.2.14-arch1-1 x86_64",
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor (8 cores / 16 threads)",
+    "ram_gib": 31,
+    "rustc": "1.100.0 (0ef1bc386 2026-11-09)",
+    "cargo": "1.100.0 (3acc79c0c 2026-11-05)",
+    "python_venv": "3.13.15",
+    "python_system": "3.14.9",
+    "uv": "0.13.7",
+    "maturin": "1.16.0",
+    "numpy": "2.4.2",
+    "pytest": "9.2.0",
+    "onnx": "1.23.2",
+    "onnxruntime": "1.32.0",
+    "gpu": "NVIDIA GeForce GTX 1080 Ti, driver 580.196.07, Vulkan API 1.4.312",
+    "vulkan_instance": "1.4.363",
+    "software_icd": "lavapipe (Mesa 26.2.7, LLVM 23.1.4)"
+  },
+  "gates": [
+    {
+      "name": "cargo-lib",
+      "command": "CARGO_BUILD_JOBS=4 cargo test --lib -- --test-threads=1",
+      "exit": 0,
+      "passed": 544,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/lib.log"
+    },
+    {
+      "name": "quantized-pipeline",
+      "command": "CARGO_BUILD_JOBS=4 cargo test --test quantized_pipeline -- --test-threads=1",
+      "exit": 0,
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/quantized_pipeline.log"
+    },
+    {
+      "name": "optim",
+      "command": "CARGO_BUILD_JOBS=4 cargo test --test optim_test -- --test-threads=1",
+      "exit": 0,
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/optim_test.log"
+    },
+    {
+      "name": "autograd-gradients",
+      "command": "CARGO_BUILD_JOBS=4 cargo test --test autograd_gradient_checks -- --test-threads=1",
+      "exit": 0,
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/autograd_gradient_checks.log"
+    },
+    {
+      "name": "cpu-arena-telemetry",
+      "command": "CARGO_BUILD_JOBS=4 cargo test --test cpu_arena_telemetry -- --test-threads=1",
+      "exit": 0,
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/cpu_arena_telemetry.log"
+    },
+    {
+      "name": "pytest-not-slow",
+      "command": "uv run pytest tests/ -m \"not slow\" -v",
+      "exit": 0,
+      "collected": 373,
+      "deselected": 2,
+      "passed": 369,
+      "skipped": 1,
+      "xfailed": 1,
+      "failed": 0,
+      "seconds": 3.44,
+      "log": "logs/pytest-not-slow-exact.log"
+    },
+    {
+      "name": "pytest-io",
+      "command": ".venv/bin/python -m pytest tests/test_io.py -v",
+      "exit": 0,
+      "passed": 8,
+      "failed": 0,
+      "log": "logs/pytest-io.log"
+    },
+    {
+      "name": "pytest-onnx",
+      "command": ".venv/bin/python -m pytest tests/test_onnx.py tests/test_onnx_shape_inputs.py -v",
+      "exit": 0,
+      "passed": 89,
+      "failed": 0,
+      "log": "logs/pytest-onnx.log"
+    },
+    {
+      "name": "pytest-aot-prepared",
+      "command": ".venv/bin/python -m pytest tests/test_aot_executor_prepared_execute.py tests/test_aot_executor_prepared_stats.py tests/test_aot_executor_profile.py -v",
+      "exit": 0,
+      "passed": 28,
+      "failed": 0,
+      "log": "logs/pytest-aot-prepared.log"
+    },
+    {
+      "name": "cargo-fmt",
+      "command": "cargo fmt --check",
+      "exit": 0,
+      "log": "logs/cargo-fmt-check.log"
+    }
+  ],
+  "gpu": {
+    "adapter_probe": "raw/gpu-adapter-probe.json",
+    "selected_device_id": 0,
+    "selected_adapter": "NVIDIA GeForce GTX 1080 Ti (Vulkan, driver 580.196.07)",
+    "wgpu_tests": {
+      "command": "CARGO_BUILD_JOBS=4 cargo test --features gpu --test wgpu -- --ignored --test-threads=1",
+      "exit": 101,
+      "passed": 16,
+      "failed": 10,
+      "log": "logs/wgpu-tests.log"
+    },
+    "wgpu_quantized_tests": {
+      "command": "CARGO_BUILD_JOBS=4 cargo test --features gpu --test wgpu_quantized -- --ignored --test-threads=1",
+      "exit": 101,
+      "passed": 0,
+      "failed": 4,
+      "log": "logs/wgpu-quantized-tests.log"
+    }
+  },
+  "cli": {
+    "build_command": "CARGO_BUILD_JOBS=4 cargo build --release --features cli",
+    "fixture": "tools/baseline/fixtures/relu_graph.json",
+    "compile": {"command": "target/release/fastnn-runtime compile tools/baseline/fixtures/relu_graph.json --output-plan /tmp/opencode/fn3-01/fnnc/relu.fnnc --output-memory /tmp/opencode/fn3-01/fnnc/relu.memory.json", "exit": 0, "log": "logs/cli-compile.log"},
+    "info": {"command": "target/release/fastnn-runtime info /tmp/opencode/fn3-01/fnnc/relu.fnnc /tmp/opencode/fn3-01/fnnc/relu.memory.json", "exit": 0, "log": "logs/cli-info.log"},
+    "run": {"command": "target/release/fastnn-runtime run /tmp/opencode/fn3-01/fnnc/relu.fnnc /tmp/opencode/fn3-01/fnnc/relu.memory.json /tmp/opencode/fn3-01/fnnc/input4m.bin -o /tmp/opencode/fn3-01/fnnc/output4m.bin", "exit": 0, "log": "logs/cli-run.log"},
+    "bench": {"command": "target/release/fastnn-runtime bench /tmp/opencode/fn3-01/fnnc/relu.fnnc /tmp/opencode/fn3-01/fnnc/relu.memory.json --random-inputs --input-sizes 4000000 --iterations 100 --warmup 10", "exit": 0, "avg_latency_us": 981.59, "log": "logs/cli-bench.log"}
+  },
+  "tiny_gpt2": {
+    "onnx_url": "https://huggingface.co/onnx-community/tiny-random-gpt2-ONNX/resolve/main/onnx/model.onnx",
+    "onnx_sha256": "e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1",
+    "onnx_bytes": 27897974,
+    "hf_repo_sha": "90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f",
+    "hf_last_modified": "2025-10-03T18:20:54.000Z",
+    "import": {"exit": 0, "nodes": 257, "params": 48, "seconds": 0.726},
+    "dynamic_build": {"exit": 1, "error_count": 200, "first_error": "Reshape inferred dimension requires unsupported symbolic division", "log": "logs/dynamic-build-failure.log"},
+    "static_variant_build": {"exit": 0, "seconds": 0.187},
+    "decode_parity": {"logits_max_abs": 7.152557373046875e-07, "cache_max_abs": 2.9802322387695312e-07, "note": "1 token, 8 past; static-shape variant"},
+    "prefill_parity": {
+      "tokens_8": {"logits_nan_count": 402056, "logits_elements": 402056, "layer0_cache_max_abs": 1.49e-07, "layer1_cache_nan_count": 1024},
+      "tokens_32": {"logits_nan_count": 1608224, "logits_elements": 1608224, "layer0_cache_max_abs": 4.18e-07, "layer1_cache_nan_count": 4096},
+      "note": "Layer-1 K/V and logits are non-finite in FastNN for both prefill sizes; ONNX Runtime is finite"
+    }
+  },
+  "skipped": [
+    "Full cargo test suite and --all-targets/--all-features checks",
+    "pytest slow marker cases",
+    "TinyLlama 1.1B and Qwen2.5 model runs (4.4 GB weights not present; no transformers/optimum export environment)",
+    "YOLO/COCO model runs (weights not present)",
+    "maturin wheel build/install outside editable develop",
+    "cargo clippy -D warnings",
+    "WGPU performance benchmark (quantized path cannot create pipelines)"
+  ]
+}

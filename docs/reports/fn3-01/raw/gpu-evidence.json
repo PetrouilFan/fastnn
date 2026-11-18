@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "host": {
+    "gpu": "NVIDIA GeForce GTX 1080 Ti",
+    "driver": "580.196.07",
+    "vulkan_api": "1.4.312",
+    "vulkan_instance": "1.4.363",
+    "validation_layers": ["VK_LAYER_KHRONOS_validation 1.4.363"],
+    "icds": ["nvidia_icd.json", "lvp_icd.json", "radeon_icd.json"]
+  },
+  "adapter_probe": {
+    "source": "raw/gpu-adapter-probe.json",
+    "command": "XDG_RUNTIME_DIR=/tmp/opencode/fn3-01/xdg cargo run --release --manifest-path tools/baseline/gpu_probe/Cargo.toml",
+    "adapter_count": 3,
+    "adapters": [
+      {
+        "device_id": 0,
+        "backend": "Vulkan",
+        "name": "NVIDIA GeForce GTX 1080 Ti",
+        "device_type": "DiscreteGpu",
+        "driver": "NVIDIA 580.196.07",
+        "compute_probe": "ok"
+      },
+      {
+        "device_id": 1,
+        "backend": "Vulkan",
+        "name": "llvmpipe (LLVM 23.1.4, 256 bits)",
+        "device_type": "Cpu",
+        "driver": "Mesa 26.2.7",
+        "compute_probe": "ok"
+      },
+      {
+        "device_id": 2,
+        "backend": "Gl",
+        "name": "NVIDIA GeForce GTX 1080 Ti/PCIe/SSE2",
+        "device_type": "Other",
+        "driver": "3.3.0 NVIDIA 580.196.07",
+        "compute_probe": "failed: request_device: Parent device is lost"
+      }
+    ],
+    "fastnn_selection": "WgpuBackend uses GpuContext::new(device_id=0), so it selects the Vulkan GTX 1080 Ti; the probe reproduces the backend's Naga shader validation failure for the reserved word `active`."
+  },
+  "wgpu_unquantized": {
+    "command": "CARGO_BUILD_JOBS=4 cargo test --features gpu --test wgpu -- --ignored --test-threads=1",
+    "result": "16 passed, 10 failed",
+    "passed": [
+      "test_wgpu_avgpool2d",
+      "test_wgpu_elementwise_add",
+      "test_wgpu_elementwise_gelu",
+      "test_wgpu_elementwise_mul_sub_div",
+      "test_wgpu_elementwise_neg_abs_exp_log_sqrt",
+      "test_wgpu_elementwise_relu",
+      "test_wgpu_elementwise_sigmoid",
+      "test_wgpu_elementwise_tanh_silu",
+      "test_wgpu_matmul_batched",
+      "test_wgpu_matmul_large",
+      "test_wgpu_matmul_small",
+      "test_wgpu_maxpool2d",
+      "test_wgpu_softmax_basic",
+      "test_wgpu_softmax_stability",
+      "test_wgpu_transpose_2d",
+      "test_wgpu_transpose_4d"
+    ],
+    "failed": [
+      {"test": "test_wgpu_argmax", "reason": "Shader validation error: Type [3] '' is invalid"},
+      {"test": "test_wgpu_conv2d_small", "reason": "WGSL reserved keyword `of` in wgpu_backend_conv2d"},
+      {"test": "test_wgpu_conv2d_multichannel", "reason": "WGSL reserved keyword `of` in wgpu_backend_conv2d"},
+      {"test": "test_wgpu_layernorm", "reason": "WGSL reserved keyword `active` in wgpu_backend_norm_f32"},
+      {"test": "test_wgpu_rmsnorm", "reason": "WGSL reserved keyword `active` in wgpu_backend_rms_norm"},
+      {"test": "test_wgpu_reduce_sum", "reason": "wrong result: GPU 3 vs CPU 10"},
+      {"test": "test_wgpu_reduce_mean", "reason": "wrong result: GPU 3 vs CPU 2.5"},
+      {"test": "test_wgpu_embedding", "reason": "Dispatch: embedding: index is non-integral or out of range"},
+      {"test": "test_wgpu_large_graph", "reason": "wrong result: GPU 0 vs CPU 0.25"},
+      {"test": "test_wgpu_unsupported_op_fallback", "reason": "wrong output length: 12 vs 8"}
+    ]
+  },
+  "wgpu_quantized": {
+    "command": "CARGO_BUILD_JOBS=4 cargo test --features gpu --test wgpu_quantized -- --ignored --test-threads=1",
+    "result": "0 passed, 4 failed",
+    "failure": "Device::create_bind_group_layout: too many StorageBuffers in COMPUTE stage: limit 4, shader needs 5. Caused by GpuContext requesting wgpu::Limits::downlevel_defaults().",
+    "tests": ["test_wgpu_conv2d_u4", "test_wgpu_conv2d_u8", "test_wgpu_matmul_u4", "test_wgpu_matmul_u8"]
+  },
+  "reproduce": {
+    "note": "Set XDG_RUNTIME_DIR to suppress the Vulkan loader warning; it is not the cause of shader failures.",
+    "wlr": "DISPLAY and WAYLAND_DISPLAY are unset on this host; headless Vulkan compute works."
+  }
+}

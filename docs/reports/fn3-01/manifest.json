@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "issue": 47,
+  "backlog_id": "FN3-01",
+  "branch": "fn3/47-baseline",
+  "base_sha": "a2c0759fff8bdcb7c943e53442f3382b86e59b66",
+  "head_sha_at_measurement": "a2c0759fff8bdcb7c943e53442f3382b86e59b66",
+  "model_artifact": {
+    "url": "https://huggingface.co/onnx-community/tiny-random-gpt2-ONNX/resolve/main/onnx/model.onnx",
+    "sha256": "e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1",
+    "bytes": 27897974,
+    "stored_in_repo": false,
+    "location": "/tmp/opencode/fn3-01/tiny-random-gpt2.onnx"
+  },
+  "commands": {
+    "rust_gates": "tools/baseline/run_cargo_gates.sh",
+    "python": "uv run pytest tests/ -m \"not slow\" -v",
+    "maturin": "CARGO_BUILD_JOBS=4 uv run --python .venv/bin/python maturin develop --release",
+    "cpu_bench": "tools/baseline/bench_tiny_gpt2.py (see baseline-2.6.0.md)",
+    "gpu_probe": "XDG_RUNTIME_DIR=/tmp/opencode/fn3-01/xdg cargo run --release --manifest-path tools/baseline/gpu_probe/Cargo.toml",
+    "gpu_tests": "cargo test --features gpu --test wgpu -- --ignored --test-threads=1"
+  },
+  "files": [
+    {
+      "path": "docs/reports/fn3-01/baseline-2.6.0.md",
+      "bytes": 27913,
+      "sha256": "eec3efb9065b9dc706a4aa0eaa26549d5c878259945d6e12c96658f6b5809689"
+    },
+    {
+      "path": "docs/reports/fn3-01/environment.txt",
+      "bytes": 4074,
+      "sha256": "1b9ab10e1baf59d102b5683d5e01ac0dcc5cf50385cfc45d08fbbc6e0ddcd2ba"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/.gitignore",
+      "bytes": 66,
+      "sha256": "a426811c9772ac4f52a68d1a0c5404f11bda5cdbf75e7dee6a7aca57a0d566df"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/autograd_gradient_checks.log",
+      "bytes": 841,
+      "sha256": "d9418a57d458c2cadc9d82d3c9dee16c4da42f2699c841ee9217bf44cfd5c21e"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/bench-tiny-gpt2-1thread.log",
+      "bytes": 7334,
+      "sha256": "e31602c255e271f0d43123ffece6123daf2d9147f454678d63d994896a8c7c64"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/bench-tiny-gpt2-parity.log",
+      "bytes": 4122,
+      "sha256": "d70c3efa90e7c54fc4995b30ade38c9af59a450d836b834f8fef9de75d6aefad"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/bench-tiny-gpt2.log",
+      "bytes": 8897,
+      "sha256": "c008c21755d8069b21a1e30863b55ebf49bf8ece4c2b4494daa2ebf0835d4b62"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cargo-fmt-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cargo-gates-summary.txt",
+      "bytes": 828,
+      "sha256": "6d5ae35207f077b918531af443fc9450a7722e87989bb9eaf50760ac0e66b725"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cargo-test-lib.log",
+      "bytes": 47960,
+      "sha256": "8828402846235fbc1757d48545276e3940552c90d6001c6f215421907c72e22a"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cli-bench.log",
+      "bytes": 153,
+      "sha256": "efd8e40435f6ebc6851e28a01dc7999bcba496d858b823bed13d69f58af7382d"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cli-build.log",
+      "bytes": 2518,
+      "sha256": "d7d160fab3c19c6bf78fe804c3031e806c0d4e1c40d5eb2b1e8de47a61521f9f"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cli-compile.log",
+      "bytes": 196,
+      "sha256": "0f28b32bddcca9808fcd6c99215168f817933332f8d542257e0db110e7bd267a"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cli-info.log",
+      "bytes": 275,
+      "sha256": "95eb01a5b9c20a6256b5d88bd2ce0f9b763a395abe1dd4543e396edfe45b7852"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cli-run.log",
+      "bytes": 62,
+      "sha256": "3b0e0a5eedf4c798a57a79833bcf013f97dd658270f482cb4ff8f416e436a9de"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/cpu_arena_telemetry.log",
+      "bytes": 955,
+      "sha256": "a6aa88a15fc503ea7ab3b7cdaf469eba25bf3885411754a806f8b62bc7d9ef85"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/dynamic-build-failure.log",
+      "bytes": 481,
+      "sha256": "383ec43fccd57d029a258283d726a68f469424802f43be89ecdb7a0d4c3dbed0"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/gpu-probe-fmt.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/gpu-probe.log",
+      "bytes": 251,
+      "sha256": "03de9b1f9e6a5f5a126f9775dfb4f48e14307c79dfe2a1b4d3f2332094d67915"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/lib.log",
+      "bytes": 45110,
+      "sha256": "3234b587c6d1462f71bd2678aea2e0fbb740dfd0a1eadaf48dc4196c7b2f97d4"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/maturin-develop.log",
+      "bytes": 1392,
+      "sha256": "e9d9013970835c2c7add60230dd0092a064d275b409f3610ceb11ecc3576799c"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/optim_test.log",
+      "bytes": 781,
+      "sha256": "8f1bf9a9bd5a8a2b5ae72a66bd3c5eb5f65c5fa581af4a231602946b6ee41351"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/pytest-aot-prepared.log",
+      "bytes": 3618,
+      "sha256": "2ea07916dfc0ef0ea17e5efcf0a5baa39be8d80b16dd69e7d90a36e4b5575af3"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/pytest-io.log",
+      "bytes": 1094,
+      "sha256": "9673439f297ff71dbdf3a6cac0855d0ed4a09c66e122ecb18481c46c130fcbdd"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/pytest-not-slow-exact.log",
+      "bytes": 34842,
+      "sha256": "0a360f2fea2eb90636ba69043d53815cd82ad742b8089fcc159ade66eec465ef"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/pytest-not-slow.log",
+      "bytes": 35227,
+      "sha256": "a7de3c17bca6b33f9109b6304c949c9d9ce3ffac9b0647f5d59d7b7899bbc67a"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/pytest-onnx.log",
+      "bytes": 8400,
+      "sha256": "92ea1f443a01efe606514e240c1280f555537492e14f4d58458e9c26c1389236"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/quantized_pipeline.log",
+      "bytes": 1525,
+      "sha256": "af357321b898872de6e343fe0e1ba85f9dd374d22f02f7281f7454d607b667d1"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/run_cargo_gates.out",
+      "bytes": 936,
+      "sha256": "85f5d057b04eba578c5f20a909bec5244592a73c81a68ec8cd2061d1096e499f"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/wgpu-quantized-tests.log",
+      "bytes": 3002,
+      "sha256": "b5b334d1af9421a5748d87bdc1bfc18cbea28c97abbaaeb746df6564d806d1d7"
+    },
+    {
+      "path": "docs/reports/fn3-01/logs/wgpu-tests.log",
+      "bytes": 7207,
+      "sha256": "ccef31f5293e6c7e350d1d023337ce95c45c6ab738b72f6259515c8166bca260"
+    },
+    {
+      "path": "docs/reports/fn3-01/raw/cpu-prefill-decode-1thread.json",
+      "bytes": 4605,
+      "sha256": "0e1ef36435364acbaaf6e7960add0d4220e326c1c3bcc4276a96a94939714ab3"
+    },
+    {
+      "path": "docs/reports/fn3-01/raw/cpu-prefill-decode-parity.json",
+      "bytes": 2611,
+      "sha256": "5261928e1c9a6f3311c32c22fa04be298c07dbd0c76a1575422c03a01a49c395"
+    },
+    {
+      "path": "docs/reports/fn3-01/raw/cpu-prefill-decode.json",
+      "bytes": 5608,
+      "sha256": "1b0cdc3b74143559082f3d33f38c7f207d0960cf10cdb14ff14697237d79280b"
+    },
+    {
+      "path": "docs/reports/fn3-01/raw/gpu-adapter-probe.json",
+      "bytes": 1463,
+      "sha256": "e0e758f15c98fc595c2ff25841364cb8c27586334a64e55874ed680462dee064"
+    },
+    {
+      "path": "docs/reports/fn3-01/raw/gpu-evidence.json",
+      "bytes": 3954,
+      "sha256": "57ac8bdb9eeaf917dcc5ecfd47b6e134d1781ebee985a11947c2acb51a80d05a"
+    },
+    {
+      "path": "docs/reports/fn3-01/raw/test-matrix.json",
+      "bytes": 7013,
+      "sha256": "f7568a098a15a3814ac1c8a4a386b20426015824ff49f7621a53a4a306f69a96"
+    },
+    {
+      "path": "tools/baseline/bench_tiny_gpt2.py",
+      "bytes": 8547,
+      "sha256": "dcf3337f377fe0b5db8ec0b513a75e5458148ba7cac8416fe32007f292766032"
+    },
+    {
+      "path": "tools/baseline/fixtures/relu_graph.json",
+      "bytes": 188,
+      "sha256": "0cc4090b175281adbeafa9dee903e467ab158ea190e0e44cfe7c31de9bfef32c"
+    },
+    {
+      "path": "tools/baseline/gpu_probe/Cargo.lock",
+      "bytes": 31263,
+      "sha256": "bee1adb55e0021b9ea54456faa78e8bc6662d4893e040c5a13e73bd6e9c70a91"
+    },
+    {
+      "path": "tools/baseline/gpu_probe/Cargo.toml",
+      "bytes": 202,
+      "sha256": "fff4716e2a6e320640cfd4d9855215c0479ff9105f471096acfbfb06d7726d30"
+    },
+    {
+      "path": "tools/baseline/gpu_probe/src/main.rs",
+      "bytes": 5397,
+      "sha256": "86ce70795304c6e82f9add09b472fb4aefff444005e5fc5c4f0a935069fcd108"
+    },
+    {
+      "path": "tools/baseline/run_cargo_gates.sh",
+      "bytes": 1222,
+      "sha256": "453b27f9a5c3cf6207069f68a30c0d98d45025b5103f2e1fd85bbc2c1e4de117"
+    },
+    {
+      "path": "tools/baseline/tiny_gpt2_static.py",
+      "bytes": 4902,
+      "sha256": "80997828e9dd816f3dd743ccbc0ea2ec51cc302304e05347fc7340d367a46515"
+    }
+  ]
+}

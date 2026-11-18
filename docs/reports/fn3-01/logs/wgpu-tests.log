@@ -1,0 +1,228 @@
+   Compiling bitflags v2.11.0
+   Compiling bytemuck_derive v1.10.2
+   Compiling cfg_aliases v0.2.1
+   Compiling rustversion v1.0.22
+   Compiling thiserror v2.0.18
+   Compiling raw-cpuid v11.6.0
+   Compiling naga v24.0.0
+   Compiling thiserror-impl v2.0.18
+   Compiling strum_macros v0.26.4
+   Compiling bytemuck v1.25.0
+   Compiling num-complex v0.4.6
+   Compiling dyn-stack v0.13.2
+   Compiling libloading v0.8.9
+   Compiling pulp v0.22.3
+   Compiling log v0.4.29
+   Compiling khronos-egl v6.0.0
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling ash v0.38.0+1.3.281
+   Compiling termcolor v1.4.1
+   Compiling hashbrown v0.16.1
+   Compiling unicode-width v0.1.14
+   Compiling bit-vec v0.8.0
+   Compiling codespan-reporting v0.11.1
+   Compiling bit-set v0.8.0
+   Compiling indexmap v2.13.0
+   Compiling strum v0.26.3
+   Compiling hashbrown v0.15.5
+   Compiling spirv v0.3.0+sdk-1.3.268.0
+   Compiling gpu-alloc-types v0.3.0
+   Compiling gpu-descriptor-types v0.2.0
+   Compiling wgpu-hal v24.0.4
+   Compiling hexf-parse v0.2.1
+   Compiling unicode-xid v0.2.6
+   Compiling arrayvec v0.7.6
+   Compiling rustc-hash v1.1.0
+   Compiling gpu-alloc v0.6.0
+   Compiling gpu-descriptor v0.3.2
+   Compiling wgpu-types v24.0.0
+   Compiling gemm-common v0.19.0
+   Compiling wgpu-core v24.0.5
+   Compiling ordered-float v4.6.0
+   Compiling litrs v1.0.0
+   Compiling raw-window-handle v0.6.2
+   Compiling glow v0.16.0
+   Compiling profiling v1.0.17
+   Compiling renderdoc-sys v1.1.0
+   Compiling document-features v0.2.12
+   Compiling wgpu v24.0.5
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling static_assertions v1.1.0
+   Compiling gemm v0.19.0
+   Compiling pollster v0.4.0
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.22s
+     Running tests/wgpu.rs (target/debug/build/fastnn/7a3adc1348fcf903/out/wgpu-7a3adc1348fcf903)
+
+running 26 tests
+test test_wgpu_argmax ... error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+FAILED
+test test_wgpu_avgpool2d ... ok
+test test_wgpu_conv2d_multichannel ... FAILED
+test test_wgpu_conv2d_small ... FAILED
+test test_wgpu_elementwise_add ... ok
+test test_wgpu_elementwise_gelu ... ok
+test test_wgpu_elementwise_mul_sub_div ... ok
+test test_wgpu_elementwise_neg_abs_exp_log_sqrt ... ok
+test test_wgpu_elementwise_relu ... ok
+test test_wgpu_elementwise_sigmoid ... ok
+test test_wgpu_elementwise_tanh_silu ... ok
+test test_wgpu_embedding ... FAILED
+test test_wgpu_large_graph ... FAILED
+test test_wgpu_layernorm ... FAILED
+test test_wgpu_matmul_batched ... ok
+test test_wgpu_matmul_large ... ok
+test test_wgpu_matmul_small ... ok
+test test_wgpu_maxpool2d ... ok
+test test_wgpu_reduce_mean ... FAILED
+test test_wgpu_reduce_sum ... FAILED
+test test_wgpu_rmsnorm ... FAILED
+test test_wgpu_softmax_basic ... ok
+test test_wgpu_softmax_stability ... ok
+test test_wgpu_transpose_2d ... ok
+test test_wgpu_transpose_4d ... ok
+test test_wgpu_unsupported_op_fallback ... FAILED
+
+failures:
+
+---- test_wgpu_argmax stdout ----
+
+thread 'test_wgpu_argmax' (62440) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1009:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module, label = 'wgpu_backend_argmax_l2'
+    
+Shader validation error: Type [3] '' is invalid
+ = Using `u64` values requires the `naga::valid::Capabilities::SHADER_INT64` flag
+
+
+      Type [3] '' is invalid
+        Using `u64` values requires the `naga::valid::Capabilities::SHADER_INT64` flag
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_wgpu_conv2d_multichannel stdout ----
+
+thread 'test_wgpu_conv2d_multichannel' (62452) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1009:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module, label = 'wgpu_backend_conv2d'
+    
+Shader 'wgpu_backend_conv2d' parsing error: name `of` is a reserved keyword
+   ┌─ wgsl:34:9
+   │
+34 │     let of = gid.z;
+   │         ^^ definition of `of`
+
+
+      name `of` is a reserved keyword
+
+
+
+---- test_wgpu_conv2d_small stdout ----
+
+thread 'test_wgpu_conv2d_small' (62453) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1009:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module, label = 'wgpu_backend_conv2d'
+    
+Shader 'wgpu_backend_conv2d' parsing error: name `of` is a reserved keyword
+   ┌─ wgsl:34:9
+   │
+34 │     let of = gid.z;
+   │         ^^ definition of `of`
+
+
+      name `of` is a reserved keyword
+
+
+
+---- test_wgpu_embedding stdout ----
+
+thread 'test_wgpu_embedding' (62469) panicked at tests/wgpu.rs:500:10:
+called `Result::unwrap()` on an `Err` value: Dispatch("embedding: index is non-integral or out of range")
+
+---- test_wgpu_large_graph stdout ----
+
+thread 'test_wgpu_large_graph' (62470) panicked at tests/wgpu.rs:70:17:
+output 0 elem 0: GPU=0 CPU=0.25 diff=0.25
+
+---- test_wgpu_layernorm stdout ----
+
+thread 'test_wgpu_layernorm' (62471) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1009:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module, label = 'wgpu_backend_norm_f32'
+    
+Shader 'wgpu_backend_norm_f32' parsing error: name `active` is a reserved keyword
+   ┌─ wgsl:46:9
+   │
+46 │     var active = WGS;
+   │         ^^^^^^ definition of `active`
+
+
+      name `active` is a reserved keyword
+
+
+
+---- test_wgpu_reduce_mean stdout ----
+
+thread 'test_wgpu_reduce_mean' (62476) panicked at tests/wgpu.rs:70:17:
+output 0 elem 0: GPU=3 CPU=2.5 diff=0.5
+
+---- test_wgpu_reduce_sum stdout ----
+
+thread 'test_wgpu_reduce_sum' (62477) panicked at tests/wgpu.rs:70:17:
+output 0 elem 0: GPU=3 CPU=10 diff=7
+
+---- test_wgpu_rmsnorm stdout ----
+
+thread 'test_wgpu_rmsnorm' (62478) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1009:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module, label = 'wgpu_backend_rms_norm'
+    
+Shader 'wgpu_backend_rms_norm' parsing error: name `active` is a reserved keyword
+   ┌─ wgsl:46:9
+   │
+46 │     var active = WGS;
+   │         ^^^^^^ definition of `active`
+
+
+      name `active` is a reserved keyword
+
+
+
+---- test_wgpu_unsupported_op_fallback stdout ----
+
+thread 'test_wgpu_unsupported_op_fallback' (62483) panicked at tests/wgpu.rs:541:5:
+assertion `left == right` failed
+  left: 12
+ right: 8
+
+
+failures:
+    test_wgpu_argmax
+    test_wgpu_conv2d_multichannel
+    test_wgpu_conv2d_small
+    test_wgpu_embedding
+    test_wgpu_large_graph
+    test_wgpu_layernorm
+    test_wgpu_reduce_mean
+    test_wgpu_reduce_sum
+    test_wgpu_rmsnorm
+    test_wgpu_unsupported_op_fallback
+
+test result: FAILED. 16 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+error: test failed, to rerun pass `--test wgpu`

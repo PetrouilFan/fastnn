@@ -1,0 +1,10 @@
++ cargo test --lib -- --test-threads=1
+  exit=0 log=/home/petrouil/Projects/github/fastnn-wt-47-baseline/docs/reports/fn3-01/logs/lib.log
++ cargo test --test quantized_pipeline -- --test-threads=1
+  exit=0 log=/home/petrouil/Projects/github/fastnn-wt-47-baseline/docs/reports/fn3-01/logs/quantized_pipeline.log
++ cargo test --test optim_test -- --test-threads=1
+  exit=0 log=/home/petrouil/Projects/github/fastnn-wt-47-baseline/docs/reports/fn3-01/logs/optim_test.log
++ cargo test --test autograd_gradient_checks -- --test-threads=1
+  exit=0 log=/home/petrouil/Projects/github/fastnn-wt-47-baseline/docs/reports/fn3-01/logs/autograd_gradient_checks.log
++ cargo test --test cpu_arena_telemetry -- --test-threads=1
+  exit=0 log=/home/petrouil/Projects/github/fastnn-wt-47-baseline/docs/reports/fn3-01/logs/cpu_arena_telemetry.log

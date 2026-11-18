@@ -1,0 +1,25 @@
+   Building fastnn @ file:///home/petrouil/Projects/github/fastnn-wt-47-baseline
+Downloading numpy (15.8MiB)
+ Downloaded numpy
+      Built fastnn @ file:///home/petrouil/Projects/github/fastnn-wt-47-baseline
+Uninstalled 1 package in 39ms
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 2 packages in 82ms
+📦 Including license file `LICENSE`
+🍹 Building a mixed python/rust project
+🐍 Found CPython 3.13 at /home/petrouil/Projects/github/fastnn-wt-47-baseline/.venv/bin/python
+🔗 Found pyo3 bindings with abi3-py3.11 support
+📡 Using build options features from pyproject.toml
+Checked 4 packages in 0.80ms
+   Compiling pyo3-build-config v0.28.2
+   Compiling pyo3-ffi v0.28.2
+   Compiling pyo3-macros-backend v0.28.2
+   Compiling pyo3 v0.28.2
+   Compiling pyo3-macros v0.28.2
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+📦 Built wheel for abi3 Python ≥ 3.11 to /tmp/.tmp0sX6uZ/fastnn-2.6.0-cp311-abi3-linux_x86_64.whl
+✏️ Setting installed package as editable
+🛠 Installed fastnn-2.6.0

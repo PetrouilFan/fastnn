@@ -1,0 +1,5 @@
+ONNX model loaded: 2 nodes
+Compiled plan saved to: /tmp/opencode/fn3-01/fnnc/relu.fnnc
+Memory plan saved to:   /tmp/opencode/fn3-01/fnnc/relu.memory.json
+Arena size: 8000000 bytes
+Instructions: 1

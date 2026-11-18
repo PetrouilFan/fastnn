@@ -1,0 +1,55 @@
+{
+  "adapter_count": 3,
+  "adapters": [
+    {
+      "backend": "Vulkan",
+      "compute_probe": {
+        "ok": true,
+        "value": 2.0
+      },
+      "device": 6918,
+      "device_id": 0,
+      "device_type": "DiscreteGpu",
+      "driver": "NVIDIA",
+      "driver_info": "580.196.07",
+      "max_compute_workgroup_size_x": 1536,
+      "max_storage_buffer_binding_size": 2147483647,
+      "name": "NVIDIA GeForce GTX 1080 Ti",
+      "vendor": 4318
+    },
+    {
+      "backend": "Vulkan",
+      "compute_probe": {
+        "ok": true,
+        "value": 2.0
+      },
+      "device": 0,
+      "device_id": 1,
+      "device_type": "Cpu",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 26.2.7-arch1.1 (LLVM 23.1.4)",
+      "max_compute_workgroup_size_x": 1024,
+      "max_storage_buffer_binding_size": 134217728,
+      "name": "llvmpipe (LLVM 23.1.4, 256 bits)",
+      "vendor": 65541
+    },
+    {
+      "backend": "Gl",
+      "compute_probe": {
+        "error": "request_device: Parent device is lost",
+        "ok": false
+      },
+      "device": 0,
+      "device_id": 2,
+      "device_type": "Other",
+      "driver": "",
+      "driver_info": "3.3.0 NVIDIA 580.196.07",
+      "max_compute_workgroup_size_x": 1536,
+      "max_storage_buffer_binding_size": 2147483647,
+      "name": "NVIDIA GeForce GTX 1080 Ti/PCIe/SSE2",
+      "vendor": 4318
+    }
+  ],
+  "instance_backends": "Backends(VULKAN | GL | METAL | DX12 | BROWSER_WEBGPU)",
+  "schema_version": 1
+}

@@ -1,0 +1,3 @@
+   Compiling fastnn-gpu-probe v0.1.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline/tools/baseline/gpu_probe)
+    Finished `release` profile [optimized] target(s) in 0.51s
+     Running `tools/baseline/gpu_probe/target/release/fastnn-gpu-probe`

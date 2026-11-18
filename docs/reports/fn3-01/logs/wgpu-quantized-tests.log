@@ -1,0 +1,68 @@
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running tests/wgpu_quantized.rs (target/debug/build/fastnn/9c866fbc1d8d588c/out/wgpu_quantized-9c866fbc1d8d588c)
+
+running 4 tests
+test test_wgpu_conv2d_u4 ... error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+FAILED
+test test_wgpu_conv2d_u8 ... FAILED
+test test_wgpu_matmul_u4 ... FAILED
+test test_wgpu_matmul_u8 ... FAILED
+
+failures:
+
+---- test_wgpu_conv2d_u4 stdout ----
+
+thread 'test_wgpu_conv2d_u4' (70594) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1079:26:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_bind_group_layout, label = 'wgpu_backend_quantized_quantized_matmul_i4_layout'
+    Too many bindings of type StorageBuffers in Stage ShaderStages(COMPUTE), limit is 4, count was 5. Check the limit `max_storage_buffers_per_shader_stage` passed to `Adapter::request_device`
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_wgpu_conv2d_u8 stdout ----
+
+thread 'test_wgpu_conv2d_u8' (70613) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1079:26:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_bind_group_layout, label = 'wgpu_backend_quantized_quantized_matmul_i8_layout'
+    Too many bindings of type StorageBuffers in Stage ShaderStages(COMPUTE), limit is 4, count was 5. Check the limit `max_storage_buffers_per_shader_stage` passed to `Adapter::request_device`
+
+
+
+---- test_wgpu_matmul_u4 stdout ----
+
+thread 'test_wgpu_matmul_u4' (70614) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1079:26:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_bind_group_layout, label = 'wgpu_backend_quantized_quantized_matmul_i4_layout'
+    Too many bindings of type StorageBuffers in Stage ShaderStages(COMPUTE), limit is 4, count was 5. Check the limit `max_storage_buffers_per_shader_stage` passed to `Adapter::request_device`
+
+
+
+---- test_wgpu_matmul_u8 stdout ----
+
+thread 'test_wgpu_matmul_u8' (70615) panicked at /home/petrouil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-24.0.5/src/backend/wgpu_core.rs:1079:26:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_bind_group_layout, label = 'wgpu_backend_quantized_quantized_matmul_i8_layout'
+    Too many bindings of type StorageBuffers in Stage ShaderStages(COMPUTE), limit is 4, count was 5. Check the limit `max_storage_buffers_per_shader_stage` passed to `Adapter::request_device`
+
+
+
+
+failures:
+    test_wgpu_conv2d_u4
+    test_wgpu_conv2d_u8
+    test_wgpu_matmul_u4
+    test_wgpu_matmul_u8
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+error: test failed, to rerun pass `--test wgpu_quantized`
