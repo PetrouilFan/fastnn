@@ -868,21 +868,67 @@ fn allocation_on_a_device_without_a_backend_is_refused_for_every_dtype() {
         let text = error.to_string();
         assert!(text.contains("device unavailable"), "{text}");
         assert!(text.contains("vulkan(0)"), "{text}");
-        assert!(text.contains("available devices: [cpu]"), "{text}");
+        // The cpu device is always first in the available list, but the list is
+        // not only the cpu device: a build with the vulkan feature legitimately
+        // enumerates adapters that still cannot own a tensor. Assert the prefix,
+        // not the whole list.
+        assert!(text.contains("available devices: [cpu"), "{text}");
+        // Whatever the configuration, the message must say what to do about it.
+        #[cfg(feature = "vulkan")]
+        assert!(
+            text.contains("host memory") && text.contains("FN3-12"),
+            "{text}"
+        );
+        #[cfg(not(feature = "vulkan"))]
+        assert!(text.contains("--features vulkan"), "{text}");
     }
 }
 
 #[test]
 fn a_device_with_no_backend_is_never_listed_as_available() {
     let available = available_devices();
-    assert!(available.iter().any(|device| device.id.is_cpu()));
-    assert!(available.iter().all(|device| device.id.is_cpu()));
-    let error = DeviceRequest::Vulkan { index: Some(0) }
-        .resolve_on_host()
-        .unwrap_err();
-    assert_eq!(error.requested(), "vulkan(index=0)");
-    assert_eq!(error.available(), ["cpu"]);
-    assert!(error.to_string().contains("available devices: [cpu]"));
+    // Enumeration is a property of the build, so assert it as one: the cpu
+    // device is always present and always first, and anything else that is
+    // listed must be a vulkan adapter, which can only exist behind the feature.
+    assert_eq!(available.first().map(|device| device.id), Some(cpu()));
+    assert!(
+        available
+            .iter()
+            .all(|device| device.id.is_cpu() || matches!(device.id, DeviceId::Vulkan(_))),
+        "available_devices listed something that is neither cpu nor vulkan: {available:?}"
+    );
+    let adapters = available
+        .iter()
+        .filter(|device| !device.id.is_cpu())
+        .count();
+    if cfg!(feature = "vulkan") {
+        // Either the loader found adapters or it did not; both are honest. What
+        // must never happen is a device listed without a backend behind it.
+        assert_eq!(
+            adapters,
+            available
+                .iter()
+                .filter(|device| matches!(device.id, DeviceId::Vulkan(_)))
+                .count()
+        );
+    } else {
+        assert_eq!(
+            adapters, 0,
+            "no vulkan feature, so no vulkan device: {available:?}"
+        );
+    }
+
+    // A request for an adapter index this machine does not have must fail and
+    // name what is actually there, in every configuration.
+    let absent = u32::try_from(adapters).expect("adapter count fits in u32") + 5;
+    let error = DeviceRequest::Vulkan {
+        index: Some(absent),
+    }
+    .resolve_on_host()
+    .unwrap_err();
+    assert_eq!(error.requested(), format!("vulkan(index={absent})"));
+    assert_eq!(error.available().first().map(String::as_str), Some("cpu"));
+    assert!(error.to_string().contains("available devices: [cpu"));
 }
 
 #[test]
