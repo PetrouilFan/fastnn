@@ -12,7 +12,7 @@ instructions and dispatches them. The authoritative AOT pass order belongs to
   caching.
 - `prepared.rs`: prepared-plan construction/execution and persistent weights.
 - `runtime.rs`: loading and running persisted executable plans.
-- `cpu/` and `wgpu/`: backend-specific execution.
+- `cpu/`: the CPU backend implementation.
 
 ## Invariants
 
@@ -25,6 +25,8 @@ instructions and dispatches them. The authoritative AOT pass order belongs to
   tightening.
 - Prepared execution must preserve persistent-weight and arena-lifetime
   assumptions.
+- This is an inference backend: there are no backward, gradient or optimizer
+  update instructions.
 
 For CPU safety and kernel rules, read `cpu/AGENTS.md`. For pass ordering, read
 `../compiler/passes/AGENTS.md`. Validate backend moves with the roadmap gates,

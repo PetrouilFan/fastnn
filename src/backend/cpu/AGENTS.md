@@ -1,8 +1,9 @@
 # CPU backend guide
 
-This directory implements `Backend` for CPU execution: instruction lowering,
-arena dispatch, SIMD/scalar kernels, packed quantized paths, and allocation
-telemetry.
+This directory implements `Backend` for the secondary 2.x AOT path: instruction
+lowering, arena dispatch, SIMD/scalar kernels, packed quantized paths, and
+allocation telemetry. The portable inference reference lives in
+`src/fn3/backend/cpu/`.
 
 ## Ownership boundaries
 
@@ -27,8 +28,8 @@ telemetry.
 ## Change flow
 
 For a new operation, trace the full path before editing: IR opcode, shape/type
-rules, backend lowering, dispatch, kernel, autograd rule if trainable, and ONNX
-mapping if imported. Keep such behavior additions separate from file moves.
+rules, backend lowering, dispatch and kernel. Keep behavior additions separate
+from file moves. There is no backward rule and no optimizer kernel to update.
 
 Run targeted CPU, quantized-pipeline, prepared-plan, and arena telemetry tests
 defined by `docs/roadmap/codebase-reorganization.md`.

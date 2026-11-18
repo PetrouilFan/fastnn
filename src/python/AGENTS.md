@@ -6,13 +6,15 @@ as part of a deliberate binding redesign.
 
 ## Boundaries
 
-- `mod.rs` should own module initialization and stable registration order, not
-  the implementation of every binding.
+- `mod.rs` owns module initialization and stable registration order, not the
+  implementation of every binding.
 - Binding modules adapt Rust APIs; they do not own graph compilation or create
   competing compiler semantics.
-- Replace `include!` through normal Rust module boundaries and explicit
-  per-domain registration functions. Rename exported Python names if that makes
-  the public boundary clearer.
+- The inference surface is declared by path from this directory:
+  `#[path = "../fn3/python/mod.rs"] pub mod fn3;`. `src/fn3/` itself stays free
+  of PyO3.
+- The 2.x binding surface is forward-only. There is no autograd, optimizer,
+  loss, trainer or gradient binding to extend.
 
 ## Safety
 
@@ -22,4 +24,4 @@ as part of a deliberate binding redesign.
   lifetime guarantees.
 
 Validate binding moves with extension build/install, modular API/import tests,
-and targeted tensor, nn, optimizer, executor, and serialization tests.
+and targeted tensor, nn, executor and serialization tests.
