@@ -15,6 +15,10 @@ when the 2.x modules are deleted. The contract authority is
 - `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
 - `backend/cpu/`: the alpha reference backend.
 - `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`, `Session`.
+- `model/plan.rs`: bounded `Plan`, slot table, folded constants, `PlanId`,
+  `PlanBound`, `PlanCache` (FN3-10 / #56).
+- `model/specialize.rs`: shape resolution, integer constant folding, typed
+  `OpParams` mapping and the `Planner` that builds plans (FN3-10 / #56).
 - `mod.rs`: facade and re-exports.
 
 ## Invariants

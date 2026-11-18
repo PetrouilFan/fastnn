@@ -49,8 +49,15 @@
 //! [`Fn3Error::NotImplemented`] naming the owner; they never panic and never
 //! approximate.
 
+pub mod plan;
+pub mod specialize;
 pub mod weights;
 
+pub use plan::{
+    BoundValue, Constant, ConstantData, FoldedNode, MaskConstant, MaskRole, Plan, PlanBound,
+    PlanCache, PlanId, SlotPlan, SlotRole,
+};
+pub use specialize::{PlanAttr, Planner};
 pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
 use std::cell::Cell;
