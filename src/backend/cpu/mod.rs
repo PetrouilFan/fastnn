@@ -2902,9 +2902,8 @@ impl Backend for CpuBackend {
                         numel
                     };
 
-                    // If the predecessor node already carries calibrated scales/zeros
-                    // (e.g. from wrap_quantized_optimizer re-quant path), forward
-                    // them through params so the kernel can skip the O(NÃ—K) scan.
+                    // If the predecessor node already carries calibrated scales/zeros,
+                    // forward them through params so the kernel can skip the O(Nâ€”K) scan.
                     let (cached_scales, cached_zeros) = node
                         .inputs
                         .first()
@@ -10193,7 +10192,7 @@ impl Backend for CpuBackend {
                                 )));
                             }
 
-                            // Check for cached scales from wrap_quantized_optimizer
+                            // Check for cached scales from the producing node
                             let has_cached = has_cached == 1;
                             let mut cached_scales = Vec::new();
                             let mut cached_zeros = Vec::new();

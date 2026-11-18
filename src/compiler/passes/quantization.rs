@@ -1044,6 +1044,4 @@ mod tests {
             "Compiled graph should contain a U4 weight node"
         );
     }
-
-    // ── Phase 3a: Dequantize-then-update optimizer tests ─────────────
 }
