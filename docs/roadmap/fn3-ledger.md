@@ -101,8 +101,16 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #47 | Baseline | verified (integrated) | `fn3/47-baseline` | `fastnn-wt-47-baseline` | `a2c0759` | done; perf + salvage reference |
 | #48 | Core | verified (integrated `cfea81b`) | `fn3/48-core-contract` | `fastnn-wt-48-core` | `a2c0759` | done; unblocks #52/#57/#66 |
 | #49 | Correctness | verified (integrated `b335146`) | `fn3/49-parity` | `fastnn-wt-49-parity` | `a2c0759` | done; tolerances for #53 |
-| #50 | Performance | dispatched | `fn3/50-bench` | `fastnn-wt-50-bench` | `a2c0759` | harness + schema |
+| #50 | Performance | verified (integrated `301e5a7`) | `fn3/50-bench` | `fastnn-wt-50-bench` | `a2c0759` | done; fn3 adapter is a #62/#67 seam |
 | #51 | Vulkan platform | verified (integrated `5581349`) | `fn3/51-vulkan` | `fastnn-wt-51-vulkan` | `a2c0759` | done; feeds #57 |
+| #52 | Core | verified (integrated `830f315`) | `fn3/52-storage` | `fastnn-wt-52-storage` | `cfea81b` | done |
+| #53 | CPU reference | verified (integrated `89dabac`) | `fn3/53-cpu-reference` | `fastnn-wt-53-cpu` | `830f315` | done; numerical oracle for all GPU work |
+| #54 | Model import | in progress | `fn3/54-onnx-import-b` | `fastnn-wt-54b-import` | `27fc60d` | ONNX protobuf parser; unblocks #55/#56/#58 |
+| #57 | Vulkan dispatch | verified (integrated `b3db105`) | `fn3/57-vulkan-dispatch` | `fastnn-wt-57-vulkan` | `cfea81b` | done; unblocks #59/#60/#61 |
+| #59 | GPU pointwise | in progress | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | pointwise/transform/embedding kernels |
+| #60 | GPU matmul | in progress | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | tiled matmul kernel |
+| #61 | GPU attention | in progress | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | norm/reduce/softmax/masked-attention |
+| #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
 
 ### #47 finding that changes the alpha story
 
@@ -221,3 +229,60 @@ matrix, and clean install verification.
 | `e45a337` | #47 | baseline report + salvage list merged | independent re-read of report; baseline test matrix green |
 | `cfea81b` | #48 | `src/fn3` contracts merged (`027ac49`) | fmt, 43 contract tests, 583 lib tests, build with and without default features |
 | `b335146` | #49 | parity fixtures + verifier merged (`d7d8db0`) | verifier OK 169 tensors/1,415,488 B; fmt; 43 contract tests still green |
+| `02a8950` | #46 | ledger: #49 evidence, #47 baseline finding, parity inputs | n/a |
+| `830f315` | #52 | storage windows/views merged (`0c017e9`) | fmt, 36 storage tests, 43 contracts, 588 lib, `--no-default-features` |
+| `89dabac` | #53 | portable CPU reference merged (`2c49653`) | fmt, 43 reference tests, 613 lib, release == debug to the last digit |
+| `4547b16` | #52 fix | extent-1 axes no longer count as stride overlap (found by #53) | 36 storage tests; unblocks `[batch,1,seq,seq]` masks for #56/#58 |
+| `bd32607` | #48 test | contract assertions realigned to the implemented CPU matrix | 43 contracts |
+| `b3db105` | #57 | Vulkan memory/dispatch/sync merged (`ddc4d5c`) | 14/14 smoke on GTX 1080 Ti, validation 0/0, add exact 100003/100003, device 106208 ns |
+| `3cbd0cc` | #57 fix | device messages state the real reason a tensor cannot live on Vulkan | 43 contracts with and without `--features vulkan` |
+| `880b979` | #66 | CI lanes merged (`08cf97c`) | lane renderer marks every absent lane NOT VERIFIED; cpu/python/frozen-2x/packaging pass |
+| `8e73812` | #48 test | dropped the unused `TensorView` import | 0 fn3 clippy findings |
+| `301e5a7` | #50 | bench harness + result schema merged (`f18fa37`) | 24 bench tests, real smoke run exit 0, schema valid |
+| `a522fbf` | #66 fix | software lane proves it dispatched; physical lane pins its device by UUID | lavapipe proof line, `max_abs_error=0`; `verify_evidence.py` VALID for the GTX 1080 Ti record |
+| `2353fc5` | #59/#60/#61 | scaffolded the kernel modules and their registration site | 14/14 smoke, 26 platform unit tests |
+| `27fc60d` | #59/#60/#61 | kernel-set verdict tests made invariant-based | 26 platform unit tests; removes the three-way merge hazard |
+
+## Integration decisions that bind later issues
+
+- **Kernel registration is wired by the integrator, not by kernel owners.**
+  `KernelSet::alpha()` calls `pointwise`, `transform`, `embedding`, `matmul`,
+  `norm`, `reduce` and `attention` in that order, and replacement is by op id,
+  so a later registration supersedes the FN3-11 smoke kernel. Kernel issues
+  fill in their own module and never edit `kernels/mod.rs`.
+- **Verdict tests are invariants.** `KernelSet` support verdicts must equal the
+  registered kernel's own verdict, and an op with no kernel must name its owner.
+  This holds before and after every GPU kernel lands, so adding a kernel cannot
+  break a test owned by another issue.
+- **Validation is enabled in code, never through `VK_INSTANCE_LAYERS`.**
+  Forcing the layer from the environment duplicates it and the loader then
+  emits `env var VK_INSTANCE_LAYERS defined` messages, which the teardown
+  test's zero-delta guard correctly counts as a leak. Both the software lane
+  and the physical evidence lane were fixed to stop doing this.
+- **A lane that skipped is not a lane that passed.** `vulkan-software-lane.sh`
+  now requires the smoke test's `[fn3vk][software-icd][proof]` line; a suite
+  where every test returned early exits 0 and would otherwise have gone green.
+- **Physical evidence is pinned by UUID.** `gpu_evidence.py` sets
+  `FN3_VK_REQUIRE_PHYSICAL=1` and `FN3_VK_DEVICE_UUID`, and the smoke test
+  honours both: selection is by UUID because the loader enumerates a software
+  ICD next to the real GPU, and a missing device is a failure rather than a skip.
+- **`Tensor` storage is host memory on every device.** Vulkan executes by
+  staging through host memory and records `host_staged=true`; device-resident
+  storage has no owner yet (it belongs with the session/KV work, #58). The
+  device-resident path (`alloc_buffer`/`upload`/`dispatch`/`download`) exists
+  for kernel chaining. Any claim of zero-copy residency on an op path is false
+  until #58.
+
+## Alpha gate status
+
+| Gate | State |
+|---|---|
+| CPU prefill + cached decode on the pinned tiny model, parity to the #49 fixtures | open — needs #56 + #58 |
+| Named physical Vulkan device, real execution | platform proven (#57); model path open — needs #59/#60/#61 + #62 |
+| Cache bounds and session isolation | open — needs #58 |
+| Residency record proves no silent CPU execution | proven for one op (#57); full-model assertion is #62 |
+| Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
+| Python facade | open — #64 |
+| CLI + quickstart | open — #63 |
+| Package versions 3.0.0-alpha.1 / 3.0.0a1 | open — #67 |
+| CI lanes | machinery merged (#66); vulkan lanes now genuinely execute |
