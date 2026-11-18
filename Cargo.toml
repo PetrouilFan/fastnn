@@ -116,3 +116,11 @@ harness = false
 name = "fn3-bench"
 path = "tools/bench/main.rs"
 
+# FN3-17 (#63) inference CLI. Gated on the existing `cli` feature for the same
+# reason as `fastnn-runtime`: a standalone binary is built without the default
+# `python` feature, whose pyo3 extension-module mode is for shared libraries.
+[[bin]]
+name = "fn3-infer"
+path = "src/bin/fn3-infer.rs"
+required-features = ["cli"]
+

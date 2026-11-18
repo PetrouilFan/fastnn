@@ -1,0 +1,856 @@
+//! `run` and `generate`: token-ID inference on one explicit device.
+//!
+//! Both commands prepare a [`PreparedModel`] from the artifact and the ONNX the
+//! artifact was made from, open exactly the requested backend, run `prefill`,
+//! and then either feed explicit token IDs (`run --decode`) or pick the argmax
+//! greedily (`generate`). Decoding is deterministic: greedy argmax with ties
+//! broken by the lowest token ID, and no sampling path at all.
+//!
+//! The bounds checks here are deliberate duplicates of the session's own: the
+//! CLI names the flag that fixes the problem before any step starts, instead of
+//! discovering it halfway through a prompt.
+
+use std::io::Write;
+use std::path::Path;
+use std::time::Instant;
+
+use crate::fn3::import::{import_onnx_model, ModelImport};
+use crate::fn3::model::format::{FormatError, FormatErrorKind, PreparedArtifact, PreparedHeader};
+use crate::fn3::model::{ModelWeights, Planner, PreparedModel, Session};
+use crate::fn3::{DType, DeviceId, Fn3Error, LiveDims, ShapeEnvelope, Symbol, Tensor, TensorMeta};
+
+use super::args::{GenerateArgs, InferArgs, RunArgs};
+use super::devices::OpenedBackend;
+use super::digest::sha256_hex;
+use super::{thousands, CliError};
+
+/// Everything a run needs, owned in one place. The session borrows `model`,
+/// `import` and the backend inside `backend`, so all three outlive it.
+struct Setup {
+    artifact: PreparedArtifact,
+    artifact_path: std::path::PathBuf,
+    artifact_bytes: u64,
+    artifact_sha256: String,
+    artifact_crc32: u32,
+    onnx_path: std::path::PathBuf,
+    onnx_sha256: String,
+    import: ModelImport,
+    backend: OpenedBackend,
+    model: PreparedModel,
+    envelope: ShapeEnvelope,
+    capacity: u64,
+    prompt: Vec<u32>,
+}
+
+/// Run `run`.
+pub fn execute_run(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> {
+    let setup = build_setup(&args.infer)?;
+    let decode = match args.decode.as_deref() {
+        Some(spec) => parse_tokens(spec, setup.artifact.geometry().vocab_size)?,
+        None => Vec::new(),
+    };
+    check_sequence(&setup, decode.len() as u64, "decode tokens")?;
+    print_header(&setup, out);
+
+    let mut session = open_session(&setup)?;
+    print_counters(&setup, &session, args.infer.steps, out);
+
+    let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
+    let mut summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+    print_logits(&summary, &logits, args.infer.top_k, out);
+
+    for (index, &token) in decode.iter().enumerate() {
+        let step = index + 1;
+        logits = decode_one(&mut session, token, step, &args.infer, out)?;
+        summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+        print_logits(&summary, &logits, args.infer.top_k, out);
+    }
+
+    let _ = writeln!(
+        out,
+        "  predicted next token: {} (logit {:.4})",
+        summary.argmax, summary.argmax_value
+    );
+    Ok(())
+}
+
+/// Run `generate`.
+pub fn execute_generate(args: &GenerateArgs, out: &mut dyn Write) -> Result<(), CliError> {
+    let setup = build_setup(&args.infer)?;
+    check_sequence(&setup, args.max_new_tokens, "generated tokens")?;
+    print_header(&setup, out);
+
+    let mut session = open_session(&setup)?;
+    print_counters(&setup, &session, args.infer.steps, out);
+
+    let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
+    let mut summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+    print_logits(&summary, &logits, args.infer.top_k, out);
+
+    let mut generated = Vec::with_capacity(args.max_new_tokens as usize);
+    for step in 1..=args.max_new_tokens {
+        let token = summary.argmax as u32;
+        generated.push(token);
+        logits = decode_one(&mut session, token, step as usize, &args.infer, out)?;
+        summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+    }
+
+    let _ = writeln!(
+        out,
+        "  generated token IDs: [{}]",
+        format_token_list(&generated)
+    );
+    let _ = writeln!(
+        out,
+        "  predicted next token: {} (logit {:.4})",
+        summary.argmax, summary.argmax_value
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+
+fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
+    // Resolve the device first: an unavailable explicit request must fail
+    // before a 28 MB artifact is read, and it must never become a CPU run.
+    let backend = OpenedBackend::open(&args.device)?;
+
+    let (artifact, artifact_sha256, artifact_crc32, artifact_bytes) = read_artifact(&args.model)?;
+    let (import, onnx_sha256) = read_import(&args.onnx)?;
+    verify_pair(&artifact, &import, &args.model, &args.onnx)?;
+
+    let envelope = artifact.envelope();
+    let capacity = args
+        .capacity
+        .unwrap_or_else(|| envelope.get(Symbol::Total).max());
+    if capacity > envelope.get(Symbol::Total).max() {
+        return Err(CliError::inference(format!(
+            "KV capacity {capacity} exceeds the artifact's total envelope maximum {}",
+            envelope.get(Symbol::Total).max()
+        ))
+        .with_next(
+            "pass `--capacity` at or below the envelope maximum, or re-prepare with a larger \
+             `--max-total` (the model's learned position table is the hard cap)",
+        ));
+    }
+
+    let prompt = parse_tokens(&args.tokens, artifact.geometry().vocab_size)?;
+    if prompt.is_empty() {
+        return Err(CliError::usage(
+            "`--tokens` needs at least one token ID; an empty prompt cannot be prefilled",
+        ));
+    }
+    let prompt_len = prompt.len() as u64;
+    if prompt_len > envelope.get(Symbol::Seq).max() {
+        return Err(CliError::inference(format!(
+            "the prompt has {prompt_len} token IDs, above the artifact's seq envelope maximum {}",
+            envelope.get(Symbol::Seq).max()
+        ))
+        .with_next(format!(
+            "re-prepare with `--max-seq {prompt_len}` (or more), or shorten the prompt"
+        )));
+    }
+    if prompt_len > envelope.get(Symbol::Total).max() {
+        return Err(CliError::inference(format!(
+            "the prompt has {prompt_len} token IDs, above the artifact's total envelope maximum {}",
+            envelope.get(Symbol::Total).max()
+        ))
+        .with_next("re-prepare with a larger `--max-total`, or shorten the prompt"));
+    }
+    if prompt_len > capacity {
+        return Err(CliError::inference(format!(
+            "the prompt has {prompt_len} token IDs but the KV capacity is {capacity} tokens"
+        ))
+        .with_next(format!(
+            "pass `--capacity {prompt_len}` (or more, up to the envelope maximum {})",
+            envelope.get(Symbol::Total).max()
+        )));
+    }
+
+    let geometry = artifact.geometry();
+    let heads = u64::from(geometry.query_heads);
+    let kv_heads = u64::from(geometry.kv_heads);
+    let head_dim = u64::from(geometry.head_dim);
+    let fixed_seq = envelope.get(Symbol::Seq).max().clamp(1, 4);
+    let fixed_dims =
+        LiveDims::new(1, fixed_seq, 0, heads, kv_heads, head_dim).map_err(|error| {
+            CliError::model(format!("the model's head geometry is not usable: {error}"))
+        })?;
+    let weights = import.to_model_weights().map_err(|error| {
+        failure(
+            "copying the weights into host tensors",
+            error,
+            backend.device,
+        )
+    })?;
+    let weights = retag_weights(&weights, backend.device)?;
+    let plan = Planner::new(&import, backend.backend.as_ref())
+        .plan(&envelope, fixed_dims)
+        .map_err(|error| plan_failure(&backend, error))?;
+    let kv_config = geometry.kv_cache_config(capacity, 1);
+    let model = PreparedModel::new(
+        plan.execution().clone(),
+        weights,
+        backend.device,
+        envelope,
+        Some(kv_config),
+    )
+    .map_err(|error| failure("PreparedModel::new", error, backend.device))?;
+
+    Ok(Setup {
+        artifact,
+        artifact_path: args.model.clone(),
+        artifact_bytes,
+        artifact_sha256,
+        artifact_crc32,
+        onnx_path: args.onnx.clone(),
+        onnx_sha256,
+        import,
+        backend,
+        model,
+        envelope,
+        capacity,
+        prompt,
+    })
+}
+
+fn open_session<'a>(setup: &'a Setup) -> Result<Session<'a>, CliError> {
+    Session::with_runtime(&setup.model, &setup.import, setup.backend.backend.as_ref())
+        .map_err(|error| failure("Session::with_runtime", error, setup.backend.device))
+}
+
+fn read_artifact(path: &Path) -> Result<(PreparedArtifact, String, u32, u64), CliError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        CliError::model(format!(
+            "cannot read artifact `{}`: {error}",
+            path.display()
+        ))
+        .with_next(
+            "create it with `fn3-infer prepare --onnx <model.onnx> --out <model.fnn3>`, or check \
+             the path",
+        )
+    })?;
+    let byte_len = bytes.len() as u64;
+    let header = PreparedHeader::parse(&bytes).map_err(|error| format_failure(path, &error))?;
+    let sha256 = sha256_hex(&bytes);
+    let artifact = PreparedArtifact::from_bytes(&bytes).map_err(|error| {
+        let cli = format_failure(path, &error);
+        if error.is_corruption() {
+            cli.with_next(
+                "the payload does not match its checksum; re-run `fn3-infer prepare` from the \
+                 source ONNX",
+            )
+        } else {
+            cli
+        }
+    })?;
+    Ok((artifact, sha256, header.payload_crc32, byte_len))
+}
+
+fn read_import(path: &Path) -> Result<(ModelImport, String), CliError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        CliError::model(format!(
+            "cannot read ONNX model `{}`: {error}",
+            path.display()
+        ))
+        .with_next(
+            "the alpha planner consumes the importer's ModelImport; pass the same ONNX file the \
+             artifact was prepared from with `--onnx <model.onnx>`",
+        )
+    })?;
+    let sha256 = sha256_hex(&bytes);
+    let import = import_onnx_model(&bytes).map_err(|error| {
+        CliError::model(format!(
+            "`{}` is not an ONNX model this importer accepts:\n{error}",
+            path.display()
+        ))
+        .with_next("pass the pinned ONNX export this artifact was prepared from")
+    })?;
+    Ok((import, sha256))
+}
+
+fn verify_pair(
+    artifact: &PreparedArtifact,
+    import: &ModelImport,
+    artifact_path: &Path,
+    onnx_path: &Path,
+) -> Result<(), CliError> {
+    let expected = crate::fn3::model::format::ArtifactMetadata::from_import(import);
+    if &expected != artifact.metadata() {
+        return Err(mismatch(
+            artifact_path,
+            onnx_path,
+            "provenance (IR version, opset, producer or graph name)",
+        ));
+    }
+    if import.geometry() != artifact.geometry() {
+        return Err(mismatch(artifact_path, onnx_path, "architecture geometry"));
+    }
+    if import.weights().len() != artifact.weights().len() {
+        return Err(mismatch(
+            artifact_path,
+            onnx_path,
+            &format!(
+                "weight count ({} in the ONNX, {} in the artifact)",
+                import.weights().len(),
+                artifact.weights().len()
+            ),
+        ));
+    }
+    for (artifact_weight, import_weight) in artifact.weights().iter().zip(import.weights().iter()) {
+        if artifact_weight.name() != import_weight.name()
+            || artifact_weight.dtype() != import_weight.dtype()
+            || artifact_weight.shape() != import_weight.shape()
+            || artifact_weight.bytes() != import_weight.bytes()
+        {
+            return Err(mismatch(
+                artifact_path,
+                onnx_path,
+                &format!("weight `{}`", artifact_weight.name()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn mismatch(artifact: &Path, onnx: &Path, what: &str) -> CliError {
+    CliError::model(format!(
+        "`{}` and `{}` do not describe the same model: {what} differs",
+        artifact.display(),
+        onnx.display()
+    ))
+    .with_next(
+        "pass the exact ONNX the artifact was prepared from, or re-run `fn3-infer prepare` with \
+         this ONNX",
+    )
+}
+
+fn format_failure(path: &Path, error: &FormatError) -> CliError {
+    let next = match error.kind() {
+        FormatErrorKind::UnsupportedVersion { found, supported } => format!(
+            "this file uses format version {found}; this build reads version {supported} only. \
+             Use a matching `fn3-infer`, or re-prepare the ONNX with this build"
+        ),
+        FormatErrorKind::BadMagic { .. } => "the first eight bytes must be `FNN3PREP`; a 2.x \
+             `.fnnc` file is a different format and is never read by FastNN 3.0"
+            .to_string(),
+        FormatErrorKind::UnsupportedDtypeEncoding { found, supported } => format!(
+            "this file uses dtype encoding {found}; this build reads encoding {supported} only"
+        ),
+        FormatErrorKind::Io { .. } => {
+            "check the path and file permissions, then create the artifact with `fn3-infer prepare`"
+                .to_string()
+        }
+        _ => "the file is truncated, corrupt or inconsistent; re-run `fn3-infer prepare` from \
+              the source ONNX"
+            .to_string(),
+    };
+    CliError::model(format!(
+        "`{}` is not a usable prepared model: {error}",
+        path.display()
+    ))
+    .with_next(next)
+}
+
+fn retag_weights(weights: &ModelWeights, device: DeviceId) -> Result<ModelWeights, CliError> {
+    let mut named = Vec::with_capacity(weights.len());
+    for index in 0..weights.len() {
+        let tensor = weights.get(index).ok_or_else(|| {
+            CliError::model(format!(
+                "weight index {index} disappeared from the imported weights"
+            ))
+        })?;
+        let name = weights.name(index).ok_or_else(|| {
+            CliError::model(format!(
+                "weight index {index} has no name in the imported weights"
+            ))
+        })?;
+        let meta = TensorMeta::contiguous(tensor.shape().clone(), tensor.dtype(), device)
+            .map_err(|error| failure("tagging a weight for the requested device", error, device))?;
+        let retagged = Tensor::from_storage(tensor.storage().clone(), meta)
+            .map_err(|error| failure("tagging a weight for the requested device", error, device))?;
+        named.push((name.to_string(), retagged));
+    }
+    ModelWeights::with_names(named)
+        .map_err(|error| failure("ModelWeights::with_names", error, device))
+}
+
+fn plan_failure(backend: &OpenedBackend, error: Fn3Error) -> CliError {
+    if error_is_unsupported(&error) && !backend.device.is_cpu() {
+        return CliError::inference(format!(
+            "the {} backend cannot build the full decoder plan on {}: {error}",
+            backend.backend.name(),
+            backend.device
+        ))
+        .with_next(
+            "full-model Vulkan execution is a known alpha blocker: the kernels exist, but the \
+             session's complete decoder plan is not yet validated on Vulkan. Run `--device cpu` \
+             for a working inference path; `fn3-infer diagnose` shows what the GPU did open",
+        );
+    }
+    failure("building the initial decoder plan", error, backend.device)
+}
+
+fn failure(context: &str, error: Fn3Error, device: DeviceId) -> CliError {
+    let code = match &error {
+        Fn3Error::DeviceUnavailable(_) => super::EXIT_DEVICE,
+        Fn3Error::InvalidFormat { .. } | Fn3Error::UnknownDTypeCode(_) => super::EXIT_MODEL,
+        _ => super::EXIT_INFERENCE,
+    };
+    let mut cli = CliError::new(code, format!("{context}: {error}"));
+    if matches!(
+        &error,
+        Fn3Error::UnsupportedOp { .. } | Fn3Error::NotImplemented { .. }
+    ) {
+        let next = if device.is_cpu() {
+            "the reference backend is missing this operation in this build; report it with the \
+             artifact SHA-256 printed above"
+        } else {
+            "this backend cannot run the full decoder graph yet; run `--device cpu`, and use \
+             `fn3-infer diagnose` to see which devices actually opened"
+        };
+        cli = cli.with_next(next);
+    } else if cli.next_step().is_none() {
+        cli = cli.with_next(
+            "re-run with `--steps` to see the failing step; if the device is involved, run \
+             `fn3-infer diagnose`",
+        );
+    }
+    cli
+}
+
+fn error_is_unsupported(error: &Fn3Error) -> bool {
+    matches!(
+        error,
+        Fn3Error::UnsupportedOp { .. } | Fn3Error::NotImplemented { .. }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Bounds and tokens
+// ---------------------------------------------------------------------------
+
+fn check_sequence(setup: &Setup, extra: u64, what: &str) -> Result<(), CliError> {
+    let prompt = setup.prompt.len() as u64;
+    let total = prompt.checked_add(extra).ok_or_else(|| {
+        CliError::inference("the prompt plus requested tokens overflows a u64 token count")
+    })?;
+    let total_max = setup.envelope.get(Symbol::Total).max();
+    if total > total_max {
+        return Err(CliError::inference(format!(
+            "the prompt ({prompt}) plus {extra} {what} needs {total} positions, above the \
+             artifact's total envelope maximum {total_max}"
+        ))
+        .with_next(format!(
+            "re-prepare with `--max-total {total}` (or more), or request fewer {what}"
+        )));
+    }
+    if total > setup.capacity {
+        return Err(CliError::inference(format!(
+            "{total} positions exceed the KV capacity of {} tokens",
+            setup.capacity
+        ))
+        .with_next(format!(
+            "pass `--capacity {total}` (up to the envelope maximum {total_max}), or request \
+             fewer {what}"
+        )));
+    }
+    if total > 0 {
+        let last_past = total - 1;
+        let past_max = setup.envelope.get(Symbol::Past).max();
+        if last_past > past_max {
+            return Err(CliError::inference(format!(
+                "the final decode would start at past={last_past}, above the artifact's past \
+                 envelope maximum {past_max}"
+            ))
+            .with_next("re-prepare with a larger `--max-past`, or request fewer tokens"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_tokens(spec: &str, vocab: u32) -> Result<Vec<u32>, CliError> {
+    let text = if let Some(path) = spec.strip_prefix('@') {
+        std::fs::read_to_string(path).map_err(|error| {
+            CliError::model(format!("cannot read token file `{path}`: {error}")).with_next(
+                "write one token ID per line or a comma-separated list, and pass `--tokens @file`",
+            )
+        })?
+    } else {
+        spec.to_string()
+    };
+
+    let mut tokens = Vec::new();
+    for (position, item) in text
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|item| !item.is_empty())
+        .enumerate()
+    {
+        let token = item.parse::<u32>().map_err(|_| {
+            CliError::usage(format!(
+                "token {} (`{item}`) is not a whole number; token IDs are unsigned 32-bit integers",
+                position + 1
+            ))
+        })?;
+        if token >= vocab {
+            return Err(CliError::inference(format!(
+                "token ID {token} is outside the model vocabulary 0..={}",
+                vocab.saturating_sub(1)
+            ))
+            .with_next(
+                "use the reference tokenizer to obtain IDs below the model's vocabulary; this \
+                 alpha does not approximate byte-level BPE, because different tokens produce \
+                 different logits",
+            ));
+        }
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
+
+fn format_token_list(tokens: &[u32]) -> String {
+    if tokens.len() <= 16 {
+        return tokens
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    let head = tokens[..8]
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tail = tokens[tokens.len() - 8..]
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{head}, … ({} more) …, {tail}", tokens.len() - 16)
+}
+
+// ---------------------------------------------------------------------------
+// Inference and output
+// ---------------------------------------------------------------------------
+
+fn prefill(
+    setup: &Setup,
+    session: &mut Session<'_>,
+    args: &InferArgs,
+    out: &mut dyn Write,
+) -> Result<Tensor, CliError> {
+    let hits_before = session.plan_hits();
+    let misses_before = session.plan_misses();
+    let start = Instant::now();
+    let logits = session
+        .prefill(&setup.prompt)
+        .map_err(|error| failure("Session::prefill", error, setup.backend.device))?;
+    let elapsed = start.elapsed();
+    let _ = writeln!(
+        out,
+        "  prefill: seq={} past=0 cache={} plan={} plan-cache={}hit/{}miss wall={}",
+        setup.prompt.len(),
+        session.cache_len(),
+        plan_label(session),
+        session.plan_hits() - hits_before,
+        session.plan_misses() - misses_before,
+        milliseconds(elapsed)
+    );
+    if args.steps {
+        let _ = writeln!(
+            out,
+            "    counters: slot_allocations={} slot_reuses={} plan_cache={} phase={}",
+            session.slot_allocations(),
+            session.slot_reuses(),
+            session.plan_cache_len(),
+            session.phase().name()
+        );
+    }
+    Ok(logits)
+}
+
+fn decode_one(
+    session: &mut Session<'_>,
+    token: u32,
+    step: usize,
+    args: &InferArgs,
+    out: &mut dyn Write,
+) -> Result<Tensor, CliError> {
+    let hits_before = session.plan_hits();
+    let misses_before = session.plan_misses();
+    let past = session.cache_len();
+    let start = Instant::now();
+    let logits = session
+        .decode(&[token])
+        .map_err(|error| failure("Session::decode", error, session.model().device()))?;
+    let elapsed = start.elapsed();
+    if args.steps {
+        let _ = writeln!(
+            out,
+            "  decode {step}: token={token} past={past} seq=1 cache={} plan={} plan-cache={}hit/{}miss \
+             wall={} slots={}/{} phase={}",
+            session.cache_len(),
+            plan_label(session),
+            session.plan_hits() - hits_before,
+            session.plan_misses() - misses_before,
+            milliseconds(elapsed),
+            session.slot_allocations(),
+            session.slot_reuses(),
+            session.phase().name()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  decode {step}: token={token} cache={}",
+            session.cache_len()
+        );
+    }
+    Ok(logits)
+}
+
+fn plan_label(session: &Session<'_>) -> String {
+    session
+        .last_plan()
+        .map(|plan| plan.to_hex())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn milliseconds(elapsed: std::time::Duration) -> String {
+    let millis = elapsed.as_secs_f64() * 1_000.0;
+    if millis >= 1_000.0 {
+        format!("{:.2}s", millis / 1_000.0)
+    } else {
+        format!("{millis:.2}ms")
+    }
+}
+
+struct Summary {
+    shape: String,
+    len: usize,
+    min: f32,
+    max: f32,
+    mean: f64,
+    argmax: usize,
+    argmax_value: f32,
+}
+
+fn summarize(logits: &Tensor, vocab: u32) -> Result<Summary, CliError> {
+    if logits.dtype() != DType::F32 {
+        return Err(CliError::inference(format!(
+            "the session returned {} logits, but the decoder contract is f32",
+            logits.dtype()
+        ))
+        .with_next("this is a backend contract violation; report it with the artifact SHA-256"));
+    }
+    let dims = logits.shape().dims();
+    let expected = [1, 1, u64::from(vocab)];
+    if dims != expected {
+        return Err(CliError::inference(format!(
+            "the session returned logits of shape {}, expected [1, 1, {vocab}]",
+            logits.shape()
+        ))
+        .with_next(
+            "this is a session/backend contract violation; report it with the artifact SHA-256",
+        ));
+    }
+    let values = logits.as_f32_slice().map_err(|error| {
+        CliError::inference(format!("the logits tensor is not readable as f32: {error}"))
+    })?;
+    if values.is_empty() {
+        return Err(CliError::inference(
+            "the session returned an empty logits tensor",
+        ));
+    }
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+    let mut argmax = 0usize;
+    let mut argmax_value = f32::NEG_INFINITY;
+    for (index, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CliError::inference(format!(
+                "logits contain a non-finite value ({value}) at vocabulary index {index}"
+            ))
+            .with_next(
+                "refusing to pick a token from an invalid distribution; check the model/artifact \
+                 pair and the backend",
+            ));
+        }
+        if value < min {
+            min = value;
+        }
+        if value > max {
+            max = value;
+        }
+        // `>` keeps the lowest token ID on a tie: deterministic argmax.
+        if value > argmax_value {
+            argmax = index;
+            argmax_value = value;
+        }
+        sum += f64::from(value);
+    }
+    Ok(Summary {
+        shape: logits.shape().to_string(),
+        len: values.len(),
+        min,
+        max,
+        mean: sum / values.len() as f64,
+        argmax,
+        argmax_value,
+    })
+}
+
+fn print_logits(summary: &Summary, logits: &Tensor, top_k: usize, out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
+        "  logits: shape={} f32 finite={} min={:.4} max={:.4} mean={:.6}",
+        summary.shape,
+        thousands(summary.len as u64),
+        summary.min,
+        summary.max,
+        summary.mean
+    );
+    let Ok(values) = logits.as_f32_slice() else {
+        return;
+    };
+    let mut ranked: Vec<(usize, f32)> = values.iter().copied().enumerate().collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let shown = top_k.min(ranked.len());
+    let top = ranked[..shown]
+        .iter()
+        .map(|(index, value)| format!("{index} ({value:.4})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "  top-{shown}: {top}");
+    let _ = writeln!(
+        out,
+        "  argmax: {} (logit {:.4})",
+        summary.argmax, summary.argmax_value
+    );
+}
+
+fn print_header(setup: &Setup, out: &mut dyn Write) {
+    let geometry = setup.artifact.geometry();
+    let envelope = setup.envelope;
+    let _ = writeln!(out, "fn3-infer inference");
+    let _ = writeln!(out, "  artifact: {}", setup.artifact_path.display());
+    let _ = writeln!(
+        out,
+        "    bytes:  {}  sha256: {}",
+        thousands(setup.artifact_bytes),
+        setup.artifact_sha256
+    );
+    let _ = writeln!(out, "    payload crc32: {:#010x}", setup.artifact_crc32);
+    let _ = writeln!(
+        out,
+        "  onnx: {} (sha256 {}, verified: metadata, geometry and {} weight payloads match)",
+        setup.onnx_path.display(),
+        setup.onnx_sha256,
+        setup.artifact.weights().len()
+    );
+    let _ = writeln!(
+        out,
+        "  device: requested {}, resolved {}, backend {} ({})",
+        setup.backend.requested,
+        setup.backend.device,
+        setup.backend.backend.name(),
+        setup.backend.detail
+    );
+    let _ = writeln!(
+        out,
+        "  envelope: batch {}..={} seq {}..={} past {}..={} total {}..={}",
+        envelope.get(Symbol::Batch).min(),
+        envelope.get(Symbol::Batch).max(),
+        envelope.get(Symbol::Seq).min(),
+        envelope.get(Symbol::Seq).max(),
+        envelope.get(Symbol::Past).min(),
+        envelope.get(Symbol::Past).max(),
+        envelope.get(Symbol::Total).min(),
+        envelope.get(Symbol::Total).max()
+    );
+    let layer_bytes = geometry
+        .kv_cache_config(setup.capacity, 1)
+        .buffer_bytes()
+        .map(|bytes| bytes.saturating_mul(2))
+        .unwrap_or(0);
+    let _ = writeln!(
+        out,
+        "  kv: capacity={} tokens, {} layers x {} KV heads x {} head_dim = {} bytes",
+        setup.capacity,
+        geometry.layers,
+        geometry.kv_heads,
+        geometry.head_dim,
+        thousands(layer_bytes.saturating_mul(u64::from(geometry.layers)))
+    );
+    let _ = writeln!(
+        out,
+        "  prompt: {} token IDs [{}]",
+        setup.prompt.len(),
+        format_token_list(&setup.prompt)
+    );
+    let _ = writeln!(out, "  input: token IDs (this alpha has no text tokenizer)");
+}
+
+fn print_counters(setup: &Setup, session: &Session<'_>, steps: bool, out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
+        "  session: phase={} cache={} kv_bytes={}",
+        session.phase().name(),
+        session.cache_len(),
+        thousands(session.kv_bytes())
+    );
+    let _ = writeln!(
+        out,
+        "  execution: {} on {}",
+        setup.backend.backend.name(),
+        setup.backend.device
+    );
+    if steps {
+        let _ = writeln!(
+            out,
+            "  timing: wall-clock around each call; the Vulkan backend records per-dispatch \
+             gpu_ns, but Session does not aggregate a device time in this build"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_accept_commas_whitespace_and_files() {
+        assert_eq!(
+            parse_tokens("1, 2 3\n4", 10).expect("parse"),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(parse_tokens("0", 1).expect("parse"), vec![0]);
+        let error = parse_tokens("1, x", 10).expect_err("not a number");
+        assert_eq!(error.code(), super::super::EXIT_USAGE);
+        assert!(error.message().contains("token 2"), "{error:?}");
+    }
+
+    #[test]
+    fn out_of_vocabulary_tokens_are_actionable_and_not_silently_wrapped() {
+        let error = parse_tokens("50257", 50_257).expect_err("out of range");
+        assert_eq!(error.code(), super::super::EXIT_INFERENCE);
+        assert!(error.message().contains("0..=50256"), "{error:?}");
+        assert!(error.next_step().is_some());
+    }
+
+    #[test]
+    fn token_lists_are_truncated_in_the_middle_for_long_prompts() {
+        let tokens: Vec<u32> = (0..40).collect();
+        let text = format_token_list(&tokens);
+        assert!(text.contains("24 more"), "{text}");
+        assert!(text.starts_with("0, 1, 2"), "{text}");
+        assert!(text.ends_with("38, 39"), "{text}");
+    }
+}
