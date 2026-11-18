@@ -503,13 +503,16 @@ mod tests {
 
     #[test]
     fn device_errors_delegate_and_keep_source() {
-        let resolve = DeviceRequest::Vulkan { index: Some(2) }
+        let resolve = DeviceRequest::Vulkan { index: Some(1000) }
             .resolve(&crate::fn3::device::available_devices())
             .unwrap_err();
         let error = Fn3Error::from(resolve);
         let text = error.to_string();
-        assert!(text.contains("vulkan(index=2)"), "{text}");
-        assert!(text.contains("available devices: [cpu]"), "{text}");
+        assert!(text.contains("vulkan(index=1000)"), "{text}");
+        // cpu is always listed first; adapters follow only when this build can
+        // see them, so a fixed one-element list would be a snapshot that breaks
+        // the moment the vulkan feature is enabled.
+        assert!(text.contains("available devices: [cpu"), "{text}");
         assert!(std::error::Error::source(&error).is_some());
     }
 

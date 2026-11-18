@@ -382,14 +382,20 @@ mod tests {
     #[test]
     fn explicit_vulkan_never_falls_back_to_cpu() {
         let available = available_devices();
-        let error = DeviceRequest::Vulkan { index: Some(0) }
+        // Ask for an adapter that exists in no configuration, so this exercises
+        // the same path whether or not the vulkan feature is enabled. Asking for
+        // index 0 would resolve to a real adapter once the feature is on, which
+        // is a different test.
+        let error = DeviceRequest::Vulkan { index: Some(1000) }
             .resolve(&available)
-            .expect_err("no vulkan in this build");
-        assert_eq!(error.requested(), "vulkan(index=0)");
-        assert_eq!(error.available(), ["cpu"]);
+            .expect_err("index 1000 is not an adapter on this host");
+        assert_eq!(error.requested(), "vulkan(index=1000)");
+        // The cpu device is always listed first, and anything after it is an
+        // adapter this build can actually see.
+        assert_eq!(error.available().first().map(String::as_str), Some("cpu"));
         let text = error.to_string();
-        assert!(text.contains("vulkan(index=0)"), "{text}");
-        assert!(text.contains("available devices: [cpu]"), "{text}");
+        assert!(text.contains("vulkan(index=1000)"), "{text}");
+        assert!(text.contains("available devices: [cpu"), "{text}");
     }
 
     #[test]

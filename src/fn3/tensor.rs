@@ -1128,7 +1128,17 @@ mod tests {
         .unwrap_err();
         let text = error.to_string();
         assert!(text.contains("vulkan(0)"), "{text}");
-        assert!(text.contains("available devices: [cpu]"), "{text}");
+        if cfg!(feature = "vulkan") {
+            // The backend exists, so the reason a tensor cannot live on the
+            // device is that alpha tensor storage is host memory, not that the
+            // device is missing. Both remedies are honest; asserting the wrong
+            // one would hide a regression in either direction.
+            assert!(text.contains("host memory"), "{text}");
+            assert!(text.contains("FN3-12"), "{text}");
+        } else {
+            assert!(text.contains("available devices: [cpu"), "{text}");
+            assert!(text.contains("--features vulkan"), "{text}");
+        }
     }
 
     #[test]
