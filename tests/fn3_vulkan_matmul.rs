@@ -1083,13 +1083,20 @@ fn support_is_full_and_the_record_proves_device_execution() {
         "the tiled kernel covers the whole rank >= 2 contract"
     );
     // `CapabilityFeatures::broadcasting` is the *elementwise* broadcasting flag
-    // (owned by FN3-13 / #59). Matmul batch broadcasting is part of this op's
-    // own contract, so this kernel leaves the flag alone and the aggregate
-    // capability set must not start advertising it.
-    assert!(
-        !backend.capabilities().features.broadcasting,
-        "a matmul registration must not claim the elementwise broadcasting flag"
-    );
+    // and it is an aggregate over every registered kernel (FN3-13 / #59 owns the
+    // kernel that sets it). Matmul's own batch broadcasting is part of this op's
+    // contract, so the only stable assertion here is the implication: if the
+    // flag is advertised, the elementwise kernel that backs it must be Full.
+    // Asserting the aggregate is *false* would fail the moment a pointwise
+    // kernel lands, which is what happened when #59 merged.
+    if backend.capabilities().features.broadcasting {
+        assert_eq!(
+            backend.supports(OpId::Add),
+            Support::Full,
+            "the broadcasting flag may only be advertised when a kernel implements \
+             elementwise broadcasting"
+        );
+    }
 
     let (sequence, hidden, projected) = (13u64, 128u64, 384u64);
     let case = Case::contiguous(

@@ -107,7 +107,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #53 | CPU reference | verified (integrated `89dabac`) | `fn3/53-cpu-reference` | `fastnn-wt-53-cpu` | `830f315` | done; numerical oracle for all GPU work |
 | #54 | Model import | in progress | `fn3/54-onnx-import-b` | `fastnn-wt-54b-import` | `27fc60d` | ONNX protobuf parser; unblocks #55/#56/#58 |
 | #57 | Vulkan dispatch | verified (integrated `b3db105`) | `fn3/57-vulkan-dispatch` | `fastnn-wt-57-vulkan` | `cfea81b` | done; unblocks #59/#60/#61 |
-| #59 | GPU pointwise | in progress | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | pointwise/transform/embedding kernels |
+| #59 | GPU pointwise | verified (integrated `3671a3c`) | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | done; 18 tests, byte-exact on 4 op families |
 | #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
 | #61 | GPU attention | verified (integrated `117e51a`) | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | done; `MaskedAttention` now Full, 19 tests, 0/0 validation |
 | #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
@@ -244,6 +244,10 @@ matrix, and clean install verification.
 | `27fc60d` | #59/#60/#61 | kernel-set verdict tests made invariant-based | 26 platform unit tests; removes the three-way merge hazard |
 | `4d188e8` | #57 test | Vulkan smoke support-gap assertions made invariant | 14/14 smoke; unblocked #60 and pre-empts #59/#61 |
 | `2835c32` | #60 | Vulkan FP32 matmul merged (`4272aac`) | 17 matmul tests, 14/14 smoke, 30 platform, 43 contracts; 0 errors 0 warnings; fixtures 1.14e-7..2.86e-6 |
+| `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
+| `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
+| `4771083` | #46 | ledger: whole-tree gate run after #60/#61 | n/a |
+| `3671a3c` | #59 | Vulkan pointwise/transform/embedding merged (`793e97d`) | 18 pointwise tests, 14/14 smoke, 30 platform, 43 contracts; 18/18 SPIR-V valid; byte-exact where exactness is expected |
 | `117e51a` | #61 | Vulkan norm/softmax/reductions/fused attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts, 17 matmul; 0 errors 0 warnings |
 
 ## Integration decisions that bind later issues
@@ -273,6 +277,15 @@ matrix, and clean install verification.
   follows it. The kernel's `keys <= 4096` bound is part of the documented
   contract and is enforced loudly; a flash-style tiled kernel would lift it,
   and that is a later performance issue, not a hidden limit.
+- **A capability flag is an aggregate, so never assert it is false.** #60's
+  matmul test asserted `!capabilities.features.broadcasting` to say "this
+  kernel does not claim the elementwise flag", and it broke the instant #59
+  registered a broadcast-capable `Add`. A kernel test may only assert the
+  implication: if the flag is advertised, the kernel that backs it is `Full`.
+  The same rule applies to `masked_attention` and to any flag added later.
+- **`shaders/compile.sh` must exit 0 on success.** It exited 141 after a fully
+  successful build because `pipefail` plus `glslc --version | head -n 1` is a
+  SIGPIPE, so a lane checking the exit status would have called a good build bad.
 - **A lane that skipped is not a lane that passed.** `vulkan-software-lane.sh`
   now requires the smoke test's `[fn3vk][software-icd][proof]` line; a suite
   where every test returned early exits 0 and would otherwise have gone green.
@@ -329,7 +342,7 @@ Known non-blocking debt, both owned by #67:
 | Residency record proves no silent CPU execution | proven for Add (#57) and MatMul (#60); full-model assertion is #62 |
 | GPU matmul on the pinned shapes | proven (#60): real prefill/decode/attention shapes within tolerance, 144,448 ns kernel-only decode `lm_head` |
 | GPU norm/softmax/attention on the pinned shapes | proven (#61): LayerNorm 2.384e-7, softmax 5.960e-8, fused attention 5.960e-8, ReduceSum bit-exact, all-masked row exactly uniform and finite |
-| GPU pointwise/transform/embedding | in progress (#59) |
+| GPU pointwise/transform/embedding | proven (#59): Add/Sub/Mul/Neg/Relu/Cast/comparisons/layout byte-exact, Gelu 4.77e-7, embedding exact |
 | Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
 | Python facade | open — #64 |
 | CLI + quickstart | open — #63 |
