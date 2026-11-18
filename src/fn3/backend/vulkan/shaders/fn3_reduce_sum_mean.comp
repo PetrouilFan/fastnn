@@ -1,0 +1,84 @@
+#version 450
+// FN3-15 (#61): ReduceSum / ReduceMean over an arbitrary axis set.
+//
+// One invocation owns one *output* element. It walks the reduced coordinates in
+// ascending row-major order (the order the CPU reference visits them, because
+// that reference scans the input linearly) and accumulates into one `f32`
+// accumulator. `ReduceMean` divides the completed sum by the reduced element
+// count; it never scales each element first, matching the CPU kernel.
+//
+// `reduced_count` is the product of the reduced extents and `divisor` is that
+// count converted to `f32` (1.0 when the reduction is empty, so an empty
+// reduction writes `+0.0` instead of `0/0`).
+//
+// The parameter block is a storage buffer, not a uniform buffer, so the layout
+// is plain scalar std430: every member is 4 bytes and the `uint[8]` arrays have
+// a stride of 4. The host writes the identical layout (`kernels::reduce`).
+//
+// Bindings and push-constant use are mirrored by
+// `kernels::reduce::REDUCE_SUM_MEAN`; `kernels::reflect` cross-checks the
+// module against that declaration at registration time.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+    float inputv[];
+};
+
+layout(set = 0, binding = 1, std430) writeonly buffer Out {
+    float outv[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer Params {
+    uint rank;
+    uint out_numel;
+    uint reduced_count;
+    uint mean; // 1 selects ReduceMean
+    float divisor;
+    uint in_dims[8];
+    uint reduced[8]; // 1 when the axis is reduced
+    uint in_stride[8];
+} pc;
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= pc.out_numel) {
+        return;
+    }
+
+    // Decompose the output slot over the non-reduced axes. The expected output
+    // shape keeps the surviving axes in input order, so a reverse walk with
+    // each surviving extent is exactly its row-major layout.
+    uint coords[8];
+    uint rem = slot;
+    for (int axis = int(pc.rank) - 1; axis >= 0; --axis) {
+        if (pc.reduced[axis] == 1u) {
+            coords[axis] = 0u;
+        } else {
+            uint extent = pc.in_dims[axis];
+            coords[axis] = rem % extent;
+            rem /= extent;
+        }
+    }
+
+    float accumulator = 0.0;
+    for (uint position = 0u; position < pc.reduced_count; ++position) {
+        // Row-major decomposition of the reduced position: the last reduced
+        // axis varies fastest, which is ascending lexicographic order.
+        uint reduced_rem = position;
+        for (int axis = int(pc.rank) - 1; axis >= 0; --axis) {
+            if (pc.reduced[axis] == 1u) {
+                uint extent = pc.in_dims[axis];
+                coords[axis] = reduced_rem % extent;
+                reduced_rem /= extent;
+            }
+        }
+        uint linear = 0u;
+        for (uint axis = 0u; axis < pc.rank; ++axis) {
+            linear += coords[axis] * pc.in_stride[axis];
+        }
+        accumulator += inputv[linear];
+    }
+
+    outv[slot] = (pc.mean == 1u) ? (accumulator / pc.divisor) : accumulator;
+}

@@ -1,0 +1,64 @@
+#version 450
+// FN3-15 (#61): numerically stable softmax over the trailing axis.
+//
+//     shifted[a] = x[a] - max(x)            (max over the axis, f32)
+//     out[a]     = exp(shifted[a]) / sum     (ascending a, one f32 accumulator)
+//
+// One invocation owns one row and walks it ascending, so the sum order and the
+// final division match the CPU reference exactly. Max subtraction is the
+// contract, not an optimisation: the pinned GPT-2 mask fills with the *finite*
+// value `-FLT_MAX` (`0xFF7FFFFF`), and a fully masked row must be exactly
+// uniform, not NaN. `-FLT_MAX - max` stays `0` when the maximum is finite, so
+// `exp(0) = 1` for every entry and the row is `1 / width` everywhere.
+//
+// The maximum starts at `-inf` (as the CPU reference does) so a row containing
+// a NaN behaves the same way: a NaN never wins the maximum comparison, and the
+// `exp(NaN)` it produces propagates instead of being hidden.
+//
+// Bindings and the push-constant size are mirrored by
+// `kernels::norm::SOFTMAX_LAST`; `kernels::reflect` cross-checks this module
+// against that declaration at registration time.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+    float inputv[];
+};
+
+layout(set = 0, binding = 1, std430) writeonly buffer Out {
+    float outv[];
+};
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint width;
+} pc;
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.rows) {
+        return;
+    }
+
+    uint base = row * pc.width;
+
+    float maximum = uintBitsToFloat(0xFF800000u); // -infinity
+    for (uint a = 0u; a < pc.width; ++a) {
+        float value = inputv[base + a];
+        if (value > maximum) {
+            maximum = value;
+        }
+    }
+
+    // `exp` is deterministic, so recomputing the same shifted value in the
+    // divide loop yields the same bits as storing it would; the accumulation
+    // order is still ascending with one f32 accumulator.
+    float total = 0.0;
+    for (uint a = 0u; a < pc.width; ++a) {
+        total += exp(inputv[base + a] - maximum);
+    }
+
+    for (uint a = 0u; a < pc.width; ++a) {
+        outv[base + a] = exp(inputv[base + a] - maximum) / total;
+    }
+}

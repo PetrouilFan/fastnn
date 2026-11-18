@@ -1,0 +1,72 @@
+#version 450
+// FN3-15 (#61): LayerNorm over the trailing axis.
+//
+//     mean     = sum(x[a]) / hidden                       (ascending a, f32)
+//     variance = sum((x[a] - mean)^2) / hidden            (ascending a, f32, biased)
+//     out[a]   = (x[a] - mean) / sqrt(variance + eps) * weight[a] + bias[a]
+//
+// This is the CPU reference expression (`backend/cpu/kernels/norm.rs`) and the
+// decomposition the pinned GPT-2 graph uses. One invocation owns one row and
+// walks it ascending with one `f32` accumulator, so the summation order is the
+// reference order rather than a tree order: no intra-row parallelism, but the
+// row count is the parallel axis. The variance is **biased** (divides by
+// `hidden`, not `hidden - 1`), and the kernel *divides* by `sqrt(var + eps)`
+// instead of multiplying by a reciprocal, because the two differ in the last
+// bits and the graph's `Div(Sqrt(...))` is the reference.
+//
+// Bindings and the push-constant size are mirrored by
+// `kernels::norm::LAYER_NORM`; `kernels::reflect` cross-checks this module
+// against that declaration at registration time.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+    float inputv[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer Weight {
+    float weightv[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer Bias {
+    float biasv[];
+};
+
+layout(set = 0, binding = 3, std430) writeonly buffer Out {
+    float outv[];
+};
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint hidden;
+    float epsilon;
+} pc;
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.rows) {
+        return;
+    }
+
+    uint base = row * pc.hidden;
+    float hidden = float(pc.hidden);
+
+    float sum = 0.0;
+    for (uint a = 0u; a < pc.hidden; ++a) {
+        sum += inputv[base + a];
+    }
+    float mean = sum / hidden;
+
+    float variance_sum = 0.0;
+    for (uint a = 0u; a < pc.hidden; ++a) {
+        float centred = inputv[base + a] - mean;
+        variance_sum += centred * centred;
+    }
+    float variance = variance_sum / hidden;
+    float deviation = sqrt(variance + pc.epsilon);
+
+    for (uint a = 0u; a < pc.hidden; ++a) {
+        float normalised = (inputv[base + a] - mean) / deviation;
+        outv[base + a] = normalised * weightv[a] + biasv[a];
+    }
+}

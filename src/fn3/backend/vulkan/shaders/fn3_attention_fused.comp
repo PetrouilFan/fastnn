@@ -1,0 +1,158 @@
+#version 450
+// FN3-15 (#61): fused masked multi-head attention.
+//
+//     scores[b,h,i,j] = (sum_d q[b,h,i,d] * k[b,kvh,j,d]) / sqrt(head_dim)
+//                       + mask[b|1,h|1,i,j]
+//     probs           = softmax(scores)                     (over j, ascending)
+//     out[b,h,i,d]    = sum_j probs[i,j] * v[b,kvh,j,d]      (ascending j)
+//
+// This is exactly the decomposition the committed `attention` fixture and the
+// pinned GPT-2 graph use (`MatMul → Div(√head_dim) → Add(mask) → Softmax →
+// MatMul`), evaluated in one dispatch:
+//
+// * the dot product accumulates ascending `d` in one `f32` accumulator, and
+//   the divide is a division by `sqrt(head_dim)`, not a reciprocal multiply;
+// * the additive mask is added with one addition per score, after the divide;
+// * softmax is max-subtracted and summed ascending, in one invocation per row,
+//   so an all-masked row (finite `-FLT_MAX` everywhere) is exactly `1 / keys`
+//   per entry and never NaN;
+// * the value product accumulates ascending `j`.
+//
+// One workgroup owns one `(batch, head, query)` row. The row's scores and
+// probabilities live in shared memory (`shared_probs`); the global `probs`
+// buffer is only written when the caller asks for the second output
+// (`write_probs`), so the fused path never materialises an `S × S_kv` tensor.
+//
+// Head mapping is grouped-query: query head `h` reads KV head
+// `h / (heads / kv_heads)`, which is the identity when `heads == kv_heads`.
+//
+// Bindings and push-constant use are mirrored by
+// `kernels::attention::ATTENTION_FUSED`; `kernels::reflect` cross-checks the
+// module against that declaration at registration time.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Q {
+    float q[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer K {
+    float k[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer V {
+    float v[];
+};
+
+// Additive mask, or a 4-byte dummy when `has_mask == 0`.
+layout(set = 0, binding = 3, std430) readonly buffer Mask {
+    float mask[];
+};
+
+layout(set = 0, binding = 4, std430) readonly buffer Params {
+    uint batch;
+    uint heads;
+    uint kv_heads;
+    uint queries;
+    uint keys;
+    uint head_dim;
+    uint mask_batch; // 1 or batch
+    uint mask_heads; // 1 or heads
+    uint has_mask;
+    uint causal;
+    uint write_probs;
+    float sqrt_dim; // sqrt(head_dim), divisor applied to the dot product
+} pc;
+
+layout(set = 0, binding = 5, std430) writeonly buffer Out {
+    float outv[];
+};
+
+// Written only when `pc.write_probs != 0`; a 4-byte dummy otherwise.
+layout(set = 0, binding = 6, std430) writeonly buffer Probs {
+    float probsv[];
+};
+
+// The largest key extent this kernel accepts. 4096 floats are 16 KiB of the
+// device's 48 KiB of shared memory; anything longer is rejected on the host
+// with `UnsupportedOp` naming #61 rather than silently truncated.
+shared float shared_probs[4096];
+
+const float NEGATIVE_FLT_MAX = uintBitsToFloat(0xFF7FFFFFu);
+
+void main() {
+    uint query = gl_WorkGroupID.x;
+    uint head = gl_WorkGroupID.y;
+    uint batch_index = gl_WorkGroupID.z;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint group = pc.heads / pc.kv_heads;
+    uint kv_head = head / group;
+
+    uint q_base =
+        ((batch_index * pc.heads + head) * pc.queries + query) * pc.head_dim;
+    uint kv_base = ((batch_index * pc.kv_heads + kv_head) * pc.keys) * pc.head_dim;
+
+    uint mask_batch_index = (pc.mask_batch == 1u) ? 0u : batch_index;
+    uint mask_head_index = (pc.mask_heads == 1u) ? 0u : head;
+    uint mask_base =
+        ((mask_batch_index * pc.mask_heads + mask_head_index) * pc.queries + query) *
+        pc.keys;
+
+    // Decode keeps `queries` rows at the end of the key extent, so the causal
+    // diagonal is shifted by `keys - queries`.
+    uint causal_limit = pc.keys - pc.queries + query;
+
+    for (uint key = tid; key < pc.keys; key += 64u) {
+        float dot = 0.0;
+        for (uint d = 0u; d < pc.head_dim; ++d) {
+            dot += q[q_base + d] * k[kv_base + key * pc.head_dim + d];
+        }
+        float score = dot / pc.sqrt_dim;
+        if (pc.has_mask != 0u) {
+            score += mask[mask_base + key];
+        }
+        if (pc.causal != 0u && key > causal_limit) {
+            // One replacement, never a second addition: adding two -FLT_MAX
+            // values would saturate to -inf and turn max subtraction into NaN.
+            score = NEGATIVE_FLT_MAX;
+        }
+        shared_probs[key] = score;
+    }
+    barrier();
+
+    // Ascending, single-accumulator softmax: the CPU reference order.
+    if (tid == 0u) {
+        float maximum = uintBitsToFloat(0xFF800000u); // -infinity
+        for (uint key = 0u; key < pc.keys; ++key) {
+            float value = shared_probs[key];
+            if (value > maximum) {
+                maximum = value;
+            }
+        }
+        float total = 0.0;
+        for (uint key = 0u; key < pc.keys; ++key) {
+            total += exp(shared_probs[key] - maximum);
+        }
+        for (uint key = 0u; key < pc.keys; ++key) {
+            shared_probs[key] = exp(shared_probs[key] - maximum) / total;
+        }
+    }
+    barrier();
+
+    if (pc.write_probs != 0u) {
+        uint p_base =
+            ((batch_index * pc.heads + head) * pc.queries + query) * pc.keys;
+        for (uint key = tid; key < pc.keys; key += 64u) {
+            probsv[p_base + key] = shared_probs[key];
+        }
+    }
+
+    for (uint d = tid; d < pc.head_dim; d += 64u) {
+        float accumulator = 0.0;
+        for (uint key = 0u; key < pc.keys; ++key) {
+            accumulator += shared_probs[key] * v[kv_base + key * pc.head_dim + d];
+        }
+        outv[q_base + d] = accumulator;
+    }
+}

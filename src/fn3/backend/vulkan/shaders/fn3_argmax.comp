@@ -1,0 +1,95 @@
+#version 450
+// FN3-15 (#61): ArgMax along one axis, producing `I64`.
+//
+// First occurrence wins: a candidate replaces the running best only when it
+// compares strictly greater, so a tie keeps the lowest index and a NaN never
+// wins (exactly the CPU reference rule). The scan runs ascending over the
+// reduced axis, one invocation per output element.
+//
+// The input buffer is declared `int` because it carries raw 32-bit payloads:
+// `mode == 0` reinterprets each word as `f32` (`intBitsToFloat`), `mode == 1`
+// uses it as the `i32` it already is. `I64` inputs are rejected on the host:
+// they would need the `shaderInt64` device feature, which the FN3-11 (#57)
+// device does not enable.
+//
+// The output is `I64` but 64-bit integers are not available, so the kernel
+// writes the little-endian `i64` layout directly: word `2 * slot` is the low
+// 32 bits (the index, always non-negative and below 2^31) and word
+// `2 * slot + 1` is zero.
+//
+// Bindings and push-constant use are mirrored by
+// `kernels::reduce::ARGMAX`; `kernels::reflect` cross-checks the module against
+// that declaration at registration time.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+    int inputv[];
+};
+
+layout(set = 0, binding = 1, std430) writeonly buffer Out {
+    uint outv[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer Params {
+    uint rank;
+    uint out_numel;
+    uint axis;
+    uint mode; // 0 = f32 payloads, 1 = i32 payloads
+    uint in_dims[8];
+    uint in_stride[8];
+} pc;
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= pc.out_numel) {
+        return;
+    }
+
+    uint coords[8];
+    uint rem = slot;
+    for (int axis = int(pc.rank) - 1; axis >= 0; --axis) {
+        if (uint(axis) == pc.axis) {
+            coords[axis] = 0u;
+        } else {
+            uint extent = pc.in_dims[axis];
+            coords[axis] = rem % extent;
+            rem /= extent;
+        }
+    }
+
+    uint extent = pc.in_dims[pc.axis];
+    bool first = true;
+    uint best_index = 0u;
+    float best_float = 0.0;
+    int best_int = 0;
+
+    for (uint position = 0u; position < extent; ++position) {
+        coords[pc.axis] = position;
+        uint linear = 0u;
+        for (uint axis = 0u; axis < pc.rank; ++axis) {
+            linear += coords[axis] * pc.in_stride[axis];
+        }
+        int bits = inputv[linear];
+        bool take;
+        if (pc.mode == 0u) {
+            float value = intBitsToFloat(bits);
+            take = first || (value > best_float);
+            if (take) {
+                best_float = value;
+            }
+        } else {
+            take = first || (bits > best_int);
+            if (take) {
+                best_int = bits;
+            }
+        }
+        if (take) {
+            best_index = position;
+        }
+        first = false;
+    }
+
+    outv[2u * slot] = best_index;
+    outv[2u * slot + 1u] = 0u;
+}
