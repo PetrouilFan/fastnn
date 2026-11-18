@@ -28,6 +28,11 @@ The active source-layout and ownership plan is
 contract-impact constraints, dependency direction, and the Rust/Python compiler
 ownership decisions required before mechanical module moves.
 
+The 3.0 inference-only rewrite is specified in
+[FastNN 3.0 Architecture](fn3-architecture.md). It supersedes the training,
+autograd, quantization and wgpu gates for the 3.0 candidate only; the 2.x tree
+stays frozen as the historical reference.
+
 The broader engineering backlog is in
 [Architecture Improvement Backlog](architecture-improvements.md). The dtype and
 quantization redesign is separately specified in
