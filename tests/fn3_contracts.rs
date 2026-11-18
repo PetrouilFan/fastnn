@@ -303,13 +303,28 @@ fn mismatched_devices_are_detected_between_operand_metas() {
 fn explicit_vulkan_request_names_the_request_and_available_devices() {
     let error = DeviceRequest::Vulkan { index: Some(3) }
         .resolve_on_host()
-        .expect_err("this build has no Vulkan backend");
+        .expect_err("index 3 does not exist on this host");
     assert_eq!(error.requested(), "vulkan(index=3)");
-    assert_eq!(error.available(), ["cpu"]);
+    let available = error.available();
+    // The CPU is always first, and the error always lists what this build can
+    // execute on rather than collapsing to the CPU.
+    assert_eq!(available.first().map(String::as_str), Some("cpu"));
     let text = error.to_string();
     assert!(text.contains("vulkan(index=3)"), "{text}");
-    assert!(text.contains("available devices: [cpu]"), "{text}");
-    assert!(text.contains("no Vulkan backend"), "{text}");
+    assert!(text.contains("available devices:"), "{text}");
+
+    #[cfg(feature = "vulkan")]
+    assert!(
+        available.iter().any(|label| label.starts_with("vulkan(")),
+        "a Vulkan-enabled build must list its adapters: {available:?}"
+    );
+
+    #[cfg(not(feature = "vulkan"))]
+    {
+        assert_eq!(available, ["cpu"]);
+        assert!(text.contains("available devices: [cpu]"), "{text}");
+        assert!(text.contains("no Vulkan backend"), "{text}");
+    }
 }
 
 #[test]
@@ -318,10 +333,23 @@ fn named_vulkan_request_lists_available_adapters() {
         name: "NVIDIA RTX 4090".to_string(),
     }
     .resolve_on_host()
-    .expect_err("this build has no Vulkan backend");
+    .expect_err("this host has no RTX 4090");
     let text = error.to_string();
     assert!(text.contains("NVIDIA RTX 4090"), "{text}");
+    assert!(text.contains("available devices:"), "{text}");
+
+    #[cfg(not(feature = "vulkan"))]
     assert!(text.contains("available devices: [cpu]"), "{text}");
+
+    #[cfg(feature = "vulkan")]
+    assert!(
+        error
+            .available()
+            .iter()
+            .any(|label| label.contains("llvmpipe") || label.contains("NVIDIA")),
+        "a Vulkan-enabled build must list its adapters: {:?}",
+        error.available()
+    );
 }
 
 #[test]
@@ -330,18 +358,28 @@ fn explicit_device_requests_never_resolve_to_cpu() {
     for request in [
         DeviceRequest::Vulkan { index: None },
         DeviceRequest::Vulkan { index: Some(0) },
+        DeviceRequest::Vulkan { index: Some(9999) },
         DeviceRequest::VulkanNamed {
             name: "anything".to_string(),
         },
     ] {
         assert!(request.is_explicit());
         let resolved = request.resolve(&available);
+        // The one invariant that holds in every configuration: an explicit
+        // request either reaches that device or fails. It never becomes CPU.
         assert_ne!(
             resolved,
             Ok(DeviceId::Cpu),
             "{request} must not fall back to the CPU"
         );
-        assert!(resolved.is_err());
+
+        // A request naming something this host does not have must be an error,
+        // whichever build this is and whichever backends are enumerated.
+        let must_fail = matches!(&request, DeviceRequest::VulkanNamed { .. })
+            || matches!(&request, DeviceRequest::Vulkan { index: Some(9999) });
+        if must_fail {
+            assert!(resolved.is_err(), "{request} must not be substituted");
+        }
     }
 }
 
@@ -356,7 +394,20 @@ fn allocation_on_a_missing_device_is_not_substituted() {
     let text = error.to_string();
     assert!(text.contains("device unavailable"), "{text}");
     assert!(text.contains("vulkan(0)"), "{text}");
+    assert!(text.contains("available devices:"), "{text}");
+    // Alpha tensor storage is host memory on every device, so an explicit
+    // Vulkan allocation fails in both configurations. In a Vulkan-enabled
+    // build the device is listed but still cannot own a tensor, and the reason
+    // must say so instead of claiming the backend is missing.
+    #[cfg(not(feature = "vulkan"))]
     assert!(text.contains("available devices: [cpu]"), "{text}");
+
+    #[cfg(feature = "vulkan")]
+    {
+        assert!(text.contains("host memory"), "{text}");
+        assert!(text.contains("FN3-12"), "{text}");
+        assert!(!text.contains("no backend for this device"), "{text}");
+    }
 }
 
 // ---------------------------------------------------------------------------

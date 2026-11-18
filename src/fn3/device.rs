@@ -15,20 +15,21 @@
 //!
 //! # Build seam
 //!
-//! [`available_devices`] currently reports CPU only. FN3-11 (#57) declares the
-//! `vulkan` feature together with its dependencies and appends enumerated
-//! physical devices there:
+//! [`available_devices`] always reports the CPU first. With the non-default
+//! `vulkan` feature (FN3-11 / #57) it then appends every enumerated physical
+//! device. Without that feature the list is exactly `[cpu]` and every
+//! `DeviceRequest::Vulkan` fails.
 //!
-//! ```ignore
-//! #[cfg(feature = "vulkan")]
-//! {
-//!     // FN3-11: enumerate adapters and push DeviceInfo::new(DeviceId::Vulkan(id), name).
-//! }
-//! ```
+//! The `vulkan` feature is intentionally *not* part of the default build: an
+//! empty feature would make `DeviceRequest::Vulkan` compile while still having
+//! no way to execute on it.
 //!
-//! The `vulkan` feature is intentionally *not* declared by the core contract
-//! change: an empty feature would make `DeviceRequest::Vulkan` compile while
-//! still having no way to execute on it.
+//! Device enumeration and tensor placement are separate questions. A Vulkan
+//! device can be present in [`available_devices`] and still refuse to own a
+//! [`Tensor`](crate::fn3::Tensor), because alpha tensor storage is host memory
+//! on every device: Vulkan executes by staging through host memory, and
+//! device-resident storage is the session/KV work (FN3-12 / #58). See
+//! [`DeviceResolveError::unavailable_device`].
 
 use std::fmt;
 
@@ -286,12 +287,22 @@ impl DeviceResolveError {
     }
 
     /// A request for a specific device that this build cannot allocate on.
+    ///
+    /// Enumeration and placement are separate questions. A Vulkan device can be
+    /// listed by [`available_devices`] and still refuse to own a
+    /// [`Tensor`](crate::fn3::Tensor), because alpha tensor storage is host
+    /// memory on every device. The reason therefore reports *why allocation*
+    /// failed, not merely that the device was missing.
     pub fn unavailable_device(device: DeviceId) -> Self {
-        DeviceResolveError::new(
-            device.diagnostic(),
-            &available_devices(),
-            "no backend for this device is present in the alpha build; FN3-11 (#57) implements Vulkan allocation",
-        )
+        #[cfg(feature = "vulkan")]
+        const REASON: &str =
+            "this alpha build allocates tensor storage in host memory only, so only the cpu \
+             device can own a tensor; vulkan devices execute through host staging, and \
+             device-resident storage is FN3-12 (#58)";
+        #[cfg(not(feature = "vulkan"))]
+        const REASON: &str = "no backend for this device is present in this build; rebuild with \
+             `--features vulkan` to enable the Vulkan platform layer (FN3-11 / #57)";
+        DeviceResolveError::new(device.diagnostic(), &available_devices(), REASON)
     }
 
     /// The rejected request, rendered.

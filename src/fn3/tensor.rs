@@ -800,9 +800,10 @@ impl Tensor {
     /// Wrap existing storage with validated metadata.
     ///
     /// The caller is responsible for the storage being valid on
-    /// `meta.device()`. In the alpha build only `DeviceId::Cpu` storage is
-    /// real; this constructor exists so device-affinity rules can be validated
-    /// before the Vulkan allocator exists (FN3-11 / #57).
+    /// `meta.device()`. Alpha tensor storage is host `AlignedBuffer` on every
+    /// device, so a Vulkan-tagged tensor describes host-staged memory; the
+    /// Vulkan backend uploads it per dispatch (FN3-11 / #57) until
+    /// device-resident storage lands with FN3-12 (#58).
     ///
     /// The storage must provide every byte this metadata addresses:
     /// `meta.required_bytes() <= storage.len()`. The offset itself is checked
