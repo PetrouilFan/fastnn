@@ -63,6 +63,7 @@ pub fn register(set: &mut KernelSet) {
         ),
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32],
+        admits: None,
         kernel: &SMOKE_ADD,
         launch: launch_add,
     });

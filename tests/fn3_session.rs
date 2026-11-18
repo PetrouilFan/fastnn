@@ -1268,8 +1268,6 @@ mod gpu {
     use fastnn::fn3::backend::vulkan::instance::validation_counts;
     use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
     use fastnn::fn3::device::DeviceRequest;
-    use fastnn::fn3::shape::Shape;
-    use fastnn::fn3::storage::Storage;
 
     /// Serialises physical-GPU use and validation-count assertions.
     static GPU_LOCK: Mutex<()> = Mutex::new(());
@@ -1353,148 +1351,6 @@ mod gpu {
         Some(backend)
     }
 
-    /// **TEST ONLY** preflight relaxation for the physical-GPU session test.
-    ///
-    /// `Planner` requires [`Support::Full`] for every instruction, and #59's
-    /// structural kernels (`Transpose`, `Reshape`, `Split`, `Concat`, `Slice`,
-    /// `Softmax`) report `Partial` because each implements a documented subset.
-    /// For the pinned graph every *concrete* instruction is inside those
-    /// subsets, but the verdict is op-level, so no Vulkan plan can be built
-    /// today. This adapter answers `Full` where the inner backend says
-    /// `Partial` and delegates execution unchanged to [`VulkanBackend`].
-    ///
-    /// It also widens the capability table's dtype list to the index dtypes the
-    /// graph uses (`i64` token/position ids and folded `i64`/`i32`/`bool`
-    /// constants). The registered `embedding.gather` kernel documents `i64`/
-    /// `i32` indices, but the aggregate table that #59 publishes lists `f32`
-    /// only, so the planner's capability preflight refuses every decoder plan.
-    ///
-    /// It cannot compute anything and it cannot hide a rejection: an
-    /// unsupported concrete shape or dtype still fails inside the Vulkan
-    /// kernel, on the device, with the kernel's own error. It never falls back
-    /// to the CPU. Production code never uses it; it exists so this test can
-    /// prove the session's device path before #56/#57/#59 close the verdict and
-    /// capability gaps, and the production refusal is asserted in
-    /// [`vulkan_session_refuses_a_partial_verdict_plan_without_falling_back`].
-    #[derive(Debug)]
-    struct RelaxedPreflight {
-        inner: std::sync::Arc<VulkanBackend>,
-        wide: Capabilities,
-    }
-
-    /// The dtypes the concrete pinned plan actually uses.
-    static WIDE_DTYPES: &[DType] = &[DType::F32, DType::I64, DType::I32, DType::Bool];
-
-    impl RelaxedPreflight {
-        fn new(inner: std::sync::Arc<VulkanBackend>) -> RelaxedPreflight {
-            let mut wide = inner.capabilities().clone();
-            wide.dtypes = WIDE_DTYPES;
-            RelaxedPreflight { inner, wide }
-        }
-    }
-
-    impl Backend for RelaxedPreflight {
-        fn name(&self) -> &'static str {
-            "vulkan-concrete-shapes-test"
-        }
-
-        fn device(&self) -> DeviceId {
-            self.inner.device_id()
-        }
-
-        fn capabilities(&self) -> &Capabilities {
-            &self.wide
-        }
-
-        fn supports(&self, op: OpId) -> Support {
-            match self.inner.supports(op) {
-                Support::Partial { .. } => Support::Full,
-                other => other,
-            }
-        }
-
-        fn execute_op(
-            &self,
-            op: OpId,
-            inputs: &[TensorView<'_>],
-            outputs: &mut [TensorMut<'_>],
-            params: &OpParams,
-        ) -> Result<(), Fn3Error> {
-            self.inner.execute_op(op, inputs, outputs, params)
-        }
-    }
-
-    /// Prefix tensors for `prefill.p13`, re-tagged for the device.
-    fn seeded_prefix(device: DeviceId) -> (Vec<Tensor>, Vec<Tensor>) {
-        let mut keys = Vec::new();
-        let mut values = Vec::new();
-        for layer in 0..LAYERS {
-            for (half, target) in [("key", &mut keys), ("value", &mut values)] {
-                let name = format!("prefill.p13.present.{layer}.{half}");
-                let floats = fixture(&name);
-                let shape = Shape::from_dims([1, KV_HEADS, 13, HEAD_DIM]);
-                let meta = TensorMeta::contiguous(shape, DType::F32, device).expect("metadata");
-                let storage = Storage::from_bytes(bytemuck::cast_slice(&floats)).expect("storage");
-                target.push(Tensor::from_storage(storage, meta).expect("prefix tensor"));
-            }
-        }
-        (keys, values)
-    }
-
-    #[test]
-    fn vulkan_session_refuses_a_partial_verdict_plan_without_falling_back() {
-        let _guard = gpu_lock();
-        let Some(backend) = open_physical() else {
-            return;
-        };
-        let Some(import) = pinned() else {
-            return;
-        };
-        let counts_before = validation_counts();
-        let device = backend.device_id();
-        let (model, _) = prepared(&import, device);
-        let mut session = Session::with_runtime(&model, &import, &*backend).expect("session");
-        assert_eq!(session.backend().unwrap().name(), "vulkan");
-
-        // The production path refuses, by name, before anything executes.
-        let error = session
-            .prefill(&token_ids()[..4])
-            .expect_err("the pinned graph is not fully promised by every Vulkan kernel yet");
-        match &error {
-            Fn3Error::UnsupportedOp {
-                op,
-                backend: name,
-                reason,
-            } => {
-                assert_eq!(*name, "vulkan");
-                assert!(
-                    reason.contains('#') || reason.contains("owner"),
-                    "the refusal must name the owning issue: {reason}"
-                );
-                println!("production refusal: op {op} ({name}): {reason}");
-            }
-            other => panic!("expected a typed refusal, found {other:?}"),
-        }
-        assert_eq!(backend.residency().len(), 0, "nothing executed");
-        assert_eq!(session.cache_len(), 0);
-        assert_eq!(session.step(), 0);
-        assert_eq!(session.tokens_consumed(), 0);
-        assert_eq!(session.phase(), SessionPhase::Empty);
-        assert_eq!(
-            validation_counts(),
-            counts_before,
-            "the refusal must not leave validation errors behind"
-        );
-        println!(
-            "no-fallback: the Vulkan session refused the plan, {} residency records, cache_len {}, \
-             step {}, phase {:?}",
-            backend.residency().len(),
-            session.cache_len(),
-            session.step(),
-            session.phase()
-        );
-    }
-
     #[test]
     fn vulkan_residency_proves_every_decode_instruction_ran_on_the_device() {
         let _guard = gpu_lock();
@@ -1507,19 +1363,41 @@ mod gpu {
         let counts_before = validation_counts();
         let device = backend.device_id();
         let (model, envelope) = prepared(&import, device);
-        let relaxed = RelaxedPreflight::new(std::sync::Arc::clone(&backend));
         let tokens = token_ids();
+        // The production path: the session's own backend plans and runs the
+        // prompt. No test adapter, no seeded prefix — this is the same
+        // `Session::with_runtime` call #62, #63 and #64 make.
         let mut session =
-            Session::with_runtime(&model, &import, &relaxed).expect("session on the GPU");
-
-        // The prompt prefix comes from the committed reference K/V: this test
-        // measures cached decode on the device, not a host prefill.
-        let (keys, values) = seeded_prefix(device);
-        session
-            .resume(&keys, &values, 13)
-            .expect("resume from the reference prefix");
+            Session::with_runtime(&model, &import, &*backend).expect("session on the GPU");
+        let prompt = session.prefill(&tokens[..13]).expect("gpu prefill p13");
+        assert_eq!(prompt.device(), device);
+        compare_logits(
+            "gpu prefill.p13.last",
+            prompt.as_f32_slice().unwrap(),
+            &fixture("prefill.p13.last_logits"),
+        );
+        for layer in 0..LAYERS {
+            compare_kv(
+                &format!("prefill.p13.present.{layer}.key"),
+                &session.caches()[layer].live_keys().unwrap(),
+                13,
+            );
+            compare_kv(
+                &format!("prefill.p13.present.{layer}.value"),
+                &session.caches()[layer].live_values().unwrap(),
+                13,
+            );
+        }
         assert_eq!(session.cache_len(), 13);
         assert_eq!(session.step(), 0);
+        assert!(
+            !backend.residency().is_empty(),
+            "the prefill must have dispatched on the device"
+        );
+        println!(
+            "gpu prefill: {} residency records for the 13-token prompt",
+            backend.residency().len()
+        );
         backend.residency().clear();
 
         let mut records = 0usize;

@@ -77,6 +77,7 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &DType::ALL,
+        admits: None,
         kernel: &GATHER,
         launch: launch_gather,
     });

@@ -17,6 +17,15 @@
 //! first input" is explicitly forbidden here; see
 //! `docs/roadmap/fn3-architecture.md`.
 //!
+//! # Two questions, not one
+//!
+//! A plan is built for one concrete shape environment, so op-level support is
+//! necessary but not sufficient. [`Backend::admits`] adds the concrete operands
+//! (shapes and element types) and defaults to [`Backend::supports`]. A `Partial`
+//! verdict whose subset is defined in terms of element width, axis or operand
+//! count can therefore answer for the plan's actual tensors without widening
+//! the op-level claim. An `Unsupported` verdict stays unsupported.
+//!
 //! # Extension seam for Vulkan
 //!
 //! FN3-11 (#57) adds the `vulkan` feature, declares the module below, and
@@ -35,6 +44,7 @@ use crate::fn3::device::DeviceId;
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
 use crate::fn3::ops::OpId;
+use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
 
 pub mod cpu;
@@ -291,6 +301,34 @@ pub trait Backend: Send + Sync + fmt::Debug {
 
     /// Whether `op` is implemented, partially implemented or unsupported.
     fn supports(&self, op: OpId) -> Support;
+
+    /// Whether this backend can run **this concrete instruction**.
+    ///
+    /// [`Backend::supports`] answers the op-level question: *is there a kernel
+    /// for this op at all?* A plan is a stronger promise — it is built for one
+    /// concrete `(seq, past)` environment — so plan preflight asks here as
+    /// well. `shapes` and `dtypes` are the instruction's operands in plan
+    /// order (inputs first, then outputs) and have the same length; `params`
+    /// are its encoded attributes.
+    ///
+    /// The element types are part of the question because [`Shape`] carries
+    /// extents only. A kernel that documents "4- and 8-byte elements" is
+    /// `Partial` at the op level but can answer for a concrete `f32` operand,
+    /// and the pinned decoder graph is exactly that case: its structural ops
+    /// are `Partial`, its index tensors are `i64`, and neither fact is
+    /// expressible without the concrete operands.
+    ///
+    /// The default body returns [`Backend::supports`], so a backend with
+    /// nothing concrete to add keeps its previous verdicts exactly. An
+    /// implementation may return [`Support::Full`] where `supports` returns
+    /// [`Support::Partial`] only when every concrete operand lies inside the
+    /// subset that reason names; it must never widen [`Support::Unsupported`].
+    /// Returning `Partial` for a concrete case is always honest, and the op
+    /// still rejects anything it cannot execute.
+    fn admits(&self, op: OpId, shapes: &[Shape], dtypes: &[DType], params: &OpParams) -> Support {
+        let _ = (shapes, dtypes, params);
+        self.supports(op)
+    }
 
     /// Execute one op into already-allocated outputs.
     ///

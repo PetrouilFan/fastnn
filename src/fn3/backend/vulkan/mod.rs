@@ -656,6 +656,16 @@ impl Backend for VulkanBackend {
         self.kernels.supports(op)
     }
 
+    fn admits(
+        &self,
+        op: OpId,
+        shapes: &[crate::fn3::shape::Shape],
+        dtypes: &[crate::fn3::dtype::DType],
+        params: &OpParams,
+    ) -> Support {
+        self.kernels.admits(op, shapes, dtypes, params)
+    }
+
     fn execute_op(
         &self,
         op: OpId,

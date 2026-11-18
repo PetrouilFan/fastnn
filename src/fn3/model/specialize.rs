@@ -14,14 +14,14 @@
 //!    exporter really does use for `past`, `total` and the causal index range —
 //!    must be **constant-folded** here, not executed later.
 //! 3. **Reject, never approximate.** A shape outside the envelope, an extent
-//!    the graph cannot resolve, or an op the backend does not support at `Full`
-//!    is a typed error naming the value or the op. There is no "try it and
-//!    see".
+//!    the graph cannot resolve, or an op the backend does not admit for the
+//!    plan's concrete operands is a typed error naming the value or the op.
+//!    There is no "try it and see".
 //!
 //! ```text
 //! ModelImport ──► resolve (substitute LiveDims, fold integer shape algebra)
 //!             ──► build   (liveness, slot table, constants, instructions)
-//!             ──► preflight (Support::require_full, capabilities, masks)
+//!             ──► preflight (Backend::admits, capabilities, masks)
 //!             ──► Plan
 //! ```
 //!
@@ -1544,15 +1544,44 @@ impl<'a> Survey<'a> {
         let execution = ExecutionPlan::new(instructions, slots.len() as u32)?;
 
         // Preflight: the plan is a promise, so ask the backend now. A `Partial`
-        // answer is a plan failure too: the plan is built for one concrete
-        // shape, so "this op sometimes works" is not good enough to promise.
+        // op-level answer is refined by `Backend::admits` against the plan's
+        // concrete operands: a kernel whose subset is "f32 and 4- or 8-byte
+        // elements" or "the trailing axis" can promise *this* instruction while
+        // its op-level verdict stays honest. `admits` never widens an
+        // `Unsupported` verdict, and the default body returns `supports`, so a
+        // backend without a concrete rule keeps exactly its previous verdicts.
+        //
+        // Element types are checked here rather than through
+        // `Capabilities::dtypes`: the aggregate table is a statement about the
+        // backend, and the pinned decoder graph is the case where it is not a
+        // statement about any instruction (Vulkan lists f32 as its compute
+        // dtype while `gather`, `transpose`, `shape` and `cast` legitimately
+        // move i64 indices). Every slot is an operand of at least one
+        // instruction, so this loop is a complete dtype gate; a slot no
+        // instruction touches falls back to the aggregate table below.
+        let mut admitted = vec![false; slots.len()];
         for (position, instruction) in execution.instructions().iter().enumerate() {
+            let operands = instruction.inputs.len() + instruction.outputs.len();
+            let mut shapes = Vec::with_capacity(operands);
+            let mut dtypes = Vec::with_capacity(operands);
+            for &slot in instruction.inputs.iter().chain(instruction.outputs.iter()) {
+                let plan = slots
+                    .get(slot as usize)
+                    .ok_or_else(|| Fn3Error::OutOfBounds {
+                        what: "Survey::finish (admission slot)",
+                        index: u64::from(slot),
+                        len: slots.len() as u64,
+                    })?;
+                shapes.push(plan.shape().clone());
+                dtypes.push(plan.dtype());
+                admitted[slot as usize] = true;
+            }
             backend
-                .supports(instruction.op)
+                .admits(instruction.op, &shapes, &dtypes, &instruction.params)
                 .require_full(instruction.op, backend.name())
                 .map_err(|error| at_instruction(error, position, instruction.op))?;
         }
-        self.check_capabilities(backend, &slots)?;
+        self.check_capabilities(backend, &slots, &admitted)?;
 
         let mask = self.mask_constants(&execution, &slots)?;
         let mut inputs = Vec::new();
@@ -1602,12 +1631,19 @@ impl<'a> Survey<'a> {
         &self,
         backend: &dyn Backend,
         slots: &[SlotPlan],
+        admitted: &[bool],
     ) -> Result<(), Fn3Error> {
         let capabilities = backend.capabilities();
-        for slot in slots {
-            capabilities.check_dtype(None, slot.dtype())?;
+        for (index, slot) in slots.iter().enumerate() {
+            // Ranks and buffer sizes are genuinely backend-wide limits.
             capabilities.check_rank(slot.shape().rank())?;
             capabilities.check_buffer(slot.byte_len()?)?;
+            // Element types are admitted per instruction (see `finish`). A
+            // slot that no instruction touches has no concrete kernel to ask,
+            // so the aggregate table remains the gate for that case only.
+            if !admitted.get(index).copied().unwrap_or(false) {
+                capabilities.check_dtype(None, slot.dtype())?;
+            }
         }
         Ok(())
     }

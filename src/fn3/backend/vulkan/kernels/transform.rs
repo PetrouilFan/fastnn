@@ -169,6 +169,53 @@ pub const RANGE_I64: KernelSpec = KernelSpec {
 /// The dtype set the generic byte-moving kernels accept.
 pub(super) const MOVE_DTYPES: &[DType] = &[DType::F32, DType::I32, DType::I64];
 
+/// The subset gap the layout kernels name in their `Partial` verdict.
+pub(super) const WIDTH_GAP: &str =
+    "4- and 8-byte elements (F32/I32/I64); a Bool tensor is rejected with UnsupportedOp naming \
+     #59";
+
+/// Concrete admission for the layout kernels: every operand is 4 or 8 bytes.
+///
+/// This is the part of the subset that the plan can decide: the element width
+/// is the only operand property the permute, identity-copy and block-copy
+/// kernels restrict by dtype. Shape-only restrictions are resolved by the
+/// planner before the plan exists, and value-dependent ones (how many axes a
+/// `Slice` really names) remain the launch function's job.
+pub(super) fn admits_movable(
+    _shapes: &[Shape],
+    dtypes: &[DType],
+    _params: &OpParams,
+) -> std::result::Result<(), String> {
+    match dtypes
+        .iter()
+        .find(|dtype| !matches!(dtype.size_bytes(), 4 | 8))
+    {
+        Some(dtype) => Err(format!(
+            "{} element(s) are {} byte(s), not 4 or 8",
+            dtype,
+            dtype.size_bytes()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Concrete admission for `Concat`: moveable widths and at most [`MAX_PIECES`]
+/// inputs (one output slot follows the inputs).
+pub(super) fn admits_concat(
+    shapes: &[Shape],
+    dtypes: &[DType],
+    params: &OpParams,
+) -> std::result::Result<(), String> {
+    admits_movable(shapes, dtypes, params)?;
+    let inputs = shapes.len().saturating_sub(1);
+    if inputs > MAX_PIECES {
+        return Err(format!(
+            "{inputs} inputs in one concatenation; the kernel records at most {MAX_PIECES}"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn element_bytes(op: OpId, dtype: DType) -> Fn3Result<u32> {
     let bytes = dtype.size_bytes();
     if bytes == 4 || bytes == 8 {
@@ -1210,9 +1257,13 @@ pub fn launch_concat(
     let destination = job.output(out.meta().byte_len()? as u64, "fn3.concat.out")?;
     let mut offset = 0u64;
     for view in inputs {
-        let source = job.input(view_window_bytes(view)?, "fn3.concat.in")?;
         let piece = view.shape().numel()?;
         if piece != 0 {
+            // A zero-element input (the empty `past` of a prefill) contributes
+            // no bytes and cannot be bound: skip it instead of allocating an
+            // unaddressable buffer. The destination extent is unchanged, and a
+            // concatenation of only empty inputs returned above.
+            let source = job.input(view_window_bytes(view)?, "fn3.concat.in")?;
             let push = block_push(
                 op,
                 element_count(op, piece)?,
@@ -1605,16 +1656,16 @@ pub fn register(set: &mut KernelSet) {
     // op's documented contract, and the reason names the missing case and its
     // owner: a `Bool` (1-byte) element cannot be written by a workgroup-wide
     // dispatch without `storageBuffer8BitAccess`, which the platform layer does
-    // not enable.
-    const WIDTH_GAP: &str = "4- and 8-byte elements (F32/I32/I64); a Bool tensor is rejected with \
-                             UnsupportedOp naming #59";
+    // not enable. `admits_movable` answers the same question for the plan's
+    // concrete element types; it never widens the registration.
     macro_rules! layout_op {
-        ($op:expr, $launch:expr, $kernel:expr, $support:expr) => {
+        ($op:expr, $launch:expr, $kernel:expr, $support:expr, $admits:expr) => {
             set.register(OpKernel {
                 op: $op,
                 support: $support,
                 features: CapabilityFeatures::default(),
                 dtypes: MOVE_DTYPES,
+                admits: Some($admits),
                 kernel: $kernel,
                 launch: $launch,
             });
@@ -1628,7 +1679,13 @@ pub fn register(set: &mut KernelSet) {
         (OpId::Unsqueeze, launch_unsqueeze),
         (OpId::Expand, launch_expand),
     ] {
-        layout_op!(op, launch, &PERMUTE, Support::partial(WIDTH_GAP));
+        layout_op!(
+            op,
+            launch,
+            &PERMUTE,
+            Support::partial(WIDTH_GAP),
+            admits_movable
+        );
     }
     layout_op!(
         OpId::Slice,
@@ -1636,7 +1693,8 @@ pub fn register(set: &mut KernelSet) {
         &BLOCK_COPY,
         Support::partial(
             "one sliced axis per call (ONNX starts/ends/axes/steps, negative steps              included); 4- and 8-byte elements. A multi-axis slice and a Bool tensor are              rejected with UnsupportedOp naming #59"
-        )
+        ),
+        admits_movable
     );
     layout_op!(
         OpId::Split,
@@ -1644,7 +1702,8 @@ pub fn register(set: &mut KernelSet) {
         &BLOCK_COPY,
         Support::partial(
             "one axis, up to 16 outputs per call, 4- and 8-byte elements. More than 16 outputs              and a Bool tensor are rejected with UnsupportedOp naming #59"
-        )
+        ),
+        admits_movable
     );
     layout_op!(
         OpId::Concat,
@@ -1652,13 +1711,15 @@ pub fn register(set: &mut KernelSet) {
         &BLOCK_COPY,
         Support::partial(
             "one axis, up to 16 inputs per call, 4- and 8-byte elements. More than 16 inputs and              a Bool tensor are rejected with UnsupportedOp naming #59"
-        )
+        ),
+        admits_concat
     );
     set.register(OpKernel {
         op: OpId::Shape,
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::I64],
+        admits: None,
         kernel: &SHAPE,
         launch: launch_shape,
     });
@@ -1667,6 +1728,7 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32, DType::I32, DType::I64, DType::Bool],
+        admits: None,
         kernel: &FILL,
         launch: launch_constant_of_shape,
     });
@@ -1677,6 +1739,7 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32, DType::I64],
+        admits: None,
         kernel: &RANGE_F32,
         launch: launch_range,
     });

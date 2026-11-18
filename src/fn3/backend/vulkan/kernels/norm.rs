@@ -496,6 +496,7 @@ pub fn register(set: &mut KernelSet) {
         support: Support::Full,
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32],
+        admits: None,
         kernel: &LAYER_NORM,
         launch: launch_layer_norm,
     });
@@ -508,9 +509,68 @@ pub fn register(set: &mut KernelSet) {
         ),
         features: CapabilityFeatures::default(),
         dtypes: &[DType::F32],
+        admits: Some(admits_softmax),
         kernel: &SOFTMAX_LAST,
         launch: launch_softmax,
     });
+}
+
+/// Concrete admission for `Softmax`: f32 and the trailing axis only.
+///
+/// The axis is in the plan's attributes, so the admission can be exact. A
+/// non-trailing axis stays `Partial` and the planner refuses the plan instead
+/// of letting the kernel reject it mid-step.
+pub(super) fn admits_softmax(
+    shapes: &[Shape],
+    dtypes: &[DType],
+    params: &OpParams,
+) -> std::result::Result<(), String> {
+    if let Some(dtype) = dtypes.iter().find(|dtype| **dtype != DType::F32) {
+        return Err(format!("{dtype} is not the f32 compute dtype"));
+    }
+    let input = shapes
+        .first()
+        .ok_or_else(|| "no input shape was supplied".to_string())?;
+    let rank = input.rank();
+    if rank == 0 {
+        return Err("a rank-0 operand has no softmax axis".to_string());
+    }
+    let axis = match params.axes.as_slice() {
+        [] => rank - 1,
+        [axis] => {
+            let resolved = if *axis < 0 {
+                let magnitude = axis.unsigned_abs() as usize;
+                if magnitude > rank {
+                    return Err(format!(
+                        "axis {axis} is outside the {rank}-axis operand {}",
+                        input
+                    ));
+                }
+                rank - magnitude
+            } else {
+                *axis as usize
+            };
+            if resolved >= rank {
+                return Err(format!(
+                    "axis {axis} is outside the {rank}-axis operand {}",
+                    input
+                ));
+            }
+            resolved
+        }
+        axes => {
+            return Err(format!(
+                "{} axes were supplied; softmax takes one",
+                axes.len()
+            ))
+        }
+    };
+    if axis != rank - 1 {
+        return Err(format!(
+            "axis {axis} of the {rank}-axis operand {input} is not the trailing axis"
+        ));
+    }
+    Ok(())
 }
 
 /// Execute `LayerNorm` through the platform layer.
