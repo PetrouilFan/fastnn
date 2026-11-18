@@ -554,6 +554,7 @@ dependencies = [
 name = "fastnn"
 version = "2.6.0"
 dependencies = [
+ "ash",
  "bincode",
  "blas-src",
  "bytemuck",

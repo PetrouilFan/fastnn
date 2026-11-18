@@ -335,9 +335,16 @@ impl std::error::Error for DeviceResolveError {}
 /// Devices this build can execute on, in preference order for
 /// [`DeviceRequest::Auto`].
 ///
-/// FN3-11 (#57) appends Vulkan physical devices here under its feature gate.
+/// The CPU is always first so `Auto` keeps choosing the reference backend. A
+/// `vulkan`-feature build appends the adapters enumerated by the Vulkan
+/// backend, in that backend's stable discovery order; the index carried by
+/// [`PhysicalDeviceId`] is the index in this list's Vulkan subset.
 pub fn available_devices() -> Vec<DeviceInfo> {
-    vec![DeviceInfo::new(DeviceId::Cpu, "cpu")]
+    #[allow(unused_mut)]
+    let mut devices = vec![DeviceInfo::new(DeviceId::Cpu, "cpu")];
+    #[cfg(feature = "vulkan")]
+    devices.extend(crate::fn3::backend::vulkan::available_devices());
+    devices
 }
 
 /// Resolve a request against an explicit device list.
