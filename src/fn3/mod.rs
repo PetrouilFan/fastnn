@@ -58,6 +58,7 @@ pub mod backend;
 pub mod device;
 pub mod dtype;
 pub mod error;
+pub mod import;
 pub mod model;
 pub mod ops;
 pub mod shape;
