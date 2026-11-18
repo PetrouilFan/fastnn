@@ -109,7 +109,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #57 | Vulkan dispatch | verified (integrated `b3db105`) | `fn3/57-vulkan-dispatch` | `fastnn-wt-57-vulkan` | `cfea81b` | done; unblocks #59/#60/#61 |
 | #59 | GPU pointwise | in progress | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | pointwise/transform/embedding kernels |
 | #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
-| #61 | GPU attention | in progress | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | norm/reduce/softmax/masked-attention |
+| #61 | GPU attention | verified (integrated `117e51a`) | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | done; `MaskedAttention` now Full, 19 tests, 0/0 validation |
 | #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
 
 ### #47 finding that changes the alpha story
@@ -244,6 +244,7 @@ matrix, and clean install verification.
 | `27fc60d` | #59/#60/#61 | kernel-set verdict tests made invariant-based | 26 platform unit tests; removes the three-way merge hazard |
 | `4d188e8` | #57 test | Vulkan smoke support-gap assertions made invariant | 14/14 smoke; unblocked #60 and pre-empts #59/#61 |
 | `2835c32` | #60 | Vulkan FP32 matmul merged (`4272aac`) | 17 matmul tests, 14/14 smoke, 30 platform, 43 contracts; 0 errors 0 warnings; fixtures 1.14e-7..2.86e-6 |
+| `117e51a` | #61 | Vulkan norm/softmax/reductions/fused attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts, 17 matmul; 0 errors 0 warnings |
 
 ## Integration decisions that bind later issues
 
@@ -267,6 +268,11 @@ matrix, and clean install verification.
   They now assert that a non-`Full` verdict names its owner, that asking for
   such an op is rejected by name, and that a capability flag agrees with the
   verdict it summarises. Do not reintroduce op lists in either place.
+- **The fused attention id is real, not aspirational.** `#61` registered
+  `MaskedAttention` (40) with `Support::Full` and `features.masked_attention`
+  follows it. The kernel's `keys <= 4096` bound is part of the documented
+  contract and is enforced loudly; a flash-style tiled kernel would lift it,
+  and that is a later performance issue, not a hidden limit.
 - **A lane that skipped is not a lane that passed.** `vulkan-software-lane.sh`
   now requires the smoke test's `[fn3vk][software-icd][proof]` line; a suite
   where every test returned early exits 0 and would otherwise have gone green.
@@ -290,6 +296,8 @@ matrix, and clean install verification.
 | Cache bounds and session isolation | open — needs #58 |
 | Residency record proves no silent CPU execution | proven for Add (#57) and MatMul (#60); full-model assertion is #62 |
 | GPU matmul on the pinned shapes | proven (#60): real prefill/decode/attention shapes within tolerance, 144,448 ns kernel-only decode `lm_head` |
+| GPU norm/softmax/attention on the pinned shapes | proven (#61): LayerNorm 2.384e-7, softmax 5.960e-8, fused attention 5.960e-8, ReduceSum bit-exact, all-masked row exactly uniform and finite |
+| GPU pointwise/transform/embedding | in progress (#59) |
 | Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
 | Python facade | open — #64 |
 | CLI + quickstart | open — #63 |
