@@ -105,8 +105,10 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #51 | Vulkan platform | verified (integrated `5581349`) | `fn3/51-vulkan` | `fastnn-wt-51-vulkan` | `a2c0759` | done; feeds #57 |
 | #52 | Core | verified (integrated `830f315`) | `fn3/52-storage` | `fastnn-wt-52-storage` | `cfea81b` | done |
 | #53 | CPU reference | verified (integrated `89dabac`) | `fn3/53-cpu-reference` | `fastnn-wt-53-cpu` | `830f315` | done; numerical oracle for all GPU work |
-| #54 | Model import | in progress | `fn3/54-onnx-import-b` | `fastnn-wt-54b-import` | `27fc60d` | ONNX protobuf parser; unblocks #55/#56/#58 |
+| #54 | Model import | verified (integrated `5a055e1`) | `fn3/54-onnx-import-b` | `fastnn-wt-54b-import` | `27fc60d` | done; 27 import tests on the real model, 265 fn3 nodes, exact inventory |
 | #57 | Vulkan dispatch | verified (integrated `b3db105`) | `fn3/57-vulkan-dispatch` | `fastnn-wt-57-vulkan` | `cfea81b` | done; unblocks #59/#60/#61 |
+| #55 | Model format | in progress | `fn3/55-model-format` | `fastnn-wt-55-model-format` | `456f3a3` | versioned shareable artifact |
+| #56 | Planner | in progress | `fn3/56-planner` | `fastnn-wt-56-planner` | `456f3a3` | specialisation + bounded plans |
 | #59 | GPU pointwise | verified (integrated `3671a3c`) | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | done; 18 tests, byte-exact on 4 op families |
 | #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
 | #61 | GPU attention | verified (integrated `117e51a`) | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | done; `MaskedAttention` now Full, 19 tests, 0/0 validation |
@@ -182,6 +184,8 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #56 | Runtime planner | ready | — | — | — | after #48, #52, #53, #54 |
 | #57 | Vulkan dispatch | ready | — | — | — | after #48, #51, #52 |
 | #58 | Session runtime | ready | — | — | — | after #48, #52, #53, #56 |
+| #55 | Model format | in progress | `fn3/55-model-format` | `fastnn-wt-55-model-format` | `456f3a3` | versioned shareable artifact |
+| #56 | Planner | in progress | `fn3/56-planner` | `fastnn-wt-56-planner` | `456f3a3` | specialisation + bounded plans |
 | #59 | GPU pointwise | ready | — | — | — | after #49, #53, #57 |
 | #60 | GPU matmul | ready | — | — | — | after #49, #53, #57 |
 | #61 | GPU attention | ready | — | — | — | after #49, #53, #57 |
@@ -244,6 +248,10 @@ matrix, and clean install verification.
 | `27fc60d` | #59/#60/#61 | kernel-set verdict tests made invariant-based | 26 platform unit tests; removes the three-way merge hazard |
 | `4d188e8` | #57 test | Vulkan smoke support-gap assertions made invariant | 14/14 smoke; unblocked #60 and pre-empts #59/#61 |
 | `2835c32` | #60 | Vulkan FP32 matmul merged (`4272aac`) | 17 matmul tests, 14/14 smoke, 30 platform, 43 contracts; 0 errors 0 warnings; fixtures 1.14e-7..2.86e-6 |
+| `3671a3c` | #59 | Vulkan pointwise/transform/embedding merged (`793e97d`) | 18 pointwise tests, 14/14 smoke, 41 platform, 0/0 validation, byte-exact for the layout and comparison ops |
+| `fcad314` | #59 fix | a capability flag is an aggregate, not a kernel's own claim | 17 matmul tests; caught a cross-issue test collision neither worker could see |
+| `5a055e1` | #54 | strict ONNX import merged (`56852ca`) | 27 import tests on the pinned 27,897,974-byte model, 43 contracts, 637 lib; 9001 insertions, one shared line |
+| `456f3a3` | #54 fix | `model::weights` declared instead of reached into by `#[path]` | 27 import tests with the model present |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
 | `4771083` | #46 | ledger: whole-tree gate run after #60/#61 | n/a |
@@ -348,3 +356,30 @@ Known non-blocking debt, both owned by #67:
 | CLI + quickstart | open — #63 |
 | Package versions 3.0.0-alpha.1 / 3.0.0a1 | open — #67 |
 | CI lanes | machinery merged (#66); vulkan lanes now genuinely execute |
+
+## #54 findings that bind #56, #58 and #62
+
+- **The importer is a real protobuf parser.** `src/fn3/import/proto.rs` is a
+  bounds-checked wire-format reader with no dependency; decoded messages borrow
+  names and weight bytes, so 28 MB is never copied. Every failure is one of 36
+  typed diagnostics and all problems are accumulated, not just the first.
+  Eleven truncated prefixes and twelve byte flips of the real file produce
+  errors and no panic.
+- **`i64` shape arithmetic is preserved, not cast.** The pinned exporter
+  computes `total`, `past` and the causal index range with `i64` `Add`/`Sub` at
+  four nodes. Casting to `f32` would be a silent numerical change, and the CPU
+  arithmetic kernels are `f32`-only by contract with `Cast` the only converter.
+  **The planner must fold this arithmetic at specialisation**; executing it is
+  not an acceptable answer. `tests/fn3_import.rs::integer_arithmetic_is_preserved_rather_than_cast`
+  pins it, so a worker cannot quietly "fix" this by widening the kernels.
+- **24 of 326 values keep one unresolved axis**, the `[batch*seq, hidden]`
+  flatten feeding each `Gemm`, because the seven-symbol envelope cannot express
+  a product. The count is pinned by a test; specialisation resolves or rejects.
+- Geometry is detected and validated, not assumed: 2 layers, hidden 128, mlp
+  512, 2 query and 2 KV heads, head_dim 64, vocab 50,257, 1024 learned
+  positions, epsilon 1e-5. A non-decoder graph, a non-`{past_key_values,
+  present, logits}` interface, opset outside 13..=17 or external tensor data
+  fails with a named error.
+- The model is **not** committed: no license is declared upstream. Tests pin
+  both the sha256 and an FNV-1a digest and skip with a printed reason when the
+  file is absent, so an offline CI lane is honest rather than falsely green.
