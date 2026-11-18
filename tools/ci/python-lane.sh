@@ -4,8 +4,8 @@
 # Builds the extension with maturin and runs the Python suite marked
 # "not slow". This is the second half of the cpu lane: it still touches no GPU.
 #
-# Today the suite exercises the frozen 2.x Python facade; FN3-18 (#64) adds the
-# 3.0 Python surface and FN3-19 (#65) deletes the 2.x tests.
+# The suite exercises the Python binding: the 3.0 fastnn.fn3 surface plus the
+# surviving 2.x forward facade and its tooling.
 set -uo pipefail
 
 CI_LANE=cpu
@@ -36,4 +36,4 @@ ci::run "Verify test dependencies import" \
 ci::run "Python tests (not slow)" \
     "'$VENV/bin/python' -m pytest tests/ -m 'not slow' -v"
 
-ci::passed "extension built with maturin and the Python suite marked 'not slow' passed (currently the frozen 2.x facade)"
+ci::passed "extension built with maturin and the Python suite marked 'not slow' passed"

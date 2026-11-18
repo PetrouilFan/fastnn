@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     reproduce = "python3 tools/ci/packaging_lane.py"
 
     print("LANE packaging — wheel build/install smoke")
-    print("  PROVES: a wheel builds, installs into a clean venv outside the checkout, imports and computes.")
+    print("  PROVES: a wheel builds, installs into a clean venv outside the checkout, and the fastnn.fn3 surface imports.")
     print("  DOES NOT PROVE: Rust tests, model loading, GPU support, or manylinux compliance.")
 
     version = _version_from_cargo()

@@ -7,7 +7,6 @@
 # Evidence boundaries, enforced by tools/ci/lane_status.py and
 # tools/ci/verify_evidence.py:
 #   cpu                     build/test, NO GPU
-#   frozen-2x               transitional 2.x compile gate, NOT 3.0 evidence
 #   vulkan-build            SPIR-V + feature compile, NO DEVICE
 #   vulkan-software-smoke   CI-ONLY lavapipe; NOT a GPU
 #   packaging               wheel build/install smoke, NO GPU
@@ -16,7 +15,7 @@
 #
 # Removed under 3.0 (see docs/reports/fn3-20-ci-lanes.md):
 #   * feature-profiles with simd/parallel/fusion/gpu — 2.x feature policy and
-#     the wgpu backend (#65 deletes both);
+#     the wgpu backend (#65 deleted both);
 #   * aarch64 with 2.x features — list needs redesigning for 3.0;
 #   * coverage with 2.x features — same reason;
 #   * --all-features / --features gpu, which cannot work after #65.
@@ -80,23 +79,6 @@ jobs:
           enable-cache: true
       - name: Run the Python half of the CPU lane
         run: tools/ci/python-lane.sh
-      - name: Upload lane status
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
-          path: ${{ github.workspace }}/target/ci-lane-status/*.json
-          if-no-files-found: ignore
-
-  frozen-2x:
-    name: "frozen-2x — 2.x compile gate (deleted by #65)"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run the frozen 2.x lane
-        run: tools/ci/frozen-2x-lane.sh
       - name: Upload lane status
         if: always()
         uses: actions/upload-artifact@v4
@@ -219,7 +201,6 @@ jobs:
     needs:
       - cpu-rust
       - cpu-python
-      - frozen-2x
       - vulkan-build
       - vulkan-software
       - packaging

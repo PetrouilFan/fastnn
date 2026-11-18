@@ -176,7 +176,7 @@ impl Module for Conv2d {
         } else {
             (x.clone(), self.padding_scalar.clone())
         };
-        let output = {
+        {
             let conv = Tensor::exec_aot(&[&input, &self.weight], |g, ins| {
                 vec![g.conv2d_with_params(
                     &ins[0],
@@ -197,9 +197,7 @@ impl Module for Conv2d {
             } else {
                 conv
             }
-        };
-
-        output
+        }
     }
 
     impl_nn_params!(weight, bias);

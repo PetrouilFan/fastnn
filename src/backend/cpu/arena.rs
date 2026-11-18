@@ -269,7 +269,7 @@ fn assert_slice_in_bounds(arena_len: usize, slice: BufferSlice, end: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::cpu::telemetry::{cpu_telemetry_snapshot, reset_cpu_telemetry};
+    use crate::backend::cpu::telemetry::cpu_telemetry_snapshot;
 
     fn arena_from_f32(values: &[f32]) -> CpuBuffer {
         CpuBuffer::new(bytemuck::cast_slice(values).to_vec())

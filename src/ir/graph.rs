@@ -655,7 +655,7 @@ impl ComputeGraph {
 
 #[cfg(test)]
 mod graph_kind_tests {
-    use super::{ComputeGraph, GraphKind, GraphResourceLimits, TensorValue};
+    use super::{ComputeGraph, GraphResourceLimits, TensorValue};
     use crate::ir::{IrDType, Opcode, TensorType};
     use std::collections::HashMap;
 

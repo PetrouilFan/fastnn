@@ -289,13 +289,13 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        let result = Tensor::exec_aot(&[x, &self.weight], |g, ins| {
+        Tensor::exec_aot(&[x, &self.weight], |g, ins| {
             vec![g.rms_norm(&ins[0], &ins[1], self.eps as f64)]
         })
-        .expect("RMSNorm::forward: AOT failed");
-        let output = result.into_iter().next().unwrap();
-
-        output
+        .expect("RMSNorm::forward: AOT failed")
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     impl_norm!(weight);

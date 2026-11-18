@@ -1,6 +1,6 @@
 use fastnn::compiler::pipeline::CompilerPipeline;
 use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
-use fastnn::types::{CompileTarget, QuantTarget};
+use fastnn::types::CompileTarget;
 
 #[test]
 fn compiler_emits_structured_pass_report() {

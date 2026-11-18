@@ -98,9 +98,7 @@ impl Module for AvgPool1d {
         .expect("AvgPool1d::forward: AOT failed");
         let out_4d = result.into_iter().next().unwrap();
         let out_shape = out_4d.shape_ref();
-        let output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
-
-        output
+        out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
     }
 }
 
@@ -157,9 +155,7 @@ impl Module for MaxPool1d {
         .next()
         .unwrap();
         let out_shape = out_4d.shape_ref();
-        let output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
-
-        output
+        out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]])
     }
 }
 

@@ -7,7 +7,7 @@ so a source-tree import (editable install) cannot masquerade as a wheel install.
 Exits 0 only when:
   * fastnn imports from the virtualenv site-packages, not the checkout;
   * the version matches the expected version when one is given;
-  * a minimal inference call produces the expected values.
+  * the 3.0 inference surface imports and lists at least the CPU device.
 """
 
 from __future__ import annotations
@@ -45,28 +45,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: expected version {args.expect_version!r}, got {version!r}", file=sys.stderr)
         return 1
 
-    # The frozen 2.x facade and the 3.0 core expose different surfaces. Name the
-    # one being tested so the lane's output cannot be mistaken for the other.
-    if hasattr(fastnn, "tensor") and hasattr(fastnn, "ones"):
-        print("smoke surface: frozen 2.x Python facade (replaced by FN3-18 / #64)")
-        x = fastnn.ones([2, 2])
-        if list(x.shape) != [2, 2]:
-            print(f"FAIL: ones([2,2]).shape = {x.shape}", file=sys.stderr)
-            return 1
-        doubled = (x + x).numpy().tolist()
-        if doubled != [[2.0, 2.0], [2.0, 2.0]]:
-            print(f"FAIL: ones([2,2]) + itself = {doubled}", file=sys.stderr)
-            return 1
-        print("inference smoke: ones([2,2]) + ones([2,2]) == [[2,2],[2,2]]")
-    elif hasattr(fastnn, "fn3"):
-        print("smoke surface: 3.0 fn3 API")
-        # FN3-18 (#64) owns the exact surface; importability is the packaging
-        # contract here until that issue lands its own smoke.
-        _ = fastnn.fn3
-        print("inference smoke: fastnn.fn3 imported")
-    else:
-        print("FAIL: package exposes neither the 2.x facade nor fastnn.fn3", file=sys.stderr)
+    # The shipped Python surface is the 3.0 inference API. It must import
+    # without a model and without a GPU.
+    import fastnn.fn3 as fn3
+
+    if fn3.Session is not fastnn._core.fn3.Session:
+        print("FAIL: fastnn.fn3.Session is not fastnn._core.fn3.Session", file=sys.stderr)
         return 1
+    devices = fn3.devices()
+    if not devices or devices[0].kind != "cpu":
+        print(f"FAIL: fn3.devices() = {devices!r}; the CPU device must always be listed", file=sys.stderr)
+        return 1
+    print(f"inference smoke: fastnn.fn3 imported, devices={[d.id for d in devices]}")
 
     print("WHEEL SMOKE: PASSED")
     return 0
