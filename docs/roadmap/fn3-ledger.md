@@ -259,6 +259,8 @@ matrix, and clean install verification.
 | `c5b69c2` | #58 fix | a session without a runtime names the constructor that works | 43 contracts |
 | `15f6177` | #52/#57 fix | device enumeration asserted as a rule, not a snapshot | 36 storage tests in both configurations |
 | `304d0f8` | #63 | inference CLI and offline quickstart merged (`669833b`) | 6 CLI tests, 24 CLI unit, 707 lib, 43 contracts; real 10-token prefill, honest Vulkan refusal |
+| `1cebabd` | #62 | end-to-end on CPU and the physical GPU merged (`44081e0`) | 10 e2e tests, 719/719 proven executions, 0 readbacks, validation 0/0 |
+| `0becaca` | #52/#57/#62 fix | device errors name the request in any configuration | lib 710 default / 753 vulkan / 690 no-default |
 | `db94d6c` | #64 | Python facade `fastnn.fn3` merged (`1e32752`) | 27 Python tests, 710 lib, 43 contracts, 36 storage, 5 ci-smoke; wheel installed in a clean venv outside the checkout reproduces the CLI's top-5 exactly |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
@@ -431,3 +433,20 @@ Both workers checked the brief instead of trusting it and reported the
 discrepancy, which is the behaviour the briefs ask for. Standing rule: a
 digest in a brief is a claim to be checked against `model.lock.json`, never a
 fact to be copied into code or a report.
+
+## Remote state (owner authorised writes)
+
+`rewrite/fastnn-3` is pushed to `origin` and tracks it; `origin/rewrite/fastnn-3`
+is `0becaca1c6c4044ac60ea266bcb0a5b94f9b4261`. No PR to `main` was created and
+`main` is untouched, so the original prohibition on merging into `main` still
+holds. **Nineteen issues are closed as completed** (#47-#64 except none, plus
+#66) each with an evidence comment naming the branch HEAD and the measured
+numbers. **Fourteen remain open** and every one has a comment saying why: #46
+(alpha handoff, open until #65/#67 land), #65 (in progress), #67 (blocked on
+#65), #68-#76 (stable wave, not started, each with its real prerequisite
+named), #77 and #78 (deferred by the owner, not activated).
+
+The closure rule applied: an issue was closed only where its own acceptance
+criteria were independently reproduced by the integrator from the integration
+checkout. No issue was closed because a compile passed, and no deferred issue
+was moved to active.
