@@ -11,7 +11,7 @@ use fastnn::fn3::shape::Symbol;
 use fastnn::fn3::{
     AlignedBuffer, Backend, Capabilities, CpuBackend, DType, DeviceId, DeviceRequest, DimBound,
     ExecutionPlan, Fn3Error, Instruction, LiveDims, ModelWeights, OpId, OpParams, PreparedModel,
-    Session, Shape, ShapeEnvelope, Storage, Strides, Tensor, TensorMeta, TensorMut, TensorView,
+    Session, Shape, ShapeEnvelope, Storage, Strides, Tensor, TensorMeta, TensorMut,
 };
 
 fn cpu() -> DeviceId {
