@@ -1,0 +1,16 @@
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running tests/autograd_gradient_checks.rs (target/debug/build/fastnn/39074ec739085b4e/out/autograd_gradient_checks-39074ec739085b4e)
+
+running 8 tests
+test add_gradient_matches_finite_difference ... ok
+test gelu_gradient_matches_finite_difference ... ok
+test matmul_gradient_matches_finite_difference ... ok
+test mean_reduction_gradient_matches_finite_difference ... ok
+test mul_gradient_matches_finite_difference ... ok
+test relu_gradient_matches_finite_difference ... ok
+test silu_gradient_matches_finite_difference ... ok
+test sum_reduction_gradient_matches_finite_difference ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

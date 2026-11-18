@@ -1,0 +1,37 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.2.0, pluggy-1.7.0 -- /home/petrouil/Projects/github/fastnn-wt-47-baseline/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/petrouil/Projects/github/fastnn-wt-47-baseline
+configfile: pytest.ini
+collecting ... collected 28 items
+
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_fallback_matches_forward_relu PASSED [  3%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_fallback_is_repeatable PASSED [  7%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_fallback_chain_relu_then_neg PASSED [ 10%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_fallback_matches_forward_with_constant_input PASSED [ 14%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_fallback_method_exists PASSED [ 17%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_arena_fallback_matches_forward_with_constant_input PASSED [ 21%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_arena_fallback_method_exists PASSED [ 25%]
+tests/test_aot_executor_prepared_execute.py::test_profile_prepared_arena_fallback_matches_profile_shape PASSED [ 28%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_no_copy_method_exists PASSED [ 32%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_no_copy_matches_forward_relu PASSED [ 35%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_no_copy_matches_forward_with_constant_input PASSED [ 39%]
+tests/test_aot_executor_prepared_execute.py::test_forward_prepared_no_copy_is_repeatable PASSED [ 42%]
+tests/test_aot_executor_prepared_stats.py::test_prepared_stats_has_arena_keys PASSED [ 46%]
+tests/test_aot_executor_profile.py::test_aot_executor_profile_reports_per_kernel_timings PASSED [ 50%]
+tests/test_aot_executor_profile.py::test_aot_executor_preserves_dynamic_runtime_shapes_in_forward_and_profile PASSED [ 53%]
+tests/test_aot_executor_profile.py::test_aot_executor_rejects_duplicate_output_names PASSED [ 57%]
+tests/test_aot_executor_profile.py::test_memory_stats_reports_instruction_level_static_traffic PASSED [ 60%]
+tests/test_aot_executor_profile.py::test_memory_stats_instruction_rows_include_graph_io_shapes_for_layout_work PASSED [ 64%]
+tests/test_aot_executor_profile.py::test_memory_stats_reports_write_const_rows_for_persistent_constant_work PASSED [ 67%]
+tests/test_aot_executor_profile.py::test_memory_stats_cross_references_prepared_static_weight_write_consts PASSED [ 71%]
+tests/test_aot_executor_profile.py::test_aot_executor_rejects_minimum_i64_input_dimension PASSED [ 75%]
+tests/test_aot_executor_profile.py::test_aot_executor_rejects_noncontiguous_input_without_panicking PASSED [ 78%]
+tests/test_aot_executor_profile.py::test_aot_executor_rejects_missing_node_inputs[Relu--1] PASSED [ 82%]
+tests/test_aot_executor_profile.py::test_aot_executor_rejects_missing_node_inputs[Add-x-2] PASSED [ 85%]
+tests/test_aot_executor_profile.py::test_constant_of_shape_rejects_hostile_dimensions[-1.0-invalid dimension] PASSED [ 89%]
+tests/test_aot_executor_profile.py::test_constant_of_shape_rejects_hostile_dimensions[nan-invalid dimension] PASSED [ 92%]
+tests/test_aot_executor_profile.py::test_constant_of_shape_rejects_hostile_dimensions[1.5-invalid dimension] PASSED [ 96%]
+tests/test_aot_executor_profile.py::test_constant_of_shape_rejects_hostile_dimensions[1000000000.0-import budget] PASSED [100%]
+
+============================== 28 passed in 0.05s ==============================

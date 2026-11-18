@@ -1,0 +1,19 @@
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running tests/optim_test.rs (target/debug/build/fastnn/0783233285239f9b/out/optim_test-0783233285239f9b)
+
+running 11 tests
+test test_adam_optimizer ... ok
+test test_adamw_optimizer ... ok
+test test_add_param_group ... ok
+test test_lion_optimizer ... ok
+test test_muon_optimizer ... ok
+test test_muon_orthogonalization_quality ... ok
+test test_muon_state_dict_roundtrip ... ok
+test test_muon_zero_norm_handling ... ok
+test test_rmsprop_optimizer ... ok
+test test_sgd_optimizer ... ok
+test test_weight_decay_optimizers ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

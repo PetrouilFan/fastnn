@@ -1,0 +1,6 @@
+artifact /tmp/opencode/fn3-01/tiny-random-gpt2.fnn
+BUILD FAILED
+ONNX conversion completed with 200 error(s):
+  node '/transformer/h.0/attn/c_attn/Reshape' (Reshape): Reshape inferred dimension requires unsupported symbolic division
+  node '/transformer/h.0/attn/c_attn/Gemm' (Gemm): input tensor '/transformer/h.0/attn/c_attn/Reshape_output_0' not found
+  node '/transformer/h.0/attn/c_attn/Reshape_1' (Reshape): input tensor '/transformer/h.0/attn/c_attn/Gemm_output_0' not found

@@ -1,0 +1,17 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.2.0, pluggy-1.7.0 -- /home/petrouil/Projects/github/fastnn-wt-47-baseline/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/petrouil/Projects/github/fastnn-wt-47-baseline
+configfile: pytest.ini
+collecting ... collected 8 items
+
+tests/test_io.py::test_save_load_model PASSED                            [ 12%]
+tests/test_io.py::test_dlpack_roundtrip PASSED                           [ 25%]
+tests/test_io.py::test_model_state_dict PASSED                           [ 37%]
+tests/test_io.py::test_v3_plain_scalar_tensor_roundtrip PASSED           [ 50%]
+tests/test_io.py::test_onnx_mixed_initializer_roundtrip PASSED           [ 62%]
+tests/test_io.py::test_onnx_symbolic_dimension_names_are_preserved PASSED [ 75%]
+tests/test_io.py::test_onnx_external_initializer_roundtrip PASSED        [ 87%]
+tests/test_io.py::test_onnx_external_initializer_cannot_escape_model_directory PASSED [100%]
+
+============================== 8 passed in 0.56s ===============================

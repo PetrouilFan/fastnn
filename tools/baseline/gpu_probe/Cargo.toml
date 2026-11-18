@@ -1,0 +1,12 @@
+[package]
+name = "fastnn-gpu-probe"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: do not become part of the fastnn package.
+[workspace]
+
+[dependencies]
+wgpu = "24"
+pollster = "0.4"
+serde_json = "1"

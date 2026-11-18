@@ -1,0 +1,29 @@
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.26s
+     Running tests/quantized_pipeline.rs (target/debug/build/fastnn/69664b82cafb53f3/out/quantized_pipeline-69664b82cafb53f3)
+
+running 21 tests
+test dynamic_w4a8_compiles_and_executes_all_group_sizes ... ok
+test dynamic_w4a8_exclusion_keeps_matching_matmul_in_native_precision ... ok
+test dynamic_w4a8_executes_batched_rank_three_activations ... ok
+test dynamic_w4a8_rejects_weight_constants_that_are_graph_outputs ... ok
+test dynamic_w4a8_reuses_one_per_token_activation_for_shared_projections ... ok
+test test_auto_cast_u8_activation_quant_pipeline_outputs_f32_directly ... ok
+test test_compile_with_quantize_rejects_invalid_bit_width ... ok
+test test_conv2d_u4_end_to_end ... ok
+test test_conv2d_u8_end_to_end ... ok
+test test_count_quantized_kernel_names ... ok
+test test_graph_builder_compile_with_quantize ... ok
+test test_matmul_f4x8_roundtrip ... ok
+test test_matmul_i4codebook_roundtrip ... ok
+test test_matmul_u4_end_to_end ... ok
+test test_matmul_u4_i8_dispatch_path ... ok
+test test_matmul_u4_output_shape_correct ... ok
+test test_matmul_u8_end_to_end ... ok
+test test_matmul_u8_i8_dispatch_path ... ok
+test test_matmul_u8_output_shape_correct ... ok
+test test_quantize_none_produces_f32_pipeline ... ok
+test test_quantized_matmul_preserves_output_sign ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

@@ -1,0 +1,13 @@
+{
+  "nodes": [
+    {
+      "name": "relu1",
+      "op_type": "Relu",
+      "inputs": "x",
+      "outputs": "y"
+    }
+  ],
+  "params": {},
+  "input_names": ["x"],
+  "output_names": ["y"]
+}

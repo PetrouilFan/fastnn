@@ -1,0 +1,15 @@
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running tests/cpu_arena_telemetry.rs (target/debug/build/fastnn/1ef6df9211eb34d0/out/cpu_arena_telemetry-1ef6df9211eb34d0)
+
+running 7 tests
+test fused_binary_activation_broadcast_add_relu_has_zero_arena_temp_copies ... ok
+test plain_binary_add_compiled_disjoint_graph_has_zero_arena_temp_copies ... ok
+test plain_binary_broadcast_add_compiled_disjoint_graph_has_zero_arena_temp_copies ... ok
+test plain_binary_max_min_compiled_disjoint_graph_has_zero_arena_temp_copies ... ok
+test reductions_compiled_disjoint_graph_have_zero_arena_temp_copies ... ok
+test scalar_add_compiled_disjoint_graph_has_zero_arena_temp_copies ... ok
+test unary_relu_compiled_disjoint_graph_has_zero_arena_temp_copies ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

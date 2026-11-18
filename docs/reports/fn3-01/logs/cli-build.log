@@ -1,0 +1,79 @@
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling libc v0.2.182
+   Compiling pyo3-build-config v0.28.2
+   Compiling bytemuck v1.25.0
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.18
+   Compiling once_cell v1.21.3
+   Compiling crossbeam-deque v0.8.6
+   Compiling bitflags v2.11.0
+   Compiling num-complex v0.4.6
+   Compiling libm v0.2.16
+   Compiling raw-cpuid v11.6.0
+   Compiling rayon-core v1.13.0
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling reborrow v0.5.5
+   Compiling either v1.15.0
+   Compiling dyn-stack v0.13.2
+   Compiling rayon v1.11.0
+   Compiling zerocopy v0.8.40
+   Compiling pulp v0.22.3
+   Compiling pyo3-macros-backend v0.28.2
+   Compiling pyo3-ffi v0.28.2
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling serde_core v1.0.228
+   Compiling getrandom v0.2.17
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling scopeguard v1.2.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling smallvec v1.15.1
+   Compiling anstyle v1.0.14
+   Compiling anstream v1.0.0
+   Compiling parking_lot_core v0.9.12
+   Compiling lock_api v0.4.14
+   Compiling rand_core v0.6.4
+   Compiling gemm-common v0.19.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling pyo3 v0.28.2
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.0
+   Compiling clap_builder v4.6.0
+   Compiling rand_chacha v0.3.1
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f32 v0.19.0
+   Compiling pyo3-macros v0.28.2
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling clap_derive v4.6.1
+   Compiling num_cpus v1.17.0
+   Compiling itoa v1.0.17
+   Compiling memchr v2.8.0
+   Compiling hashbrown v0.14.5
+   Compiling clap v4.6.1
+   Compiling thiserror v1.0.69
+   Compiling core_affinity v0.8.3
+   Compiling dashmap v6.1.0
+   Compiling serde_json v1.0.149
+   Compiling bincode v1.3.3
+   Compiling gemm v0.19.0
+   Compiling rand v0.8.5
+   Compiling half v2.7.1
+   Compiling parking_lot v0.12.5
+   Compiling rustc-hash v2.1.2
+   Compiling fnv v1.0.7
+   Compiling fastnn v2.6.0 (/home/petrouil/Projects/github/fastnn-wt-47-baseline)
+warning: unused dependency `fnv`
+  --> Cargo.toml:31:1
+   |
+31 | fnv          = "1.0"
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `fnv`
+warning: `fastnn` (manifest) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 1m 40s

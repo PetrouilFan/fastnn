@@ -1,0 +1,214 @@
+{"workload": "prefill 8 tokens + 1 cached", "tokens": 8, "past": 1, "warmup": 3, "reps": 15, "variant_changes": 9, "samples_ms": [7.136425, 6.863565, 9.338359, 6.736684, 6.576364, 6.811404, 6.415213, 6.418413, 6.343634, 17.661017, 6.065303, 6.133422, 6.706104, 6.175643, 5.951893], "min_ms": 5.951893, "p50_ms": 6.576364, "p95_ms": 11.835156, "max_ms": 17.661017, "mean_ms": 7.42223, "telemetry": {"arena_bytes": 55634336, "rss_bytes": 365203456, "instruction_count": 302, "write_const_count": 0, "dispatch_ns": 3335967, "total_ns": 3917728}}
+{"workload": "prefill 32 tokens + 1 cached", "tokens": 32, "past": 1, "warmup": 3, "reps": 15, "variant_changes": 9, "samples_ms": [12.853096, 12.607687, 12.508836, 12.621327, 14.37079, 14.20472, 12.559826, 12.827957, 12.546476, 14.01439, 13.712818, 14.19818, 12.646557, 12.510076, 12.651876], "min_ms": 12.508836, "p50_ms": 12.651876, "p95_ms": 14.254541, "max_ms": 14.37079, "mean_ms": 13.122307, "telemetry": {"arena_bytes": 61851520, "rss_bytes": 501567488, "instruction_count": 302, "write_const_count": 0, "dispatch_ns": 8682328, "total_ns": 9638170}}
+{"workload": "decode 1 token after 8 cached", "tokens": 1, "past": 8, "warmup": 3, "reps": 15, "variant_changes": 9, "samples_ms": [3.876258, 3.909839, 3.952188, 3.930538, 3.740458, 3.887848, 4.189119, 4.025119, 3.873368, 3.921148, 3.790318, 3.743358, 3.692008, 3.914598, 4.316529], "min_ms": 3.692008, "p50_ms": 3.909839, "p95_ms": 4.227342, "max_ms": 4.316529, "mean_ms": 3.917513, "telemetry": {"arena_bytes": 53874884, "rss_bytes": 570904576, "instruction_count": 302, "write_const_count": 0, "dispatch_ns": 1683674, "total_ns": 2327785}}
+{"workload": "decode 1 token after 16 cached", "tokens": 1, "past": 16, "warmup": 3, "reps": 15, "variant_changes": 9, "samples_ms": [3.944209, 3.910598, 4.031688, 4.189819, 4.205789, 4.69376, 5.757822, 4.90565, 4.66306, 4.134369, 4.062228, 4.124419, 4.153608, 4.086539, 4.197429], "min_ms": 3.910598, "p50_ms": 4.153608, "p95_ms": 5.161302, "max_ms": 5.757822, "mean_ms": 4.337399, "telemetry": {"arena_bytes": 53916868, "rss_bytes": 648146944, "instruction_count": 302, "write_const_count": 0, "dispatch_ns": 3195827, "total_ns": 3842018}}
+{"workload": "decode 1 token after 32 cached", "tokens": 1, "past": 32, "warmup": 3, "reps": 15, "variant_changes": 9, "samples_ms": [4.391459, 4.253159, 4.049509, 4.150278, 4.238439, 4.45877, 4.297939, 4.075818, 4.075219, 4.116378, 4.133119, 4.133979, 4.151248, 4.226329, 4.250729], "min_ms": 4.049509, "p50_ms": 4.151248, "p95_ms": 4.411652, "max_ms": 4.45877, "mean_ms": 4.200158, "telemetry": {"arena_bytes": 54000132, "rss_bytes": 725430272, "instruction_count": 302, "write_const_count": 0, "dispatch_ns": 1783374, "total_ns": 2372055}}
+{
+  "decode": [
+    {
+      "max_ms": 4.316529,
+      "mean_ms": 3.917513,
+      "min_ms": 3.692008,
+      "p50_ms": 3.909839,
+      "p95_ms": 4.227342,
+      "past": 8,
+      "reps": 15,
+      "samples_ms": [
+        3.876258,
+        3.909839,
+        3.952188,
+        3.930538,
+        3.740458,
+        3.887848,
+        4.189119,
+        4.025119,
+        3.873368,
+        3.921148,
+        3.790318,
+        3.743358,
+        3.692008,
+        3.914598,
+        4.316529
+      ],
+      "telemetry": {
+        "arena_bytes": 53874884,
+        "dispatch_ns": 1683674,
+        "instruction_count": 302,
+        "rss_bytes": 570904576,
+        "total_ns": 2327785,
+        "write_const_count": 0
+      },
+      "tokens": 1,
+      "variant_changes": 9,
+      "warmup": 3,
+      "workload": "decode 1 token after 8 cached"
+    },
+    {
+      "max_ms": 5.757822,
+      "mean_ms": 4.337399,
+      "min_ms": 3.910598,
+      "p50_ms": 4.153608,
+      "p95_ms": 5.161302,
+      "past": 16,
+      "reps": 15,
+      "samples_ms": [
+        3.944209,
+        3.910598,
+        4.031688,
+        4.189819,
+        4.205789,
+        4.69376,
+        5.757822,
+        4.90565,
+        4.66306,
+        4.134369,
+        4.062228,
+        4.124419,
+        4.153608,
+        4.086539,
+        4.197429
+      ],
+      "telemetry": {
+        "arena_bytes": 53916868,
+        "dispatch_ns": 3195827,
+        "instruction_count": 302,
+        "rss_bytes": 648146944,
+        "total_ns": 3842018,
+        "write_const_count": 0
+      },
+      "tokens": 1,
+      "variant_changes": 9,
+      "warmup": 3,
+      "workload": "decode 1 token after 16 cached"
+    },
+    {
+      "max_ms": 4.45877,
+      "mean_ms": 4.200158,
+      "min_ms": 4.049509,
+      "p50_ms": 4.151248,
+      "p95_ms": 4.411652,
+      "past": 32,
+      "reps": 15,
+      "samples_ms": [
+        4.391459,
+        4.253159,
+        4.049509,
+        4.150278,
+        4.238439,
+        4.45877,
+        4.297939,
+        4.075818,
+        4.075219,
+        4.116378,
+        4.133119,
+        4.133979,
+        4.151248,
+        4.226329,
+        4.250729
+      ],
+      "telemetry": {
+        "arena_bytes": 54000132,
+        "dispatch_ns": 1783374,
+        "instruction_count": 302,
+        "rss_bytes": 725430272,
+        "total_ns": 2372055,
+        "write_const_count": 0
+      },
+      "tokens": 1,
+      "variant_changes": 9,
+      "warmup": 3,
+      "workload": "decode 1 token after 32 cached"
+    }
+  ],
+  "environment": {
+    "cpu_count": 16,
+    "fastnn": "2.6.0",
+    "numpy": "2.4.2",
+    "omp_num_threads": "1",
+    "openblas_num_threads": "1",
+    "python": "3.13.15",
+    "rayon_num_threads": "1"
+  },
+  "kind": "static-shape tiny random GPT-2 CPU AOT",
+  "peak_rss_kib": 707844,
+  "prefill": [
+    {
+      "max_ms": 17.661017,
+      "mean_ms": 7.42223,
+      "min_ms": 5.951893,
+      "p50_ms": 6.576364,
+      "p95_ms": 11.835156,
+      "past": 1,
+      "reps": 15,
+      "samples_ms": [
+        7.136425,
+        6.863565,
+        9.338359,
+        6.736684,
+        6.576364,
+        6.811404,
+        6.415213,
+        6.418413,
+        6.343634,
+        17.661017,
+        6.065303,
+        6.133422,
+        6.706104,
+        6.175643,
+        5.951893
+      ],
+      "telemetry": {
+        "arena_bytes": 55634336,
+        "dispatch_ns": 3335967,
+        "instruction_count": 302,
+        "rss_bytes": 365203456,
+        "total_ns": 3917728,
+        "write_const_count": 0
+      },
+      "tokens": 8,
+      "variant_changes": 9,
+      "warmup": 3,
+      "workload": "prefill 8 tokens + 1 cached"
+    },
+    {
+      "max_ms": 14.37079,
+      "mean_ms": 13.122307,
+      "min_ms": 12.508836,
+      "p50_ms": 12.651876,
+      "p95_ms": 14.254541,
+      "past": 1,
+      "reps": 15,
+      "samples_ms": [
+        12.853096,
+        12.607687,
+        12.508836,
+        12.621327,
+        14.37079,
+        14.20472,
+        12.559826,
+        12.827957,
+        12.546476,
+        14.01439,
+        13.712818,
+        14.19818,
+        12.646557,
+        12.510076,
+        12.651876
+      ],
+      "telemetry": {
+        "arena_bytes": 61851520,
+        "dispatch_ns": 8682328,
+        "instruction_count": 302,
+        "rss_bytes": 501567488,
+        "total_ns": 9638170,
+        "write_const_count": 0
+      },
+      "tokens": 32,
+      "variant_changes": 9,
+      "warmup": 3,
+      "workload": "prefill 32 tokens + 1 cached"
+    }
+  ],
+  "schema_version": 1,
+  "warning": "Dynamic-shape build fails at a2c0759; each workload uses a static-shape variant of the same 257-node graph and plain forward(), not stateful decode."
+}

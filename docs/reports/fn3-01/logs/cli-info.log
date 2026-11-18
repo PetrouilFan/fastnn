@@ -1,0 +1,10 @@
+ExecutablePlan:
+  arena_size: 8000000 bytes (7.63 MB)
+  instructions: 1
+    [0] relu_f32: inputs=[0+4000000] out=4000000+4000000 params=[]
+
+MemoryPlan:
+  total_size: 8000000 bytes (7.63 MB)
+  slots: 2
+    node 1: offset=0 size=4000000
+    node 2: offset=4000000 size=4000000

@@ -1,0 +1,97 @@
+{"workload": "prefill 8 tokens + 1 cached", "tokens": 8, "past": 1, "warmup": 1, "reps": 3, "variant_changes": 9, "samples_ms": [6.088783, 5.444402, 5.377681], "min_ms": 5.377681, "p50_ms": 5.444402, "p95_ms": 6.024345, "max_ms": 6.088783, "mean_ms": 5.636955, "parity": {"logits_max_abs": null, "logits_nan_count": 402056, "logits_element_count": 402056, "logits_argmax_last": null, "ort_argmax_last": 32753, "cache_max_abs": {"present.0.key": 1.1920928955078125e-07, "present.0.value": 1.4901161193847656e-07, "present.1.key": null, "present.1.value": null}, "cache_nan_count": {"present.0.key": 0, "present.0.value": 0, "present.1.key": 1024, "present.1.value": 1024}, "note": "FastNN produced non-finite values; errors are null"}}
+{"workload": "decode 1 token after 8 cached", "tokens": 1, "past": 8, "warmup": 1, "reps": 3, "variant_changes": 9, "samples_ms": [3.537898, 3.592737, 3.639278], "min_ms": 3.537898, "p50_ms": 3.592737, "p95_ms": 3.634624, "max_ms": 3.639278, "mean_ms": 3.589971, "parity": {"logits_max_abs": 7.152557373046875e-07, "logits_nan_count": 0, "logits_element_count": 50257, "logits_argmax_last": 11, "ort_argmax_last": 11, "cache_max_abs": {"present.0.key": 2.086162567138672e-07, "present.0.value": 1.4901161193847656e-07, "present.1.key": 2.682209014892578e-07, "present.1.value": 2.980232238769531e-07}, "cache_nan_count": {"present.0.key": 0, "present.0.value": 0, "present.1.key": 0, "present.1.value": 0}, "note": "logits and cache match ONNX Runtime within float32 noise"}}
+{
+  "decode": [
+    {
+      "max_ms": 3.639278,
+      "mean_ms": 3.589971,
+      "min_ms": 3.537898,
+      "p50_ms": 3.592737,
+      "p95_ms": 3.634624,
+      "parity": {
+        "cache_max_abs": {
+          "present.0.key": 2.086162567138672e-07,
+          "present.0.value": 1.4901161193847656e-07,
+          "present.1.key": 2.682209014892578e-07,
+          "present.1.value": 2.980232238769531e-07
+        },
+        "cache_nan_count": {
+          "present.0.key": 0,
+          "present.0.value": 0,
+          "present.1.key": 0,
+          "present.1.value": 0
+        },
+        "logits_argmax_last": 11,
+        "logits_element_count": 50257,
+        "logits_max_abs": 7.152557373046875e-07,
+        "logits_nan_count": 0,
+        "note": "logits and cache match ONNX Runtime within float32 noise",
+        "ort_argmax_last": 11
+      },
+      "past": 8,
+      "reps": 3,
+      "samples_ms": [
+        3.537898,
+        3.592737,
+        3.639278
+      ],
+      "tokens": 1,
+      "variant_changes": 9,
+      "warmup": 1,
+      "workload": "decode 1 token after 8 cached"
+    }
+  ],
+  "environment": {
+    "cpu_count": 16,
+    "fastnn": "2.6.0",
+    "numpy": "2.4.2",
+    "omp_num_threads": null,
+    "openblas_num_threads": null,
+    "python": "3.13.15",
+    "rayon_num_threads": null
+  },
+  "kind": "static-shape tiny random GPT-2 CPU AOT",
+  "peak_rss_kib": 531072,
+  "prefill": [
+    {
+      "max_ms": 6.088783,
+      "mean_ms": 5.636955,
+      "min_ms": 5.377681,
+      "p50_ms": 5.444402,
+      "p95_ms": 6.024345,
+      "parity": {
+        "cache_max_abs": {
+          "present.0.key": 1.1920928955078125e-07,
+          "present.0.value": 1.4901161193847656e-07,
+          "present.1.key": null,
+          "present.1.value": null
+        },
+        "cache_nan_count": {
+          "present.0.key": 0,
+          "present.0.value": 0,
+          "present.1.key": 1024,
+          "present.1.value": 1024
+        },
+        "logits_argmax_last": null,
+        "logits_element_count": 402056,
+        "logits_max_abs": null,
+        "logits_nan_count": 402056,
+        "note": "FastNN produced non-finite values; errors are null",
+        "ort_argmax_last": 32753
+      },
+      "past": 1,
+      "reps": 3,
+      "samples_ms": [
+        6.088783,
+        5.444402,
+        5.377681
+      ],
+      "tokens": 8,
+      "variant_changes": 9,
+      "warmup": 1,
+      "workload": "prefill 8 tokens + 1 cached"
+    }
+  ],
+  "schema_version": 1,
+  "warning": "Dynamic-shape build fails at a2c0759; each workload uses a static-shape variant of the same 257-node graph and plain forward(), not stateful decode."
+}
