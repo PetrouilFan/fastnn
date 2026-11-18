@@ -444,10 +444,15 @@ fn gpt2_op_set_is_present() {
 #[test]
 fn unsupported_ops_are_reported_not_approximated() {
     let backend = CpuBackend::new();
-    let support = backend.supports(OpId::Softmax);
+    // `MaskedAttention` is a real, reserved id (40) that this backend genuinely
+    // does not implement: it is the fused attention op owned by the Vulkan
+    // attention worker (#61), and the CPU reference proves the same arithmetic
+    // by decomposition. It is therefore the canonical honest-`Unsupported` case
+    // now that the rest of the op matrix is implemented.
+    let support = backend.supports(OpId::MaskedAttention);
     assert!(matches!(support, Support::Unsupported { .. }));
     assert!(!support.is_supported());
-    assert!(support.reason().unwrap().contains("FN3-07"));
+    assert!(support.reason().unwrap().contains("#61"));
 
     let input = Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0; 6]).unwrap();
     let mut out = Tensor::zeros(Shape::from_dims([2, 3]), DType::F32, cpu()).unwrap();
@@ -455,22 +460,22 @@ fn unsupported_ops_are_reported_not_approximated() {
     let mut out_view = out.as_mut_view().unwrap();
     let error = backend
         .execute_op(
-            OpId::Softmax,
+            OpId::MaskedAttention,
             &[view],
             std::slice::from_mut(&mut out_view),
-            &OpParams::default().with_axes([-1]),
+            &OpParams::default(),
         )
         .unwrap_err();
     assert!(matches!(
         error,
         Fn3Error::UnsupportedOp {
-            op: OpId::Softmax,
+            op: OpId::MaskedAttention,
             backend: "cpu",
             ..
         }
     ));
     let text = error.to_string();
-    assert!(text.contains("op softmax"), "{text}");
+    assert!(text.contains("masked_attention"), "{text}");
     assert!(text.contains("backend cpu"), "{text}");
     drop(out_view);
 
@@ -497,7 +502,7 @@ fn plan_preflight_rejects_unsupported_instructions() {
     let plan = ExecutionPlan::new(
         vec![
             Instruction::new(OpId::Add, vec![0, 1], vec![2]),
-            Instruction::new(OpId::Relu, vec![2], vec![3]),
+            Instruction::new(OpId::MaskedAttention, vec![2], vec![3]),
         ],
         4,
     )
@@ -505,7 +510,10 @@ fn plan_preflight_rejects_unsupported_instructions() {
     let error = plan.check_supported(&CpuBackend::new()).unwrap_err();
     assert!(matches!(
         error,
-        Fn3Error::UnsupportedOp { op: OpId::Relu, .. }
+        Fn3Error::UnsupportedOp {
+            op: OpId::MaskedAttention,
+            ..
+        }
     ));
     assert!(error.to_string().contains("at instruction 1"), "{error}");
 }
@@ -589,21 +597,53 @@ fn cpu_matmul_is_rank_two_and_honours_strides() {
         .unwrap();
     assert_eq!(out.as_f32_slice().unwrap(), &[58.0, 64.0, 139.0, 154.0]);
 
-    // Batched matmul is reported, not silently reduced to the first matrix.
-    let batched = Tensor::zeros(Shape::from_dims([2, 2, 3]), DType::F32, cpu()).unwrap();
+    // Batched matmul is now implemented (it is required by #53's acceptance
+    // criteria), so the assertion is that the batch is actually contracted
+    // rather than silently reduced to the first matrix.
+    let batched = Tensor::from_f32(
+        Shape::from_dims([2, 2, 3]),
+        &[
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, // batch 0: identity-ish 2x3
+            0.0, 0.0, 1.0, 1.0, 1.0, 1.0, // batch 1
+        ],
+    )
+    .unwrap();
     let mut out3 = Tensor::zeros(Shape::from_dims([2, 2, 2]), DType::F32, cpu()).unwrap();
     let batched_view = batched.as_view().unwrap();
+    let mut out3_view = out3.as_mut_view().unwrap();
+    CpuBackend::new()
+        .execute_op(
+            OpId::MatMul,
+            &[batched_view, rhs_view.clone()],
+            std::slice::from_mut(&mut out3_view),
+            &OpParams::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        out3.as_f32_slice().unwrap(),
+        &[
+            7.0, 8.0, // batch 0 row 0 = 1 * rhs row 0
+            9.0, 10.0, // batch 0 row 1 = 1 * rhs row 1
+            11.0, 12.0, // batch 1 row 0 = 1 * rhs row 2
+            27.0, 30.0, // batch 1 row 1 = rhs row 0 + rhs row 1 + rhs row 2
+        ]
+    );
+
+    // A rank-1 operand is still an honest, named failure rather than an
+    // implicit broadcast or a silent wrong answer.
+    let vector = Tensor::from_f32(Shape::from_dims([3]), &[1.0, 2.0, 3.0]).unwrap();
+    let vector_view = vector.as_view().unwrap();
     let mut out3_view = out3.as_mut_view().unwrap();
     let error = CpuBackend::new()
         .execute_op(
             OpId::MatMul,
-            &[batched_view, rhs_view],
+            &[vector_view, rhs_view],
             std::slice::from_mut(&mut out3_view),
             &OpParams::default(),
         )
         .unwrap_err();
-    assert!(matches!(error, Fn3Error::UnsupportedOp { .. }));
-    assert!(error.to_string().contains("rank-2"), "{error}");
+    assert!(matches!(error, Fn3Error::UnsupportedOp { .. }), "{error}");
+    assert!(error.to_string().contains("rank"), "{error}");
 }
 
 #[test]
