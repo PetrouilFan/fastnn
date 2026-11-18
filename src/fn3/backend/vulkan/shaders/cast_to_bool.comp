@@ -1,0 +1,50 @@
+#version 450
+// FN3-13 (#59): `Cast` into `Bool`.
+//
+// src_kind: 0 f32, 1 i64, 2 i32, 3 bool. Non-zero becomes 1, zero becomes 0;
+// -0.0 is zero and NaN is non-zero, which is the CPU reference's rule.
+//
+// A `Bool` element is one byte, so one invocation packs four consecutive
+// verdicts into one 32-bit word (core Vulkan cannot write a single byte
+// atomically). The output buffer is padded to a multiple of four bytes.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint src_kind;
+} p;
+
+bool nonzero_at(uint element) {
+    if (p.src_kind == 0u) {
+        return uintBitsToFloat(src_words[element]) != 0.0;
+    }
+    if (p.src_kind == 1u) {
+        return (src_words[element * 2u] | src_words[element * 2u + 1u]) != 0u;
+    }
+    if (p.src_kind == 2u) {
+        return src_words[element] != 0u;
+    }
+    return ((src_words[element >> 2u] >> ((element & 3u) * 8u)) & 0xffu) != 0u;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint base = gid * 4u;
+    if (base >= p.n) {
+        return;
+    }
+    uint packed = 0u;
+    for (uint lane = 0u; lane < 4u; ++lane) {
+        uint element = base + lane;
+        if (element >= p.n) {
+            break;
+        }
+        if (nonzero_at(element)) {
+            packed |= 1u << (lane * 8u);
+        }
+    }
+    dst_words[gid] = packed;
+}

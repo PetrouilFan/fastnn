@@ -1,0 +1,55 @@
+#version 450
+// FN3-13 (#59): single-axis block move shared by `Slice`, `Split` and `Concat`.
+//
+// Every element of a three-dimensional view [outer, axis, inner] is addressed as
+//   source = (o * src_axis + (src_start + src_step * a)) * inner + c
+//   dest   = (o * dst_axis + (dst_axis_offset + a)) * inner + c
+// with `a` running 0..count-1. That single formula is:
+//   * `Slice`: src_start = resolved start, src_step = step, dst_* = the output;
+//   * `Split`: src_start = the piece's offset, dst_axis = the piece extent;
+//   * `Concat`: dst_axis = the joined extent, dst_axis_offset = the input's
+//     offset, src_start = 0, src_step = 1.
+// `n` is the piece element count, so count = n / (outer * inner).
+//
+// Push constants:
+//   n, outer, src_axis, inner       decomposition of the source
+//   src_start, src_step             signed source axis mapping
+//   dst_axis, dst_axis_offset       destination axis extent and offset
+//   elem_bytes                      4 or 8
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint outer;
+    uint src_axis;
+    uint inner;
+    int src_start;
+    int src_step;
+    uint dst_axis;
+    uint dst_axis_offset;
+    uint elem_bytes;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n || p.outer == 0u || p.inner == 0u) {
+        return;
+    }
+    uint plane = p.outer * p.inner;
+    uint count = p.n / plane;
+    uint c = gid % p.inner;
+    uint rest = gid / p.inner;
+    uint a = rest % count;
+    uint o = rest / count;
+    uint source = (o * p.src_axis + uint(p.src_start + p.src_step * int(a))) * p.inner + c;
+    uint destination = (o * p.dst_axis + p.dst_axis_offset + a) * p.inner + c;
+    if (p.elem_bytes == 4u) {
+        dst_words[destination] = src_words[source];
+    } else {
+        dst_words[destination * 2u] = src_words[source * 2u];
+        dst_words[destination * 2u + 1u] = src_words[source * 2u + 1u];
+    }
+}

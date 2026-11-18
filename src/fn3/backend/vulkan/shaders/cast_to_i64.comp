@@ -1,0 +1,69 @@
+#version 450
+// FN3-13 (#59): `Cast` into `I64`.
+//
+// src_kind: 0 f32, 1 i64, 2 i32, 3 bool. An i64 destination is written as two
+// little-endian words per element (the storage order of an `i64` tensor).
+//
+// A float source saturates and truncates toward zero exactly like the CPU
+// reference's Rust `as i64`: NaN becomes 0, values at or above 2^63 become
+// i64::MAX and values at or below -2^63 become i64::MIN. The in-range path
+// splits the magnitude on 2^32, which is exact for |x| < 2^24 and within one
+// ulp up to 2^53; the CPU's rounding is likewise a single rounding.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint src_kind;
+} p;
+
+uint byte_at(uint element) {
+    return (src_words[element >> 2u] >> ((element & 3u) * 8u)) & 0xffu;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    uint low = 0u;
+    uint high = 0u;
+    if (p.src_kind == 0u) {
+        float x = uintBitsToFloat(src_words[gid]);
+        if (isnan(x)) {
+            low = 0u;
+            high = 0u;
+        } else if (x >= 9223372036854775808.0) {
+            low = 0xffffffffu;
+            high = 0x7fffffffu;
+        } else if (x <= -9223372036854775808.0) {
+            low = 0u;
+            high = 0x80000000u;
+        } else {
+            float magnitude = abs(trunc(x));
+            float beyond = floor(magnitude / 4294967296.0);
+            low = uint(magnitude - beyond * 4294967296.0);
+            high = uint(beyond);
+            if (x < 0.0) {
+                // Two's-complement negation of (high:low).
+                uint negated_low = (~low) + 1u;
+                high = (~high) + ((negated_low == 0u) ? 1u : 0u);
+                low = negated_low;
+            }
+        }
+    } else if (p.src_kind == 1u) {
+        low = src_words[gid * 2u];
+        high = src_words[gid * 2u + 1u];
+    } else if (p.src_kind == 2u) {
+        int value = int(src_words[gid]);
+        low = uint(value);
+        high = (value < 0) ? 0xffffffffu : 0u;
+    } else {
+        low = (byte_at(gid) != 0u) ? 1u : 0u;
+        high = 0u;
+    }
+    dst_words[gid * 2u] = low;
+    dst_words[gid * 2u + 1u] = high;
+}

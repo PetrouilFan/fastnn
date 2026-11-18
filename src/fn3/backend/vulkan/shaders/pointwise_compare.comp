@@ -1,0 +1,116 @@
+#version 450
+// FN3-13 (#59): `Equal`/`Less`/`Greater` with broadcasting, producing `Bool`.
+//
+// A `Bool` element is one byte, and a byte cannot be written atomically in core
+// Vulkan (`storageBuffer8BitAccess` is not enabled), so one invocation computes
+// four consecutive comparisons and writes one packed 32-bit word. The output
+// buffer is padded to a multiple of four bytes; the tail bytes beyond the last
+// element are never read back.
+//
+// Push constants:
+//   n          number of output elements
+//   rank       output rank
+//   cmp        0 equal, 1 less, 2 greater
+//   kind       0 f32, 1 i32, 2 i64, 3 bool
+//   out_dims / lhs_dims / rhs_dims   right-aligned extents padded with 1
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Lhs { uint lhs_words[]; };
+layout(std430, binding = 1) readonly buffer Rhs { uint rhs_words[]; };
+layout(std430, binding = 2) writeonly buffer Out { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint rank;
+    uint cmp;
+    uint kind;
+    uint out_dims[8];
+    uint lhs_dims[8];
+    uint rhs_dims[8];
+} p;
+
+float as_f32(uint word) {
+    return uintBitsToFloat(word);
+}
+
+uint byte_of(uint word, uint element) {
+    return (word >> ((element & 3u) * 8u)) & 0xffu;
+}
+
+bool compare_at(uint lhs_element, uint rhs_element) {
+    if (p.kind == 0u) {
+        float x = as_f32(lhs_words[lhs_element]);
+        float y = as_f32(rhs_words[rhs_element]);
+        if (p.cmp == 0u) {
+            return x == y;
+        }
+        return (p.cmp == 1u) ? (x < y) : (x > y);
+    }
+    if (p.kind == 1u) {
+        int x = int(lhs_words[lhs_element]);
+        int y = int(rhs_words[rhs_element]);
+        if (p.cmp == 0u) {
+            return x == y;
+        }
+        return (p.cmp == 1u) ? (x < y) : (x > y);
+    }
+    if (p.kind == 2u) {
+        // Two's-complement i64 read as (high, low) words: a signed compare of
+        // the high words decides everything except equality of the highs, and
+        // then an unsigned compare of the lows is exact.
+        uint xlo = lhs_words[lhs_element * 2u];
+        int xhi = int(lhs_words[lhs_element * 2u + 1u]);
+        uint ylo = rhs_words[rhs_element * 2u];
+        int yhi = int(rhs_words[rhs_element * 2u + 1u]);
+        if (p.cmp == 0u) {
+            return xhi == yhi && xlo == ylo;
+        }
+        if (p.cmp == 1u) {
+            return (xhi < yhi) || (xhi == yhi && xlo < ylo);
+        }
+        return (xhi > yhi) || (xhi == yhi && xlo > ylo);
+    }
+    uint x = byte_of(lhs_words[lhs_element >> 2u], lhs_element);
+    uint y = byte_of(rhs_words[rhs_element >> 2u], rhs_element);
+    return (x != 0u) == (y != 0u);
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint base = gid * 4u;
+    if (base >= p.n) {
+        return;
+    }
+    uint packed = 0u;
+    for (uint lane = 0u; lane < 4u; ++lane) {
+        uint gid_element = base + lane;
+        if (gid_element >= p.n) {
+            break;
+        }
+        uint coord[8];
+        uint rem = gid_element;
+        for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+            uint extent = p.out_dims[axis];
+            coord[axis] = (extent == 0u) ? 0u : (rem % extent);
+            rem = (extent == 0u) ? 0u : (rem / extent);
+        }
+        uint lhs_index = 0u;
+        uint lhs_stride = 1u;
+        uint rhs_index = 0u;
+        uint rhs_stride = 1u;
+        for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+            if (p.lhs_dims[axis] != 1u) {
+                lhs_index += coord[axis] * lhs_stride;
+            }
+            if (p.rhs_dims[axis] != 1u) {
+                rhs_index += coord[axis] * rhs_stride;
+            }
+            lhs_stride *= p.lhs_dims[axis];
+            rhs_stride *= p.rhs_dims[axis];
+        }
+        if (compare_at(lhs_index, rhs_index)) {
+            packed |= 1u << (lane * 8u);
+        }
+    }
+    dst_words[gid] = packed;
+}

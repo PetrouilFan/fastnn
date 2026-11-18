@@ -1,0 +1,104 @@
+#version 450
+// FN3-13 (#59): right-aligned broadcast binary arithmetic on f32.
+//
+// One invocation per output element. The operands are contiguous row-major
+// windows; a broadcast axis is an input extent of 1, which contributes a zero
+// coordinate, exactly the effective-zero-stride rule of the CPU reference.
+//
+// Push constants:
+//   n          number of output elements
+//   opcode     0 add, 1 sub, 2 mul, 3 div, 4 pow
+//   rank       output rank (right-aligned operand extents are padded with 1)
+//   out_dims   output extents
+//   lhs_dims   left operand extents
+//   rhs_dims   right operand extents
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Lhs { float lhs[]; };
+layout(std430, binding = 1) readonly buffer Rhs { float rhs[]; };
+layout(std430, binding = 2) writeonly buffer Out { float dst[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint opcode;
+    uint rank;
+    uint out_dims[8];
+    uint lhs_dims[8];
+    uint rhs_dims[8];
+} p;
+
+// `pow` in GLSL is undefined for a negative base, while `f32::powf` (the CPU
+// reference) implements C `pow`: a negative base is defined for an integral
+// exponent, and non-integral exponents give NaN. The pinned graph computes
+// `x^2` (LayerNorm variance) and `x^3` (gelu_new), and the cube really is
+// negative for negative inputs, so the negative-base branch is required, not a
+// nicety.
+float safe_pow(float x, float y) {
+    if (x > 0.0) {
+        return pow(x, y);
+    }
+    if (x == 0.0) {
+        if (y > 0.0) {
+            return 0.0;
+        }
+        if (y < 0.0) {
+            return uintBitsToFloat(0x7f800000u); // +inf
+        }
+        return 1.0;
+    }
+    // x < 0
+    if (floor(y) != y) {
+        return uintBitsToFloat(0x7fc00000u); // NaN, as C pow
+    }
+    float magnitude = pow(-x, y);
+    return (mod(y, 2.0) == 0.0) ? magnitude : -magnitude;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    uint coord[8];
+    uint rem = gid;
+    for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+        uint extent = p.out_dims[axis];
+        coord[axis] = (extent == 0u) ? 0u : (rem % extent);
+        rem = (extent == 0u) ? 0u : (rem / extent);
+    }
+    uint lhs_index = 0u;
+    uint lhs_stride = 1u;
+    uint rhs_index = 0u;
+    uint rhs_stride = 1u;
+    for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+        if (p.lhs_dims[axis] != 1u) {
+            lhs_index += coord[axis] * lhs_stride;
+        }
+        if (p.rhs_dims[axis] != 1u) {
+            rhs_index += coord[axis] * rhs_stride;
+        }
+        lhs_stride *= p.lhs_dims[axis];
+        rhs_stride *= p.rhs_dims[axis];
+    }
+    float x = lhs[lhs_index];
+    float y = rhs[rhs_index];
+    float value;
+    switch (p.opcode) {
+        case 0u:
+            value = x + y;
+            break;
+        case 1u:
+            value = x - y;
+            break;
+        case 2u:
+            value = x * y;
+            break;
+        case 3u:
+            value = x / y;
+            break;
+        default:
+            value = safe_pow(x, y);
+            break;
+    }
+    dst[gid] = value;
+}

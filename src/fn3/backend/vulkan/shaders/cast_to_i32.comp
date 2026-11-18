@@ -1,0 +1,52 @@
+#version 450
+// FN3-13 (#59): `Cast` into `I32`.
+//
+// src_kind: 0 f32, 1 i64, 2 i32, 3 bool.
+//
+// A float source saturates and truncates toward zero exactly like the CPU
+// reference's Rust `as i32` (NaN becomes 0). An i64 source keeps the low word,
+// which is the same truncation `i64 as i32` performs.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint src_kind;
+} p;
+
+int f32_as_i32(float x) {
+    if (isnan(x)) {
+        return 0;
+    }
+    if (x >= 2147483648.0) {
+        return 2147483647;
+    }
+    if (x <= -2147483648.0) {
+        return -2147483648;
+    }
+    return int(x);
+}
+
+uint byte_at(uint element) {
+    return (src_words[element >> 2u] >> ((element & 3u) * 8u)) & 0xffu;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    uint value;
+    if (p.src_kind == 0u) {
+        value = uint(f32_as_i32(uintBitsToFloat(src_words[gid])));
+    } else if (p.src_kind == 1u) {
+        value = src_words[gid * 2u];
+    } else if (p.src_kind == 2u) {
+        value = src_words[gid];
+    } else {
+        value = (byte_at(gid) != 0u) ? 1u : 0u;
+    }
+    dst_words[gid] = value;
+}

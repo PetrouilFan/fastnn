@@ -1,0 +1,26 @@
+#version 450
+// FN3-13 (#59): `Shape` — materialise the runtime shape as an i64 tensor.
+//
+// The extents are metadata, so they arrive as push constants; the kernel is the
+// device that writes them, which keeps the execution record a real dispatch
+// instead of a host-side output write.
+//
+// Push constants: rank, extents low words, extents high words.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint rank;
+    uint dims_low[8];
+    uint dims_high[8];
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.rank) {
+        return;
+    }
+    dst_words[gid * 2u] = p.dims_low[gid];
+    dst_words[gid * 2u + 1u] = p.dims_high[gid];
+}

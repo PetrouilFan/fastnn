@@ -1,0 +1,27 @@
+#version 450
+// FN3-13 (#59): f32 `Range` — start + i * delta, computed as a multiplication
+// (not repeated addition) so the sequence cannot drift.
+//
+// `precise` forbids the compiler from contracting the multiply-add into an FMA,
+// which keeps the result identical to the CPU reference's two-step expression.
+//
+// Push constants: n, start bits, delta bits.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint start_bits;
+    uint delta_bits;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    precise float value =
+        uintBitsToFloat(p.start_bits) + float(gid) * uintBitsToFloat(p.delta_bits);
+    dst[gid] = value;
+}

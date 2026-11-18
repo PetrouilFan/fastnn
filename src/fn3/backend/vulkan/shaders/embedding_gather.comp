@@ -1,0 +1,85 @@
+#version 450
+// FN3-13 (#59): `Gather` / embedding lookup.
+//
+// The output is [data before axis] x [indices] x [data after axis], which is
+// exactly outer x index_count x inner in row-major order, so one flattened
+// formula covers every axis:
+//
+//   source = (outer_index * dim + resolved_index) * inner + inner_index
+//
+// `indices` may be `i64` (two words) or `i32`. The launch validates every index
+// against [-dim, dim) on the host before the dispatch, so the negative-index
+// resolution below only has to recover a value the host already proved is in
+// range; the low word plus `dim` is exact because |raw| <= dim < 2^32.
+//
+// Element widths are 4 bytes (f32/i32), 8 bytes (i64) and 1 byte (bool). A
+// one-byte destination cannot be written by one invocation per element without
+// `storageBuffer8BitAccess`, so that case packs four gathered bytes into one
+// word; the output is padded to a multiple of four bytes.
+//
+// Push constants: n, outer, index_count, inner, dim, index_bytes, elem_bytes.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Table { uint table_words[]; };
+layout(std430, binding = 1) readonly buffer Indices { uint index_words[]; };
+layout(std430, binding = 2) writeonly buffer Out { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint outer;
+    uint index_count;
+    uint inner;
+    uint dim;
+    uint index_bytes;
+    uint elem_bytes;
+} p;
+
+uint resolved_index(uint index_position) {
+    if (p.index_bytes == 8u) {
+        uint low = index_words[index_position * 2u];
+        uint high = index_words[index_position * 2u + 1u];
+        return ((high & 0x80000000u) != 0u) ? (low + p.dim) : low;
+    }
+    int value = int(index_words[index_position]);
+    return (value < 0) ? uint(value + int(p.dim)) : uint(value);
+}
+
+uint source_element(uint destination) {
+    uint c = destination % p.inner;
+    uint rest = destination / p.inner;
+    uint index_position = rest % p.index_count;
+    uint outer_position = rest / p.index_count;
+    return (outer_position * p.dim + resolved_index(index_position)) * p.inner + c;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (p.inner == 0u) {
+        return;
+    }
+    if (p.elem_bytes == 1u) {
+        uint base = gid * 4u;
+        uint packed = 0u;
+        for (uint lane = 0u; lane < 4u; ++lane) {
+            uint destination = base + lane;
+            if (destination >= p.n) {
+                break;
+            }
+            uint source = source_element(destination);
+            uint byte = (table_words[source >> 2u] >> ((source & 3u) * 8u)) & 0xffu;
+            packed |= byte << (lane * 8u);
+        }
+        dst_words[gid] = packed;
+        return;
+    }
+    if (gid >= p.n) {
+        return;
+    }
+    uint source = source_element(gid);
+    if (p.elem_bytes == 4u) {
+        dst_words[gid] = table_words[source];
+    } else {
+        dst_words[gid * 2u] = table_words[source * 2u];
+        dst_words[gid * 2u + 1u] = table_words[source * 2u + 1u];
+    }
+}

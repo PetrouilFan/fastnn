@@ -1,0 +1,47 @@
+#version 450
+// FN3-13 (#59): `Expand` — broadcast one tensor to the target shape.
+//
+// Right-aligned NumPy broadcasting: an input extent of 1 repeats along that
+// axis, which is the same effective-zero-stride rule the CPU reference uses.
+//
+// Push constants: n, elem_bytes (4 or 8), rank, out_dims, in_dims.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint elem_bytes;
+    uint rank;
+    uint out_dims[8];
+    uint in_dims[8];
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    uint coord[8];
+    uint rem = gid;
+    for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+        uint extent = p.out_dims[axis];
+        coord[axis] = (extent == 0u) ? 0u : (rem % extent);
+        rem = (extent == 0u) ? 0u : (rem / extent);
+    }
+    uint source = 0u;
+    uint stride = 1u;
+    for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+        if (p.in_dims[axis] != 1u) {
+            source += coord[axis] * stride;
+        }
+        stride *= p.in_dims[axis];
+    }
+    if (p.elem_bytes == 4u) {
+        dst_words[gid] = src_words[source];
+    } else {
+        dst_words[gid * 2u] = src_words[source * 2u];
+        dst_words[gid * 2u + 1u] = src_words[source * 2u + 1u];
+    }
+}

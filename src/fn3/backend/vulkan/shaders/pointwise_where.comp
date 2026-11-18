@@ -1,0 +1,77 @@
+#version 450
+// FN3-13 (#59): `Where(cond, x, y)` with three-way right-aligned broadcasting.
+//
+// `cond` is a `Bool` tensor (one byte per element, 0 or 1); `x`, `y` and the
+// output are the same dtype and are moved as opaque 4- or 8-byte elements, so
+// the kernel never interprets the value it selects. The selection itself is
+// element granular: no bytes are mixed.
+//
+// Push constants:
+//   n          number of output elements
+//   rank       output rank
+//   elem_bytes 4 or 8
+//   out_dims / x_dims / y_dims / cond_dims   extents, right-aligned padded with 1
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Cond { uint cond_words[]; };
+layout(std430, binding = 1) readonly buffer X { uint x_words[]; };
+layout(std430, binding = 2) readonly buffer Y { uint y_words[]; };
+layout(std430, binding = 3) writeonly buffer Out { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint rank;
+    uint elem_bytes;
+    uint out_dims[8];
+    uint x_dims[8];
+    uint y_dims[8];
+    uint cond_dims[8];
+} p;
+
+uint byte_at(uint byte_offset) {
+    return (cond_words[byte_offset >> 2u] >> ((byte_offset & 3u) * 8u)) & 0xffu;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    uint coord[8];
+    uint rem = gid;
+    for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+        uint extent = p.out_dims[axis];
+        coord[axis] = (extent == 0u) ? 0u : (rem % extent);
+        rem = (extent == 0u) ? 0u : (rem / extent);
+    }
+    uint x_index = 0u;
+    uint x_stride = 1u;
+    uint y_index = 0u;
+    uint y_stride = 1u;
+    uint cond_index = 0u;
+    uint cond_stride = 1u;
+    for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+        if (p.x_dims[axis] != 1u) {
+            x_index += coord[axis] * x_stride;
+        }
+        if (p.y_dims[axis] != 1u) {
+            y_index += coord[axis] * y_stride;
+        }
+        if (p.cond_dims[axis] != 1u) {
+            cond_index += coord[axis] * cond_stride;
+        }
+        x_stride *= p.x_dims[axis];
+        y_stride *= p.y_dims[axis];
+        cond_stride *= p.cond_dims[axis];
+    }
+    bool take_x = byte_at(cond_index) != 0u;
+    if (p.elem_bytes == 4u) {
+        dst_words[gid] = take_x ? x_words[x_index] : y_words[y_index];
+    } else {
+        uint out_word = gid * 2u;
+        uint x_word = x_index * 2u;
+        uint y_word = y_index * 2u;
+        dst_words[out_word] = take_x ? x_words[x_word] : y_words[y_word];
+        dst_words[out_word + 1u] = take_x ? x_words[x_word + 1u] : y_words[y_word + 1u];
+    }
+}

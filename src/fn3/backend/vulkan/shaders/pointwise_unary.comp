@@ -1,0 +1,68 @@
+#version 450
+// FN3-13 (#59): elementwise unary functions on f32.
+//
+// Push constants:
+//   n       number of elements
+//   opcode  0 neg, 1 sqrt, 2 tanh, 3 relu, 4 sin, 5 cos, 6 erf, 7 gelu
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { float src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint opcode;
+} p;
+
+// Abramowitz & Stegun 7.1.26: |error| <= 1.5e-7 absolute for every finite x,
+// i.e. about 2.5 f32 ulp at 1.0. It is the reference implementation for both
+// `erf` and the exact (erf) form of `gelu` here; the fixture bound for gelu is
+// atol 2e-6 + rtol 1e-6, which this meets with a factor of ~10 to spare.
+float erf_approx(float x) {
+    float magnitude = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * magnitude);
+    float poly = t * (0.254829592 +
+                      t * (-0.284496736 +
+                           t * (1.421413741 +
+                                t * (-1.453152027 + t * 1.061405429))));
+    float value = 1.0 - poly * exp(-magnitude * magnitude);
+    return (x < 0.0) ? -value : value;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    float x = src[gid];
+    float value;
+    switch (p.opcode) {
+        case 0u:
+            value = -x;
+            break;
+        case 1u:
+            value = sqrt(x);
+            break;
+        case 2u:
+            value = tanh(x);
+            break;
+        case 3u:
+            // CPU contract: Relu(NaN) is 0, because it is `if x > 0 { x } else { 0 }`.
+            value = (x > 0.0) ? x : 0.0;
+            break;
+        case 4u:
+            value = sin(x);
+            break;
+        case 5u:
+            value = cos(x);
+            break;
+        case 6u:
+            value = erf_approx(x);
+            break;
+        default:
+            // Exact (erf) GELU: 0.5 * x * (1 + erf(x / sqrt(2))).
+            value = 0.5 * x * (1.0 + erf_approx(x * 0.7071067811865476));
+            break;
+    }
+    dst[gid] = value;
+}
