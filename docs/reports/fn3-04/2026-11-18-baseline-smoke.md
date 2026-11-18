@@ -88,6 +88,37 @@ The `criterion` suite ran `cargo bench --no-default-features --features simd,par
 
 The import was exercised with `--reuse-criterion` on the tree produced by the successful `cargo bench` invocation; `--reuse-criterion` only skips the bench step and reads the same `new/estimates.json` + `new/sample.json` files.
 
+## Comparison demo
+
+A second clean-tree smoke run (`smoke-run-b.json`, run id
+`3be15f71e9de831f94b9070698606fa6`, load 0.56) was captured and compared with
+the first. Both runs used the same commit lineage, geometry, precision, model
+identity and host; the only differences are the commit (evidence commit) and
+start load, both reported as *soft* mismatches. The tool produced a diff table
+and exited 0:
+
+```bash
+./target/release/fn3-bench compare \
+  docs/reports/fn3-04/smoke-run.json \
+  docs/reports/fn3-04/smoke-run-b.json
+```
+
+Full output: [`compare-example.txt`](compare-example.txt). Excerpt:
+
+```
+compatibility: 2 mismatch(es) (soft only)
+  [soft] git.commit: A=Some("918ec7d...") B=Some("a1ff0a1...")
+  [soft] host.load.one: A="Some(0.79)" B="Some(0.56)"
+...
+decode.per_token          ms   0.1922   0.1879   -0.0042  0.978x   5
+decode.throughput  tokens/s   5203.9696 5321.1302 +117.1606 1.023x  5
+microbench.lm_head.gemm_f32 ms 2308.7718 2331.9426 +23.1708 1.010x  3
+```
+
+Comparing runs with different suites/geometry was exercised separately and is
+refused with exit code 2 unless `--force`, as documented in the harness README.
+`--json` emits the same diff as structured data for downstream tooling.
+
 ## Interpretation limits
 
 - The smoke suite uses a tiny decoder (hidden 96, 2 heads, vocab 1024) for load/prepare/prefill/decode coverage; the projection microbenchmarks use real GPT-2 small shapes (hidden 768, 12 heads x 64, FFN 3072, vocab 50257).

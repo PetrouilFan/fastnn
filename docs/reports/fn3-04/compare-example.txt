@@ -1,0 +1,40 @@
+A: f0da74cde8c902486e77ff6fc499745b suite=smoke adapter=baseline fn3/50-bench@918ec7d7b58bbdd91383e78314b216de2059a408 dirty=Some(false) 2026-11-18T11:18:32Z
+B: 3be15f71e9de831f94b9070698606fa6 suite=smoke adapter=baseline fn3/50-bench@a1ff0a1aa35778cbd028195628b0248618db3840 dirty=Some(false) 2026-11-18T11:19:31Z
+compatibility: 2 mismatch(es) (soft only)
+  [soft] git.commit: A=Some("918ec7d7b58bbdd91383e78314b216de2059a408") B=Some("a1ff0a1aa35778cbd028195628b0248618db3840")
+  [soft] host.load.one: A="Some(0.79)" B="Some(0.56)"
+
+stat: p50
+metric                                                        unit            A            B        delta     ratio    n(A/B)  note
+------------------------------------------------------------------------------------------------------------------------------------------------------
+allocation.arena_temp_copies_per_decode_step                 count       3.0000       3.0000      +0.0000    1.000x         5  
+allocation.tls_vec_allocs_per_decode_step                    count       0.0000       0.0000      +0.0000         -         5  
+decode.per_token                                                ms       0.1922       0.1879      -0.0042    0.978x         5  
+decode.throughput                                          tokens/s    5203.9696    5321.1302    +117.1606    1.023x         5  
+memory.device_peak                                             MiB  unavailable  unavailable            -         -         -  A: no GPU execution in this run; device memory is not queryable from the CPU baseline adapter; B: no GPU execution in this run; device memory is not queryable from the CPU baseline adapter
+memory.peak_rss                                                MiB      10.3594      10.3711      +0.0117    1.001x         1  
+microbench.attn.out.gemm_f32                                    ms      36.6315      37.1192      +0.4877    1.013x         3  
+microbench.attn.out.gemm_gflops                            GFLOP/s       0.2576       0.2542      -0.0034    0.987x         3  
+microbench.attn.out.gemv_f32                                    ms       0.0354       0.0337      -0.0018    0.950x         3  
+microbench.attn.out.gemv_gflops                            GFLOP/s      33.3046      35.0554      +1.7508    1.053x         3  
+microbench.attn.qkv.gemm_f32                                    ms     110.8262     112.5754      +1.7492    1.016x         3  
+microbench.attn.qkv.gemm_gflops                            GFLOP/s       0.2555       0.2515      -0.0040    0.984x         3  
+microbench.attn.qkv.gemv_f32                                    ms       0.0995       0.0993      -0.0001    0.999x         3  
+microbench.attn.qkv.gemv_gflops                            GFLOP/s      35.5780      35.6278      +0.0498    1.001x         3  
+microbench.lm_head.gemm_f32                                     ms    2308.7718    2331.9426     +23.1708    1.010x         3  
+microbench.lm_head.gemm_gflops                             GFLOP/s       0.2675       0.2648      -0.0027    0.990x         3  
+microbench.lm_head.gemv_f32                                     ms       4.6676       4.3690      -0.2986    0.936x         3  
+microbench.lm_head.gemv_gflops                             GFLOP/s      16.5386      17.6688      +1.1302    1.068x         3  
+microbench.mlp.fc.gemm_f32                                      ms     148.0773     149.9608      +1.8835    1.013x         3  
+microbench.mlp.fc.gemm_gflops                              GFLOP/s       0.2549       0.2517      -0.0032    0.987x         3  
+microbench.mlp.fc.gemv_f32                                      ms       0.1290       0.1211      -0.0080    0.938x         3  
+microbench.mlp.fc.gemv_gflops                              GFLOP/s      36.5666      38.9738      +2.4071    1.066x         3  
+microbench.mlp.proj.gemm_f32                                    ms      44.8249      48.0907      +3.2658    1.073x         3  
+microbench.mlp.proj.gemm_gflops                            GFLOP/s       0.8421       0.7849      -0.0572    0.932x         3  
+microbench.mlp.proj.gemv_f32                                    ms       0.1329       0.1266      -0.0063    0.953x         3  
+microbench.mlp.proj.gemv_gflops                            GFLOP/s      35.5126      37.2687      +1.7561    1.049x         3  
+model.load                                                      ms       2.9334       2.9357      +0.0023    1.001x         2  
+model.prepare                                                   ms       0.3267       0.2962      -0.0304    0.907x         2  
+prefill.throughput                                         tokens/s   21975.5467   21718.3564    -257.1904    0.988x         3  
+prefill.time_to_first_token                                     ms       0.3640       0.3684      +0.0043    1.012x         3  
+

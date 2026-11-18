@@ -1,0 +1,1386 @@
+{
+  "schema_version": 1,
+  "schema_name": "fastnn.fn3.bench.result",
+  "run": {
+    "run_id": "3be15f71e9de831f94b9070698606fa6",
+    "timestamp_utc": "2026-11-18T11:19:31Z",
+    "started_unix_s": 1795000771,
+    "duration_s": 14.496004083,
+    "adapter": "baseline",
+    "suite": "smoke",
+    "quick": true,
+    "seed": 20260818,
+    "label": null
+  },
+  "git": {
+    "commit": "a1ff0a1aa35778cbd028195628b0248618db3840",
+    "branch": "fn3/50-bench",
+    "dirty": false,
+    "dirty_entries": 0,
+    "describe": "v2.6.0-73-ga1ff0a1"
+  },
+  "build": {
+    "package_version": "2.6.0",
+    "profile": "release",
+    "debug_assertions": false,
+    "rustc_version": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "cargo_version": "cargo 1.100.0 (3acc79c0c 2026-11-05)",
+    "features": {
+      "blas": false,
+      "cli": false,
+      "debug_canary": false,
+      "fusion-backward": false,
+      "fusion-forward": true,
+      "gpu": false,
+      "openblas": false,
+      "parallel": true,
+      "prepared-plan": true,
+      "python": false,
+      "simd": true
+    },
+    "target_arch": "x86_64",
+    "target_os": "linux",
+    "target_family": "unix",
+    "command_line": [
+      "./target/release/fn3-bench",
+      "run",
+      "--suite",
+      "smoke",
+      "--quick",
+      "--out",
+      "/tmp/opencode/fn3-04-smoke-final-b.json",
+      "--json-stdout"
+    ]
+  },
+  "host": {
+    "os": "Arch Linux",
+    "kernel": "7.2.14-arch1-1",
+    "arch": "x86_64",
+    "cpu_model": "AMD Ryzen 7 3700X 8-Core Processor",
+    "physical_cores": 8,
+    "logical_cores": 16,
+    "threads_used": 16,
+    "memory_total_bytes": 33548152832,
+    "load": {
+      "one": 0.56,
+      "five": 1.68,
+      "fifteen": 1.88,
+      "threshold": 2.0,
+      "exceeded": false,
+      "reason": null
+    },
+    "competing_build_pids": [],
+    "competing_benchmark_pids": []
+  },
+  "gpu": {
+    "status": "present",
+    "reason": null,
+    "vulkan_instance_version": "1.4.363",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA GeForce GTX 1080 Ti",
+        "vendor": "NVIDIA",
+        "vendor_id": "0x10de",
+        "device_id": "0x1b06",
+        "device_type": "physical",
+        "software_icd": false,
+        "driver_name": "NVIDIA",
+        "driver_info": "580.196.07",
+        "driver_version": "580.196.7.0",
+        "api_version": "1.4.312",
+        "device_uuid": "471b2bda-51e1-6451-e692-ff5d1e146f1e"
+      },
+      {
+        "index": 1,
+        "name": "llvmpipe (LLVM 23.1.4, 256 bits)",
+        "vendor": "Mesa",
+        "vendor_id": "0x10005",
+        "device_id": "0x0000",
+        "device_type": "software",
+        "software_icd": true,
+        "driver_name": "llvmpipe",
+        "driver_info": "Mesa 26.2.7-arch1.1 (LLVM 23.1.4)",
+        "driver_version": "26.2.7",
+        "api_version": "1.4.354",
+        "device_uuid": "6d657361-3236-2e32-2e37-2d6172636800"
+      }
+    ],
+    "selected_device_index": null,
+    "execution_backend": "cpu",
+    "execution_reason": "CPU execution in this revision; 1 physical and 1 software Vulkan device(s) enumerated, none selected"
+  },
+  "model": {
+    "name": "synthetic-tiny-decoder",
+    "revision": "synthetic:20260818",
+    "source": "synthetic-random-weights",
+    "parameter_count": 173280,
+    "weights_bytes": 693120,
+    "seed": 20260818,
+    "checksums": [
+      {
+        "subject": "weights",
+        "algorithm": "fnv1a64",
+        "value": "a4062200d06b3e8b"
+      }
+    ]
+  },
+  "geometry": {
+    "batch": 1,
+    "prompt_tokens": 8,
+    "decode_tokens": 5,
+    "context_capacity": 8,
+    "hidden_size": 96,
+    "num_heads": 2,
+    "num_kv_heads": null,
+    "head_dim": 48,
+    "num_layers": 1,
+    "intermediate_size": 192,
+    "vocab_size": 1024,
+    "attention": "full",
+    "kv_cache": false
+  },
+  "precision": {
+    "weights_dtype": "f32",
+    "activations_dtype": "f32",
+    "accumulation_dtype": "f32",
+    "quantization": null
+  },
+  "metrics": [
+    {
+      "name": "model.load",
+      "category": "load",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          3.330015,
+          2.5413710000000003
+        ],
+        "sample_count": 2,
+        "warmup_count": 0,
+        "repetition_count": 2,
+        "stats": {
+          "min": 2.5413710000000003,
+          "p50": 2.935693,
+          "p95": 3.2905828,
+          "p99": 3.32212856,
+          "max": 3.330015,
+          "mean": 2.935693,
+          "stddev": 0.5576555203420833
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "attention_kv_cache": "false",
+        "decode_plan_tokens": "1",
+        "includes": "deterministic f32 weight synthesis + graph construction",
+        "parameter_count": "173280",
+        "prefill_plan_tokens": "8",
+        "resident_weight_bytes": "1386240",
+        "weights_bytes_per_graph": "693120"
+      }
+    },
+    {
+      "name": "model.prepare",
+      "category": "prepare",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.33250199999999996,
+          0.259971
+        ],
+        "sample_count": 2,
+        "warmup_count": 0,
+        "repetition_count": 2,
+        "stats": {
+          "min": 0.259971,
+          "p50": 0.2962365,
+          "p95": 0.32887544999999996,
+          "p99": 0.33177669,
+          "max": 0.33250199999999996,
+          "mean": 0.2962365,
+          "stddev": 0.05128716194624145
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "executor": "cold GraphExecutor per sample",
+        "includes": "compiler passes + memory planning + CPU plan build, two sequence lengths"
+      }
+    },
+    {
+      "name": "prefill.time_to_first_token",
+      "category": "prefill",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.368352,
+          0.37382099999999996,
+          0.360562
+        ],
+        "sample_count": 3,
+        "warmup_count": 1,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.360562,
+          "p50": 0.368352,
+          "p95": 0.37327409999999994,
+          "p99": 0.37371161999999997,
+          "max": 0.37382099999999996,
+          "mean": 0.36757833333333334,
+          "stddev": 0.0066632717439207845
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "includes": "full prompt forward pass, no KV cache",
+        "prompt_tokens": "8"
+      }
+    },
+    {
+      "name": "prefill.throughput",
+      "category": "throughput",
+      "unit": "tokens/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "tokens/s",
+        "samples": [
+          21718.356354791067,
+          21400.61687278136,
+          22187.584936848587
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 21400.61687278136,
+          "p50": 21718.356354791067,
+          "p95": 22140.662078642836,
+          "p99": 22178.200365207438,
+          "max": 22187.584936848587,
+          "mean": 21768.85272147367,
+          "stddev": 395.90667555818976
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic prefill samples"
+      }
+    },
+    {
+      "name": "decode.per_token",
+      "category": "decode",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.187791,
+          0.19353099999999998,
+          0.186891,
+          0.198681,
+          0.18792999999999999
+        ],
+        "sample_count": 5,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.186891,
+          "p50": 0.18792999999999999,
+          "p95": 0.197651,
+          "p99": 0.19847499999999998,
+          "max": 0.198681,
+          "mean": 0.1909648,
+          "stddev": 0.005049851205728735
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "attention": "full (unmasked)",
+        "decode_steps": "5",
+        "includes": "one-token full-stack forward; 2.x has no KV cache"
+      }
+    },
+    {
+      "name": "decode.throughput",
+      "category": "throughput",
+      "unit": "tokens/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "tokens/s",
+        "samples": [
+          5325.068826514583,
+          5167.130847254445,
+          5350.712447362366,
+          5033.193913861919,
+          5321.130208056191
+        ],
+        "sample_count": 5,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 5033.193913861919,
+          "p50": 5321.130208056191,
+          "p95": 5345.58372319281,
+          "p99": 5349.686702528455,
+          "max": 5350.712447362366,
+          "mean": 5239.447248609901,
+          "stddev": 136.15543040940724
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic decode samples"
+      }
+    },
+    {
+      "name": "memory.peak_rss",
+      "category": "memory",
+      "unit": "MiB",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "MiB",
+        "samples": [
+          10.37109375
+        ],
+        "sample_count": 1,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 10.37109375,
+          "p50": 10.37109375,
+          "p95": 10.37109375,
+          "p99": 10.37109375,
+          "max": 10.37109375,
+          "mean": 10.37109375,
+          "stddev": 0.0
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "scope": "whole process, VmHWM after all measurements",
+        "source": "/proc/self/status"
+      }
+    },
+    {
+      "name": "memory.device_peak",
+      "category": "memory",
+      "unit": "MiB",
+      "status": "unavailable",
+      "reason": "no GPU execution in this run; device memory is not queryable from the CPU baseline adapter",
+      "clock": "not_applicable",
+      "host_time": null,
+      "device_time": {
+        "status": "unavailable",
+        "reason": "measurement unavailable; no device timing was reported",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "backend": "cpu"
+      }
+    },
+    {
+      "name": "allocation.tls_vec_allocs_per_decode_step",
+      "category": "allocation",
+      "unit": "count",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "count",
+        "samples": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "sample_count": 5,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "stddev": 0.0
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "source": "fastnn::backend::cpu::telemetry",
+        "total_tls_vec_allocs": "0",
+        "total_tls_vec_reuses": "15"
+      }
+    },
+    {
+      "name": "allocation.arena_temp_copies_per_decode_step",
+      "category": "allocation",
+      "unit": "count",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "count",
+        "samples": [
+          3.0,
+          3.0,
+          3.0,
+          3.0,
+          3.0
+        ],
+        "sample_count": 5,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 3.0,
+          "p50": 3.0,
+          "p95": 3.0,
+          "p99": 3.0,
+          "max": 3.0,
+          "mean": 3.0,
+          "stddev": 0.0
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "source": "fastnn::backend::cpu::telemetry",
+        "total_arena_temp_copy_bytes": "9600"
+      }
+    },
+    {
+      "name": "microbench.attn.qkv.gemm_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          112.575405,
+          110.874529,
+          116.890643
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 110.874529,
+          "p50": 112.575405,
+          "p95": 116.4591192,
+          "p99": 116.80433823999999,
+          "max": 116.890643,
+          "mean": 113.446859,
+          "stddev": 3.10128698621008
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "28311552",
+        "implementation": "gemm_cpu_flat::<F32x1>",
+        "k": "768",
+        "m": "8",
+        "n": "2304",
+        "weights_fnv1a64": "e06d29c908944079"
+      }
+    },
+    {
+      "name": "microbench.attn.qkv.gemm_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          0.25148967485393453,
+          0.25534766420518457,
+          0.24220546036349547
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.24220546036349547,
+          "p50": 0.25148967485393453,
+          "p95": 0.25496186527005954,
+          "p99": 0.25527050441815957,
+          "max": 0.25534766420518457,
+          "mean": 0.2496809331408715,
+          "stddev": 0.006755223193393206
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples",
+        "k": "768",
+        "m": "8",
+        "n": "2304"
+      }
+    },
+    {
+      "name": "microbench.attn.qkv.gemv_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.099081,
+          0.09972,
+          0.099331
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.099081,
+          "p50": 0.099331,
+          "p95": 0.09968110000000001,
+          "p99": 0.09971222,
+          "max": 0.09972,
+          "mean": 0.09937733333333333,
+          "stddev": 0.00032200983421835667
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "3538944",
+        "implementation": "gemv_cpu::<F32x1>",
+        "k": "768",
+        "m": "1",
+        "n": "2304"
+      }
+    },
+    {
+      "name": "microbench.attn.qkv.gemv_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          35.71768553002089,
+          35.48880866425993,
+          35.62778991452819
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 35.48880866425993,
+          "p50": 35.62778991452819,
+          "p95": 35.708695968471616,
+          "p99": 35.71588761771103,
+          "max": 35.71768553002089,
+          "mean": 35.611428036269665,
+          "stddev": 0.11531235066223451
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples"
+      }
+    },
+    {
+      "name": "microbench.attn.out.gemm_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          36.758908,
+          37.11923,
+          38.049794
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 36.758908,
+          "p50": 37.11923,
+          "p95": 37.9567376,
+          "p99": 38.03118272,
+          "max": 38.049794,
+          "mean": 37.30931066666667,
+          "stddev": 0.6661040918124832
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "9437184",
+        "implementation": "gemm_cpu_flat::<F32x1>",
+        "k": "768",
+        "m": "8",
+        "n": "768",
+        "weights_fnv1a64": "e5e28f99a0568a8d"
+      }
+    },
+    {
+      "name": "microbench.attn.out.gemm_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          0.25673189203553054,
+          0.2542397565897784,
+          0.24802194724102844
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.24802194724102844,
+          "p50": 0.2542397565897784,
+          "p95": 0.2564826784909553,
+          "p99": 0.2566820493266155,
+          "max": 0.25673189203553054,
+          "mean": 0.25299786528877916,
+          "stddev": 0.004485811530084805
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples",
+        "k": "768",
+        "m": "8",
+        "n": "768"
+      }
+    },
+    {
+      "name": "microbench.attn.out.gemv_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.033651,
+          0.033569999999999996,
+          0.03367
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.033569999999999996,
+          "p50": 0.033651,
+          "p95": 0.0336681,
+          "p99": 0.03366962,
+          "max": 0.03367,
+          "mean": 0.03363033333333334,
+          "stddev": 0.000053106810611573575
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "1179648",
+        "implementation": "gemv_cpu::<F32x1>",
+        "k": "768",
+        "m": "1",
+        "n": "768"
+      }
+    },
+    {
+      "name": "microbench.attn.out.gemv_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          35.05536239636266,
+          35.139946380697054,
+          35.03558063558064
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 35.03558063558064,
+          "p50": 35.05536239636266,
+          "p95": 35.131487982263614,
+          "p99": 35.13825470101037,
+          "max": 35.139946380697054,
+          "mean": 35.076963137546784,
+          "stddev": 0.055434611960433956
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples"
+      }
+    },
+    {
+      "name": "microbench.mlp.fc.gemm_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          147.391636,
+          149.96083599999997,
+          166.799529
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 147.391636,
+          "p50": 149.96083599999997,
+          "p95": 165.1156597,
+          "p99": 166.46275514,
+          "max": 166.799529,
+          "mean": 154.71733366666666,
+          "stddev": 10.542048198268517
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "37748736",
+        "implementation": "gemm_cpu_flat::<F32x1>",
+        "k": "768",
+        "m": "8",
+        "n": "3072",
+        "weights_fnv1a64": "d5ed53ab28a746b8"
+      }
+    },
+    {
+      "name": "microbench.mlp.fc.gemm_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          0.25611179185228666,
+          0.25172396344869674,
+          0.22631200595296644
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.22631200595296644,
+          "p50": 0.25172396344869674,
+          "p95": 0.2556730090119277,
+          "p99": 0.25602403528421486,
+          "max": 0.25611179185228666,
+          "mean": 0.24471592041798326,
+          "stddev": 0.016088545933414234
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples",
+        "k": "768",
+        "m": "8",
+        "n": "3072"
+      }
+    },
+    {
+      "name": "microbench.mlp.fc.gemv_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.12189,
+          0.121071,
+          0.12064
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.12064,
+          "p50": 0.121071,
+          "p95": 0.1218081,
+          "p99": 0.12187362,
+          "max": 0.12189,
+          "mean": 0.12120033333333334,
+          "stddev": 0.0006349569539215505
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "4718592",
+        "implementation": "gemv_cpu::<F32x1>",
+        "k": "768",
+        "m": "1",
+        "n": "3072"
+      }
+    },
+    {
+      "name": "microbench.mlp.fc.gemv_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          38.71188776765936,
+          38.973759199147615,
+          39.11299734748011
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 38.71188776765936,
+          "p50": 38.973759199147615,
+          "p95": 39.09907353264686,
+          "p99": 39.11021258451346,
+          "max": 39.11299734748011,
+          "mean": 38.9328814380957,
+          "stddev": 0.2036552657493971
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples"
+      }
+    },
+    {
+      "name": "microbench.mlp.proj.gemm_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          41.632179,
+          48.090677,
+          48.58596
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 41.632179,
+          "p50": 48.090677,
+          "p95": 48.5364317,
+          "p99": 48.57605434,
+          "max": 48.58596,
+          "mean": 46.10293866666667,
+          "stddev": 3.879702992542384
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "37748736",
+        "implementation": "gemm_cpu_flat::<F32x1>",
+        "k": "3072",
+        "m": "8",
+        "n": "768",
+        "weights_fnv1a64": "1ed8338bdac447b2"
+      }
+    },
+    {
+      "name": "microbench.mlp.proj.gemm_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          0.9067201599032326,
+          0.7849491492914521,
+          0.7769474144382452
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.7769474144382452,
+          "p50": 0.7849491492914521,
+          "p95": 0.8945430588420545,
+          "p99": 0.904284739690997,
+          "max": 0.9067201599032326,
+          "mean": 0.8228722412109767,
+          "stddev": 0.07272456285143715
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples",
+        "k": "3072",
+        "m": "8",
+        "n": "768"
+      }
+    },
+    {
+      "name": "microbench.mlp.proj.gemv_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          0.125231,
+          0.12661,
+          0.132811
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.125231,
+          "p50": 0.12661,
+          "p95": 0.1321909,
+          "p99": 0.13268698,
+          "max": 0.132811,
+          "mean": 0.12821733333333332,
+          "stddev": 0.004037541372337051
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "4718592",
+        "implementation": "gemv_cpu::<F32x1>",
+        "k": "3072",
+        "m": "1",
+        "n": "768"
+      }
+    },
+    {
+      "name": "microbench.mlp.proj.gemv_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          37.67910501393425,
+          37.268714951425636,
+          35.528623382099376
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 35.528623382099376,
+          "p50": 37.268714951425636,
+          "p95": 37.638066007683385,
+          "p99": 37.670897212684075,
+          "max": 37.67910501393425,
+          "mean": 36.82548111581975,
+          "stddev": 1.1417026701309847
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples"
+      }
+    },
+    {
+      "name": "microbench.lm_head.gemm_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          2331.942618,
+          2339.834415,
+          2325.75891
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 2325.75891,
+          "p50": 2331.942618,
+          "p95": 2339.0452352999996,
+          "p99": 2339.6765790599998,
+          "max": 2339.834415,
+          "mean": 2332.5119809999997,
+          "stddev": 7.05500467190359
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "617558016",
+        "implementation": "gemm_cpu_flat::<F32x1>",
+        "k": "768",
+        "m": "8",
+        "n": "50257",
+        "weights_fnv1a64": "5c920633d03a51c7"
+      }
+    },
+    {
+      "name": "microbench.lm_head.gemm_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          0.26482556270173196,
+          0.26393235864940473,
+          0.26552967865443966
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 0.26393235864940473,
+          "p50": 0.26482556270173196,
+          "p95": 0.2654592670591689,
+          "p99": 0.2655155963353855,
+          "max": 0.26552967865443966,
+          "mean": 0.2647625333351921,
+          "stddev": 0.0008005231573202663
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples",
+        "k": "768",
+        "m": "8",
+        "n": "50257"
+      }
+    },
+    {
+      "name": "microbench.lm_head.gemv_f32",
+      "category": "microbench",
+      "unit": "ms",
+      "status": "ok",
+      "reason": null,
+      "clock": "host_monotonic",
+      "host_time": {
+        "unit": "ms",
+        "samples": [
+          4.314128,
+          4.391049,
+          4.368989
+        ],
+        "sample_count": 3,
+        "warmup_count": 2,
+        "repetition_count": 1,
+        "stats": {
+          "min": 4.314128,
+          "p50": 4.368989,
+          "p95": 4.388843,
+          "p99": 4.3906078,
+          "max": 4.391049,
+          "mean": 4.358055333333333,
+          "stddev": 0.03960894924550912
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "CPU backend does not report per-operation device clocks",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "flops": "77194752",
+        "implementation": "gemv_cpu::<F32x1>",
+        "k": "768",
+        "m": "1",
+        "n": "50257"
+      }
+    },
+    {
+      "name": "microbench.lm_head.gemv_gflops",
+      "category": "microbench",
+      "unit": "GFLOP/s",
+      "status": "ok",
+      "reason": null,
+      "clock": "not_applicable",
+      "host_time": {
+        "unit": "GFLOP/s",
+        "samples": [
+          17.893477430433215,
+          17.580025183048516,
+          17.668790651567214
+        ],
+        "sample_count": 3,
+        "warmup_count": 0,
+        "repetition_count": 1,
+        "stats": {
+          "min": 17.580025183048516,
+          "p50": 17.668790651567214,
+          "p95": 17.871008752546615,
+          "p99": 17.888983694855895,
+          "max": 17.893477430433215,
+          "mean": 17.714097755016315,
+          "stddev": 0.16156307766578454
+        }
+      },
+      "device_time": {
+        "status": "unavailable",
+        "reason": "quantity metric has no device-time counterpart",
+        "source": null,
+        "samples": [],
+        "stats": null
+      },
+      "counters": {},
+      "metadata": {
+        "clock": "derived from host_monotonic samples"
+      }
+    }
+  ],
+  "notes": [
+    "2.x has no KV cache and no weight artifact: load measures deterministic weight synthesis plus graph construction, prepare measures AOT compile for prefill and decode sequence lengths, and decode is a one-token full-stack forward.",
+    "Attention is unmasked full attention; causal masking would not change the FLOPs measured here.",
+    "Smoke suite combines a tiny synthetic decoder with GPT-2-shaped projection microbenchmarks."
+  ],
+  "warnings": []
+}
