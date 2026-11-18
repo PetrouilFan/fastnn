@@ -1,0 +1,133 @@
+#version 450
+// FN3-14 (#60): tiled shared-memory FP32 matrix product.
+//
+// The shader computes ONE batch slice of `out[b, m, n] = sum_k lhs[b, m, k] *
+// rhs[b, k, n]` per workgroup grid position, with 16x16 output elements per
+// workgroup and a 16-deep shared-memory tile. Batches are handled by
+// `gl_WorkGroupID.z`, so one dispatch covers the whole batched op.
+//
+// # Contract (mirrors the CPU reference in
+// # `src/fn3/backend/cpu/kernels/matmul.rs`)
+//
+// - both operands have rank >= 2 with the matrix axes last; the batch axes
+//   broadcast from the left;
+// - each output element is one `f32` accumulator, adding products in ascending
+//   `k` from `+0.0` (no tree reduction, no `f64` accumulator). A tail `k` is
+//   zero-padded in shared memory, and `x + 0.0 == x` exactly, so the padded
+//   steps cannot change the result;
+// - operands are addressed with explicit element strides, so a transposed
+//   right-hand side (`K @ V^T`), a strided view or a zero-stride broadcast axis
+//   needs no host-side copy;
+// - the output is contiguous row-major.
+//
+// # Layout
+//
+// `a` is indexed `a_base + a_batch + row * a_row_stride + k * a_k_stride`;
+// `b` is indexed `b_base + b_batch + k * b_k_stride + col * b_col_stride`.
+// `a_batch`/`b_batch` come from decomposing the batch workgroup id over the
+// six right-aligned batch axes, multiplying by the effective (broadcast-aware)
+// strides. Unused axes are extent 1 with stride 0.
+//
+// Bindings, push-constant size and LocalSize are mirrored by
+// `kernels::matmul::MATMUL_TILED`; `kernels::reflect` cross-checks this module
+// against that declaration at registration time.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Lhs {
+    float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer Rhs {
+    float b[];
+};
+
+layout(set = 0, binding = 2, std430) writeonly buffer Out {
+    float outv[];
+};
+
+// 28 x 4 = 112 bytes, below the 128-byte guaranteed maxPushConstantsSize.
+layout(push_constant) uniform Params {
+    uint m;                  // output rows of one batch slice
+    uint n;                  // output columns
+    uint k;                  // contraction length
+    uint a_base;             // element offset of a's first addressed element
+    uint b_base;             // element offset of b's first addressed element
+    uint out_base;           // element offset of out's first element
+    uint a_row_stride;       // elements between a rows
+    uint a_k_stride;         // elements between a k steps
+    uint b_k_stride;         // elements between b k steps
+    uint b_col_stride;       // elements between b columns
+    uint batch_dims[6];      // right-aligned output batch extents (1 = unused)
+    uint a_batch_stride[6];  // effective a batch strides (0 = broadcast)
+    uint b_batch_stride[6];  // effective b batch strides (0 = broadcast)
+} pc;
+
+const uint TILE = 16u;
+
+// The +1 keeps consecutive rows off the same shared-memory bank.
+shared float tile_a[TILE][TILE + 1];
+shared float tile_b[TILE][TILE + 1];
+
+void main() {
+    const uint tx = gl_LocalInvocationID.x; // column inside the tile
+    const uint ty = gl_LocalInvocationID.y; // row inside the tile
+
+    const uint row0 = gl_WorkGroupID.y * TILE;
+    const uint col0 = gl_WorkGroupID.x * TILE;
+    const uint row = row0 + ty;
+    const uint col = col0 + tx;
+
+    // Batch offsets: least-significant axis is the last slot, matching the
+    // row-major flattening of the output batch axes.
+    uint a_batch = 0u;
+    uint b_batch = 0u;
+    uint remaining = gl_WorkGroupID.z;
+    for (int axis = 5; axis >= 0; --axis) {
+        const uint extent = max(pc.batch_dims[axis], 1u);
+        const uint coordinate = remaining % extent;
+        remaining /= extent;
+        a_batch += coordinate * pc.a_batch_stride[axis];
+        b_batch += coordinate * pc.b_batch_stride[axis];
+    }
+
+    const uint a_slice = pc.a_base + a_batch;
+    const uint b_slice = pc.b_base + b_batch;
+    const bool write = (row < pc.m) && (col < pc.n);
+
+    float accumulator = 0.0;
+    for (uint k0 = 0u; k0 < pc.k; k0 += TILE) {
+        // 256 threads load a 16x16 tile of each operand; out-of-range elements
+        // are zero so a K tail contributes nothing.
+        const uint a_row = row0 + ty;
+        const uint a_col = k0 + tx;
+        tile_a[ty][tx] = (a_row < pc.m && a_col < pc.k)
+            ? a[a_slice + a_row * pc.a_row_stride + a_col * pc.a_k_stride]
+            : 0.0;
+
+        const uint b_row = k0 + ty;
+        const uint b_col = col0 + tx;
+        tile_b[ty][tx] = (b_row < pc.k && b_col < pc.n)
+            ? b[b_slice + b_row * pc.b_k_stride + b_col * pc.b_col_stride]
+            : 0.0;
+
+        barrier();
+
+        // Ascending k, one f32 accumulator: the reference order. Threads whose
+        // output element is outside the matrix contribute nothing, but the
+        // barriers above stay in uniform control flow.
+        if (write) {
+            for (uint step = 0u; step < TILE; ++step) {
+                accumulator += tile_a[ty][step] * tile_b[step][tx];
+            }
+        }
+
+        barrier();
+    }
+
+    if (write) {
+        const uint out_index =
+            pc.out_base + gl_WorkGroupID.z * pc.m * pc.n + row * pc.n + col;
+        outv[out_index] = accumulator;
+    }
+}
