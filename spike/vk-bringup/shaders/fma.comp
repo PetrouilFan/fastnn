@@ -1,0 +1,42 @@
+#version 450
+// Element-wise fused multiply-add used by the FN3-05 bring-up dispatch:
+//
+//     out[i] = a[i] * b[i] + c[i] + bias
+//
+// The dispatch deliberately covers an odd tail: the host dispatches
+// ceil(n / 64) workgroups, so the final workgroup has inactive invocations
+// that must be rejected by the bounds check below.
+//
+// `bias` lives in a push constant so the repeated-submission test can change
+// the expected result on every submission without touching the buffers.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer A {
+    float a[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer B {
+    float b[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer C {
+    float c[];
+};
+
+layout(set = 0, binding = 3, std430) writeonly buffer Out {
+    float outv[];
+};
+
+layout(push_constant) uniform Params {
+    uint n;
+    float bias;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) {
+        return;
+    }
+    outv[i] = a[i] * b[i] + c[i] + pc.bias;
+}

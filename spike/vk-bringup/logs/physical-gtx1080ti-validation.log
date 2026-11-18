@@ -1,0 +1,261 @@
+[fn3vk] fn3-vk-bringup 0.1.0 (ash 0.38.0, raw Vulkan loader)
+[fn3vk][validation][INFO] Loader Message(0) (general) vkCreateInstance: applicationName: "fn3-vk-bringup", applicationVersion: 4096, engineName: "fn3-vk-bringup", engineVersion: 4096, apiVersion: 1.1.0
+[fn3vk][validation][INFO] Loader Message(0) (general) vkCreateInstance: Requested 1 instance layer(s):
+[fn3vk][validation][INFO] Loader Message(0) (general)    VK_LAYER_KHRONOS_validation
+[fn3vk][validation][INFO] Loader Message(0) (general) vkCreateInstance: Requested 1 instance extension(s):
+[fn3vk][validation][INFO] Loader Message(0) (general)    VK_EXT_debug_utils
+[fn3vk][validation][INFO] Loader Message(0) (general) No valid vk_loader_settings.json file found, no loader settings will be active
+[fn3vk][validation][INFO] Loader Message(0) (general) Searching for implicit layer manifest files
+[fn3vk][validation][INFO] Loader Message(0) (general)    In following locations:
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.config/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /etc/xdg/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /etc/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /var/lib/flatpak/exports/share/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/local/share/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/implicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)    Found the following files:
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/implicit_layer.d/steamoverlay_i386.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/implicit_layer.d/steamoverlay_x86_64.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/implicit_layer.d/steamfossilize_i386.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/implicit_layer.d/steamfossilize_x86_64.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/implicit_layer.d/VkLayer_MESA_anti_lag.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/implicit_layer.d/VkLayer_MESA_device_select.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/implicit_layer.d/nvidia_layers.json
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /home/petrouil/.local/share/vulkan/implicit_layer.d/steamoverlay_i386.json (file version 1.0.0)
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /home/petrouil/.local/share/vulkan/implicit_layer.d/steamoverlay_x86_64.json (file version 1.0.0)
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /home/petrouil/.local/share/vulkan/implicit_layer.d/steamfossilize_i386.json (file version 1.0.0)
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /home/petrouil/.local/share/vulkan/implicit_layer.d/steamfossilize_x86_64.json (file version 1.0.0)
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /usr/share/vulkan/implicit_layer.d/VkLayer_MESA_anti_lag.json (file version 1.2.1)
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /usr/share/vulkan/implicit_layer.d/VkLayer_MESA_device_select.json (file version 1.0.0)
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /usr/share/vulkan/implicit_layer.d/nvidia_layers.json (file version 1.0.1)
+[fn3vk][validation][INFO] Loader Message(0) (general) Searching for explicit layer manifest files
+[fn3vk][validation][INFO] Loader Message(0) (general)    In following locations:
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.config/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /etc/xdg/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /etc/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /var/lib/flatpak/exports/share/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/local/share/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/explicit_layer.d
+[fn3vk][validation][INFO] Loader Message(0) (general)    Found the following files:
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json
+[fn3vk][validation][INFO] Loader Message(0) (general) Found manifest file /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json (file version 1.2.0)
+[fn3vk][validation][INFO] Loader Message(0) (general) Searching for driver manifest files
+[fn3vk][validation][INFO] Loader Message(0) (general)    In following locations:
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.config/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /etc/xdg/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /etc/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /home/petrouil/.local/share/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /var/lib/flatpak/exports/share/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/local/share/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/icd.d
+[fn3vk][validation][INFO] Loader Message(0) (general)    Found the following files:
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/icd.d/radeon_icd.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/icd.d/nvidia_icd.json
+[fn3vk][validation][INFO] Loader Message(0) (general)       /usr/share/vulkan/icd.d/lvp_icd.json
+[fn3vk][validation][INFO] Loader Message(0) (general) Found ICD manifest file /usr/share/vulkan/icd.d/radeon_icd.json, version 1.0.1
+[fn3vk][validation][INFO] Loader Message(0) (general) Found ICD manifest file /usr/share/vulkan/icd.d/nvidia_icd.json, version 1.0.1
+[fn3vk][validation][INFO] Loader Message(0) (general) Found ICD manifest file /usr/share/vulkan/icd.d/lvp_icd.json, version 1.0.1
+[fn3vk][validation][INFO] Loader Message(0) (general) Insert instance layer "VK_LAYER_KHRONOS_validation" (/usr/lib/libVkLayer_khronos_validation.so)
+[fn3vk][validation][INFO] Loader Message(0) (general) Insert instance layer "VK_LAYER_MESA_device_select" (/usr/lib/libVkLayer_MESA_device_select.so)
+[fn3vk][validation][INFO] Loader Message(0) (general) vkCreateInstance layer callstack setup to:
+[fn3vk][validation][INFO] Loader Message(0) (general)    <Application>
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    <Loader>
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    VK_LAYER_MESA_device_select
+[fn3vk][validation][INFO] Loader Message(0) (general)            Type: Implicit
+[fn3vk][validation][INFO] Loader Message(0) (general)            Enabled By: Implicit Layer
+[fn3vk][validation][INFO] Loader Message(0) (general)                Disable Env Var:  NODEVICE_SELECT
+[fn3vk][validation][INFO] Loader Message(0) (general)            Manifest: /usr/share/vulkan/implicit_layer.d/VkLayer_MESA_device_select.json
+[fn3vk][validation][INFO] Loader Message(0) (general)            Library:  /usr/lib/libVkLayer_MESA_device_select.so
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    VK_LAYER_KHRONOS_validation
+[fn3vk][validation][INFO] Loader Message(0) (general)            Type: Explicit
+[fn3vk][validation][INFO] Loader Message(0) (general)            Enabled By: By the Application
+[fn3vk][validation][INFO] Loader Message(0) (general)            Manifest: /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json
+[fn3vk][validation][INFO] Loader Message(0) (general)            Library:  /usr/lib/libVkLayer_khronos_validation.so
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    <Drivers>
+[fn3vk][validation][INFO] CURRENT-VALIDATION-ENABLED(-42261870) (validation) vkCreateInstance(): Current Validation Enabled:
+  - Core Checks
+  - Stateless Parameter
+  - Object lifetime
+  - Thread Safety
+  - Handle Wrapping
+
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk] loader instance API: 1.4.363
+[fn3vk] validation: ENABLED (VK_LAYER_KHRONOS_validation -> stderr)
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) Removing driver /usr/lib/libvulkan_radeon.so due to not having any physical devices
+[fn3vk] selector: Uuid("471b2bda-51e1-6451-e692-ff5d1e146f1e")
+[fn3vk] physical devices: 2
+[fn3vk]   [0] NVIDIA GeForce GTX 1080 Ti               type=DISCRETE_GPU api=1.4.312 uuid=471b2bda-51e1-6451-e692-ff5d1e146f1e
+[fn3vk]   [1] llvmpipe (LLVM 23.1.4, 256 bits)         type=CPU api=1.4.354 uuid=6d657361-3236-2e32-2e37-2d6172636800
+
+[fn3vk] selected device 0 of 2
+device[0]: NVIDIA GeForce GTX 1080 Ti
+  vendor_id         0x10de (NVIDIA)
+  device_id         0x1b06
+  device_type       DISCRETE_GPU
+  api_version       1.4.312
+  driver_id         NVIDIA_PROPRIETARY (driverID=4)
+  driver_version    580.196.7.0 (raw=0x913101c0)
+  device_uuid       471b2bda-51e1-6451-e692-ff5d1e146f1e
+  driver_uuid       75d4e284-3c58-509f-9ec3-29f8fc7eb00a
+  memory            3 heaps, 11 types
+    heap[0] size=11811160064 (11.00 GiB) flags=DEVICE_LOCAL
+    heap[1] size=25161114624 (23.43 GiB) flags=
+    heap[2] size=257949696 (0.24 GiB) flags=DEVICE_LOCAL
+  queue_families    5
+    family[0] GRAPHICS|COMPUTE|TRANSFER|SPARSE_BINDING queues=16 timestamp_bits=64 granularity=1x1x1
+    family[1] TRANSFER|SPARSE_BINDING          queues=2 timestamp_bits=64 granularity=1x1x1
+    family[2] COMPUTE|TRANSFER|SPARSE_BINDING  queues=8 timestamp_bits=64 granularity=1x1x1
+    family[3] TRANSFER|SPARSE_BINDING          queues=1 timestamp_bits=32 granularity=1x1x1
+    family[4] TRANSFER|SPARSE_BINDING          queues=2 timestamp_bits=32 granularity=1x1x1
+  limits:
+    maxComputeWorkGroupCount          [2147483647, 65535, 65535]
+    maxComputeWorkGroupSize           [1536, 1024, 64]
+    maxComputeWorkGroupInvocations    1536
+    maxComputeSharedMemorySize        49152 bytes
+    maxStorageBufferRange             4294967295 bytes
+    maxMemoryAllocationSize           4292870144 bytes
+    minUniformBufferOffsetAlignment   256 bytes
+    minStorageBufferOffsetAlignment   16 bytes
+    maxMemoryAllocationCount          4294967295
+    timestampPeriod                   1 ns
+    maxPushConstantsSize              256 bytes
+    maxDescriptorSetStorageBuffers    1048576
+  relevant_extensions:
+    VK_KHR_8bit_storage              present                  8-bit storage
+    VK_KHR_16bit_storage             present                  16-bit storage
+    VK_KHR_shader_float16_int8       present                  FP16/INT8 arithmetic
+    VK_KHR_buffer_device_address     present                  buffer device address
+    VK_KHR_synchronization2          present                  synchronization2
+    VK_EXT_memory_budget             present                  memory budget
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) linux_read_sorted_physical_devices:
+[fn3vk][validation][INFO] Loader Message(0) (general)      Original order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] llvmpipe (LLVM 23.1.4, 256 bits)
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] NVIDIA GeForce GTX 1080 Ti
+[fn3vk][validation][INFO] Loader Message(0) (general)      Sorted order:
+[fn3vk][validation][INFO] Loader Message(0) (general)            [0] NVIDIA GeForce GTX 1080 Ti  
+[fn3vk][validation][INFO] Loader Message(0) (general)            [1] llvmpipe (LLVM 23.1.4, 256 bits)  
+[fn3vk][validation][INFO] Loader Message(0) (general) Inserted device layer "VK_LAYER_KHRONOS_validation" (/usr/lib/libVkLayer_khronos_validation.so)
+[fn3vk][validation][INFO] Loader Message(0) (general) Failed to find vkGetDeviceProcAddr in layer "/usr/lib/libVkLayer_MESA_device_select.so"
+[fn3vk][validation][INFO] Loader Message(0) (general) vkCreateDevice layer callstack setup to:
+[fn3vk][validation][INFO] Loader Message(0) (general)    <Application>
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    <Loader>
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    VK_LAYER_KHRONOS_validation
+[fn3vk][validation][INFO] Loader Message(0) (general)            Type: Explicit
+[fn3vk][validation][INFO] Loader Message(0) (general)            Enabled By: By the Application
+[fn3vk][validation][INFO] Loader Message(0) (general)            Manifest: /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json
+[fn3vk][validation][INFO] Loader Message(0) (general)            Library:  /usr/lib/libVkLayer_khronos_validation.so
+[fn3vk][validation][INFO] Loader Message(0) (general)      ||
+[fn3vk][validation][INFO] Loader Message(0) (general)    <Device>
+[fn3vk][validation][INFO] Loader Message(0) (general)        Using "NVIDIA GeForce GTX 1080 Ti" with driver: "/usr/lib/libGLX_nvidia.so.580.196.07"
+
+[fn3vk] logical device: queue family 2 (COMPUTE|TRANSFER|SPARSE_BINDING)
+[fn3vk] workload: count=262147 workgroups=4097 repeats=100 local_size=64
+[fn3vk] buffers: 4 x 1048588 B device-local storage, 3145764 B upload staging, 1048588 B readback staging
+[fn3vk] dispatch: count=262147 workgroups=4097 upload=3145764 B readback=1048588 B wall=0.526 ms
+[fn3vk] verify: max_abs_error=0 exact_matches=262147/262147
+[fn3vk] repeat: submissions=100 samples=300 sample_mismatches=0 min=0.046 ms mean=0.053 ms max=0.115 ms
+[fn3vk] repeat verify: max_abs_error=0 exact_matches=262147/262147
+[fn3vk] submissions total: 102 (1 upload+dispatch, 100 repeated dispatches, 1 final readback)
+[fn3vk] handles[compute]:
+  buffer: created=6 destroyed=6
+  command_buffer: created=1 destroyed=1
+  command_pool: created=1 destroyed=1
+  descriptor_pool: created=1 destroyed=1
+  descriptor_set_layout: created=1 destroyed=1
+  device_memory: created=6 destroyed=6 bytes_allocated=8388736 bytes_freed=8388736
+  fence: created=1 destroyed=1
+  pipeline: created=1 destroyed=1
+  pipeline_layout: created=1 destroyed=1
+  shader_module: created=1 destroyed=1
+[fn3vk] handles[device]:
+  device: created=1 destroyed=1
+[fn3vk] handles[instance]:
+  debug_messenger: created=1 destroyed=1
+  instance: created=1 destroyed=1
+[fn3vk] validation summary: errors=0 warnings=0
+[fn3vk] result: PASS
