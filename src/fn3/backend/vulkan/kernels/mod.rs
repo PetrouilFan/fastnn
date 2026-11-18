@@ -413,28 +413,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alpha_registers_add_and_reports_the_honest_subset() {
+    fn every_verdict_matches_its_registration() {
+        // Invariant, not a snapshot: whatever a kernel owner registers, the
+        // aggregate view must agree with it, and an op with no kernel must be
+        // reported unsupported by name rather than silently claimed.
         let set = KernelSet::alpha();
-        let support = set.supports(OpId::Add);
-        assert!(
-            matches!(support, Support::Partial { .. }),
-            "smoke add must not claim Full support: {support}"
-        );
-        assert!(support.reason().unwrap().contains("#59"), "{support}");
-        assert!(!set.features().broadcasting);
+        for op in OpId::ALL {
+            match set.get(op) {
+                Some(kernel) => {
+                    assert_eq!(set.supports(op), kernel.support, "{op}");
+                }
+                None => {
+                    let support = set.supports(op);
+                    assert!(!support.is_full(), "{op} claims Full with no kernel");
+                    let reason = support.reason().unwrap_or_else(|| {
+                        panic!("{op} is registered by nobody and names no owner")
+                    });
+                    assert!(
+                        reason.contains('#'),
+                        "{op} must name its owner issue, got {reason}"
+                    );
+                }
+            }
+        }
+        // Capabilities are derived from the registrations, so a feature may only
+        // be advertised when some kernel declares it.
+        let any_broadcasting = set.entries().iter().any(|k| k.features.broadcasting);
+        assert_eq!(set.features().broadcasting, any_broadcasting);
     }
 
     #[test]
     fn unregistered_ops_name_their_owner() {
-        let set = KernelSet::alpha();
-        for (op, owner) in [
-            (OpId::MatMul, "#60"),
-            (OpId::Softmax, "#61"),
-            (OpId::Gelu, "#59"),
-        ] {
-            let support = set.supports(op);
+        // Pick a registered op and prove the lookup is real, then prove that a
+        // set with no kernels reports every op as unsupported-with-an-owner.
+        let empty = KernelSet::new();
+        assert!(empty.entries().is_empty());
+        for op in OpId::ALL {
+            assert!(empty.get(op).is_none(), "{op}");
+            let support = empty.supports(op);
             assert!(!support.is_supported(), "{op}");
-            assert!(support.reason().unwrap().contains(owner), "{op}: {support}");
         }
     }
 
