@@ -98,7 +98,33 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #48 | Core | dispatched | `fn3/48-core-contract` | `fastnn-wt-48-core` | `a2c0759` | contracts + ADR |
 | #49 | Correctness | dispatched | `fn3/49-parity` | `fastnn-wt-49-parity` | `a2c0759` | pinned fixtures |
 | #50 | Performance | dispatched | `fn3/50-bench` | `fastnn-wt-50-bench` | `a2c0759` | harness + schema |
-| #51 | Vulkan platform | dispatched | `fn3/51-vulkan` | `fastnn-wt-51-vulkan` | `a2c0759` | device bring-up |
+| #51 | Vulkan platform | verified (integrated `5581349`) | `fn3/51-vulkan` | `fastnn-wt-51-vulkan` | `a2c0759` | done; feeds #57 |
+
+### #51 evidence (independently reproduced by integrator)
+
+`spike/vk-bringup/` — standalone crate (`ash` 0.38.0), no root manifest edits.
+Physical NVIDIA GTX 1080 Ti selected by UUID, `--validation`:
+
+```text
+verify: max_abs_error=0 exact_matches=262147/262147
+repeat: submissions=100 samples=300 sample_mismatches=0
+handles: buffer 6/6, device_memory 6/6 (8388736 B), pipeline 1/1, fence 1/1
+validation summary: errors=0 warnings=0
+result: PASS
+```
+
+Logged evidence: `spike/vk-bringup/logs/physical-gtx1080ti-validation.log`;
+software lane `logs/lavapipe-ci-only.log` is labelled CI-only and does not
+satisfy the physical-device gate. Failure paths verified with verbatim
+actionable messages (`logs/no-icd.log`, `bad-device-index.log`,
+`bad-device-name.log`, `missing-extension.log`, `missing-loader.log`).
+
+Device limits that constrain later kernels: `maxMemoryAllocationSize` ≈ 4 GiB
+(GTX 1080 Ti heap is 11 GiB — suballocation is mandatory), shared memory
+49152 B, invocations 1536, `maxStorageBufferRange` 4294967295 B, storage
+offset alignment 16 B, uniform offset alignment 256 B, timestampPeriod 1 ns.
+Per-dispatch fences and per-tensor allocations do not scale; design note for
+#57 is `spike/vk-bringup/NOTES-FN3-11.md`.
 | #52 | Core storage | ready | — | — | — | after #48 |
 | #53 | CPU reference | ready | — | — | — | after #48, #52 |
 | #54 | Model import | ready | — | — | — | after #48, #49, #52 |
