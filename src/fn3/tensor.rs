@@ -27,6 +27,47 @@
 //! `offset` is measured in **elements** from the start of the storage. Kernels
 //! index storage with `offset + sum(coord[axis] * stride[axis])`, so a view of
 //! a slice never needs to copy.
+//!
+//! An offset that is measured in **bytes** first goes through
+//! [`crate::fn3::storage::StorageWindow`], which checks
+//! `offset % dtype.alignment_hint() == 0` and `offset + len <= storage.len()`
+//! before any metadata exists. [`TensorView::from_window`] and
+//! [`Tensor::from_window`] then derive the element offset from that window, so
+//! a byte offset can never point between two elements or past the allocation.
+//!
+//! # Aliasing and mutation
+//!
+//! Shared storage is read-only: [`TensorView`] and [`Tensor::as_view`] only
+//! ever read, and [`Storage::try_make_mut`] succeeds only when the handle is
+//! the last one. The rule a backend must obey is therefore:
+//!
+//! > **A write must not alias a read.** An output element that an input view
+//! > can also address must not be written, in either order.
+//!
+//! The safe API makes that structural rather than a convention:
+//!
+//! - [`Tensor::as_mut_view`] fails with [`Fn3Error::StorageShared`] while any
+//!   other `Storage` handle exists, which includes every live [`Tensor`] clone
+//!   and every live [`TensorView`] of the same allocation.
+//! - [`TensorMut`] borrows an [`AlignedBuffer`] mutably, so no `&Storage`
+//!   pointing at that buffer can exist at the same time.
+//! - [`Tensor::shares_storage_with`] and [`Storage::ptr_eq`] let a backend
+//!   assert allocation identity before deciding that two operands are
+//!   distinct.
+//!
+//! A backend that computes raw indices must preserve this rule when it writes:
+//! it may not write an output slot through a pointer obtained from an input,
+//! and it may not assume that two `TensorMut` outputs point at distinct
+//! allocations unless it checked. Plan construction rejects a slot that is both
+//! input and output ([`crate::fn3::model::ExecutionPlan`]).
+//!
+//! # Materialisation
+//!
+//! A strided view is fully supported by metadata indexing, but some operations
+//! need one contiguous window of bytes. [`Tensor::to_contiguous`] and
+//! [`TensorView::to_contiguous`] return an owned contiguous tensor whose bytes
+//! are the logical row-major order of the view; they never reinterpret a
+//! strided window as if it were contiguous.
 
 use std::fmt;
 
@@ -36,8 +77,8 @@ use crate::fn3::device::{DeviceId, DeviceResolveError};
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
 use crate::fn3::ops::OpId;
-use crate::fn3::shape::{Shape, Strides};
-use crate::fn3::storage::{AlignedBuffer, Storage};
+use crate::fn3::shape::{checked_usize, Shape, Strides};
+use crate::fn3::storage::{AlignedBuffer, Storage, StorageWindow};
 
 /// Validated description of a tensor: dtype, device, shape, strides, offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +146,10 @@ impl TensorMeta {
             offset,
             broadcast,
         };
-        // Reject metadata that can never address a buffer on this target.
+        // Reject metadata that can never address a buffer on this target:
+        // offset + span must fit in u64 (and in usize once scaled to bytes).
+        // The element offset is always aligned to the dtype's alignment hint
+        // because the hint equals the element size for every alpha dtype.
         meta.required_bytes()?;
         Ok(meta)
     }
@@ -155,16 +199,42 @@ impl TensorMeta {
         self.shape.numel()
     }
 
+    /// Number of elements in the view, checked against `usize`.
+    pub fn numel_usize(&self) -> Result<usize, Fn3Error> {
+        self.shape.numel_usize()
+    }
+
     /// Byte length of the view's elements (not of its span).
     pub fn byte_len(&self) -> Result<usize, Fn3Error> {
         self.shape.byte_len(self.dtype)
     }
 
+    /// Checked byte offset of the first addressed element from the start of
+    /// storage: `offset * dtype.size_bytes()`.
+    ///
+    /// Fails with [`Fn3Error::ShapeOverflow`] instead of wrapping when the
+    /// element offset cannot be scaled to bytes in a `usize`.
+    pub fn byte_offset(&self) -> Result<usize, Fn3Error> {
+        self.offset
+            .checked_mul(self.dtype.size_bytes())
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "TensorMeta::byte_offset",
+                axis: None,
+                detail: format!(
+                    "element offset {} times {} bytes per {} exceeds usize::MAX",
+                    self.offset,
+                    self.dtype.size_bytes(),
+                    self.dtype
+                ),
+            })
+    }
+
     /// Elements addressed from the start of storage: `offset + span`.
+    ///
+    /// A zero-element view reports its offset, not zero: the view still starts
+    /// somewhere inside its storage, and a later window or slice operation must
+    /// be able to see that start.
     pub fn required_elements(&self) -> Result<u64, Fn3Error> {
-        if self.shape.has_zero_extent() {
-            return Ok(0);
-        }
         let span = self.strides.required_len(&self.shape)?;
         let offset = self.offset as u64;
         offset
@@ -176,7 +246,7 @@ impl TensorMeta {
             })
     }
 
-    /// Bytes that storage must provide for this view.
+    /// Bytes that storage must provide for this view, checked on both widths.
     pub fn required_bytes(&self) -> Result<usize, Fn3Error> {
         let elements = self.required_elements()?;
         if elements == 0 {
@@ -187,18 +257,95 @@ impl TensorMeta {
             .ok_or_else(|| Fn3Error::ShapeOverflow {
                 context: "TensorMeta::required_bytes",
                 axis: None,
-                detail: format!("{elements} elements of {} exceed u64::MAX", self.dtype),
+                detail: format!(
+                    "{elements} elements of {} ({} bytes each) exceed u64::MAX",
+                    self.dtype,
+                    self.dtype.size_bytes()
+                ),
             })?;
-        usize::try_from(bytes).map_err(|_| Fn3Error::ShapeOverflow {
-            context: "TensorMeta::required_bytes",
-            axis: None,
-            detail: format!("{bytes} bytes do not fit in a usize on this target"),
-        })
+        checked_usize(bytes, "TensorMeta::required_bytes", "required byte count")
+    }
+
+    /// Checked element index of `coordinates` from the start of storage.
+    ///
+    /// Every coordinate must be inside its extent. The returned index is what a
+    /// kernel passes to `storage_slice::<T>()`; the addition and the
+    /// coordinate-times-stride product are both checked, and the result is
+    /// converted to `usize` without truncation.
+    pub fn checked_index(&self, coordinates: &[u64]) -> Result<usize, Fn3Error> {
+        if coordinates.len() != self.rank() {
+            return Err(Fn3Error::RankMismatch {
+                op: None,
+                expected: self.rank(),
+                actual: coordinates.len(),
+            });
+        }
+        let mut index = self.offset as u64;
+        for (axis, (&coordinate, &extent)) in coordinates.iter().zip(self.shape.dims()).enumerate()
+        {
+            if coordinate >= extent {
+                return Err(Fn3Error::InvalidShape {
+                    context: "TensorMeta::checked_index",
+                    detail: format!(
+                        "coordinate {coordinate} on axis {axis} is outside extent {extent} \
+                         of shape {}",
+                        self.shape
+                    ),
+                });
+            }
+            let stride = self
+                .strides
+                .get(axis)
+                .ok_or_else(|| Fn3Error::RankMismatch {
+                    op: None,
+                    expected: self.rank(),
+                    actual: axis + 1,
+                })?;
+            let stride = u64::try_from(stride).map_err(|_| Fn3Error::InvalidStride {
+                axis,
+                stride,
+                detail: "negative strides are not addressable in the alpha view contract"
+                    .to_string(),
+            })?;
+            let delta = coordinate
+                .checked_mul(stride)
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: "TensorMeta::checked_index",
+                    axis: Some(axis),
+                    detail: format!(
+                        "coordinate {coordinate} times stride {stride} exceeds u64::MAX"
+                    ),
+                })?;
+            index = index
+                .checked_add(delta)
+                .ok_or_else(|| Fn3Error::ShapeOverflow {
+                    context: "TensorMeta::checked_index",
+                    axis: Some(axis),
+                    detail: format!("element index of shape {} exceeds u64::MAX", self.shape),
+                })?;
+        }
+        checked_usize(index, "TensorMeta::checked_index", "element index")
     }
 
     /// `true` if the view is contiguous row-major.
     pub fn is_contiguous(&self) -> bool {
         self.shape.is_contiguous(&self.strides)
+    }
+
+    /// Require a contiguous row-major view, naming the view when it is not.
+    ///
+    /// A strided view is not invalid; it simply cannot be exposed as one
+    /// contiguous slice. Materialise it with
+    /// [`crate::fn3::tensor::TensorView::to_contiguous`] first.
+    pub fn require_contiguous(&self, context: &'static str) -> Result<(), Fn3Error> {
+        if self.is_contiguous() {
+            Ok(())
+        } else {
+            Err(Fn3Error::NonContiguous {
+                context,
+                detail: format!("{self} uses {}", self.strides),
+            })
+        }
     }
 
     /// Require this tensor to be on `expected`.
@@ -256,6 +403,39 @@ impl fmt::Display for TensorMeta {
     }
 }
 
+/// Build contiguous metadata for `shape` placed at `window`'s offset.
+///
+/// Checks that the whole view fits inside the window, not merely inside the
+/// parent storage: a window is a caller's promise about which part of a shared
+/// allocation a tensor may address.
+fn meta_from_window(
+    window: &StorageWindow,
+    shape: Shape,
+    dtype: DType,
+    device: DeviceId,
+    what: &'static str,
+) -> Result<TensorMeta, Fn3Error> {
+    let element_offset = window.element_offset(dtype)?;
+    let strides = shape.default_strides()?;
+    let meta = TensorMeta::build(shape, strides, element_offset, dtype, device, false)?;
+    let required = meta.required_bytes()?;
+    if required > window.end() {
+        return Err(Fn3Error::StorageWindow {
+            what,
+            offset: window.offset() as u64,
+            len: window.len() as u64,
+            storage_len: window.storage().len() as u64,
+            detail: format!(
+                "the {dtype}{} tensor needs {required} bytes from the start of storage, \
+                 which is beyond the window end {}",
+                meta.shape(),
+                window.end()
+            ),
+        });
+    }
+    Ok(meta)
+}
+
 /// A read-only, borrowed view of a tensor.
 #[derive(Debug, Clone)]
 pub struct TensorView<'a> {
@@ -275,6 +455,23 @@ impl<'a> TensorView<'a> {
             });
         }
         Ok(TensorView { storage, meta })
+    }
+
+    /// A contiguous view of `shape` whose first element starts at `window`'s
+    /// byte offset.
+    ///
+    /// The window's alignment was checked against `dtype` when it was created,
+    /// and this constructor additionally checks that the whole tensor fits
+    /// inside the window. The view shares the parent allocation; no bytes are
+    /// copied.
+    pub fn from_window(
+        window: &'a StorageWindow,
+        shape: Shape,
+        dtype: DType,
+        device: DeviceId,
+    ) -> Result<TensorView<'a>, Fn3Error> {
+        let meta = meta_from_window(window, shape, dtype, device, "TensorView::from_window")?;
+        TensorView::new(window.storage(), meta)
     }
 
     /// Metadata of the view.
@@ -327,19 +524,12 @@ impl<'a> TensorView<'a> {
 
     /// The view's window as elements of `T`.
     ///
-    /// Requires a contiguous view whose element size matches `T`.
+    /// Requires a contiguous view whose element size matches `T`. A valid
+    /// transposed or sliced view returns [`Fn3Error::NonContiguous`]; call
+    /// [`TensorView::to_contiguous`] to materialise it.
     pub fn as_slice<T: Pod>(&self) -> Result<&'a [T], Fn3Error> {
-        if !self.is_contiguous() {
-            return Err(Fn3Error::InvalidStride {
-                axis: 0,
-                stride: self.meta.strides.get(0).unwrap_or(0),
-                detail: format!(
-                    "as_slice requires a contiguous view, but {} is {}",
-                    self.meta, self.meta.strides
-                ),
-            });
-        }
-        self.contiguous_window::<T>()
+        self.meta.require_contiguous("TensorView::as_slice")?;
+        self.contiguous_window::<T>("TensorView::as_slice")
     }
 
     /// The view's window as `f32`.
@@ -360,42 +550,53 @@ impl<'a> TensorView<'a> {
         self.as_slice::<i32>()
     }
 
-    fn contiguous_window<T: Pod>(&self) -> Result<&'a [T], Fn3Error> {
+    fn contiguous_window<T: Pod>(&self, context: &'static str) -> Result<&'a [T], Fn3Error> {
         if std::mem::size_of::<T>() != self.meta.dtype.size_bytes() {
             return Err(Fn3Error::StorageCast {
                 element: std::any::type_name::<T>(),
-                byte_len: std::mem::size_of::<T>(),
+                byte_len: self.meta.byte_len().unwrap_or(0),
                 detail: format!(
-                    "element size does not match dtype {} ({})",
+                    "element size does not match dtype {} ({} bytes)",
                     self.meta.dtype,
                     self.meta.dtype.size_bytes()
                 ),
             });
         }
-        let element_bytes = self.meta.dtype.size_bytes();
-        let numel = usize::try_from(self.meta.numel()?).map_err(|_| Fn3Error::ShapeOverflow {
-            context: "TensorView::contiguous_window",
-            axis: None,
-            detail: "element count does not fit in a usize".to_string(),
-        })?;
-        if numel == 0 {
+        let start = self.meta.byte_offset()?;
+        let len = self.meta.byte_len()?;
+        if len == 0 {
             return Ok(&[]);
         }
-        let start = self.meta.offset * element_bytes;
-        let end = numel
-            .checked_mul(element_bytes)
-            .and_then(|len| start.checked_add(len))
+        let end = start
+            .checked_add(len)
             .ok_or_else(|| Fn3Error::ShapeOverflow {
-                context: "TensorView::contiguous_window",
+                context,
                 axis: None,
-                detail: "window end offset exceeds usize::MAX".to_string(),
+                detail: format!("window end {start} + {len} exceeds usize::MAX"),
             })?;
-        let bytes = &self.storage.as_bytes()[start..end];
+        let bytes =
+            self.storage
+                .as_bytes()
+                .get(start..end)
+                .ok_or_else(|| Fn3Error::OutOfBounds {
+                    what: "TensorView contiguous window (storage bytes)",
+                    index: end as u64,
+                    len: self.storage.len() as u64,
+                })?;
         bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
             element: std::any::type_name::<T>(),
             byte_len: bytes.len(),
             detail: format!("{error:?}"),
         })
+    }
+
+    /// Materialise this view into an owned contiguous tensor.
+    ///
+    /// A contiguous view shares its storage (no copy). A strided view is copied
+    /// element by element in row-major logical order into a fresh allocation.
+    /// An empty view produces an empty tensor with no allocation.
+    pub fn to_contiguous(&self) -> Result<Tensor, Fn3Error> {
+        materialise_contiguous(self.storage, &self.meta)
     }
 }
 
@@ -476,41 +677,94 @@ impl<'a> TensorMut<'a> {
 
     /// The view's window as elements of `T` (contiguous views only).
     pub fn as_slice<T: Pod>(&self) -> Result<&[T], Fn3Error> {
+        self.contiguous_window::<T>("TensorMut::as_slice")
+    }
+
+    /// The view's window as mutable elements of `T` (contiguous views only).
+    ///
+    /// A strided writable view can still be written element by element through
+    /// [`TensorMut::storage_slice_mut`] and its metadata, but it is not one
+    /// contiguous slice.
+    pub fn as_mut_slice<T: Pod>(&mut self) -> Result<&mut [T], Fn3Error> {
+        let element = std::any::type_name::<T>();
+        self.meta.require_contiguous("TensorMut::as_mut_slice")?;
         if std::mem::size_of::<T>() != self.meta.dtype.size_bytes() {
             return Err(Fn3Error::StorageCast {
-                element: std::any::type_name::<T>(),
-                byte_len: std::mem::size_of::<T>(),
+                element,
+                byte_len: self.meta.byte_len().unwrap_or(0),
                 detail: format!(
-                    "element size does not match dtype {} ({})",
+                    "element size does not match dtype {} ({} bytes)",
                     self.meta.dtype,
                     self.meta.dtype.size_bytes()
                 ),
             });
         }
-        let element_bytes = self.meta.dtype.size_bytes();
-        let start = self.meta.offset * element_bytes;
-        let end = start + self.meta.byte_len()?;
-        if start == end {
-            return Ok(&[]);
+        let start = self.meta.byte_offset()?;
+        let len = self.meta.byte_len()?;
+        if len == 0 {
+            return Ok(&mut []);
         }
-        let bytes = &self.buffer.as_bytes()[start..end];
-        bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
-            element: std::any::type_name::<T>(),
-            byte_len: bytes.len(),
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "TensorMut::as_mut_slice",
+                axis: None,
+                detail: format!("window end {start} + {len} exceeds usize::MAX"),
+            })?;
+        let byte_len = self.buffer.len();
+        let bytes = self
+            .buffer
+            .as_bytes_mut()
+            .get_mut(start..end)
+            .ok_or_else(|| Fn3Error::OutOfBounds {
+                what: "TensorMut::as_mut_slice (storage bytes)",
+                index: end as u64,
+                len: byte_len as u64,
+            })?;
+        bytemuck::try_cast_slice_mut(bytes).map_err(|error| Fn3Error::StorageCast {
+            element,
+            byte_len: len,
             detail: format!("{error:?}"),
         })
     }
 
-    /// The view's window as mutable elements of `T` (contiguous views only).
-    pub fn as_mut_slice<T: Pod>(&mut self) -> Result<&mut [T], Fn3Error> {
-        let element_bytes = self.meta.dtype.size_bytes();
-        let start = self.meta.offset * element_bytes;
+    fn contiguous_window<T: Pod>(&self, context: &'static str) -> Result<&[T], Fn3Error> {
+        self.meta.require_contiguous(context)?;
+        if std::mem::size_of::<T>() != self.meta.dtype.size_bytes() {
+            return Err(Fn3Error::StorageCast {
+                element: std::any::type_name::<T>(),
+                byte_len: self.meta.byte_len().unwrap_or(0),
+                detail: format!(
+                    "element size does not match dtype {} ({} bytes)",
+                    self.meta.dtype,
+                    self.meta.dtype.size_bytes()
+                ),
+            });
+        }
+        let start = self.meta.byte_offset()?;
         let len = self.meta.byte_len()?;
-        let element = std::any::type_name::<T>();
-        let bytes = &mut self.buffer.as_bytes_mut()[start..start + len];
-        bytemuck::try_cast_slice_mut(bytes).map_err(|error| Fn3Error::StorageCast {
-            element,
-            byte_len: len,
+        if len == 0 {
+            return Ok(&[]);
+        }
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context,
+                axis: None,
+                detail: format!("window end {start} + {len} exceeds usize::MAX"),
+            })?;
+        let bytes =
+            self.buffer
+                .as_bytes()
+                .get(start..end)
+                .ok_or_else(|| Fn3Error::OutOfBounds {
+                    what: "TensorMut contiguous window (storage bytes)",
+                    index: end as u64,
+                    len: self.buffer.len() as u64,
+                })?;
+        bytemuck::try_cast_slice(bytes).map_err(|error| Fn3Error::StorageCast {
+            element: std::any::type_name::<T>(),
+            byte_len: bytes.len(),
             detail: format!("{error:?}"),
         })
     }
@@ -518,9 +772,10 @@ impl<'a> TensorMut<'a> {
 
 /// An owned tensor: metadata plus a shared handle to its storage.
 ///
-/// Cloning a `Tensor` is not implemented on purpose. Sharing is explicit
-/// through [`Tensor::storage`] and [`Tensor::as_view`]; mutable access requires
-/// exclusive storage ([`Tensor::as_mut_view`]).
+/// Cloning is cheap: it copies metadata and clones the `Arc`, so the clone
+/// reads the same bytes and cannot be mutated while the original (or any other
+/// handle or view) is alive. Use [`Tensor::as_mut_view`] for an exclusive
+/// write.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     meta: TensorMeta,
@@ -548,6 +803,10 @@ impl Tensor {
     /// `meta.device()`. In the alpha build only `DeviceId::Cpu` storage is
     /// real; this constructor exists so device-affinity rules can be validated
     /// before the Vulkan allocator exists (FN3-11 / #57).
+    ///
+    /// The storage must provide every byte this metadata addresses:
+    /// `meta.required_bytes() <= storage.len()`. The offset itself is checked
+    /// at metadata construction.
     pub fn from_storage(storage: Storage, meta: TensorMeta) -> Result<Tensor, Fn3Error> {
         let required = meta.required_bytes()?;
         if required > storage.len() {
@@ -558,6 +817,21 @@ impl Tensor {
             });
         }
         Ok(Tensor { meta, storage })
+    }
+
+    /// An owned contiguous tensor at `window`'s byte offset.
+    ///
+    /// The tensor shares the parent allocation through `Arc`; the window was
+    /// already checked for alignment and bounds, and this constructor
+    /// additionally checks that the tensor fits inside the window.
+    pub fn from_window(
+        window: StorageWindow,
+        shape: Shape,
+        dtype: DType,
+        device: DeviceId,
+    ) -> Result<Tensor, Fn3Error> {
+        let meta = meta_from_window(&window, shape, dtype, device, "Tensor::from_window")?;
+        Tensor::from_storage(window.into_storage(), meta)
     }
 
     /// A 1-D `f32` tensor on the CPU.
@@ -604,7 +878,7 @@ impl Tensor {
                 element: std::any::type_name::<T>(),
                 byte_len: std::mem::size_of::<T>(),
                 detail: format!(
-                    "element size does not match dtype {dtype} ({})",
+                    "element size does not match dtype {dtype} ({} bytes)",
                     dtype.size_bytes()
                 ),
             });
@@ -659,6 +933,15 @@ impl Tensor {
         &self.storage
     }
 
+    /// `true` when both tensors address the same allocation.
+    ///
+    /// Two tensors with equal bytes in distinct allocations are not aliases.
+    /// A backend can use this to assert that an output cannot observe an input
+    /// before writing.
+    pub fn shares_storage_with(&self, other: &Tensor) -> bool {
+        self.storage.ptr_eq(&other.storage)
+    }
+
     /// A read-only view of the whole tensor.
     pub fn as_view(&self) -> Result<TensorView<'_>, Fn3Error> {
         TensorView::new(&self.storage, self.meta.clone())
@@ -699,49 +982,110 @@ impl Tensor {
         view.as_i32_slice()
     }
 
-    /// Materialise this tensor into a fresh contiguous tensor.
+    /// Materialise this tensor into an owned contiguous tensor.
     ///
-    /// Contiguous tensors return a cheap storage-sharing copy. Strided views
-    /// are copied element by element in row-major order.
+    /// A contiguous tensor returns a cheap storage-sharing clone. A strided
+    /// tensor is copied element by element in row-major order. An empty tensor
+    /// produces an empty tensor with no allocation.
     pub fn to_contiguous(&self) -> Result<Tensor, Fn3Error> {
-        if self.is_contiguous() {
-            return Ok(self.clone());
-        }
-        let mut out = Tensor::zeros(self.shape().clone(), self.dtype(), self.device())?;
-        {
-            let view = self.as_view()?;
-            let mut out_view = out.as_mut_view()?;
-            let element_bytes = self.dtype().size_bytes();
-            let in_bytes = view.storage_bytes();
-            let out_bytes = out_view.storage_slice_mut::<u8>()?;
-            let numel = usize::try_from(self.numel()?).map_err(|_| Fn3Error::ShapeOverflow {
-                context: "Tensor::to_contiguous",
-                axis: None,
-                detail: "element count does not fit in a usize".to_string(),
-            })?;
-            let rank = self.shape().rank();
-            let in_shape = self.shape().dims();
-            let in_strides = self.meta.strides.as_slice();
-            let mut coordinates = vec![0u64; rank];
-            for linear in 0..numel {
-                let mut remainder = linear;
-                for axis in (0..rank).rev() {
-                    let extent = in_shape[axis] as usize;
-                    coordinates[axis] = (remainder % extent) as u64;
-                    remainder /= extent;
-                }
-                let mut source = self.meta.offset;
-                for axis in 0..rank {
-                    source += coordinates[axis] as usize * in_strides[axis] as usize;
-                }
-                let source = source * element_bytes;
-                let destination = linear * element_bytes;
-                out_bytes[destination..destination + element_bytes]
-                    .copy_from_slice(&in_bytes[source..source + element_bytes]);
-            }
-        }
-        Ok(out)
+        materialise_contiguous(&self.storage, &self.meta)
     }
+}
+
+/// Copy a strided view into a fresh contiguous allocation.
+///
+/// The source is addressed through [`TensorMeta::checked_index`], so every
+/// source byte is bounds-checked and every destination byte is written in
+/// row-major logical order. The destination allocation is never indexed
+/// unchecked.
+fn materialise_contiguous(storage: &Storage, meta: &TensorMeta) -> Result<Tensor, Fn3Error> {
+    let numel = meta.numel_usize()?;
+    if numel == 0 {
+        return Tensor::zeros(meta.shape().clone(), meta.dtype(), meta.device());
+    }
+    if meta.is_contiguous() {
+        return Tensor::from_storage(storage.clone(), meta.clone());
+    }
+
+    let element_bytes = meta.dtype().size_bytes();
+    let source = storage.as_bytes();
+    let mut out = Tensor::zeros(meta.shape().clone(), meta.dtype(), meta.device())?;
+    {
+        let mut out_view = out.as_mut_view()?;
+        let destination = out_view.storage_slice_mut::<u8>()?;
+        let rank = meta.rank();
+        let dims = meta.shape().dims();
+        let mut coordinates = vec![0u64; rank];
+        for linear in 0..numel {
+            let mut remainder = linear;
+            for axis in (0..rank).rev() {
+                // `numel` fits in usize, so every non-zero extent does too;
+                // a zero extent cannot reach this loop because numel == 0.
+                let extent = checked_usize(
+                    dims[axis],
+                    "materialise_contiguous",
+                    "axis extent for a non-empty tensor",
+                )?;
+                coordinates[axis] = (remainder % extent) as u64;
+                remainder /= extent;
+            }
+            let index = meta.checked_index(&coordinates)?;
+            let source_start =
+                index
+                    .checked_mul(element_bytes)
+                    .ok_or_else(|| Fn3Error::ShapeOverflow {
+                        context: "materialise_contiguous (source)",
+                        axis: None,
+                        detail: format!(
+                            "element index {index} times {element_bytes} bytes overflows"
+                        ),
+                    })?;
+            let source_end =
+                source_start
+                    .checked_add(element_bytes)
+                    .ok_or_else(|| Fn3Error::ShapeOverflow {
+                        context: "materialise_contiguous (source)",
+                        axis: None,
+                        detail: "source window end exceeds usize::MAX".to_string(),
+                    })?;
+            let destination_start =
+                linear
+                    .checked_mul(element_bytes)
+                    .ok_or_else(|| Fn3Error::ShapeOverflow {
+                        context: "materialise_contiguous (destination)",
+                        axis: None,
+                        detail: format!(
+                            "element index {linear} times {element_bytes} bytes overflows"
+                        ),
+                    })?;
+            let destination_end =
+                destination_start
+                    .checked_add(element_bytes)
+                    .ok_or_else(|| Fn3Error::ShapeOverflow {
+                        context: "materialise_contiguous (destination)",
+                        axis: None,
+                        detail: "destination window end exceeds usize::MAX".to_string(),
+                    })?;
+            let from =
+                source
+                    .get(source_start..source_end)
+                    .ok_or_else(|| Fn3Error::OutOfBounds {
+                        what: "materialise_contiguous (source bytes)",
+                        index: source_end as u64,
+                        len: source.len() as u64,
+                    })?;
+            let destination_len = destination.len();
+            let to = destination
+                .get_mut(destination_start..destination_end)
+                .ok_or_else(|| Fn3Error::OutOfBounds {
+                    what: "materialise_contiguous (destination bytes)",
+                    index: destination_end as u64,
+                    len: destination_len as u64,
+                })?;
+            to.copy_from_slice(from);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -762,6 +1106,15 @@ mod tests {
         assert_eq!(tensor.numel(), Ok(0));
         assert_eq!(tensor.as_f32_slice().unwrap().len(), 0);
         assert_eq!(tensor.storage().len(), 0);
+        assert_eq!(
+            tensor
+                .to_contiguous()
+                .unwrap()
+                .as_f32_slice()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -799,9 +1152,7 @@ mod tests {
         let strides = tensor.meta().strides().permuted(&[1, 0]).unwrap();
         let meta = TensorMeta::strided(shape, strides, 0, DType::F32, DeviceId::Cpu).unwrap();
         let view = TensorView::new(tensor.storage(), meta).unwrap();
-        let transposed =
-            Tensor::from_storage(tensor.storage().clone(), view.meta().clone()).unwrap();
-        let contiguous = transposed.to_contiguous().unwrap();
+        let contiguous = view.to_contiguous().unwrap();
         assert_eq!(contiguous.shape(), &Shape::from_dims([3, 2]));
         assert_eq!(
             contiguous.as_f32_slice().unwrap(),
@@ -823,7 +1174,23 @@ mod tests {
         let view = TensorView::new(tensor.storage(), meta).unwrap();
         assert!(matches!(
             view.as_f32_slice(),
-            Err(Fn3Error::InvalidStride { .. })
+            Err(Fn3Error::NonContiguous { .. })
         ));
+    }
+
+    #[test]
+    fn window_views_share_the_allocation() {
+        let storage = Storage::from_bytes(bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0])).unwrap();
+        let window = storage.window(4, 8, DType::F32).unwrap();
+        let view =
+            TensorView::from_window(&window, Shape::from_dims([2]), DType::F32, DeviceId::Cpu)
+                .unwrap();
+        assert_eq!(view.as_f32_slice().unwrap(), &[2.0, 3.0]);
+        assert_eq!(view.meta().offset(), 1);
+
+        let tensor =
+            Tensor::from_window(window, Shape::from_dims([2]), DType::F32, DeviceId::Cpu).unwrap();
+        assert_eq!(tensor.as_f32_slice().unwrap(), &[2.0, 3.0]);
+        assert!(storage.ptr_eq(tensor.storage()));
     }
 }

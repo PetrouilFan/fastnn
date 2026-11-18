@@ -95,6 +95,18 @@ pub enum Fn3Error {
         /// Why it was rejected.
         detail: String,
     },
+    /// An access needs a contiguous view, but the view is legitimately strided.
+    ///
+    /// This is not an invalid view: it is a valid transpose or slice that must
+    /// be materialised (for example with
+    /// [`crate::fn3::tensor::Tensor::to_contiguous`]) before this particular
+    /// access. The detail names the view and its strides.
+    NonContiguous {
+        /// The operation that requires a contiguous view.
+        context: &'static str,
+        /// The rejected view and its strides.
+        detail: String,
+    },
     /// Operands of one operation are on different devices.
     DeviceMismatch {
         /// The operation, when one is in scope.
@@ -175,6 +187,25 @@ pub enum Fn3Error {
         bytes: usize,
         /// Number of live handles.
         handles: usize,
+    },
+    /// A byte window or sub-range is outside its storage or misaligned for its
+    /// dtype.
+    ///
+    /// Carried by [`crate::fn3::storage::Storage::window`] and the constructors
+    /// that consume a window. The window is always checked with
+    /// `offset.checked_add(len)`, so a wrapping request is reported here rather
+    /// than silently becoming an in-bounds request.
+    StorageWindow {
+        /// The constructor or method being validated.
+        what: &'static str,
+        /// Requested byte offset.
+        offset: u64,
+        /// Requested byte length.
+        len: u64,
+        /// Length of the storage that was addressed.
+        storage_len: u64,
+        /// Whether the failure was bounds or alignment, with the values.
+        detail: String,
     },
     /// Host allocation failed.
     Allocation {
@@ -334,6 +365,9 @@ impl fmt::Display for Fn3Error {
                 stride,
                 detail,
             } => write!(f, "invalid stride on axis {axis}: {stride} ({detail})"),
+            Fn3Error::NonContiguous { context, detail } => {
+                write!(f, "{context} requires a contiguous view: {detail}")
+            }
             Fn3Error::DeviceMismatch {
                 op,
                 expected,
@@ -393,6 +427,17 @@ impl fmt::Display for Fn3Error {
             Fn3Error::StorageShared { bytes, handles } => write!(
                 f,
                 "cannot mutate {bytes}-byte storage: it is shared by {handles} handles"
+            ),
+            Fn3Error::StorageWindow {
+                what,
+                offset,
+                len,
+                storage_len,
+                detail,
+            } => write!(
+                f,
+                "{what}: byte window at offset {offset} with length {len} is invalid for \
+                 {storage_len} bytes of storage: {detail}"
             ),
             Fn3Error::Allocation { bytes, detail } => {
                 write!(f, "failed to allocate {bytes} bytes: {detail}")
