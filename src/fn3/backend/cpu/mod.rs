@@ -1,32 +1,49 @@
-//! The alpha CPU reference backend.
+//! The alpha CPU reference backend (FN3-07 / #53).
 //!
 //! # What is implemented
 //!
-//! Two ops, end to end, through the [`Backend`] contract:
+//! Every [`OpId`] except [`OpId::MaskedAttention`], which is reserved for the
+//! Vulkan attention kernels (FN3-15 / #61) and is reported as
+//! `Support::Unsupported`. The authoritative list and the measurement of the
+//! pinned graph's ONNX op inventory live in [`support`]; the kernels live in
+//! [`kernels`].
 //!
-//! | Op | Contract |
-//! |---|---|
-//! | [`OpId::Add`] | `F32`, right-aligned NumPy broadcasting, strided views |
-//! | [`OpId::MatMul`] | `F32`, rank-2 `[M, K] x [K, N] -> [M, N]`, strided views |
-//!
-//! Everything else reports [`Support::Unsupported`]. This is intentional: the
-//! backend is the working pattern downstream workers copy (FN3-07 / #53), not a
-//! partial library of approximations.
+//! ```text
+//! cpu/
+//!   mod.rs        CpuBackend: capabilities, support, dispatch
+//!   support.rs    honest support table + pinned-graph op inventory
+//!   kernels/
+//!     mod.rs      shared indexing/attribute helpers, optimization hand-off
+//!     elementwise.rs  add sub mul div neg pow sqrt erf tanh gelu relu sin cos cast
+//!     matmul.rs       matmul (rank >= 2, batched, broadcast batch dims)
+//!     norm.rs         layernorm (trailing axis)
+//!     softmax.rs      softmax (one axis, all-masked rows uniform)
+//!     reduce.rs       reduce_mean reduce_sum argmax
+//!     transform.rs    gather transpose reshape flatten squeeze unsqueeze
+//!                     concat slice split expand shape constant_of_shape range
+//!     logic.rs        equal less greater where trilu scatter_nd
+//! ```
 //!
 //! # Numerical contract
 //!
-//! Both kernels are scalar reference implementations with a documented order:
+//! See [`kernels`] for the module-wide rules and
+//! [`kernels::optimization_handoff`] for the symbols later performance work
+//! (FN3-42 / #71) is expected to replace, together with the reference each one
+//! must keep matching. In short: `f32` compute only, `MatMul` accumulates in
+//! ascending `k`, reductions accumulate in ascending row-major order, and
+//! `Erf`/`Gelu` are evaluated in `f64` and rounded once.
 //!
-//! - `Add` evaluates element `(i, j, ...)` as `lhs[...] + rhs[...]` with
-//!   right-aligned broadcasting.
-//! - `MatMul` accumulates in `f32` in ascending `k`. This is the reference
-//!   order every faster kernel must be tested against; changing it changes
-//!   results in the last bits.
+//! # Error policy
 //!
-//! Kernels index storage through metadata (`offset + sum(coord * stride)`), so
-//! a transposed or sliced view needs no materialisation. Performance work
-//! (blocking, SIMD, threading) belongs to FN3-07 and must keep these results
-//! bit-comparable or publish a documented tolerance.
+//! A request the backend does not implement is reported, never approximated:
+//!
+//! - an unimplemented op id is `UnsupportedOp` from [`support`];
+//! - a shape or rank outside a kernel's documented contract is `UnsupportedOp`
+//!   naming FN3-07 (#53) and the offending value;
+//! - a wrong dtype, device, arity or attribute is the matching
+//!   [`crate::fn3::error::Fn3Error`] variant with the op named;
+//! - every failure happens before the first output write, so a failed
+//!   `execute_op` leaves the caller's outputs untouched.
 
 use std::fmt;
 
@@ -35,8 +52,10 @@ use crate::fn3::device::DeviceId;
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
 use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
+
+pub(crate) mod kernels;
+pub(crate) mod support;
 
 /// Backend name used in every CPU diagnostic.
 pub const CPU_BACKEND_NAME: &str = "cpu";
@@ -57,6 +76,8 @@ pub fn cpu_capabilities() -> Capabilities {
         supports_strided_views: true,
         features: CapabilityFeatures {
             broadcasting: true,
+            // The fused id belongs to #61; the CPU proves the same result by
+            // decomposition (see `support`).
             masked_attention: false,
             quantized: false,
             persistent_weights: true,
@@ -76,139 +97,6 @@ impl CpuBackend {
         CpuBackend {
             capabilities: cpu_capabilities(),
         }
-    }
-
-    fn add(
-        &self,
-        inputs: &[TensorView<'_>],
-        outputs: &mut [TensorMut<'_>],
-    ) -> Result<(), Fn3Error> {
-        let lhs = &inputs[0];
-        let rhs = &inputs[1];
-        lhs.meta().require_dtype(Some(OpId::Add), DType::F32)?;
-        rhs.meta().require_dtype(Some(OpId::Add), DType::F32)?;
-        outputs[0]
-            .meta()
-            .require_dtype(Some(OpId::Add), DType::F32)?;
-
-        let shape = lhs.shape().broadcast_with(rhs.shape(), OpId::Add)?;
-        if *outputs[0].shape() != shape {
-            return Err(Fn3Error::ShapeMismatch {
-                op: Some(OpId::Add),
-                expected: format!("broadcast result {shape}"),
-                actual: outputs[0].shape().to_string(),
-            });
-        }
-        let numel = shape.numel()?;
-        if numel == 0 {
-            return Ok(());
-        }
-
-        let rank = shape.rank();
-        let lhs_layout = BroadcastLayout::new(&shape, lhs);
-        let rhs_layout = BroadcastLayout::new(&shape, rhs);
-        let out_offset = outputs[0].meta().offset();
-        let out_strides = outputs[0].strides().as_slice().to_vec();
-
-        let lhs_data = lhs.storage_slice::<f32>()?;
-        let rhs_data = rhs.storage_slice::<f32>()?;
-        let out_data = outputs[0].storage_slice_mut::<f32>()?;
-
-        let mut coordinates = vec![0u64; rank];
-        for linear in 0..numel {
-            decompose(linear, shape.dims(), &mut coordinates);
-            let left =
-                lhs_data[element_index(lhs_layout.offset, &lhs_layout.strides, &coordinates)];
-            let right =
-                rhs_data[element_index(rhs_layout.offset, &rhs_layout.strides, &coordinates)];
-            out_data[element_index(out_offset, &out_strides, &coordinates)] = left + right;
-        }
-        Ok(())
-    }
-
-    fn matmul(
-        &self,
-        inputs: &[TensorView<'_>],
-        outputs: &mut [TensorMut<'_>],
-    ) -> Result<(), Fn3Error> {
-        let lhs = &inputs[0];
-        let rhs = &inputs[1];
-        for view in [lhs, rhs] {
-            if view.shape().rank() != 2 {
-                return Err(Fn3Error::UnsupportedOp {
-                    op: OpId::MatMul,
-                    backend: CPU_BACKEND_NAME,
-                    reason: format!(
-                        "the alpha CPU reference implements rank-2 matmul only; {} has rank {} \
-                         (batched matmul is owned by FN3-07 / #53)",
-                        view.meta(),
-                        view.shape().rank()
-                    ),
-                });
-            }
-        }
-        lhs.meta().require_dtype(Some(OpId::MatMul), DType::F32)?;
-        rhs.meta().require_dtype(Some(OpId::MatMul), DType::F32)?;
-        outputs[0]
-            .meta()
-            .require_dtype(Some(OpId::MatMul), DType::F32)?;
-        if outputs[0].shape().rank() != 2 {
-            return Err(Fn3Error::RankMismatch {
-                op: Some(OpId::MatMul),
-                expected: 2,
-                actual: outputs[0].shape().rank(),
-            });
-        }
-
-        let rows = lhs.shape().dims()[0];
-        let inner = lhs.shape().dims()[1];
-        let rhs_inner = rhs.shape().dims()[0];
-        let columns = rhs.shape().dims()[1];
-        if inner != rhs_inner {
-            return Err(Fn3Error::ShapeMismatch {
-                op: Some(OpId::MatMul),
-                expected: format!("rhs inner dimension {inner} (lhs is {})", lhs.shape()),
-                actual: format!("rhs {} has inner dimension {rhs_inner}", rhs.shape()),
-            });
-        }
-        let expected_output = Shape::from_dims([rows, columns]);
-        if *outputs[0].shape() != expected_output {
-            return Err(Fn3Error::ShapeMismatch {
-                op: Some(OpId::MatMul),
-                expected: expected_output.to_string(),
-                actual: outputs[0].shape().to_string(),
-            });
-        }
-
-        let out_offset = outputs[0].meta().offset();
-        let out_strides = outputs[0].strides().as_slice().to_vec();
-        let lhs_offset = lhs.meta().offset();
-        let lhs_strides = lhs.strides().as_slice();
-        let rhs_offset = rhs.meta().offset();
-        let rhs_strides = rhs.strides().as_slice();
-
-        let lhs_data = lhs.storage_slice::<f32>()?;
-        let rhs_data = rhs.storage_slice::<f32>()?;
-        let out_data = outputs[0].storage_slice_mut::<f32>()?;
-
-        for row in 0..rows {
-            for column in 0..columns {
-                let mut accumulator = 0.0f32;
-                for step in 0..inner {
-                    let left = lhs_data[lhs_offset
-                        + row as usize * lhs_strides[0] as usize
-                        + step as usize * lhs_strides[1] as usize];
-                    let right = rhs_data[rhs_offset
-                        + step as usize * rhs_strides[0] as usize
-                        + column as usize * rhs_strides[1] as usize];
-                    accumulator += left * right;
-                }
-                out_data[out_offset
-                    + row as usize * out_strides[0] as usize
-                    + column as usize * out_strides[1] as usize] = accumulator;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -232,16 +120,7 @@ impl Backend for CpuBackend {
     }
 
     fn supports(&self, op: OpId) -> Support {
-        match op {
-            OpId::Add | OpId::MatMul => Support::Full,
-            other => Support::Unsupported {
-                reason: format!(
-                    "the alpha CPU reference implements add (broadcast f32) and rank-2 matmul only; \
-                     {} is owned by FN3-07 (#53)",
-                    other.name()
-                ),
-            },
-        }
+        support::support(op)
     }
 
     fn execute_op(
@@ -254,26 +133,238 @@ impl Backend for CpuBackend {
         self.preflight(op)?;
         for view in inputs {
             view.meta().require_device(Some(op), self.device())?;
+            self.capabilities.check_rank(view.shape().rank())?;
         }
         for output in outputs.iter() {
             output.meta().require_device(Some(op), self.device())?;
+            self.capabilities.check_rank(output.shape().rank())?;
         }
+        // A kernel below writes only after every check has passed; the
+        // arguments are validated by arity/dtype/shape helpers before the first
+        // output element is touched.
+        self.dispatch(op, inputs, outputs, params)
+    }
+}
+
+impl CpuBackend {
+    fn dispatch(
+        &self,
+        op: OpId,
+        inputs: &[TensorView<'_>],
+        outputs: &mut [TensorMut<'_>],
+        params: &OpParams,
+    ) -> Result<(), Fn3Error> {
+        use kernels::{elementwise, logic, matmul, norm, reduce, softmax, transform};
+
         match op {
-            OpId::Add => {
-                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                require_no_attributes(op, params)?;
-                self.add(inputs, outputs)
-            }
+            // -- linear algebra ------------------------------------------
             OpId::MatMul => {
                 check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
-                require_no_attributes(op, params)?;
-                self.matmul(inputs, outputs)
+                kernels::require_no_attributes(op, params)?;
+                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0])
             }
-            other => Err(Fn3Error::UnsupportedOp {
-                op: other,
-                backend: CPU_BACKEND_NAME,
-                reason: "not implemented in the alpha CPU reference".to_string(),
-            }),
+
+            // -- elementwise arithmetic ----------------------------------
+            OpId::Add | OpId::Sub | OpId::Mul | OpId::Div | OpId::Pow => {
+                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                match op {
+                    OpId::Add => elementwise::add(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                    OpId::Sub => elementwise::sub(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                    OpId::Mul => elementwise::mul(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                    OpId::Div => elementwise::div(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                    OpId::Pow => elementwise::pow(op, &inputs[0], &inputs[1], &mut outputs[0]),
+                    other => unreachable!("matched a binary op: {other}"),
+                }
+            }
+            OpId::Neg
+            | OpId::Sqrt
+            | OpId::Erf
+            | OpId::Tanh
+            | OpId::Gelu
+            | OpId::Relu
+            | OpId::Sin
+            | OpId::Cos => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                match op {
+                    OpId::Neg => elementwise::neg(op, &inputs[0], &mut outputs[0]),
+                    OpId::Sqrt => elementwise::sqrt(op, &inputs[0], &mut outputs[0]),
+                    OpId::Erf => elementwise::erf(op, &inputs[0], &mut outputs[0]),
+                    OpId::Tanh => elementwise::tanh(op, &inputs[0], &mut outputs[0]),
+                    OpId::Gelu => elementwise::gelu(op, &inputs[0], &mut outputs[0]),
+                    OpId::Relu => elementwise::relu(op, &inputs[0], &mut outputs[0]),
+                    OpId::Sin => elementwise::sin(op, &inputs[0], &mut outputs[0]),
+                    OpId::Cos => elementwise::cos(op, &inputs[0], &mut outputs[0]),
+                    other => unreachable!("matched a unary op: {other}"),
+                }
+            }
+
+            // -- normalization and reduction ------------------------------
+            OpId::Softmax => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_only_axes(op, params)?;
+                softmax::softmax(op, &inputs[0], &mut outputs[0], params)
+            }
+            OpId::LayerNorm => {
+                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+                kernels::require_axes_and_epsilon(op, params)?;
+                norm::layer_norm(
+                    op,
+                    &inputs[0],
+                    &inputs[1],
+                    &inputs[2],
+                    &mut outputs[0],
+                    params,
+                )
+            }
+            OpId::ReduceMean | OpId::ReduceSum => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_axes_and_keep_dims(op, params)?;
+                reduce::reduce(
+                    op,
+                    &inputs[0],
+                    &mut outputs[0],
+                    params,
+                    op == OpId::ReduceMean,
+                )
+            }
+            OpId::ArgMax => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_axes_and_keep_dims(op, params)?;
+                reduce::argmax(op, &inputs[0], &mut outputs[0], params)
+            }
+
+            // -- data movement --------------------------------------------
+            OpId::Gather => {
+                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+                kernels::require_only_axes(op, params)?;
+                transform::gather(op, &inputs[0], &inputs[1], &mut outputs[0], params)
+            }
+            OpId::Transpose => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_only_axes(op, params)?;
+                transform::transpose(op, &inputs[0], &mut outputs[0], params)
+            }
+            OpId::Reshape => {
+                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                transform::reshape(op, &inputs[0], &inputs[1], &mut outputs[0])
+            }
+            OpId::Flatten => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_only_axes(op, params)?;
+                transform::flatten(op, &inputs[0], &mut outputs[0], params)
+            }
+            OpId::Squeeze | OpId::Unsqueeze => {
+                check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
+                kernels::require_only_axes(op, params)?;
+                let axes_input = inputs.get(1);
+                if op == OpId::Squeeze {
+                    transform::squeeze(op, &inputs[0], axes_input, &mut outputs[0], params)
+                } else {
+                    transform::unsqueeze(op, &inputs[0], axes_input, &mut outputs[0], params)
+                }
+            }
+            OpId::Concat => {
+                if inputs.is_empty() || outputs.len() != 1 {
+                    return Err(Fn3Error::ArityMismatch {
+                        op,
+                        expected_inputs: 1,
+                        actual_inputs: inputs.len(),
+                        expected_outputs: 1,
+                        actual_outputs: outputs.len(),
+                    });
+                }
+                kernels::require_only_axes(op, params)?;
+                transform::concat(op, inputs, &mut outputs[0], params)
+            }
+            OpId::Slice => {
+                check_flexible_arity(op, inputs.len(), outputs.len(), &[2, 3, 4, 5], 1)?;
+                kernels::require_no_attributes(op, params)?;
+                transform::slice(
+                    op,
+                    &inputs[0],
+                    &inputs[1],
+                    &inputs[2],
+                    inputs.get(3),
+                    inputs.get(4),
+                    &mut outputs[0],
+                )
+            }
+            OpId::Split => {
+                check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
+                kernels::require_only_axes(op, params)?;
+                transform::split(op, &inputs[0], inputs.get(1), outputs, params)
+            }
+            OpId::Expand => {
+                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                transform::expand(op, &inputs[0], &inputs[1], &mut outputs[0])
+            }
+
+            // -- shape ----------------------------------------------------
+            OpId::Shape => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                transform::shape_of(op, &inputs[0], &mut outputs[0])
+            }
+            OpId::ConstantOfShape => {
+                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                transform::constant_of_shape(op, &inputs[0], &inputs[1], &mut outputs[0])
+            }
+            OpId::Range => {
+                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                transform::range(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
+            }
+
+            // -- conversion and comparison --------------------------------
+            OpId::Cast => {
+                check_arity(op, inputs.len(), outputs.len(), 1, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                elementwise::cast(op, &inputs[0], &mut outputs[0])
+            }
+            OpId::Equal | OpId::Less | OpId::Greater => {
+                check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                let comparison = match op {
+                    OpId::Equal => logic::Comparison::Equal,
+                    OpId::Less => logic::Comparison::Less,
+                    _ => logic::Comparison::Greater,
+                };
+                logic::compare(op, comparison, &inputs[0], &inputs[1], &mut outputs[0])
+            }
+            OpId::Where => {
+                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                logic::where_select(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
+            }
+            OpId::Trilu => {
+                check_flexible_arity(op, inputs.len(), outputs.len(), &[1, 2], 1)?;
+                kernels::require_only_axes(op, params)?;
+                logic::trilu(op, &inputs[0], inputs.get(1), &mut outputs[0], params)
+            }
+            OpId::ScatterND => {
+                check_arity(op, inputs.len(), outputs.len(), 3, 1)?;
+                kernels::require_no_attributes(op, params)?;
+                logic::scatter_nd(op, &inputs[0], &inputs[1], &inputs[2], &mut outputs[0])
+            }
+
+            // -- reserved fused id ---------------------------------------
+            OpId::MaskedAttention => {
+                // `preflight` already rejected this id; it is matched so that a
+                // future capability change cannot silently fall through.
+                Err(Fn3Error::UnsupportedOp {
+                    op,
+                    backend: CPU_BACKEND_NAME,
+                    reason: "the fused attention id belongs to FN3-15 (#61); the CPU backend \
+                             computes attention by decomposition and does not approximate the \
+                             fused op"
+                        .to_string(),
+                })
+            }
         }
     }
 }
@@ -284,68 +375,26 @@ impl fmt::Display for CpuBackend {
     }
 }
 
-/// Reject attributes an op does not define, instead of silently ignoring them.
-fn require_no_attributes(op: OpId, params: &OpParams) -> Result<(), Fn3Error> {
-    if params.axes.is_empty() && !params.keep_dims && params.epsilon == 0.0 {
+/// Arity check for an op whose input count is one of `allowed` and that needs
+/// at least `min_outputs` outputs (`Split` writes one output per piece).
+fn check_flexible_arity(
+    op: OpId,
+    inputs: usize,
+    outputs: usize,
+    allowed: &[usize],
+    min_outputs: usize,
+) -> Result<(), Fn3Error> {
+    if allowed.contains(&inputs) && outputs >= min_outputs {
         Ok(())
     } else {
-        Err(Fn3Error::InvalidShape {
-            context: "cpu backend attributes",
-            detail: format!(
-                "op {op} accepts no attributes, but the plan supplies axes={:?}, keep_dims={}, epsilon={}",
-                params.axes, params.keep_dims, params.epsilon
-            ),
+        Err(Fn3Error::ArityMismatch {
+            op,
+            expected_inputs: allowed.last().copied().unwrap_or(0),
+            actual_inputs: inputs,
+            expected_outputs: min_outputs,
+            actual_outputs: outputs,
         })
     }
-}
-
-/// Effective strides of one operand promoted to the broadcast result shape.
-struct BroadcastLayout {
-    offset: usize,
-    strides: Vec<i64>,
-}
-
-impl BroadcastLayout {
-    fn new(result: &Shape, operand: &TensorView<'_>) -> BroadcastLayout {
-        debug_assert!(
-            result.rank() >= operand.shape().rank(),
-            "broadcast result rank must be at least the operand rank"
-        );
-        let result_rank = result.rank();
-        let operand_rank = operand.shape().rank();
-        let mut strides = vec![0i64; result_rank];
-        for axis in (result_rank - operand_rank)..result_rank {
-            let operand_axis = axis - (result_rank - operand_rank);
-            let operand_extent = operand.shape().dims()[operand_axis];
-            strides[axis] = if operand_extent == 1 && result.dims()[axis] != 1 {
-                0
-            } else {
-                operand.strides().as_slice()[operand_axis]
-            };
-        }
-        BroadcastLayout {
-            offset: operand.meta().offset(),
-            strides,
-        }
-    }
-}
-
-/// Row-major coordinates of a linear index.
-fn decompose(mut linear: u64, dims: &[u64], coordinates: &mut [u64]) {
-    for axis in (0..dims.len()).rev() {
-        let extent = dims[axis];
-        coordinates[axis] = linear % extent;
-        linear /= extent;
-    }
-}
-
-/// Element index for a validated (non-negative) layout.
-fn element_index(offset: usize, strides: &[i64], coordinates: &[u64]) -> usize {
-    let mut index = offset;
-    for (axis, &coordinate) in coordinates.iter().enumerate() {
-        index += coordinate as usize * strides[axis] as usize;
-    }
-    index
 }
 
 #[cfg(test)]
@@ -354,21 +403,15 @@ mod tests {
     use crate::fn3::shape::Shape;
     use crate::fn3::tensor::Tensor;
 
-    fn add_via_backend(lhs: &Tensor, rhs: &Tensor) -> Tensor {
-        let shape = lhs.shape().broadcast_with(rhs.shape(), OpId::Add).unwrap();
-        let mut out = Tensor::zeros(shape, DType::F32, DeviceId::Cpu).unwrap();
-        let lhs_view = lhs.as_view().unwrap();
-        let rhs_view = rhs.as_view().unwrap();
+    fn run(
+        op: OpId,
+        inputs: &[&Tensor],
+        out: &mut Tensor,
+        params: &OpParams,
+    ) -> Result<(), Fn3Error> {
+        let views: Vec<TensorView<'_>> = inputs.iter().map(|v| v.as_view().unwrap()).collect();
         let mut out_view = out.as_mut_view().unwrap();
-        CpuBackend::new()
-            .execute_op(
-                OpId::Add,
-                &[lhs_view, rhs_view],
-                std::slice::from_mut(&mut out_view),
-                &OpParams::default(),
-            )
-            .unwrap();
-        out
+        CpuBackend::new().execute_op(op, &views, std::slice::from_mut(&mut out_view), params)
     }
 
     #[test]
@@ -376,7 +419,8 @@ mod tests {
         let lhs =
             Tensor::from_f32(Shape::from_dims([2, 3]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let rhs = Tensor::from_f32(Shape::from_dims([3]), &[10.0, 20.0, 30.0]).unwrap();
-        let out = add_via_backend(&lhs, &rhs);
+        let mut out = Tensor::zeros(Shape::from_dims([2, 3]), DType::F32, DeviceId::Cpu).unwrap();
+        run(OpId::Add, &[&lhs, &rhs], &mut out, &OpParams::default()).unwrap();
         assert_eq!(
             out.as_f32_slice().unwrap(),
             &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0]
@@ -387,24 +431,24 @@ mod tests {
     fn unsupported_ops_are_reported_not_approximated() {
         let input = Tensor::from_f32(Shape::from_dims([2, 3]), &[0.0; 6]).unwrap();
         let mut out = Tensor::zeros(Shape::from_dims([2, 3]), DType::F32, DeviceId::Cpu).unwrap();
-        let view = input.as_view().unwrap();
-        let mut out_view = out.as_mut_view().unwrap();
-        let error = CpuBackend::new()
-            .execute_op(
-                OpId::Softmax,
-                &[view],
-                std::slice::from_mut(&mut out_view),
-                &OpParams::default().with_axes([-1]),
-            )
-            .unwrap_err();
+        // `MaskedAttention` is reserved for #61 and must stay unsupported.
+        let error = run(
+            OpId::MaskedAttention,
+            &[&input],
+            &mut out,
+            &OpParams::default(),
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             Fn3Error::UnsupportedOp {
-                op: OpId::Softmax,
+                op: OpId::MaskedAttention,
+                backend: "cpu",
                 ..
             }
         ));
-        assert!(error.to_string().contains("softmax"), "{error}");
+        assert!(error.to_string().contains("masked_attention"), "{error}");
+        assert_eq!(out.as_f32_slice().unwrap(), &[0.0; 6]);
     }
 
     #[test]
@@ -444,18 +488,21 @@ mod tests {
         let rhs =
             Tensor::from_f32(Shape::from_dims([3, 2]), &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]).unwrap();
         let mut out = Tensor::zeros(Shape::from_dims([2, 2]), DType::F32, DeviceId::Cpu).unwrap();
-        let lhs_view = lhs.as_view().unwrap();
-        let rhs_view = rhs.as_view().unwrap();
-        let mut out_view = out.as_mut_view().unwrap();
-        CpuBackend::new()
-            .execute_op(
-                OpId::MatMul,
-                &[lhs_view, rhs_view],
-                std::slice::from_mut(&mut out_view),
-                &OpParams::default(),
-            )
-            .unwrap();
+        run(OpId::MatMul, &[&lhs, &rhs], &mut out, &OpParams::default()).unwrap();
         assert_eq!(out.as_f32_slice().unwrap(), &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn softmax_is_supported_and_masked_attention_is_not() {
+        let backend = CpuBackend::new();
+        assert!(backend.supports(OpId::Softmax).is_full());
+        assert!(backend.supports(OpId::LayerNorm).is_full());
+        assert!(backend.supports(OpId::MaskedAttention).is_supported() == false);
+        assert!(backend
+            .supports(OpId::MaskedAttention)
+            .reason()
+            .unwrap()
+            .contains("#61"));
     }
 
     #[test]
@@ -463,8 +510,10 @@ mod tests {
         let capabilities = cpu_capabilities();
         assert!(capabilities.supports_dtype(DType::F32));
         assert!(capabilities.features.broadcasting);
+        // The fused attention flag stays false until #61 lands the id.
         assert!(!capabilities.features.masked_attention);
         assert_eq!(capabilities.max_workgroup_size, [1, 1, 1]);
+        assert_eq!(capabilities.max_shape_rank, 8);
     }
 
     #[test]
@@ -475,5 +524,12 @@ mod tests {
             Err(Fn3Error::ArityMismatch { .. })
         ));
         assert!(backend.supports(OpId::Add).is_full());
+    }
+
+    #[test]
+    fn flexible_arity_reports_the_actual_counts() {
+        assert!(check_flexible_arity(OpId::Split, 2, 2, &[1, 2], 1).is_ok());
+        assert!(check_flexible_arity(OpId::Split, 3, 2, &[1, 2], 1).is_err());
+        assert!(check_flexible_arity(OpId::Split, 1, 0, &[1, 2], 1).is_err());
     }
 }
