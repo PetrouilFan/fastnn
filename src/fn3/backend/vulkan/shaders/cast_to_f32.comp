@@ -1,0 +1,51 @@
+#version 450
+// FN3-13 (#59): `Cast` into `F32`.
+//
+// src_kind: 0 f32, 1 i64, 2 i32, 3 bool. An i64 source is read as two words and
+// converted from its two's-complement form: the magnitude is built from the
+// complemented words, so a negative value keeps its sign. The result is exact
+// for every value the pinned graph casts (mask flags and shape extents) and
+// within one f32 ulp of the CPU's correctly rounded `as f32` beyond 2^24.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint src_kind;
+} p;
+
+float i64_as_f32(uint element) {
+    uint low = src_words[element * 2u];
+    int high = int(src_words[element * 2u + 1u]);
+    if (high >= 0) {
+        return float(high) * 4294967296.0 + float(low);
+    }
+    // Two's-complement magnitude: (~high:~low) + 1.
+    uint magnitude_low = (~low) + 1u;
+    uint magnitude_high = uint(~high) + ((magnitude_low == 0u) ? 1u : 0u);
+    return -(float(magnitude_high) * 4294967296.0 + float(magnitude_low));
+}
+
+uint byte_at(uint element) {
+    return (src_words[element >> 2u] >> ((element & 3u) * 8u)) & 0xffu;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    float value;
+    if (p.src_kind == 0u) {
+        value = uintBitsToFloat(src_words[gid]);
+    } else if (p.src_kind == 1u) {
+        value = i64_as_f32(gid);
+    } else if (p.src_kind == 2u) {
+        value = float(int(src_words[gid]));
+    } else {
+        value = (byte_at(gid) != 0u) ? 1.0 : 0.0;
+    }
+    dst_words[gid] = floatBitsToUint(value);
+}

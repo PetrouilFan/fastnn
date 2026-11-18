@@ -1,0 +1,65 @@
+#version 450
+// FN3-13 (#59): layout copy for `Transpose`, `Reshape`, `Squeeze`,
+// `Unsqueeze` and `Flatten`.
+//
+// mode 0 is the identity copy used by every shape-only op (the output has the
+// input's element count and row-major order, only its extents differ). mode 1
+// is an axis permutation. Elements are moved as opaque 4- or 8-byte units, so
+// the kernel never interprets an `f32`, `i32` or `i64` value.
+//
+// Push constants:
+//   n          number of elements
+//   elem_bytes 4 or 8
+//   mode       0 identity, 1 permute
+//   rank       tensor rank
+//   perm       output axis -> input axis (mode 1)
+//   out_dims   output extents
+//   in_dims    input extents
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint src_words[]; };
+layout(std430, binding = 1) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint elem_bytes;
+    uint mode;
+    uint rank;
+    uint perm[8];
+    uint out_dims[8];
+    uint in_dims[8];
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    uint source = gid;
+    if (p.mode != 0u) {
+        uint coord[8];
+        uint rem = gid;
+        for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+            uint extent = p.out_dims[axis];
+            coord[axis] = (extent == 0u) ? 0u : (rem % extent);
+            rem = (extent == 0u) ? 0u : (rem / extent);
+        }
+        uint input_coord[8];
+        for (uint out_axis = 0u; out_axis < p.rank; ++out_axis) {
+            input_coord[p.perm[out_axis]] = coord[out_axis];
+        }
+        uint index = 0u;
+        uint stride = 1u;
+        for (int axis = int(p.rank) - 1; axis >= 0; --axis) {
+            index += input_coord[axis] * stride;
+            stride *= p.in_dims[axis];
+        }
+        source = index;
+    }
+    if (p.elem_bytes == 4u) {
+        dst_words[gid] = src_words[source];
+    } else {
+        dst_words[gid * 2u] = src_words[source * 2u];
+        dst_words[gid * 2u + 1u] = src_words[source * 2u + 1u];
+    }
+}

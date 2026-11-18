@@ -1,0 +1,44 @@
+#version 450
+// FN3-13 (#59): `ConstantOfShape` — fill a tensor with one value.
+//
+// The fill value is a parameter, not tensor data: the launch reads the
+// single-element `value` input and passes its raw 64-bit pattern in the push
+// constants, exactly like a scalar attribute. The element width comes from the
+// output dtype (1, 4 or 8 bytes).
+//
+// A 1-byte fill packs four identical bytes per invocation because core Vulkan
+// cannot write a single byte atomically; the output is padded to a multiple of
+// four bytes.
+//
+// Push constants: n, elem_bytes, value_low, value_high.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint elem_bytes;
+    uint value_low;
+    uint value_high;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (p.elem_bytes == 1u) {
+        if (gid * 4u >= p.n) {
+            return;
+        }
+        uint byte = p.value_low & 0xffu;
+        dst_words[gid] = byte * 0x01010101u;
+        return;
+    }
+    if (gid >= p.n) {
+        return;
+    }
+    if (p.elem_bytes == 4u) {
+        dst_words[gid] = p.value_low;
+    } else {
+        dst_words[gid * 2u] = p.value_low;
+        dst_words[gid * 2u + 1u] = p.value_high;
+    }
+}

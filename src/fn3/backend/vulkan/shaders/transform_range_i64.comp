@@ -1,0 +1,39 @@
+#version 450
+// FN3-13 (#59): i64 `Range` — start + i * delta in two's-complement 64-bit
+// arithmetic built from 32-bit words, because the platform layer enables no
+// optional shader feature (`shaderInt64` is not requested).
+//
+// The launch validates on the host that every value fits in i64 and that the
+// element count is below 2^32, so the 32x32->64 multiply below cannot overflow
+// the 64-bit result.
+//
+// Push constants: n, start low/high, delta low/high.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) writeonly buffer Dst { uint dst_words[]; };
+
+layout(push_constant) uniform Params {
+    uint n;
+    uint start_low;
+    uint start_high;
+    uint delta_low;
+    uint delta_high;
+} p;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n) {
+        return;
+    }
+    // delta * i, with i < 2^32: the low product is a full 64-bit multiply and
+    // the high contribution is a 32-bit multiply plus its carry.
+    uint product_high;
+    uint product_low;
+    umulExtended(p.delta_low, gid, product_high, product_low);
+    uint high = p.delta_high * gid + product_high;
+    uint low = product_low + p.start_low;
+    uint carry = (low < product_low) ? 1u : 0u;
+    high = high + p.start_high + carry;
+    dst_words[gid * 2u] = low;
+    dst_words[gid * 2u + 1u] = high;
+}
