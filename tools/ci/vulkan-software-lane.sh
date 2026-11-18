@@ -5,8 +5,10 @@
 # labelled CI-ONLY everywhere it appears: its output, its job name and the run
 # summary. It is NOT physical-GPU evidence and must never be cited as such.
 #
-# Today the Vulkan backend does not exist (FN3-11 / #57), so this lane reports
-# "Vulkan backend not yet implemented (#57)" as NOT VERIFIED. It does not pass.
+# A pass requires a real dispatch: the log must contain the software test's
+# proof line. A run in which every test skipped is a FAILURE here, not a pass,
+# because a green lane with no execution is exactly the confusion this file is
+# meant to prevent.
 set -uo pipefail
 
 CI_LANE=vulkan-software-smoke
@@ -41,30 +43,42 @@ else
 fi
 
 if ! ci::cargo_feature_declared vulkan; then
-    ci::not_verified "CI-ONLY software Vulkan lane did not run: Vulkan backend not yet implemented (#57) — Cargo.toml declares no 'vulkan' feature (FN3-11). This is not a GPU check and not a pass."
+    ci::not_verified "CI-ONLY software Vulkan lane did not run: Cargo.toml declares no 'vulkan' feature, so there is no Vulkan backend to smoke. This is not a GPU check and not a pass."
 fi
 if [[ ! -f "$CI_ROOT/tests/fn3_vulkan_smoke.rs" ]]; then
-    ci::not_verified "CI-ONLY software Vulkan lane did not run: the 'vulkan' feature exists but tests/fn3_vulkan_smoke.rs (FN3-11 / #57) does not"
+    ci::not_verified "CI-ONLY software Vulkan lane did not run: the 'vulkan' feature exists but tests/fn3_vulkan_smoke.rs does not"
 fi
 
 SMOKE_LOG="$CI_ROOT/target/ci-vulkan-software.log"
 mkdir -p "$(dirname "$SMOKE_LOG")"
 echo
 echo "== CI-ONLY software Vulkan smoke (lavapipe, validation enabled) =="
-echo "\$ VK_ICD_FILENAMES=$ICD VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
+# Validation is requested in code (VulkanConfig::validated), which is what the
+# smoke test asserts on. Forcing VK_INSTANCE_LAYERS on top of that duplicates
+# the layer and makes the loader emit 'env var VK_INSTANCE_LAYERS defined'
+# messages, and VK_LAYER_ENABLES makes it emit a VALIDATION-SETTINGS
+# information line; the test's zero-delta guard counts both as warnings it
+# cannot attribute to fastnn. So the lane sets only the ICD and the software
+# gate, and lets the code own validation.
+echo "\$ VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
 if ! VK_ICD_FILENAMES="$ICD" \
-     VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation \
-     VK_LAYER_ENABLES="VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT" \
-     FN3_VK_SOFTWARE_ONLY=1 \
+     FN3_VK_TEST_SOFTWARE=1 \
      cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture 2>&1 | tee "$SMOKE_LOG"; then
     ci::failed "CI-ONLY software Vulkan smoke failed under lavapipe" \
-        "VK_ICD_FILENAMES=$ICD cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
+        "VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
 fi
 
-if ! grep -qiE 'llvmpipe|lavapipe|software' "$SMOKE_LOG"; then
-    ci::failed "the smoke test never reported the software device; it may have used a physical GPU, which invalidates a CI-ONLY lane" \
-        "VK_ICD_FILENAMES=$ICD cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
+# The smoke test skips itself unless the software gate is set explicitly. A
+# suite where everything skipped still exits 0, so the proof line is the actual
+# requirement: without it this lane proved nothing and must not go green.
+if ! grep -q '\[fn3vk\]\[software-icd\]\[proof\]' "$SMOKE_LOG"; then
+    ci::failed "the CI-only software smoke ran no dispatch: no '[fn3vk][software-icd][proof]' line in the log, so this lane has no evidence and is not a pass" \
+        "VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
 fi
-ci::check "CI-only lavapipe smoke test"
+if ! grep -qiE 'llvmpipe|lavapipe' "$SMOKE_LOG"; then
+    ci::failed "the smoke test never reported the software device; it may have used a physical GPU, which invalidates a CI-ONLY lane" \
+        "VK_ICD_FILENAMES=$ICD FN3_VK_TEST_SOFTWARE=1 cargo test --no-default-features --features vulkan --test fn3_vulkan_smoke -- --test-threads=1 --nocapture"
+fi
+ci::check "CI-only lavapipe smoke test dispatched and reported the software device"
 
 ci::passed "CI-ONLY software Vulkan smoke passed under lavapipe with validation enabled; this is NOT physical GPU evidence"
