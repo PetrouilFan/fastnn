@@ -1,10 +1,10 @@
 use fastnn::compiler::pipeline::CompilerPipeline;
-use fastnn::ir::{ComputeGraph, DimExpr, GraphKind, IrDType, Opcode, TensorType};
+use fastnn::ir::{ComputeGraph, DimExpr, IrDType, Opcode, TensorType};
 use fastnn::types::{CompileTarget, QuantTarget};
 
 #[test]
 fn compiler_emits_structured_pass_report() {
-    let mut graph = ComputeGraph::with_kind(GraphKind::Inference);
+    let mut graph = ComputeGraph::with_kind(fastnn::ir::GraphKind::Inference);
     let input = graph.add_node(
         Opcode::Input,
         vec![],
@@ -18,7 +18,7 @@ fn compiler_emits_structured_pass_report() {
         .run(graph)
         .expect("native inference graph should compile");
 
-    assert_eq!(compiled.report.graph_kind, GraphKind::Inference);
+    assert_eq!(compiled.report.graph_kind, fastnn::ir::GraphKind::Inference);
     assert_eq!(compiled.report.initial_nodes, 1);
     assert_eq!(compiled.report.final_nodes, compiled.graph.nodes.len());
     assert_eq!(
@@ -34,17 +34,4 @@ fn compiler_emits_structured_pass_report() {
         .passes
         .iter()
         .any(|pass| pass.name == "representation validation"));
-}
-
-#[test]
-fn inference_quantization_is_rejected_for_backward_graphs() {
-    let graph = ComputeGraph::with_kind(GraphKind::Backward);
-    let error =
-        match CompilerPipeline::new(CompileTarget::WeightOnly(QuantTarget::I4), None).run(graph) {
-            Ok(_) => panic!("inference quantization must not be applied to backward graphs"),
-            Err(error) => error,
-        };
-
-    assert!(error.to_string().contains("Backward"));
-    assert!(error.to_string().contains("training compile policy"));
 }

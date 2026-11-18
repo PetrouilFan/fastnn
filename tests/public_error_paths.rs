@@ -1,4 +1,3 @@
-use fastnn::autograd;
 use fastnn::backend::cpu::CpuBackend;
 
 use fastnn::backend::{Backend, Instruction};
@@ -377,102 +376,6 @@ fn invalid_binary_shapes_return_dispatch_errors() {
 }
 
 #[test]
-fn invalid_sgd_inputs_return_structured_errors() {
-    let graph = GraphBuilder::new();
-    let weight = graph.input(&[2, 2], IrDType::F32);
-    let wrong_shape = graph.input(&[4], IrDType::F32);
-    let shape = graph
-        .try_apply_sgd(&weight, &wrong_shape, 0.1, 0.0)
-        .expect_err("SGD must reject mismatched gradient shapes");
-    assert!(shape.to_string().contains("gradient shape"));
-
-    let gradient = graph.input(&[2, 2], IrDType::F32);
-    assert!(graph
-        .try_apply_sgd(&weight, &gradient, f32::NAN, 0.0)
-        .is_err());
-    assert!(graph.try_apply_sgd(&weight, &gradient, 0.1, -1.0).is_err());
-}
-
-#[test]
-fn invalid_adam_inputs_return_structured_errors() {
-    let graph = GraphBuilder::new();
-    let weight = graph.input(&[2, 2], IrDType::F32);
-    let gradient = graph.input(&[2, 2], IrDType::F32);
-    let first_moment = graph.input(&[2, 2], IrDType::F32);
-    let second_moment = graph.input(&[2, 2], IrDType::F32);
-    let half_moment = graph.input(&[2, 2], IrDType::F16);
-    let wrong_shape = graph.input(&[4], IrDType::F32);
-
-    assert!(graph
-        .try_apply_adam(
-            &weight,
-            &gradient,
-            &half_moment,
-            &second_moment,
-            0.001,
-            0.9,
-            0.999,
-            1e-8,
-            1,
-        )
-        .is_err());
-
-    assert!(graph
-        .try_apply_adam(
-            &weight,
-            &wrong_shape,
-            &first_moment,
-            &second_moment,
-            0.001,
-            0.9,
-            0.999,
-            1e-8,
-            1,
-        )
-        .is_err());
-    assert!(graph
-        .try_apply_adam(
-            &weight,
-            &gradient,
-            &first_moment,
-            &second_moment,
-            0.001,
-            1.0,
-            0.999,
-            1e-8,
-            1,
-        )
-        .is_err());
-    assert!(graph
-        .try_apply_adam(
-            &weight,
-            &gradient,
-            &first_moment,
-            &second_moment,
-            0.001,
-            0.9,
-            0.999,
-            0.0,
-            0,
-        )
-        .is_err());
-    assert!(graph
-        .try_apply_adamw(
-            &weight,
-            &gradient,
-            &first_moment,
-            &second_moment,
-            0.001,
-            0.9,
-            0.999,
-            1e-8,
-            1,
-            -0.01,
-        )
-        .is_err());
-}
-
-#[test]
 fn invalid_comparison_operands_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
     let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
@@ -482,14 +385,6 @@ fn invalid_comparison_operands_return_structured_errors() {
     let packed = Tensor::try_zeros(vec![8], DType::I4, Device::Cpu).unwrap();
     assert!(packed.try_sign().is_err());
     assert!(packed.try_logical_not().is_err());
-}
-
-#[test]
-fn invalid_gradient_clipping_parameters_return_structured_errors() {
-    let tensor = Tensor::from_vec(vec![1.0, 2.0], vec![2]);
-    assert!(fastnn::tensor::try_clip_grad_norm_(std::slice::from_ref(&tensor), -1.0, 2.0).is_err());
-    assert!(fastnn::tensor::try_clip_grad_norm_(std::slice::from_ref(&tensor), 1.0, 0.0).is_err());
-    assert!(fastnn::tensor::try_clip_grad_value_(&[tensor], f32::NAN).is_err());
 }
 
 #[test]
@@ -603,78 +498,6 @@ fn integer_slice_conversion_returns_structured_errors() {
 }
 
 #[test]
-fn invalid_fused_optimizer_tensors_return_dispatch_errors() {
-    let weight = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
-    let gradient = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
-    let moment = Tensor::from_vec(vec![0.0; 4], vec![2, 2]);
-    let wrong_shape = Tensor::from_vec(vec![0.0; 2], vec![2]);
-
-    assert!(weight
-        .try_adam_update(&wrong_shape, &moment, &moment, 0.001, 0.9, 0.999, 1e-8, 1)
-        .is_err());
-    assert!(weight
-        .try_adamw_update(&gradient, &moment, &moment, 0.001, 0.9, 0.999, 1e-8, 1, -0.1,)
-        .is_err());
-}
-
-#[test]
-fn invalid_rmsprop_inputs_return_structured_errors() {
-    let graph = GraphBuilder::new();
-    let weight = graph.input(&[2, 2], IrDType::F32);
-    let gradient = graph.input(&[2, 2], IrDType::F32);
-    let second_moment = graph.input(&[2, 2], IrDType::F32);
-    let wrong_shape = graph.input(&[4], IrDType::F32);
-
-    assert!(graph
-        .try_apply_rmsprop(&weight, &wrong_shape, &second_moment, 0.01, 0.99, 1e-8)
-        .is_err());
-    assert!(graph
-        .try_apply_rmsprop(&weight, &gradient, &second_moment, 0.01, 1.0, 1e-8)
-        .is_err());
-    assert!(graph
-        .try_apply_rmsprop(&weight, &gradient, &second_moment, 0.01, 0.99, 0.0)
-        .is_err());
-}
-
-#[test]
-fn invalid_lion_inputs_return_structured_errors() {
-    let graph = GraphBuilder::new();
-    let weight = graph.input(&[2, 2], IrDType::F32);
-    let gradient = graph.input(&[2, 2], IrDType::F32);
-    let momentum = graph.input(&[2, 2], IrDType::F32);
-    let wrong_shape = graph.input(&[4], IrDType::F32);
-
-    assert!(graph
-        .try_apply_lion(&weight, &wrong_shape, &momentum, 0.01, 0.9, 0.99, 0.0)
-        .is_err());
-    assert!(graph
-        .try_apply_lion(&weight, &gradient, &momentum, 0.01, 0.9, 1.0, 0.0)
-        .is_err());
-    assert!(graph
-        .try_apply_lion(&weight, &gradient, &momentum, 0.01, 0.9, 0.99, -0.1)
-        .is_err());
-}
-
-#[test]
-fn invalid_muon_inputs_return_structured_errors() {
-    let graph = GraphBuilder::new();
-    let weight = graph.input(&[2, 2], IrDType::F32);
-    let gradient = graph.input(&[2, 2], IrDType::F32);
-    let momentum = graph.input(&[2, 2], IrDType::F32);
-    let wrong_shape = graph.input(&[4], IrDType::F32);
-
-    assert!(graph
-        .try_apply_muon(&weight, &wrong_shape, &momentum, 0.01, 0.9, 0.0)
-        .is_err());
-    assert!(graph
-        .try_apply_muon(&weight, &gradient, &momentum, 0.01, 1.0, 0.0)
-        .is_err());
-    assert!(graph
-        .try_apply_muon(&weight, &gradient, &momentum, 0.01, 0.9, -0.1)
-        .is_err());
-}
-
-#[test]
 fn invalid_selection_operands_return_structured_errors() {
     let values = Tensor::from_vec(vec![1.0; 6], vec![2, 3]);
     let incompatible = Tensor::from_vec(vec![1.0; 4], vec![2, 2]);
@@ -732,17 +555,6 @@ fn invalid_reduction_dimensions_return_structured_errors() {
         tensor.try_cumsum(-1, false, false).unwrap().shape(),
         vec![2, 2]
     );
-}
-
-#[test]
-fn backward_rejects_mismatched_gradient_shape() {
-    let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).requires_grad_(true);
-    let loss = input.sum(0, false);
-    let wrong_gradient = Tensor::from_vec(vec![1.0], vec![1]);
-
-    let error = autograd::backward(&loss, Some(wrong_gradient))
-        .expect_err("mismatched backward gradient must fail");
-    assert!(error.to_string().contains("gradient shape"));
 }
 
 #[test]

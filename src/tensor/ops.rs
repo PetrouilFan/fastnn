@@ -1,6 +1,5 @@
 // Tensor operation methods - arithmetic, matmul, activations, and operator overloads
 
-use crate::autograd;
 use crate::backend::BackendError;
 use crate::error::{FastnnError, FastnnResult};
 
@@ -24,16 +23,7 @@ where
 macro_rules! impl_unary_op {
     ($try_name:ident, $name:ident, $ir_method:ident, $backward:literal) => {
         pub fn $try_name(&self) -> Result<Tensor, BackendError> {
-            let output = exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0])])?;
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let inputs = vec![self.clone()];
-                Ok(Self::attach_grad_fn(
-                    output,
-                    autograd::make_node_info($backward, inputs),
-                ))
-            } else {
-                Ok(output)
-            }
+            exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0])])
         }
 
         pub fn $name(&self) -> Tensor {
@@ -53,13 +43,7 @@ macro_rules! impl_unary_op_extra {
     ($try_name:ident, $name:ident, $backward:literal, ($($param:ident: $ptype:ty),*), $ir_method:ident $(, $extra_arg:expr)*) => {
         #[allow(unused_variables)]
         pub fn $try_name(&self, $($param: $ptype),*) -> Result<Tensor, BackendError> {
-            let output = exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0] $(, $extra_arg)*)])?;
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let inputs = vec![self.clone()];
-                Ok(Self::attach_grad_fn(output, autograd::make_node_info($backward, inputs)))
-            } else {
-                Ok(output)
-            }
+            exec_single(&[self], |g, ins| vec![g.$ir_method(&ins[0] $(, $extra_arg)*)])
         }
 
         pub fn $name(&self, $($param: $ptype),*) -> Tensor {
@@ -79,17 +63,9 @@ macro_rules! impl_validated_unary_op_extra {
                     concat!(stringify!($name), ": ", $message).into(),
                 ));
             }
-            let output = exec_single(&[self], |g, ins| {
+            exec_single(&[self], |g, ins| {
                 vec![g.$ir_method(&ins[0] $(, $extra_arg)*)]
-            })?;
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                Ok(Self::attach_grad_fn(
-                    output,
-                    autograd::make_node_info($backward, vec![self.clone()]),
-                ))
-            } else {
-                Ok(output)
-            }
+            })
         }
 
         pub fn $name(&self, $($param: $ptype),*) -> Tensor {
@@ -123,7 +99,6 @@ macro_rules! impl_inplace_binary_op {
                 *self = result;
                 return self;
             }
-            self.inner.version_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let self_ptr = self.data_ptr_f32_mut();
             let other_ptr = other.data_ptr_f32();
             match dtype {
@@ -230,34 +205,6 @@ macro_rules! impl_inplace_binary_op {
 }
 
 impl Tensor {
-    fn validate_optimizer_tensors(
-        &self,
-        grad: &Tensor,
-        m: &Tensor,
-        v: &Tensor,
-        operation: &str,
-    ) -> Result<(), BackendError> {
-        for (name, tensor) in [
-            ("gradient", grad),
-            ("first moment", m),
-            ("second moment", v),
-        ] {
-            if tensor.shape() != self.shape() {
-                return Err(BackendError::Dispatch(format!(
-                    "{operation}: {name} shape {:?} does not match weight shape {:?}",
-                    tensor.shape(),
-                    self.shape()
-                )));
-            }
-            if tensor.dtype() != self.dtype() || tensor.device() != self.device() {
-                return Err(BackendError::Dispatch(format!(
-                    "{operation}: {name} dtype and device must match the weight"
-                )));
-            }
-        }
-        Ok(())
-    }
-
     fn normalize_axis(&self, axis: i32, operation: &str) -> Result<usize, BackendError> {
         let rank = self.ndim() as i64;
         let requested = i64::from(axis);
@@ -272,17 +219,6 @@ impl Tensor {
             )));
         }
         Ok(normalized as usize)
-    }
-
-    fn attach_unary_grad(&self, output: Tensor, backward: &'static str) -> Tensor {
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            Self::attach_grad_fn(
-                output,
-                autograd::make_node_info(backward, vec![self.clone()]),
-            )
-        } else {
-            output
-        }
     }
 
     fn validate_binary_inputs(&self, other: &Tensor, operation: &str) -> Result<(), BackendError> {
@@ -387,25 +323,11 @@ impl Tensor {
                     }
                 }
             }
-            if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-                let inputs = vec![self.clone(), other.clone()];
-                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(autograd::make_node_info("AddBackward", inputs));
-                Arc::make_mut(&mut output.inner).set_autograd_meta(meta);
-            }
             return Ok(output);
         }
 
         let output = exec_single(&[self, other], |g, ins| vec![g.add(&ins[0], &ins[1])])?;
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("AddBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     // In-place addition for gradient accumulation
@@ -458,9 +380,6 @@ impl Tensor {
     /// Non-in-place scalar multiplication without creating a scalar tensor.
     /// Avoids the 5-heap-alloc overhead of Tensor::from_scalar().
     pub fn mul_scalar(&self, scalar: f32) -> Tensor {
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            return self.mul(&Tensor::from_scalar(scalar));
-        }
         let mut result = self.clone();
         result.mul_scalar_(scalar);
         result
@@ -529,7 +448,6 @@ impl Tensor {
             && self.inner.sizes == tensor2.inner.sizes
         {
             let numel = self.inner.numel() as usize;
-            self.inner.increment_version();
             let self_ptr = self.data_ptr_f32_mut();
             let t1_ptr = tensor1.data_ptr_f32();
             let t2_ptr = tensor2.data_ptr_f32();
@@ -626,15 +544,7 @@ impl Tensor {
     pub fn try_sub(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         self.validate_binary_inputs(other, "sub")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.sub(&ins[0], &ins[1])])?;
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("SubBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn sub(&self, other: &Tensor) -> Tensor {
@@ -645,15 +555,7 @@ impl Tensor {
     pub fn try_mul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         self.validate_binary_inputs(other, "mul")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.mul(&ins[0], &ins[1])])?;
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("MulBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn mul(&self, other: &Tensor) -> Tensor {
@@ -664,15 +566,7 @@ impl Tensor {
     pub fn try_div(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         self.validate_binary_inputs(other, "div")?;
         let output = exec_single(&[self, other], |g, ins| vec![g.div(&ins[0], &ins[1])])?;
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("DivBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn div(&self, other: &Tensor) -> Tensor {
@@ -683,15 +577,7 @@ impl Tensor {
     pub fn try_matmul(&self, other: &Tensor) -> Result<Tensor, BackendError> {
         self.validate_matmul_inputs(other)?;
         let output = exec_single(&[self, other], |g, ins| vec![g.matmul(&ins[0], &ins[1])])?;
-        if autograd::is_grad_enabled() && (self.requires_grad() || other.requires_grad()) {
-            let inputs = vec![self.clone(), other.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("MatmulBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
@@ -743,18 +629,7 @@ impl Tensor {
         let output = exec_single(&[self], |graph, inputs| {
             vec![graph.softmax(&inputs[0], dim as i64)]
         })?;
-        Ok(if autograd::is_grad_enabled() && self.requires_grad() {
-            Self::attach_grad_fn(
-                output,
-                autograd::make_node_info_with_params(
-                    "SoftmaxBackward",
-                    vec![self.clone()],
-                    vec![dim as i64],
-                ),
-            )
-        } else {
-            output
-        })
+        Ok(output)
     }
 
     pub fn softmax(&self, dim: i32) -> Tensor {
@@ -791,15 +666,7 @@ impl Tensor {
     pub fn try_pow(&self, exponent: f32) -> Result<Tensor, BackendError> {
         let exp = Tensor::from_scalar(exponent);
         let output = exec_single(&[self, &exp], |g, ins| vec![g.pow(&ins[0], &ins[1])])?;
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Ok(Self::attach_grad_fn(
-                output,
-                autograd::make_node_info("PowBackward", inputs),
-            ))
-        } else {
-            Ok(output)
-        }
+        Ok(output)
     }
 
     pub fn pow(&self, exponent: f32) -> Tensor {
@@ -813,7 +680,7 @@ impl Tensor {
         let output = exec_single(&[self], |graph, inputs| {
             vec![graph.log_softmax(&inputs[0], dim as i64)]
         })?;
-        Ok(self.attach_unary_grad(output, "LogSoftmaxBackward"))
+        Ok(output)
     }
 
     pub fn log_softmax(&self, dim: i32) -> Tensor {
@@ -868,122 +735,6 @@ impl Tensor {
     }
 
     impl_unary_op!(try_erf, erf, erf, "ErfBackward");
-
-    /// Fused AdamW weight update — single graph node replaces ~12 intermediate tensors.
-    /// Returns [updated_weight, updated_m, updated_v].
-    pub fn adamw_update(
-        &self,
-        grad: &Tensor,
-        m: &Tensor,
-        v: &Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        t: u64,
-        weight_decay: f32,
-    ) -> Vec<Tensor> {
-        self.try_adamw_update(grad, m, v, lr, beta1, beta2, eps, t, weight_decay)
-            .expect("Tensor::adamw_update failed")
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_adamw_update(
-        &self,
-        grad: &Tensor,
-        m: &Tensor,
-        v: &Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        t: u64,
-        weight_decay: f32,
-    ) -> Result<Vec<Tensor>, BackendError> {
-        self.validate_optimizer_tensors(grad, m, v, "adamw_update")?;
-        if !lr.is_finite()
-            || lr < 0.0
-            || !beta1.is_finite()
-            || !(0.0..1.0).contains(&beta1)
-            || !beta2.is_finite()
-            || !(0.0..1.0).contains(&beta2)
-            || !eps.is_finite()
-            || eps <= 0.0
-            || t == 0
-            || !weight_decay.is_finite()
-            || weight_decay < 0.0
-        {
-            return Err(BackendError::Dispatch(
-                "adamw_update: invalid optimizer hyperparameters".into(),
-            ));
-        }
-        Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
-            let updated = g.apply_adamw(
-                &ins[0],
-                &ins[1],
-                &ins[2],
-                &ins[3],
-                lr,
-                beta1,
-                beta2,
-                eps,
-                t,
-                weight_decay,
-            );
-            vec![updated, ins[2].clone(), ins[3].clone()]
-        })
-    }
-
-    /// Fused Adam weight update — single graph node replaces ~12 intermediate tensors.
-    /// Returns [updated_weight, updated_m, updated_v].
-    pub fn adam_update(
-        &self,
-        grad: &Tensor,
-        m: &Tensor,
-        v: &Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        t: u64,
-    ) -> Vec<Tensor> {
-        self.try_adam_update(grad, m, v, lr, beta1, beta2, eps, t)
-            .expect("Tensor::adam_update failed")
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_adam_update(
-        &self,
-        grad: &Tensor,
-        m: &Tensor,
-        v: &Tensor,
-        lr: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
-        t: u64,
-    ) -> Result<Vec<Tensor>, BackendError> {
-        self.validate_optimizer_tensors(grad, m, v, "adam_update")?;
-        if !lr.is_finite()
-            || lr < 0.0
-            || !beta1.is_finite()
-            || !(0.0..1.0).contains(&beta1)
-            || !beta2.is_finite()
-            || !(0.0..1.0).contains(&beta2)
-            || !eps.is_finite()
-            || eps <= 0.0
-            || t == 0
-        {
-            return Err(BackendError::Dispatch(
-                "adam_update: invalid optimizer hyperparameters".into(),
-            ));
-        }
-        Tensor::exec_aot(&[self, grad, m, v], |g, ins| {
-            let updated =
-                g.apply_adam(&ins[0], &ins[1], &ins[2], &ins[3], lr, beta1, beta2, eps, t);
-            vec![updated, ins[2].clone(), ins[3].clone()]
-        })
-    }
 }
 
 impl Add for &Tensor {

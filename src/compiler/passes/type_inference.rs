@@ -43,14 +43,6 @@ fn expected_input_dtype(opcode: &Opcode, _input_index: usize) -> Option<IrDType>
         Opcode::DequantizeActivations => Some(IrDType::I8),
         Opcode::Cast => None, // already has the right input
 
-        // Optimizer ops accept F32 gradients.
-        Opcode::SgdUpdate
-        | Opcode::AdamUpdate
-        | Opcode::AdamWUpdate
-        | Opcode::MuonUpdate
-        | Opcode::LionUpdate
-        | Opcode::RmspropUpdate => Some(IrDType::F32),
-
         // Everything else: no constraint (F32 is the default).
         _ => None,
     }

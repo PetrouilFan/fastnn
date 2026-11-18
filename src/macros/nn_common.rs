@@ -29,11 +29,6 @@ macro_rules! impl_norm {
             vec![("weight", &self.$weight), ("bias", &self.$bias)]
         }
 
-        fn zero_grad(&self) {
-            $crate::nn::clear_grad(&self.$weight);
-            $crate::nn::clear_grad(&self.$bias);
-        }
-
         $crate::impl_training_state!(self, self.$training);
     };
     ($weight:ident, $bias:ident) => {
@@ -51,11 +46,6 @@ macro_rules! impl_norm {
         fn named_parameters_ref(&self) -> Vec<(&str, &$crate::tensor::Tensor)> {
             vec![("weight", &self.$weight), ("bias", &self.$bias)]
         }
-
-        fn zero_grad(&self) {
-            $crate::nn::clear_grad(&self.$weight);
-            $crate::nn::clear_grad(&self.$bias);
-        }
     };
     ($weight:ident, $training:ident) => {
         fn parameters(&self) -> Vec<$crate::tensor::Tensor> {
@@ -68,10 +58,6 @@ macro_rules! impl_norm {
 
         fn named_parameters_ref(&self) -> Vec<(&str, &$crate::tensor::Tensor)> {
             vec![("weight", &self.$weight)]
-        }
-
-        fn zero_grad(&self) {
-            $crate::nn::clear_grad(&self.$weight);
         }
 
         $crate::impl_training_state!(self, self.$training);
@@ -88,14 +74,10 @@ macro_rules! impl_norm {
         fn named_parameters_ref(&self) -> Vec<(&str, &$crate::tensor::Tensor)> {
             vec![("weight", &self.$weight)]
         }
-
-        fn zero_grad(&self) {
-            $crate::nn::clear_grad(&self.$weight);
-        }
     };
 }
 
-/// Implement `Module` for a pooling layer with AOT execution and autograd.
+/// Implement `Module` for a pooling layer with AOT execution.
 ///
 /// `$exec_body` is the closure body passed to `Tensor::exec_aot`.
 /// Use `g` for the `GraphBuilder` and `ins` for the input tensors.
@@ -115,7 +97,6 @@ macro_rules! impl_pooling {
                     concat!(stringify!($name), "::forward: AOT execution failed"),
                 );
                 let mut output = result.into_iter().next().unwrap();
-                $crate::utils::attach_grad(&mut output, $backward_name, &[x]);
                 output
             }
         }

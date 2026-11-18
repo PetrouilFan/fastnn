@@ -42,13 +42,11 @@ def _to_scalar(value: Union[int, Tuple[int, int]], name: str) -> int:
 
 class _BaseModule(Module):
     """Base class for modules with common layer iteration logic."""
-    __slots__ = ('_param_layers', '_zero_grad_layers', '_train_layers', 
-                 '_eval_layers', '_named_param_pairs')
+    __slots__ = ('_param_layers', '_train_layers', '_eval_layers', '_named_param_pairs')
     
     def __init__(self):
         super().__init__()
         self._param_layers = []
-        self._zero_grad_layers = []
         self._train_layers = []
         self._eval_layers = []
         self._named_param_pairs = []
@@ -58,7 +56,6 @@ class _BaseModule(Module):
         mask = getattr(layer, '_fnn_cap_mask', 0)
         if mask == 0:
             mask = (1 << 0) if hasattr(layer, "parameters") else 0
-            mask |= (1 << 1) if hasattr(layer, "zero_grad") else 0
             mask |= (1 << 2) if hasattr(layer, "train_mode") else 0
             mask |= (1 << 3) if hasattr(layer, "eval_mode") else 0
             # Cache the mask on the layer object (may fail for slotted classes like
@@ -70,8 +67,6 @@ class _BaseModule(Module):
         
         if mask & (1 << 0):
             self._param_layers.append(layer)
-        if mask & (1 << 1):
-            self._zero_grad_layers.append(layer)
         if mask & (1 << 2):
             self._train_layers.append(layer)
         if mask & (1 << 3):
@@ -91,10 +86,6 @@ class _BaseModule(Module):
             for n, p in layer.named_parameters():
                 params.append((f"{name}.{n}", p))
         return params
-    
-    def zero_grad(self):
-        for layer in self._zero_grad_layers:
-            layer.zero_grad()
     
     def train_mode(self) -> None:
         super().train_mode()

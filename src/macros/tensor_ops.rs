@@ -128,28 +128,15 @@ macro_rules! impl_cpu_fast_path {
                         }
                     }
                 }
-                if autograd::is_grad_enabled() && self.requires_grad() {
-                    let s = Tensor::from_scalar(scalar);
-                    let inputs = vec![self.clone(), s.clone()];
-                    return Self::attach_grad_fn(output, autograd::make_node_info(stringify!($backward_name), inputs));
-                } else {
-                    return output;
-                }
+                return output;
             }
 
             let s = Tensor::from_scalar(scalar);
-            let output = Tensor::exec_aot(&[self, &s], |g, ins| vec![g.$fn_name(&ins[0], &ins[1])])
+            Tensor::exec_aot(&[self, &s], |g, ins| vec![g.$fn_name(&ins[0], &ins[1])])
                 .expect(concat!("Tensor::", stringify!($fn_name), ": AOT execution failed"))
                 .into_iter()
                 .next()
-                .unwrap();
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let _edges = autograd::make_edge(self);
-                let inputs = vec![self.clone(), s.clone()];
-                Self::attach_grad_fn(output, autograd::make_node_info(stringify!($backward_name), inputs))
-            } else {
-                output
-            }
+                .unwrap()
         }
     };
 }

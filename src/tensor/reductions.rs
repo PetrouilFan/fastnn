@@ -1,11 +1,8 @@
 // Tensor reduction methods
 
-use crate::autograd;
+use super::Tensor;
 use crate::error::{FastnnError, FastnnResult};
 use crate::storage::{DType, Device};
-use std::sync::Arc;
-
-use super::Tensor;
 
 fn normalize_reduction_dim(dim: i64, rank: usize, operation: &str) -> FastnnResult<usize> {
     let rank = rank as i64;
@@ -36,19 +33,9 @@ impl Tensor {
             let shape = self.shape();
             let dim_size = shape[normalized_dim] as usize;
             let num_rows = shape[0] as usize;
-            let mut output = crate::backend::cpu::reductions_fast::sum_last_dim_contiguous(
+            let output = crate::backend::cpu::reductions_fast::sum_last_dim_contiguous(
                 self, dim_size, num_rows,
             );
-            if autograd::is_grad_enabled() && self.requires_grad() {
-                let inputs = vec![self.clone()];
-                let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-                meta.grad_fn = Some(autograd::make_node_info_with_params(
-                    "SumBackward",
-                    inputs,
-                    vec![normalized_dim as i64, i64::from(keepdim)],
-                ));
-                Arc::make_mut(&mut output.inner).set_autograd_meta(meta);
-            }
             return Ok(output);
         }
 
@@ -59,7 +46,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("sum execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "SumBackward", normalized_dim, keepdim))
+        Ok(output)
     }
 
     pub fn max(&self, dim: i32, keepdim: bool) -> Tensor {
@@ -75,7 +62,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("max execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "MaximumBackward", normalized_dim, keepdim))
+        Ok(output)
     }
 
     pub fn mean(&self, dim: i32, keepdim: bool) -> Tensor {
@@ -91,7 +78,7 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("mean execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "MeanBackward", normalized_dim, keepdim))
+        Ok(output)
     }
 
     pub fn cumsum(&self, dim: i64, exclusive: bool, reverse: bool) -> Tensor {
@@ -108,28 +95,6 @@ impl Tensor {
         .into_iter()
         .next()
         .ok_or_else(|| FastnnError::Internal("cumsum execution returned no output".into()))?;
-        Ok(self.attach_reduction_grad(output, "CumSumBackward", normalized_dim, false))
-    }
-
-    fn attach_reduction_grad(
-        &self,
-        output: Tensor,
-        backward_name: &'static str,
-        dim: usize,
-        keepdim: bool,
-    ) -> Tensor {
-        if autograd::is_grad_enabled() && self.requires_grad() {
-            let inputs = vec![self.clone()];
-            Self::attach_grad_fn(
-                output,
-                autograd::make_node_info_with_params(
-                    backward_name,
-                    inputs,
-                    vec![dim as i64, i64::from(keepdim)],
-                ),
-            )
-        } else {
-            output
-        }
+        Ok(output)
     }
 }

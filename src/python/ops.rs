@@ -1,22 +1,3 @@
-/// Helper to wrap loss function output with autograd support
-fn wrap_loss_with_autograd(
-    output: Tensor,
-    input: &Tensor,
-    _backward_fn: impl FnOnce() -> std::sync::Arc<dyn autograd::Node>,
-) -> PyTensor {
-    if autograd::is_grad_enabled() && input.requires_grad() {
-        let inputs = vec![input.clone()];
-        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(crate::autograd::make_node_info("LossBackward", inputs));
-        let mut output = output;
-        Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
-        PyTensor::from_tensor(output)
-    } else {
-        PyTensor::from_tensor(output)
-    }
-}
-
 fn reduce_mean_all(t: &Tensor) -> Tensor {
     let ndim = t.ndim();
     let mut result = t.clone();
@@ -65,29 +46,6 @@ fn reduce_min_all(t: &Tensor) -> Tensor {
         result = result.neg().max(0, false).neg();
     }
     result
-}
-
-fn checkpoint_op(name: &str, inputs: &[&Tensor]) -> PyResult<Tensor> {
-    match name {
-        "add" => Ok(inputs[0].add(inputs[1])),
-        "sub" => Ok(inputs[0].sub(inputs[1])),
-        "mul" => Ok(inputs[0].mul(inputs[1])),
-        "div" => Ok(inputs[0].div(inputs[1])),
-        "matmul" => Ok(inputs[0].matmul(inputs[1])),
-        "relu" => Ok(inputs[0].relu()),
-        "sigmoid" => Ok(inputs[0].sigmoid()),
-        "tanh" => Ok(inputs[0].tanh()),
-        "gelu" => Ok(inputs[0].gelu()),
-        "silu" => Ok(inputs[0].silu()),
-        "neg" => Ok(inputs[0].neg()),
-        "exp" => Ok(inputs[0].exp()),
-        "sqrt" => Ok(inputs[0].sqrt()),
-        "abs" => Ok(inputs[0].abs()),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unknown checkpoint operation: {}",
-            name
-        ))),
-    }
 }
 
 /// Macro for unary operations: fn op(a) -> PyTensor
@@ -438,124 +396,6 @@ fn argmin(a: &PyTensor, dim: Option<i32>) -> PyResult<PyTensor> {
     ))
 }
 
-// Loss functions
-#[pyfunction]
-#[pyo3(signature = (pred, target, reduction = None))]
-fn mse_loss(pred: &PyTensor, target: &PyTensor, reduction: Option<String>) -> PyResult<PyTensor> {
-    let pred_inner = pred.inner.clone();
-    let target_inner = target.inner.clone();
-    let reduction_str = reduction.unwrap_or_else(|| "mean".to_string());
-    let diff = &pred_inner - &target_inner;
-    let squared = diff.pow(2.0);
-    let output = match reduction_str.as_str() {
-        "none" => squared,
-        "mean" => reduce_mean_all(&squared),
-        "sum" => reduce_sum_all(&squared),
-        _ => reduce_mean_all(&squared),
-    };
-
-    let edges = autograd::make_edges(&pred.inner, &target.inner);
-    let inputs = vec![pred.inner.clone(), target.inner.clone()];
-    Ok(wrap_loss_with_autograd(output, &pred.inner, move || {
-        std::sync::Arc::new(autograd::MSELossBackward::new(edges, inputs))
-    }))
-}
-
-#[pyfunction]
-#[pyo3(signature = (pred, target, reduction = None))]
-fn cross_entropy_loss(
-    pred: &PyTensor,
-    target: &PyTensor,
-    reduction: Option<String>,
-) -> PyResult<PyTensor> {
-    let pred_inner = pred.inner.clone();
-    let target_inner = target.inner.clone();
-    let reduction_str = reduction.unwrap_or_else(|| "mean".to_string());
-    let pred_shape = pred_inner.shape();
-    if pred_shape.len() != 2 {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "cross_entropy_loss expects rank-2 logits [batch, classes], got {pred_shape:?}"
-        )));
-    }
-    let batch = pred_shape[0];
-    let classes = pred_shape[1];
-    if target_inner.numel() != batch {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "cross_entropy_loss expects {batch} targets, got {}",
-            target_inner.numel()
-        )));
-    }
-    let log_probs = pred_inner.log_softmax(-1);
-    // Gather is ONNX-style and inserts the entire index shape. Using [B, 1]
-    // indices on [B, C] would therefore produce [B, B, 1], not a row-wise
-    // gather. Flatten and add each row's base offset instead.
-    let row_offsets = Tensor::from_vec(
-        (0..batch).map(|row| (row * classes) as f32).collect(),
-        vec![batch],
-    );
-    let flat_indices = target_inner.reshape(vec![batch]).add(&row_offsets);
-    let nll = log_probs.reshape(vec![batch * classes]).gather(0, &flat_indices).neg();
-    let output = match reduction_str.as_str() {
-        "none" => nll,
-        "mean" => reduce_mean_all(&nll),
-        "sum" => reduce_sum_all(&nll),
-        _ => reduce_mean_all(&nll),
-    };
-
-    let edges = autograd::make_edges(&pred.inner, &target.inner);
-    let inputs = vec![pred.inner.clone(), target.inner.clone()];
-    Ok(wrap_loss_with_autograd(output, &pred.inner, move || {
-        std::sync::Arc::new(autograd::CrossEntropyBackward::new(edges, inputs))
-    }))
-}
-
-#[pyfunction]
-fn _no_grad_enter() {
-    no_grad_enter();
-}
-
-#[pyfunction]
-fn _no_grad_exit() {
-    no_grad_exit();
-}
-
-#[pyfunction]
-#[pyo3(signature = (fn_name, inputs))]
-fn checkpoint(fn_name: &str, inputs: Vec<PyTensor>) -> PyResult<Vec<PyTensor>> {
-    let inputs_inner: Vec<Tensor> = inputs.iter().map(|p| p.inner.clone()).collect();
-    let requires_grad = inputs.iter().any(|p| p.inner.requires_grad());
-
-    let num_inputs = inputs_inner.len();
-    let forward_fn = fn_name.to_string();
-
-    let inputs_refs: Vec<&Tensor> = inputs_inner.iter().collect();
-    let output_tensor = checkpoint_op(&forward_fn, &inputs_refs)?;
-    let output = PyTensor::from_tensor(output_tensor);
-
-    // When grad is disabled, just return the computed outputs
-    // (not the inputs! — we must still compute and return results).
-    if !requires_grad || !autograd::is_grad_enabled() {
-        return Ok(vec![output]);
-    }
-
-    let output_inner = output.inner.clone();
-
-    if output_inner.requires_grad() {
-        let mut meta = autograd::AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(autograd::make_node_info("CheckpointBackward", inputs_inner));
-        let mut out = output_inner.clone();
-        Arc::make_mut(&mut out.inner).autograd_meta =
-            Some(std::sync::Arc::new(parking_lot::Mutex::new(meta)));
-        let mut result = vec![PyTensor::from_tensor(out)];
-        for i in 1..num_inputs {
-            result.push(inputs[i].clone());
-        }
-        Ok(result)
-    } else {
-        Ok(vec![output])
-    }
-}
-
 #[pyfunction]
 fn _set_seed(seed: u64) {
     set_seeded_rng(seed);
@@ -631,57 +471,6 @@ fn pow(a: &PyTensor, exponent: f32) -> PyTensor {
 }
 
 #[pyfunction]
-#[allow(clippy::needless_range_loop)]
-fn bucket_allreduce(mut param_groups: Vec<Vec<PyTensor>>) -> PyResult<()> {
-    if param_groups.is_empty() {
-        return Ok(());
-    }
-
-    let num_replicas = param_groups.len();
-    let num_params = param_groups[0].len();
-
-    for group in &param_groups {
-        if group.len() != num_params {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "All replicas must have the same number of parameters",
-            ));
-        }
-    }
-
-    for param_idx in 0..num_params {
-        let mut gradients: Vec<core_tensor::Tensor> = Vec::with_capacity(num_replicas);
-        let mut all_have_grad = true;
-        for replica_idx in 0..num_replicas {
-            let param = &param_groups[replica_idx][param_idx];
-            if let Some(grad) = param.grad() {
-                gradients.push(grad.inner.clone());
-            } else {
-                all_have_grad = false;
-                break;
-            }
-        }
-
-        if !all_have_grad || gradients.len() != num_replicas {
-            continue;
-        }
-
-        let mut avg_grad = gradients[0].clone();
-        for i in 1..gradients.len() {
-            avg_grad.add_(&gradients[i]);
-        }
-        avg_grad.mul_scalar_(1.0 / num_replicas as f32);
-
-        let avg_grad_arc = avg_grad;
-        for replica_idx in 0..num_replicas {
-            let param = &mut param_groups[replica_idx][param_idx];
-            param.set_grad(Some(PyTensor::from_tensor(avg_grad_arc.clone())));
-        }
-    }
-
-    Ok(())
-}
-
-#[pyfunction]
 fn cat(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     let tensors_inner: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
     Ok(PyTensor::from_tensor(core_tensor::Tensor::try_cat(
@@ -699,42 +488,6 @@ fn stack(tensors: Vec<PyTensor>, dim: i32) -> PyResult<PyTensor> {
     )?))
 }
 
-#[pyfunction]
-fn bce_with_logits(input: &PyTensor, target: &PyTensor) -> PyResult<PyTensor> {
-    let zero = Tensor::from_scalar(0.0);
-    let one = Tensor::from_scalar(1.0);
-    let term1 = input.inner.maximum(&zero);
-    let term2 = input.inner.mul(&target.inner);
-    let term3 = one.add(&input.inner.abs().neg().exp()).ln();
-    let output = term1.sub(&term2).add(&term3);
-
-    let edges = autograd::make_edges(&input.inner, &target.inner);
-    let inputs = vec![input.inner.clone(), target.inner.clone()];
-    Ok(wrap_loss_with_autograd(output, &input.inner, move || {
-        std::sync::Arc::new(autograd::BCEWithLogitsBackward::new(edges, inputs))
-    }))
-}
-
-#[pyfunction]
-fn huber_loss(input: &PyTensor, target: &PyTensor, delta: f32) -> PyResult<PyTensor> {
-    let diff = &input.inner - &target.inner;
-    let abs_diff = diff.abs();
-    let delta_t = Tensor::from_scalar(delta);
-    let zero = Tensor::from_scalar(0.0);
-    let half = Tensor::from_scalar(0.5);
-    let quadratic = diff.pow(2.0) * half.clone();
-    let excess = (abs_diff - delta_t).maximum(&zero);
-    let correction = excess.pow(2.0) * half;
-    let output = quadratic - correction;
-
-    let edges = autograd::make_edges(&input.inner, &target.inner);
-    let inputs = vec![input.inner.clone(), target.inner.clone()];
-    Ok(wrap_loss_with_autograd(output, &input.inner, move || {
-        std::sync::Arc::new(autograd::HuberLossBackward::new(edges, inputs))
-    }))
-}
-
-// Tensor manipulation ops
 #[pyfunction]
 fn where_(
     condition: &PyTensor,
@@ -903,17 +656,3 @@ fn erf(tensor: &PyTensor) -> PyTensor {
     PyTensor::from_tensor(tensor.inner.erf())
 }
 
-#[pyfunction]
-fn clip_grad_norm_(tensors: Vec<PyTensor>, max_norm: f32, norm_type: f32) -> PyResult<f32> {
-    let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    Ok(core_tensor::try_clip_grad_norm_(
-        &tensors, max_norm, norm_type,
-    )?)
-}
-
-#[pyfunction]
-fn clip_grad_value_(tensors: Vec<PyTensor>, clip_value: f32) -> PyResult<()> {
-    let tensors: Vec<core_tensor::Tensor> = tensors.into_iter().map(|p| p.inner).collect();
-    core_tensor::try_clip_grad_value_(&tensors, clip_value)?;
-    Ok(())
-}

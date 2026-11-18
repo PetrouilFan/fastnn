@@ -89,20 +89,19 @@ impl<A: Activation> FusedConvBn<A> {
             conv_weight_data,
             vec![out_channels, in_channels / groups, kernel_size, kernel_size],
         );
-        let conv_weight = conv_weight.requires_grad_(true);
 
         let conv_bias = if bias {
             let bias_data: Vec<f32> = (0..out_channels).map(|_| 0.0).collect();
-            Some(Tensor::from_vec(bias_data, vec![out_channels]).requires_grad_(true))
+            Some(Tensor::from_vec(bias_data, vec![out_channels]))
         } else {
             None
         };
 
         let bn_weight_data: Vec<f32> = (0..out_channels).map(|_| 1.0).collect();
-        let bn_weight = Tensor::from_vec(bn_weight_data, vec![out_channels]).requires_grad_(true);
+        let bn_weight = Tensor::from_vec(bn_weight_data, vec![out_channels]);
 
         let bn_bias_data: Vec<f32> = (0..out_channels).map(|_| 0.0).collect();
-        let bn_bias = Tensor::from_vec(bn_bias_data, vec![out_channels]).requires_grad_(true);
+        let bn_bias = Tensor::from_vec(bn_bias_data, vec![out_channels]);
 
         let bn_running_mean_data: Vec<f32> = (0..out_channels).map(|_| 0.0).collect();
         let bn_running_mean = Tensor::from_vec(bn_running_mean_data, vec![out_channels]);
@@ -217,21 +216,6 @@ impl<A: Activation + Send + Sync> Module for FusedConvBn<A> {
             params.push(("conv_bias".to_string(), b.clone()));
         }
         params
-    }
-
-    fn zero_grad(&self) {
-        for tensor in [&self.conv_weight, &self.bn_weight, &self.bn_bias] {
-            if let Some(meta) = &tensor.inner.autograd_meta {
-                let mut lock = meta.lock();
-                lock.grad = None;
-            }
-        }
-        if let Some(b) = &self.conv_bias {
-            if let Some(meta) = &b.inner.autograd_meta {
-                let mut lock = meta.lock();
-                lock.grad = None;
-            }
-        }
     }
 }
 

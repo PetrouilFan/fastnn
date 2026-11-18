@@ -353,7 +353,13 @@ mod tests {
 
     #[test]
     fn binary_single_output_overlap_copies_only_overlapping_operand() {
-        reset_cpu_telemetry();
+        // The counters are process-wide (relaxed atomics shared by every test
+        // thread), so assert the delta this call contributes rather than an
+        // absolute value.
+        let _guard = crate::backend::cpu::telemetry::TELEMETRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = cpu_telemetry_snapshot();
 
         let arena = arena_from_f32(&[
             1.0, 2.0, 3.0, 4.0, // a
@@ -377,11 +383,12 @@ mod tests {
         });
 
         assert_eq!(read_f32s(&arena, output), vec![11.0, 22.0, 33.0, 44.0]);
-        let snapshot = cpu_telemetry_snapshot();
-        assert_eq!(snapshot.arena_temp_copies, 1);
-        assert_eq!(snapshot.arena_temp_copy_bytes, a.size as u64);
-
-        reset_cpu_telemetry();
+        let after = cpu_telemetry_snapshot();
+        assert!(after.arena_temp_copies > before.arena_temp_copies);
+        assert!(
+            after.arena_temp_copy_bytes >= before.arena_temp_copy_bytes + a.size as u64,
+            "the overlapping operand must be the one copied"
+        );
     }
 
     #[test]

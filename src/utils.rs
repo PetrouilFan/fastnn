@@ -1,8 +1,5 @@
-use crate::autograd::{make_node_info, AutogradMeta};
 use crate::ir::{ComputeGraph, DimExpr, IRNode, NodeId};
-use crate::tensor::Tensor;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Parse a shape attribute string like `"[1,64,56,56]"` into a `Vec<DimExpr>`.
 pub fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
@@ -26,19 +23,6 @@ pub fn parse_shape_attr(s: &str) -> Vec<DimExpr> {
             }
         })
         .collect()
-}
-
-/// Attach gradient tracking to an output tensor.
-/// Call this inside `Module::forward` after computing `output` from `inputs`.
-/// `op_name` should be the backward pass name (e.g. `"MaxPool2dBackward"`).
-pub fn attach_grad(output: &mut Tensor, op_name: &'static str, inputs: &[&Tensor]) {
-    if inputs.iter().any(|t| t.requires_grad()) {
-        let owned_inputs: Vec<Tensor> = inputs.iter().map(|t| (*t).clone()).collect();
-        let mut meta = AutogradMeta::new_non_leaf(true);
-        meta.grad_fn = Some(make_node_info(op_name, owned_inputs));
-        Arc::make_mut(&mut output.inner).autograd_meta =
-            Some(Arc::new(parking_lot::Mutex::new(meta)));
-    }
 }
 
 /// Iterate over all nodes in topological order, calling `f` for each.

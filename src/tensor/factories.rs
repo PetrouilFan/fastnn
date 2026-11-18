@@ -5,7 +5,7 @@ use crate::storage_pool::get_storage_pool;
 use crate::{FastnnError, FastnnResult};
 use smallvec::smallvec;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicI8, AtomicU64};
+use std::sync::atomic::AtomicI8;
 use std::sync::Arc;
 
 use super::shape::compute_strides;
@@ -258,9 +258,6 @@ impl Tensor {
                     storage_offset: 0,
                     dtype,
                     device,
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
-                    requires_grad: false,
                     contiguous_cache: AtomicI8::new(1),
                 })
             }
@@ -368,9 +365,6 @@ impl Tensor {
                     storage_offset: 0,
                     dtype,
                     device,
-                    version_counter: Arc::new(AtomicU64::new(0)),
-                    autograd_meta: None,
-                    requires_grad: false,
                     contiguous_cache: AtomicI8::new(1),
                 })
             }

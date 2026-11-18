@@ -47,7 +47,6 @@ pub mod macros;
 
 pub mod nn;
 pub mod onnx;
-pub mod optim;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod residual;
@@ -75,7 +74,6 @@ pub mod packed_tensor;
 pub mod swar;
 
 // v2.0.0 AOT compiler infrastructure
-pub mod autograd;
 pub mod backend;
 pub mod compiler;
 pub mod ir;

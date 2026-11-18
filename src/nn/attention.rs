@@ -292,21 +292,5 @@ impl Module for MultiHeadAttention {
         params
     }
 
-    fn zero_grad(&self) {
-        if let Some(ref q_proj) = self.q_proj {
-            q_proj.zero_grad();
-        }
-        if let Some(ref k_proj) = self.k_proj {
-            k_proj.zero_grad();
-        }
-        if let Some(ref v_proj) = self.v_proj {
-            v_proj.zero_grad();
-        }
-        if let Some(ref qkv_proj) = self.qkv_proj {
-            qkv_proj.zero_grad();
-        }
-        self.out_proj.zero_grad();
-    }
-
     impl_training_state!(self, self.training);
 }

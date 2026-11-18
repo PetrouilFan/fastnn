@@ -1,9 +1,8 @@
-use crate::autograd::{self, AutogradMeta};
 use crate::ir::{DimExpr, IrDType, TensorType};
 use crate::tensor::Tensor;
 use crate::{
     impl_norm, impl_training_state,
-    nn::{clear_grad, Module, TrainingState},
+    nn::{Module, TrainingState},
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -23,10 +22,10 @@ pub struct LayerNorm {
 impl LayerNorm {
     pub fn new(normalized_shape: i64, eps: f64) -> Self {
         let weight_data: Vec<f32> = (0..normalized_shape).map(|_| 1.0).collect();
-        let weight = Tensor::from_vec(weight_data, vec![normalized_shape]).requires_grad_(true);
+        let weight = Tensor::from_vec(weight_data, vec![normalized_shape]);
 
         let bias_data: Vec<f32> = (0..normalized_shape).map(|_| 0.0).collect();
-        let bias = Tensor::from_vec(bias_data, vec![normalized_shape]).requires_grad_(true);
+        let bias = Tensor::from_vec(bias_data, vec![normalized_shape]);
 
         LayerNorm {
             weight,
@@ -41,17 +40,6 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
-        if autograd::is_grad_enabled()
-            && (x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad())
-        {
-            let axis = x.ndim() as i32 - 1;
-            let centered = x.sub(&x.mean(axis, true));
-            let variance = centered.mul(&centered).mean(axis, true);
-            return centered
-                .div(&variance.add_scalar(self.eps as f32).sqrt())
-                .mul(&self.weight)
-                .add(&self.bias);
-        }
         let shape = x.shape_ref();
         let _ndim = shape.len();
 
@@ -91,10 +79,10 @@ pub struct BatchNorm1d {
 impl BatchNorm1d {
     pub fn new(num_features: i64, eps: f64, momentum: f64) -> Self {
         let weight_data: Vec<f32> = (0..num_features).map(|_| 1.0).collect();
-        let weight = Tensor::from_vec(weight_data, vec![num_features]).requires_grad_(true);
+        let weight = Tensor::from_vec(weight_data, vec![num_features]);
 
         let bias_data: Vec<f32> = (0..num_features).map(|_| 0.0).collect();
-        let bias = Tensor::from_vec(bias_data, vec![num_features]).requires_grad_(true);
+        let bias = Tensor::from_vec(bias_data, vec![num_features]);
 
         let running_mean_data: Vec<f32> = (0..num_features).map(|_| 0.0).collect();
         let running_mean = Tensor::from_vec(running_mean_data, vec![num_features]);
@@ -137,10 +125,6 @@ impl Module for BatchNorm1d {
         };
 
         let is_training = self.training.is_training();
-
-        let grads_needed = x.requires_grad()
-            || self.weight.as_ref().is_some_and(|w| w.requires_grad())
-            || self.bias.as_ref().is_some_and(|b| b.requires_grad());
 
         // Compute batch statistics via fused AOT graph (mean + var in one pass)
         // In eval mode, read running stats from the stored values
@@ -203,7 +187,7 @@ impl Module for BatchNorm1d {
         .expect("BatchNorm1d::forward: AOT failed");
 
         #[allow(unused_mut)]
-        let mut output = result.into_iter().next().unwrap();
+        let output = result.into_iter().next().unwrap();
 
         // Remove redundant output.clone() — output is uniquely owned
         #[allow(unused_mut)]
@@ -241,38 +225,13 @@ impl Module for BatchNorm1d {
             let new_mean = running_mean_lock
                 .mul_scalar(inv_mom)
                 .add(&batch_mean.mul_scalar(mom));
-            *running_mean_lock = new_mean.detach();
+            *running_mean_lock = new_mean;
 
             let mut running_var_lock = self.running_var.write();
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
-            *running_var_lock = new_var.detach();
-        }
-
-        // Attach autograd
-        if grads_needed {
-            let _edges = {
-                let mut edges = autograd::make_edge(x);
-                if let Some(w) = &self.weight {
-                    edges.extend(autograd::make_edge(w));
-                }
-                if let Some(b) = &self.bias {
-                    edges.extend(autograd::make_edge(b));
-                }
-                edges
-            };
-            let mut inputs = vec![x.clone()];
-            if let Some(ref w) = self.weight {
-                inputs.push(w.clone());
-            }
-            if let Some(ref b) = self.bias {
-                inputs.push(b.clone());
-            }
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("BatchNorm1dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
+            *running_var_lock = new_var;
         }
 
         output
@@ -300,15 +259,6 @@ impl Module for BatchNorm1d {
         params
     }
 
-    fn zero_grad(&self) {
-        if let Some(w) = &self.weight {
-            clear_grad(w);
-        }
-        if let Some(b) = &self.bias {
-            clear_grad(b);
-        }
-    }
-
     impl_training_state!(self, self.training);
 }
 
@@ -328,10 +278,8 @@ impl RMSNorm {
             crate::storage::DType::F32,
             crate::storage::Device::Cpu,
         );
-        let w = weight.clone();
-        let w = w.requires_grad_(true);
         RMSNorm {
-            weight: w,
+            weight,
             eps,
             normalized_shape,
             eps_scalar: Tensor::from_scalar(eps),
@@ -345,15 +293,7 @@ impl Module for RMSNorm {
             vec![g.rms_norm(&ins[0], &ins[1], self.eps as f64)]
         })
         .expect("RMSNorm::forward: AOT failed");
-        let mut output = result.into_iter().next().unwrap();
-
-        if x.requires_grad() || self.weight.requires_grad() {
-            let inputs = vec![x.clone(), self.weight.clone()];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("RMSNormBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
+        let output = result.into_iter().next().unwrap();
 
         output
     }
@@ -386,13 +326,9 @@ impl GroupNorm {
             crate::storage::DType::F32,
             crate::storage::Device::Cpu,
         );
-        let w = weight.clone();
-        let b = bias.clone();
-        let w = w.requires_grad_(true);
-        let b = b.requires_grad_(true);
         GroupNorm {
-            weight: w,
-            bias: b,
+            weight,
+            bias,
             eps,
             num_groups,
             num_channels,
@@ -410,7 +346,7 @@ impl Module for GroupNorm {
 
         // Single fused AOT graph for GroupNorm forward
         // Reduces overhead by compiling one graph instead of per-op exec_aot calls
-        let mut output = Tensor::exec_aot(&[x, &self.weight, &self.bias], |g, ins| {
+        let output = Tensor::exec_aot(&[x, &self.weight, &self.bias], |g, ins| {
             let x = &ins[0];
             let w = &ins[1];
             let b = &ins[2];
@@ -472,20 +408,6 @@ impl Module for GroupNorm {
         .next()
         .unwrap();
 
-        if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
-            let _edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges.extend(autograd::make_edge(&self.bias));
-                edges
-            };
-            let inputs = vec![x.clone(), self.weight.clone(), self.bias.clone()];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("GroupNormBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
-
         output
     }
 
@@ -540,13 +462,9 @@ impl BatchNorm2d {
             crate::storage::DType::F32,
             crate::storage::Device::Cpu,
         );
-        let w = weight.clone();
-        let b = bias.clone();
-        let w = w.requires_grad_(true);
-        let b = b.requires_grad_(true);
         BatchNorm2d {
-            weight: w,
-            bias: b,
+            weight,
+            bias,
             running_mean: parking_lot::RwLock::new(running_mean),
             running_var: parking_lot::RwLock::new(running_var),
             eps,
@@ -591,7 +509,7 @@ impl Module for BatchNorm2d {
         })
         .expect("BatchNorm2d::forward: AOT failed");
 
-        let mut output = result.into_iter().next().unwrap();
+        let output = result.into_iter().next().unwrap();
 
         // In training mode, update the running stats
         if is_training {
@@ -607,7 +525,7 @@ impl Module for BatchNorm2d {
             let new_mean = running_mean_lock
                 .mul_scalar(inv_mom)
                 .add(&batch_mean.mul_scalar(mom));
-            *running_mean_lock = new_mean.detach();
+            *running_mean_lock = new_mean;
 
             let mut running_var_lock = self.running_var.write();
             let n = (batch * spatial) as f32;
@@ -619,22 +537,7 @@ impl Module for BatchNorm2d {
             let new_var = running_var_lock
                 .mul_scalar(inv_mom)
                 .add(&unbiased_var.mul_scalar(mom));
-            *running_var_lock = new_var.detach();
-        }
-
-        // Attach autograd
-        if x.requires_grad() || self.weight.requires_grad() || self.bias.requires_grad() {
-            let _edges = {
-                let mut edges = autograd::make_edge(x);
-                edges.extend(autograd::make_edge(&self.weight));
-                edges.extend(autograd::make_edge(&self.bias));
-                edges
-            };
-            let inputs = vec![x.clone(), self.weight.clone(), self.bias.clone()];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(autograd::make_node_info("BatchNorm2dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
+            *running_var_lock = new_var;
         }
 
         output

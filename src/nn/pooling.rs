@@ -1,7 +1,5 @@
-use crate::autograd::AutogradMeta;
 use crate::nn::Module;
 use crate::tensor::Tensor;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct MaxPool2d {
@@ -51,22 +49,7 @@ impl Module for MaxPool2d {
             vec![values]
         })
         .expect("MaxPool2d::forward: AOT execution failed");
-        let mut output = result.into_iter().next().unwrap();
-
-        if x.requires_grad() {
-            let inputs = vec![
-                x.clone(),
-                self.kernel_size_scalar.clone(),
-                self.stride_scalar.clone(),
-                self.padding_scalar.clone(),
-            ];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(crate::autograd::make_node_info("MaxPool2dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
-
-        output
+        result.into_iter().next().unwrap()
     }
 }
 
@@ -115,23 +98,7 @@ impl Module for AvgPool1d {
         .expect("AvgPool1d::forward: AOT failed");
         let out_4d = result.into_iter().next().unwrap();
         let out_shape = out_4d.shape_ref();
-        let mut output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
-
-        // Attach autograd on the final 3D output.
-        // The backward reconstruction uses a pass-through (identity) since
-        // the 1D→2D→1D reshape chain is complex to reconstruct.
-        if x.requires_grad() {
-            let inputs = vec![
-                x.clone(),
-                self.kernel_size_scalar.clone(),
-                self.stride_scalar.clone(),
-                self.padding_scalar.clone(),
-            ];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(crate::autograd::make_node_info("AvgPool1dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
+        let output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
 
         output
     }
@@ -190,24 +157,7 @@ impl Module for MaxPool1d {
         .next()
         .unwrap();
         let out_shape = out_4d.shape_ref();
-        let mut output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
-
-        // Attach autograd on the final 3D output.
-        // The backward reconstruction uses a pass-through (identity) since
-        // the 1D→2D→1D reshape chain is complex to reconstruct. Gradients
-        // flow approximately the same as the Conv2dBackward pass-through.
-        if x.requires_grad() {
-            let inputs = vec![
-                x.clone(),
-                self.kernel_size_scalar.clone(),
-                self.stride_scalar.clone(),
-                self.padding_scalar.clone(),
-            ];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(crate::autograd::make_node_info("MaxPool1dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
+        let output = out_4d.reshape(vec![out_shape[0], out_shape[1], out_shape[3]]);
 
         output
     }
@@ -244,21 +194,6 @@ impl Module for AvgPool2d {
             )]
         })
         .expect("AvgPool2d::forward: AOT failed");
-        let mut output = result.into_iter().next().unwrap();
-
-        if x.requires_grad() {
-            let inputs = vec![
-                x.clone(),
-                Tensor::from_scalar(self.kernel_size as f32),
-                Tensor::from_scalar(self.stride as f32),
-                Tensor::from_scalar(self.padding as f32),
-            ];
-            let mut meta = AutogradMeta::new_non_leaf(true);
-            meta.grad_fn = Some(crate::autograd::make_node_info("AvgPool2dBackward", inputs));
-            Arc::make_mut(&mut output.inner).autograd_meta =
-                Some(Arc::new(parking_lot::Mutex::new(meta)));
-        }
-
-        output
+        result.into_iter().next().unwrap()
     }
 }

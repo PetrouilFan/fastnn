@@ -25,6 +25,12 @@ impl std::ops::Deref for AlignedAtomicU64 {
     }
 }
 
+/// Serializes the tests that assert on the process-wide counters below.
+/// They are global, so a parallel test that records a copy would otherwise
+/// make a `reset` + `snapshot` delta non-deterministic.
+#[cfg(test)]
+pub(crate) static TELEMETRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 static ARENA_TEMP_COPIES: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
 static ARENA_TEMP_COPY_BYTES: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
 static TLS_VEC_ALLOCS: AlignedAtomicU64 = AlignedAtomicU64(AtomicU64::new(0));
@@ -68,23 +74,28 @@ mod tests {
 
     #[test]
     fn cpu_telemetry_reset_and_record_helpers_are_stable() {
-        reset_cpu_telemetry();
-        assert_eq!(cpu_telemetry_snapshot(), CpuTelemetrySnapshot::default());
+        // Counters are process-wide; another test thread may record between
+        // the calls below, so assert deltas and monotonicity.
+        let _guard = TELEMETRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = cpu_telemetry_snapshot();
 
         record_arena_temp_copy(16);
         record_tls_vec_alloc();
         record_tls_vec_reuse();
 
-        let snapshot = cpu_telemetry_snapshot();
-        assert_eq!(snapshot.arena_temp_copies, 1);
-        assert_eq!(snapshot.arena_temp_copy_bytes, 16);
-        assert_eq!(snapshot.tls_vec_allocs, 1);
-        assert_eq!(snapshot.tls_vec_reuses, 1);
-
-        let snapshot_again = cpu_telemetry_snapshot();
-        assert_eq!(snapshot_again, snapshot);
+        let after = cpu_telemetry_snapshot();
+        assert!(after.arena_temp_copies > before.arena_temp_copies);
+        assert!(after.arena_temp_copy_bytes >= before.arena_temp_copy_bytes + 16);
+        assert!(after.tls_vec_allocs > before.tls_vec_allocs);
+        assert!(after.tls_vec_reuses > before.tls_vec_reuses);
 
         reset_cpu_telemetry();
-        assert_eq!(cpu_telemetry_snapshot(), CpuTelemetrySnapshot::default());
+        let reset = cpu_telemetry_snapshot();
+        assert_eq!(reset.arena_temp_copies, 0);
+        assert_eq!(reset.arena_temp_copy_bytes, 0);
+        assert_eq!(reset.tls_vec_allocs, 0);
+        assert_eq!(reset.tls_vec_reuses, 0);
     }
 }

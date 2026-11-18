@@ -55,11 +55,6 @@ flash_attention = _core.flash_attention
 cumsum = _core.cumsum
 erf = _core.erf
 
-mse_loss = _core.mse_loss
-cross_entropy_loss = _core.cross_entropy_loss
-bce_with_logits = _core.bce_with_logits
-huber_loss = _core.huber_loss
-
 __all__ = [
     # Activation functions
     "relu",
@@ -116,8 +111,4 @@ __all__ = [
     "flash_attention",
     "erf",
     # Loss functions
-    "mse_loss",
-    "cross_entropy_loss",
-    "bce_with_logits",
-    "huber_loss",
 ]

@@ -91,9 +91,7 @@ impl PReLU {
             crate::storage::DType::F32,
             crate::storage::Device::Cpu,
         );
-        let w = weight.clone();
-        let w = w.requires_grad_(true);
-        PReLU { weight: w }
+        PReLU { weight }
     }
 }
 
@@ -112,10 +110,6 @@ impl Module for PReLU {
 
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
         vec![("weight".to_string(), self.weight.clone())]
-    }
-
-    fn zero_grad(&self) {
-        crate::nn::clear_grad(&self.weight);
     }
 }
 

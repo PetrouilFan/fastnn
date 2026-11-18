@@ -22,10 +22,6 @@ macro_rules! impl_nn_module {
                     .collect()
             }
 
-            fn zero_grad(&self) {
-                self.inner.zero_grad();
-            }
-
             fn train(&self) {
                 self.inner.train_mode();
             }
@@ -133,8 +129,6 @@ macro_rules! impl_activation {
                 vec![]
             }
 
-            fn zero_grad(&self) {}
-
             fn train(&self) {}
 
             fn eval(&self) {}
@@ -170,8 +164,6 @@ macro_rules! impl_activation {
             fn named_parameters(&self) -> Vec<(String, PyTensor)> {
                 vec![]
             }
-
-            fn zero_grad(&self) {}
 
             fn train(&self) {}
 
@@ -845,8 +837,6 @@ impl Mish {
         vec![]
     }
 
-    fn zero_grad(&self) {}
-
     fn train(&self) {}
 
     fn eval(&self) {}
@@ -1111,16 +1101,6 @@ impl Sequential {
         false
     }
 
-    fn zero_grad(&self, py: Python<'_>) {
-        for layer in &self.native_layers {
-            layer.zero_grad();
-        }
-        for layer in &self.layers {
-            if let Ok(m) = layer.getattr(py, "zero_grad") {
-                let _ = m.call0(py);
-            }
-        }
-    }
 }
 
 #[pyclass]

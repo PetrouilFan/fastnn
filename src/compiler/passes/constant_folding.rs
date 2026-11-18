@@ -45,19 +45,8 @@ pub fn constant_fold(graph: &mut ComputeGraph) -> usize {
     folded
 }
 
-fn has_side_effects(opcode: &Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::SgdUpdate
-            | Opcode::AdamUpdate
-            | Opcode::AdamWUpdate
-            | Opcode::MuonUpdate
-            | Opcode::LionUpdate
-            | Opcode::RmspropUpdate
-            | Opcode::GradientScale
-            | Opcode::QuantizeGradient
-            | Opcode::DequantizeGradient
-    )
+fn has_side_effects(_opcode: &Opcode) -> bool {
+    false
 }
 
 fn evaluate_node(graph: &ComputeGraph, node: &IRNode) -> Option<TensorValue> {
