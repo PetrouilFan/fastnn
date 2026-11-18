@@ -113,6 +113,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
 | #61 | GPU attention | verified (integrated `117e51a`) | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | done; `MaskedAttention` now Full, 19 tests, 0/0 validation |
 | #64 | Python API | verified (integrated `db94d6c`) | `fn3/64-python` | `fastnn-wt-64-python` | `c5b69c2` | done; wheel installs clean outside the checkout, 27 Python tests |
+| #65 | Remove training/wgpu | verified (integrated `f772f10`) | `fn3/65-remove-training-wgpu` | `fastnn-wt-65-remove` | `0becaca` | done; 171 files, -27,921 lines, 81 lock entries gone |
 | #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
 
 ### #47 finding that changes the alpha story
@@ -195,6 +196,7 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #64 | Python | ready | — | — | — | after #48, #55, #58 |
 | #65 | Cleanup | ready | — | — | — | after #62, #64 |
 | #64 | Python API | verified (integrated `db94d6c`) | `fn3/64-python` | `fastnn-wt-64-python` | `c5b69c2` | done; wheel installs clean outside the checkout, 27 Python tests |
+| #65 | Remove training/wgpu | verified (integrated `f772f10`) | `fn3/65-remove-training-wgpu` | `fastnn-wt-65-remove` | `0becaca` | done; 171 files, -27,921 lines, 81 lock entries gone |
 | #66 | CI | ready | — | — | — | after #48 |
 | #67 | Alpha release | ready | — | — | — | after #50, #62-#66 |
 | #68 | Quant format | deferred (stable) | — | — | — | after #62 |
@@ -259,6 +261,7 @@ matrix, and clean install verification.
 | `c5b69c2` | #58 fix | a session without a runtime names the constructor that works | 43 contracts |
 | `15f6177` | #52/#57 fix | device enumeration asserted as a rule, not a snapshot | 36 storage tests in both configurations |
 | `304d0f8` | #63 | inference CLI and offline quickstart merged (`669833b`) | 6 CLI tests, 24 CLI unit, 707 lib, 43 contracts; real 10-token prefill, honest Vulkan refusal |
+| `f772f10` | #65 | wgpu + training removed, inference surface promoted (`43396e5`) | lib 673 (37 training tests enumerated), ten fn3 binaries unchanged, 10/10 e2e on the GTX 1080 Ti, 0/0 validation, no wgpu in `cargo tree` |
 | `1cebabd` | #62 | end-to-end on CPU and the physical GPU merged (`44081e0`) | 10 e2e tests, 719/719 proven executions, 0 readbacks, validation 0/0 |
 | `0becaca` | #52/#57/#62 fix | device errors name the request in any configuration | lib 710 default / 753 vulkan / 690 no-default |
 | `db94d6c` | #64 | Python facade `fastnn.fn3` merged (`1e32752`) | 27 Python tests, 710 lib, 43 contracts, 36 storage, 5 ci-smoke; wheel installed in a clean venv outside the checkout reproduces the CLI's top-5 exactly |
@@ -450,3 +453,20 @@ The closure rule applied: an issue was closed only where its own acceptance
 criteria were independently reproduced by the integrator from the integration
 checkout. No issue was closed because a compile passed, and no deferred issue
 was moved to active.
+
+## Alpha scope decision recorded at #65
+
+FN3-19 was written when 3.0 was expected to move `src/fn3/` to the crate root
+and drop the `fn3` prefix. The ADR still says so. That rename did **not**
+happen, and the reason is recorded here rather than left as an omission: the
+Python package (`fastnn.fn3`) and the CLI (`fn3-infer`) already ship under that
+name, and the artifact magic is `FNN3PREP`, so the prefix is now part of the
+published surface rather than a temporary marker. Renaming it would touch every
+import, the Python package, the CLI and every committed artifact for no
+behavioural gain. `src/fn3/AGENTS.md` no longer calls the tree temporary. A
+future rename is mechanical and is not scheduled.
+
+The 2.x forward tree is deliberately retained: it is inference-only now and
+still exercises surviving CPU kernels through 348 passing tests. Deleting it
+would have removed tests whose subject still exists, which the #65 brief
+forbade.
