@@ -168,8 +168,11 @@ only (physical GTX 1080 Ti plus the lavapipe software ICD on this host);
 
 - Schedule benchmark jobs outside competing builds. The harness records the
   1-minute load average at start, prints/records a warning when it exceeds
-  `--max-load` (default 2.0), and lists other `cargo`/`rustc`/`rustdoc` PIDs.
-  A non-empty list or a warning means the run is evidence, not a release claim.
+  `--max-load` (default: half the logical cores, minimum 2.0), and lists other
+  `cargo`/`rustc`/`rustdoc` PIDs. A non-empty list or a warning means the run is
+  evidence, not a release claim. The default is relative because a benchmark
+  that uses every core raises the load average itself; the active-build PID
+  scan is the direct competing-build signal.
 - One GPU benchmark at a time. Other live `fn3-bench` PIDs are recorded and
   warned about.
 - Raw samples are retained. Do not post-filter a run to make a percentile look

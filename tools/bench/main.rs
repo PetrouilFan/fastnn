@@ -31,7 +31,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const DEFAULT_SEED: u64 = 20_260_818;
-const DEFAULT_MAX_LOAD: f64 = 2.0;
 
 fn main() {
     let code = dispatch(std::env::args().skip(1).collect());
@@ -83,7 +82,7 @@ fn print_usage() {
          \x20 --prompt-tokens <n>      prefill tokens (default: quick 8 / normal 128)\n\
          \x20 --layers <n>             decoder layers (default: quick 1 / normal 12)\n\
          \x20 --decode-tokens <n>      decode steps (default: quick 5 / normal 32)\n\
-         \x20 --max-load <f>           load-average warning threshold (default {DEFAULT_MAX_LOAD})\n\
+         \x20 --max-load <f>           load-average warning threshold (default: half logical cores, min 2.0)\n\
          \x20 --no-gpu-probe           skip `vulkaninfo --summary`\n\
          \x20 --reuse-criterion        import existing target/criterion output\n\
          \x20 --label <text>           free-form label recorded in the result\n\
@@ -124,7 +123,7 @@ struct RunOptions {
     prompt_tokens: Option<usize>,
     layers: Option<usize>,
     decode_tokens: Option<u64>,
-    max_load: f64,
+    max_load: Option<f64>,
     gpu_probe: bool,
     label: Option<String>,
     reuse_criterion: bool,
@@ -160,7 +159,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
     let mut prompt_tokens = None;
     let mut layers = None;
     let mut decode_tokens = None;
-    let mut max_load = DEFAULT_MAX_LOAD;
+    let mut max_load = None;
     let mut gpu_probe = true;
     let mut label = None;
     let mut reuse_criterion = false;
@@ -221,9 +220,11 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             }
             "--max-load" => {
                 let value = take_value(args, &mut index, "--max-load")?;
-                max_load = value
-                    .parse::<f64>()
-                    .map_err(|error| format!("--max-load expects a float: {error}"))?
+                max_load = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|error| format!("--max-load expects a float: {error}"))?,
+                )
             }
             "--no-gpu-probe" => gpu_probe = false,
             "--reuse-criterion" => reuse_criterion = true,

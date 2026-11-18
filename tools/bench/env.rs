@@ -285,7 +285,7 @@ pub fn other_benchmark_pids() -> Vec<u64> {
     matching_pids(&["fn3-bench"])
 }
 
-pub fn capture_host(load_threshold: f64, warnings: &mut Vec<String>) -> HostInfo {
+pub fn capture_host(load_threshold: Option<f64>, warnings: &mut Vec<String>) -> HostInfo {
     let cpuinfo = read_file("/proc/cpuinfo").unwrap_or_default();
     let cpu_model = non_empty(cpu_model_from_cpuinfo(&cpuinfo));
     if cpu_model.is_none() {
@@ -294,6 +294,10 @@ pub fn capture_host(load_threshold: f64, warnings: &mut Vec<String>) -> HostInfo
     let logical_cores = std::thread::available_parallelism()
         .map(|n| n.get() as u64)
         .unwrap_or(1);
+    // Default: flag a machine that is more than half busy. A fixed threshold of
+    // 2.0 false-positives on a 16-thread host after a previous benchmark run;
+    // the active cargo/rustc PID scan remains the direct competing-build signal.
+    let load_threshold = load_threshold.unwrap_or((logical_cores as f64 / 2.0).max(2.0));
     let threads_used = std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
