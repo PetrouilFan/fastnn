@@ -55,6 +55,7 @@
 //! - `tests/fn3_contracts.rs`: pinned behaviour downstream workers rely on.
 
 pub mod backend;
+pub mod cli;
 pub mod device;
 pub mod dtype;
 pub mod error;
