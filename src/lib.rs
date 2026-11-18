@@ -37,6 +37,11 @@ pub mod error;
 pub mod io;
 pub mod utils;
 
+// FastNN 3.0 inference core. Temporary top-level name: FN3-19 (#65) promotes
+// and renames this tree when the 2.x modules are removed. Pure Rust, no
+// optional features, no 2.x dependencies. See docs/roadmap/fn3-architecture.md.
+pub mod fn3;
+
 // v2.4: shared macros for reducing boilerplate
 pub mod macros;
 

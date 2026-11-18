@@ -8,6 +8,11 @@ contracts when that produces a cleaner architecture. Preserve numerical
 correctness and the targeted test suite unless a change deliberately replaces
 the associated behavior.
 
+The 3.0 inference-only candidate (`src/fn3/`) supersedes this file's training,
+autograd, quantization and wgpu structural gates; see
+`docs/roadmap/fn3-architecture.md`. This file remains authoritative for the 2.x
+tree while it exists.
+
 ## Goals
 
 - Make ownership, dependency direction, and entry points obvious from the directory tree.
