@@ -23,7 +23,6 @@ ShapeError = _core.ShapeError
 DtypeError = _core.DtypeError
 DeviceError = _core.DeviceError
 IoError = _core.IoError
-CudaError = _core.CudaError
 
 # ---------------------------------------------------------------------------
 # Submodule imports — each submodule is the single source of truth for its
@@ -239,7 +238,6 @@ __all__ = [
     "DtypeError",
     "DeviceError",
     "IoError",
-    "CudaError",
     # Layers and modules
     "Linear",
     "Conv2d",

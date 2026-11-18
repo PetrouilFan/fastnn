@@ -45,12 +45,6 @@ pyo3::create_exception!(
     FastnnError,
     "Error during serialization/deserialization."
 );
-pyo3::create_exception!(
-    fastnn,
-    CudaError,
-    FastnnError,
-    "CUDA/GPU computation error."
-);
 
 // Lock-free default device storage (AtomicU8 for variant, AtomicUsize for device_id)
 static DEFAULT_DEVICE_VARIANT: AtomicU8 = AtomicU8::new(0);
@@ -104,7 +98,6 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DtypeError", py.get_type::<DtypeError>())?;
     m.add("DeviceError", py.get_type::<DeviceError>())?;
     m.add("IoError", py.get_type::<IoError>())?;
-    m.add("CudaError", py.get_type::<CudaError>())?;
 
     m.add_function(wrap_pyfunction!(tensor_from_data, py)?)?;
     m.add_function(wrap_pyfunction!(tensor_from_bytes, py)?)?;
@@ -224,8 +217,8 @@ pub fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cumsum, py)?)?;
     m.add_function(wrap_pyfunction!(erf, py)?)?;
 
-    // FN3-18 (#64): `_core.fn3`, the 3.0 inference surface. The 2.x entry
-    // points above are frozen and removed by #65.
+    // `_core.fn3` is the 3.0 inference surface. The 2.x entry points above are
+    // the secondary eager/AOT API and carry no training names.
     fn3::register(m)?;
     Ok(())
 }

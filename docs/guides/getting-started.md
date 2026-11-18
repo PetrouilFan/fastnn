@@ -22,7 +22,7 @@ This builds the Rust extension via maturin and installs the `fastnn` Python pack
 
 ## Your First Program
 
-A tensor operation with autograd:
+A forward tensor operation:
 
 ```python
 import fastnn as fnn
@@ -32,51 +32,34 @@ w = fnn.tensor([0.5, 0.0, 0.0, 0.5], [2, 2])
 
 y = fnn.matmul(x, w)
 print(y.numpy())
-
-# Autograd
-z = y.sum()
-z.backward()
-print(x.grad)
 ```
 
-## Training an MLP on XOR
+## Prepare and run an inference session
 
 ```python
-import fastnn as fnn
+import fastnn.fn3 as fn3
 
-# XOR data
-X = fnn.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], [4, 2])
-y = fnn.tensor([0.0, 1.0, 1.0, 0.0], [4, 1])
+report = fn3.prepare("model.onnx", "model.fn3prep")
+print(report.status, report.geometry)
 
-# Model
-model = fnn.Sequential(
-    fnn.Linear(2, 16),
-    fnn.ReLU(),
-    fnn.Linear(16, 1),
-)
-optimizer = fnn.Adam(model.parameters(), lr=1e-2)
+model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+session = model.session()
 
-# Training loop
-model.train()
-for epoch in range(100):
-    pred = model(X)
-    loss = fnn.mse_loss(pred, y)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-    if epoch % 20 == 0:
-        print(f"Epoch {epoch}: loss = {loss.item():.4}")
+logits = session.prefill([464, 2068, 7586, 21831])
+print(int(logits.argmax()), session.cache_len)
 
-# Inference
-model.eval()
-with fnn.no_grad():
-    preds = model(X)
-    print("Predictions:", preds.numpy().round(2))
+for token in [640, 11, 612]:
+    logits = session.decode([token])
+    print(int(logits.argmax()), session.cache_len)
 ```
+
+`prepare` writes a versioned artifact; `load` re-checks it; `session` owns the
+KV cache so each decode step only processes the new token. A device request the
+build or the machine cannot satisfy raises `Fn3DeviceError` instead of falling
+back to CPU.
 
 ## Next Steps
 
-- [Training Basics](training/training-basics.md) — deeper dive into training loops
 - [Tensor Reference](../reference/tensors.md) — tensor creation and operations
 - [NN Module Catalog](../reference/nn-modules.md) — available layer types
 - [API Reference](../reference/api-reference.md) — full function reference

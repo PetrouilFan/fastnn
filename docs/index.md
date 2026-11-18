@@ -1,52 +1,47 @@
 # fastnn Documentation
 
-Welcome to the fastnn documentation. fastnn is an ahead-of-time compiled neural
-network runtime with a Rust core and Python bindings.
+fastnn 3.0 is an inference-only neural-network runtime: ONNX import → a
+versioned prepared-model artifact → a planned session running on the CPU
+reference backend or a physical Vulkan device. It has a Rust API, the
+`fn3-infer` CLI and the `fastnn.fn3` Python package.
+
+The crate also keeps the 2.x AOT tree as a secondary inference surface (graph
+IR, compiler passes, CPU executor, eager forward tensor/nn API, ONNX conversion
+and `.fnn` I/O). Training, autograd, optimizers and the wgpu backend were
+deleted in FN3-19 (#65); the pinned 2.x revision `a2c0759` is the archive.
 
 ---
 
 ## Guides
 
-Start here for tutorials and walkthroughs.
-
-- [Getting Started](guides/getting-started.md) — Install fastnn and run your first program
-- [Training](guides/training/index.md) — Training loops, data loading, callbacks, compiled training
+- [Getting Started](guides/getting-started.md) — build, prepare a model, run a session
 
 ## Reference
 
-API documentation and module catalogs.
-
-- [Tensors](reference/tensors.md) — Tensor creation, operations, autograd, broadcasting
-- [Neural Network Modules](reference/nn-modules.md) — Layer and module reference (Linear, Conv, Normalization, etc.)
-- [Optimizers](reference/optimizers.md) — Optimizer and scheduler APIs (SGD, Adam, AdamW, Muon, Lion, RMSprop)
-- [IO & Serialization](reference/io.md) — Save/load models, ONNX import, serialization format
-- [API Reference](reference/api-reference.md) — Complete Rust and Python API documentation
-- [Python API](reference/python-api.md) — Python-facing APIs for compiled execution and runtime features
+- [Tensors](reference/tensors.md) — inference tensor creation, operations, devices and NumPy interop
+- [Neural Network Modules](reference/nn-modules.md) — forward layer reference (Linear, Conv, Normalization, etc.)
+- [IO & Serialization](reference/io.md) — save/load models, ONNX import, `.fnn` and `.fn3prep` artifacts
+- [API Reference](reference/api-reference.md) — forward Rust and Python API
+- [Python API](reference/python-api.md) — the `fastnn.fn3` inference surface
 
 ## Internals
 
-Architecture and contributor documentation.
-
-- [Architecture](internals/architecture.md) — AOT compiler pipeline: IR, compiler passes, backends
-- [Development](internals/development.md) — Codebase walkthrough, module guide, adding ops and types
-- [Release Process](internals/release-process.md) — Release workflow and checklist
-- [Performance Roadmap](internals/performance-roadmap.md) — GPU, fusion, optimizer, and precision roadmap
+- [Architecture](internals/architecture.md) — the 3.0 inference core and the secondary AOT pipeline
+- [Development](internals/development.md) — codebase walkthrough and test layout
+- [Release Process](internals/release-process.md) — release workflow and checklist
+- [Performance Roadmap](internals/performance-roadmap.md) — CPU/Vulkan performance work
 - [ARM NEON Backend](internals/arm-neon.md) — ARM NEON SIMD kernel documentation
 
 ## Models
 
-Pre-built model architectures and ONNX support.
-
-- [Models](models/models.md) — Supported architectures (MLP, Transformer, YOLO)
+- [Models](models/models.md) — supported architectures (MLP, Transformer, YOLO)
 - [ONNX Support](models/onnx.md) — ONNX import, operator coverage, troubleshooting
-- [ONNX Training Export](models/onnx-training-export.md) — Training export contract and workflow
 
 ## Roadmap
 
-- [Roadmap Overview](roadmap/index.md) — Current and future development priorities
-- [v2.3 Roadmap](roadmap/v2.3-roadmap.md) — Historical planning document
+- [Roadmap Overview](roadmap/index.md) — current and future development priorities
+- [v2.3 Roadmap](roadmap/v2.3-roadmap.md) — historical planning document
 
 ---
 
-*Each document includes cross-references to related guides and reference material.
-Start with [Getting Started](guides/getting-started.md) if you are new to fastnn.*
+Start with [Getting Started](guides/getting-started.md).

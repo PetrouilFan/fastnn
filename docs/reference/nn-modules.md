@@ -266,10 +266,8 @@ model.eval()    # Disable dropout, freeze BN
 
 ## See also
 
-- [Tensors](tensors.md) -- Tensor creation, operations, autograd
-- [Optimizers](optimizers.md) -- Optimizer APIs for training modules
+- [Tensors](tensors.md) -- Tensor creation and operations
 - [API Reference](api-reference.md) -- Complete module signatures
-- [Python API](python-api.md) -- Compiled training API
-- [Training Basics](../guides/training/training-basics.md) -- Training loop walkthrough
+- [Python API](python-api.md) -- the `fastnn.fn3` inference API
 - [ONNX Support](../models/onnx.md) -- Quantized inference
 - [Index](../index.md) -- Full documentation index

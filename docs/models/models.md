@@ -237,16 +237,10 @@ For full-featured save/load with automatic class reconstruction, subclass `BaseM
 | `YOLO` | `fnn.YOLO("model.onnx")` | YOLO object detection (v5/v8/v10/v11) |
 | `create_mlp` | `fnn.models.create_mlp(...)` | Builder for sequential MLP |
 
-## Training Example
-
-See [Training Basics](../guides/training/training-basics.md) for a complete walkthrough of the compiled training pipeline, including data loading, optimizer setup, and evaluation.
-
 ## See also
 
 - [onnx.md](onnx.md) -- ONNX model import and execution
-- [onnx-training-export.md](onnx-training-export.md) -- ONNX training export contract
 - [io.md](../reference/io.md) -- serialization and format conversion
-- [Training Basics](../guides/training/training-basics.md) -- training API and compiled pipeline
 - [Getting Started](../guides/getting-started.md) -- quickstart guide
 - [Guides](../guides/getting-started.md) -- detailed usage guides
 - [Reference Docs](../reference/tensors.md) -- API reference

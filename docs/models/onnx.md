@@ -1,6 +1,6 @@
 # ONNX Model Support in FastNN
 
-FastNN loads and executes ONNX models through the v2.0 AOT compiler pipeline. The pipeline supports 90+ ONNX operator types (60+ with native IR handlers) and produces an optimized executable plan for CPU inference (with WGPU GPU fallback).
+FastNN imports ONNX two ways: the 3.0 `fastnn.fn3` path prepares a versioned artifact for the session runtime, and the 2.x AOT pipeline converts operator graphs into a CPU executable plan.
 
 ## Pipeline Overview
 
@@ -12,7 +12,7 @@ ONNX (.onnx)
 ComputeGraph IR
     [compiler passes] -- shape inference > fusion > quantization > memory planning
 ExecutablePlan
-    [GraphExecutor::run] -- execute on CPU (or WGPU fallback)
+    [GraphExecutor::run] -- execute on CPU
 Output tensors
 ```
 
@@ -133,10 +133,10 @@ The import stage runs in Python (`io/onnx.py`). The `OnnxConverter` and compiler
 
 ## Current Limitations
 
-- **Conv2d**: CPU-only for quantized; WGPU f32 conv supported
+- **Conv2d**: CPU-only for quantized weights
 - **Control flow**: Loop, If ops are recorded but not supported at execution time
-- **GPU quantization**: U4/U8 quantized kernels run on GPU via WGSL compute shaders
-- **Training**: ONNX models can execute forward passes within the compiled training pipeline, but the training graph itself cannot be exported to ONNX (see [onnx-training-export.md](onnx-training-export.md))
+- **GPU quantization**: the 3.0 Vulkan backend runs FP32; quantized Vulkan execution is reserved for a later milestone
+- **Training**: there is no training pipeline to export
 
 ## Unsupported Ops
 
@@ -180,7 +180,5 @@ src/
 ## See also
 
 - [models.md](models.md) -- model architectures and loading guide
-- [onnx-training-export.md](onnx-training-export.md) -- training export contract
 - [io.md](../reference/io.md) -- serialization and format conversion
-- [Training Basics](../guides/training/training-basics.md) -- compiled training pipeline
 - [Architecture](../internals/architecture.md) -- system architecture overview

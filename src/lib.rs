@@ -1,11 +1,27 @@
-//! # fastnn — High-Performance Neural Network Inference Library
+//! # fastnn — inference-only neural-network runtime
 //!
-//! fastnn provides a complete **ahead-of-time (AOT) compiler pipeline** built on a
-//! first-class IR (`ComputeGraph`). The pipeline compiles computation graphs through
-//! shape inference, operator fusion, optional weight quantization (I4/I8/F4/F8/F8R), and memory
-//! planning before dispatching to a backend (CPU or WGPU).
+//! FastNN 3.0 is an inference product. The primary API is [`fn3`]: tensor
+//! storage, a portable CPU reference, a Vulkan compute backend, strict ONNX
+//! import, a versioned prepared-model artifact, a bounded planner, sessions
+//! that own their KV cache, an inference CLI and a Python binding. There is no
+//! autograd, optimizer, training loop or wgpu backend in this crate.
 //!
-//! # Quick Start
+//! ```text
+//! ONNX ──import──► graph ──plan──► PreparedModel ──session──► prefill/decode
+//!                                   (CPU or Vulkan)
+//! ```
+//!
+//! Start with [`fn3::model::PreparedModel`] and [`fn3::model::Session`]; the
+//! CLI (`fn3-infer`) and the `fastnn.fn3` Python package call the same path.
+//!
+//! # Secondary 2.x AOT tree
+//!
+//! The 2.x modules remain compiled as a secondary, inference-capable surface:
+//! the graph IR ([`ir`]), compiler passes ([`compiler`]), the CPU executor and
+//! prepared-plan runtime ([`backend`]), the eager [`tensor`]/[`nn`] forward
+//! API, ONNX conversion ([`onnx`]) and `.fnn` I/O ([`io`]). They are kept for
+//! the legacy AOT path and its quantized CPU pipeline; new code should use
+//! [`fn3`].
 //!
 //! ```rust
 //! use fastnn::ir::builder::GraphBuilder;
@@ -19,12 +35,11 @@
 //! let weight = gb.constant(&weight_bytes, weight_tt);
 //! let output = gb.matmul(&input, &weight);
 //!
-//! // Compile with 4-bit quantization
-//! let result = gb.compile_with_quantize(&[&output], CpuBackend, Some(4));
+//! let result = gb.compile_and_execute(&[&output], CpuBackend, &[&vec![0u8; 784 * 4], &weight_bytes]);
 //! ```
 //!
-//! See [`ir::builder::GraphBuilder`] and [`backend::executor::GraphExecutor`] for the
-//! full API.
+//! See [`ir::builder::GraphBuilder`] and [`backend::executor::GraphExecutor`]
+//! for the 2.x AOT API.
 
 // Keep byte decoding on slice chunks: Clippy's array-chunk rewrite changes
 // TryInto inference in packed-type macros. This is a style lint, not validation.
@@ -33,17 +48,24 @@
 // SIMD compute kernels require many raw pointer + dimension parameters for zero-overhead dispatch.
 #![allow(clippy::too_many_arguments)]
 
+// ── 3.0 inference core: the primary API ─────────────────────────────────────
+//
+// Pure Rust, no optional features and no dependency on the 2.x modules. See
+// docs/roadmap/fn3-architecture.md for the contract.
+pub mod fn3;
+
+// ── Shared infrastructure ───────────────────────────────────────────────────
 pub mod error;
 pub mod io;
 pub mod utils;
 
-// FastNN 3.0 inference core. Temporary top-level name: FN3-19 (#65) promotes
-// and renames this tree when the 2.x modules are removed. Pure Rust, no
-// optional features, no 2.x dependencies. See docs/roadmap/fn3-architecture.md.
-pub mod fn3;
-
 // v2.4: shared macros for reducing boilerplate
 pub mod macros;
+
+// ── Secondary 2.x AOT tree (inference only; no training) ────────────────────
+pub mod backend;
+pub mod compiler;
+pub mod ir;
 
 pub mod nn;
 pub mod onnx;
@@ -55,28 +77,21 @@ pub mod storage_pool;
 
 pub mod tensor;
 pub mod types;
-pub use error::{FastnnError, FastnnResult};
 
-// v2.0.0: The old `kernels` module and DAG dispatcher have been removed.
-// All operations route through the AOT pipeline (ir/ + backend/ + compiler/).
+// v2.1 cleanup: legacy packed layer classes (PackedLinear, PackedConv2d, etc.)
+// and their kernel backends have been removed. The AOT pipeline's quantized
+// dispatch (matmul_u4, conv2d_u4) uses PackedTensor and dtypes internally via
+// backend/cpu/microkernels.rs.
+pub mod dtypes;
+pub mod packed_tensor;
+// swar ops — used by microkernels.rs for packed integer kernels
+pub mod swar;
+
+pub use error::{FastnnError, FastnnResult};
 
 // Re-export core types
 pub use storage::{DType, Device};
 pub use tensor::Tensor;
-
-// v2.1 cleanup: legacy packed layer classes (PackedLinear, PackedConv2d, etc.)
-// and their kernel backends have been removed. The AOT pipeline's
-// quantized dispatch (matmul_u4, conv2d_u4) uses PackedTensor and
-// dtypes internally via backend/cpu/microkernels.rs.
-pub mod dtypes;
-pub mod packed_tensor;
-// swar ops — used by microkernels.rs for quantized relu backward
-pub mod swar;
-
-// v2.0.0 AOT compiler infrastructure
-pub mod backend;
-pub mod compiler;
-pub mod ir;
 
 // Re-export the graph builder API for convenience
 pub use ir::builder::{GraphBuilder, GraphTensor};

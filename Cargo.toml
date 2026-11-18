@@ -36,20 +36,27 @@ ash          = { version = "0.38", optional = true }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports"] }
 
 [features]
+# Inference defaults: SIMD/threaded CPU kernels, forward fusion, PyO3 bindings
+# and the prepared-plan runtime.
 default = ["simd", "parallel", "fusion-forward", "python", "prepared-plan"]
-# FN3-11 (#57): the 3.0 Vulkan compute backend. Deliberately not in `default`:
-# an enabled feature advertises a device that must be able to allocate and
-# dispatch, so it is opt-in until the kernel owners land their shaders.
+
+# The 3.0 Vulkan compute backend. Opt-in because an enabled feature advertises
+# a device that must be able to allocate and dispatch; the four kernel families
+# are registered and tested on a physical GTX 1080 Ti.
 vulkan = ["dep:ash"]
+# FastNN 3.0 Python bindings (`fastnn._core.fn3`).
 python = ["dep:pyo3"]
+# CPU acceleration.
 openblas = ["blas-src/openblas-src"]
 blas = []
 parallel = ["rayon"]
 simd = []
+# Extra runtime assertions in the CPU direct-convolution kernels.
 debug_canary = []
+# Prepared-plan construction and the persistent executor path.
 prepared-plan = []
 
-# ── Fusion passes (compile-time modular) ─────────────────────────────
+# ── Forward fusion passes (compile-time modular) ─────────────────────────────
 fusion-forward = [
   "fusion-op-relu",
   "fusion-op-gelu",
