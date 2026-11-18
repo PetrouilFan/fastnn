@@ -11,16 +11,17 @@
 //!
 //! Session        (mutable, Send but NOT Sync, one per concurrent step)
 //!   ├── &PreparedModel       borrowed, never owned
+//!   ├── StepRuntime          planner + backend + plan cache + slot pool
 //!   ├── Vec<KvCacheState>    capacity + live extent + buffers
-//!   ├── step: u64            successful step counter
-//!   └── phase                Empty | Ready
+//!   ├── step: u64            successful `decode` calls
+//!   └── phase                Empty | Prefilling | Ready
 //! ```
 //!
 //! A `PreparedModel` never changes after construction, so it may be shared by
 //! any number of threads (`Arc<PreparedModel>`). A `Session` owns every mutable
 //! byte of inference state: two sessions over one model are independent, and
 //! one session must not be stepped from two threads. `Session` is deliberately
-//! `!Sync` (see the `PhantomData<Cell<()>>` field): `Arc<Session>` cannot be
+//! `!Sync` (see its `PhantomData<Cell<()>>` field): `Arc<Session>` cannot be
 //! sent across threads, while `Mutex<Session>` still works because `Session`
 //! is `Send`.
 //!
@@ -41,36 +42,37 @@
 //! | versioned prepared-model format | FN3-09 (#55) |
 //! | bounded specialisation and plan building | FN3-10 (#56) |
 //! | Vulkan backend | FN3-11 (#57) |
-//! | real KV append, `prefill`/`decode` | FN3-12 (#58) |
+//! | real KV append, `prefill`/`decode` | FN3-12 (#58), in `kv.rs` and `session.rs` |
 //! | end-to-end pinned model | FN3-16 (#62) |
 //!
 //! The signatures and ownership rules below are the contract those issues
-//! code against. Entry points that are not implemented yet return
-//! [`Fn3Error::NotImplemented`] naming the owner; they never panic and never
-//! approximate.
+//! code against. An entry point that is not implemented returns
+//! [`Fn3Error::NotImplemented`] naming the owner; it never panics and never
+//! approximates.
 
 pub mod format;
+pub mod kv;
 pub mod plan;
+pub mod session;
 pub mod specialize;
 pub mod weights;
 
+pub use kv::{KvCacheConfig, KvCacheLayout, KvCacheState, MAX_KV_LAYERS};
 pub use plan::{
     BoundValue, Constant, ConstantData, FoldedNode, MaskConstant, MaskRole, Plan, PlanBound,
     PlanCache, PlanId, SlotPlan, SlotRole,
 };
+pub use session::{Session, SessionPhase};
 pub use specialize::{PlanAttr, Planner};
 pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
-use std::cell::Cell;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::fn3::backend::Backend;
 use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
 use crate::fn3::ops::OpId;
-use crate::fn3::shape::{DimBound, LiveDims, Shape, ShapeEnvelope, Symbol};
+use crate::fn3::shape::{LiveDims, ShapeEnvelope};
 use crate::fn3::tensor::Tensor;
 
 /// One op invocation inside an [`ExecutionPlan`].
@@ -395,372 +397,6 @@ impl ModelWeights {
     }
 }
 
-/// Layout of the key and value cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvCacheLayout {
-    /// `[batch, n_kv_heads, capacity_tokens, head_dim]`, keys and values
-    /// identical. The innermost axis is `head_dim`, which keeps an appended
-    /// token's vector contiguous.
-    BatchHeadsCapacityHeadDim,
-}
-
-/// Largest layer count a KV cache configuration may declare.
-///
-/// This is a sanity bound: it keeps a corrupt or hostile model header from
-/// asking a session to build an unbounded number of cache buffers before the
-/// allocator reports a failure.
-pub const MAX_KV_LAYERS: u64 = 1024;
-
-/// Geometry and dtype of one layer's key/value cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KvCacheConfig {
-    /// Number of transformer layers that each own a key and value cache.
-    pub layers: u64,
-    /// Cache capacity in tokens (the safety bound, not the live extent).
-    pub capacity_tokens: u64,
-    /// Batch size.
-    pub batch: u64,
-    /// Key/value head count.
-    pub n_kv_heads: u64,
-    /// Per-head width.
-    pub head_dim: u64,
-    /// Element type of the cache.
-    pub dtype: DType,
-    /// Layout of keys and values.
-    pub layout: KvCacheLayout,
-}
-
-impl KvCacheConfig {
-    /// Validate against the model envelope and compute nothing.
-    pub fn validate(&self, envelope: &ShapeEnvelope) -> Result<(), Fn3Error> {
-        if self.layers == 0 {
-            return Err(Fn3Error::InvalidShape {
-                context: "KvCacheConfig::validate",
-                detail: "a model with a KV cache needs at least one layer".to_string(),
-            });
-        }
-        if self.layers > MAX_KV_LAYERS {
-            return Err(Fn3Error::CapacityExceeded {
-                what: "KV cache layer count",
-                requested: self.layers,
-                capacity: MAX_KV_LAYERS,
-            });
-        }
-        if self.batch == 0 || self.n_kv_heads == 0 || self.head_dim == 0 {
-            return Err(Fn3Error::InvalidShape {
-                context: "KvCacheConfig::validate",
-                detail: format!(
-                    "batch, n_kv_heads and head_dim must be positive, found {}, {}, {}",
-                    self.batch, self.n_kv_heads, self.head_dim
-                ),
-            });
-        }
-        let total = envelope.get(Symbol::Total);
-        if self.capacity_tokens > total.max() {
-            return Err(Fn3Error::CapacityExceeded {
-                what: "KV cache capacity vs envelope total",
-                requested: self.capacity_tokens,
-                capacity: total.max(),
-            });
-        }
-        DimBound::new(self.capacity_tokens, self.capacity_tokens)?;
-        Ok(())
-    }
-
-    /// Shape of one cache buffer.
-    pub fn shape(&self) -> Shape {
-        Shape::from_dims([
-            self.batch,
-            self.n_kv_heads,
-            self.capacity_tokens,
-            self.head_dim,
-        ])
-    }
-
-    /// Bytes of one cache buffer (keys or values).
-    pub fn buffer_bytes(&self) -> Result<u64, Fn3Error> {
-        let elements = self.shape().numel()?;
-        elements
-            .checked_mul(self.dtype.size_bytes() as u64)
-            .ok_or_else(|| Fn3Error::ShapeOverflow {
-                context: "KvCacheConfig::buffer_bytes",
-                axis: None,
-                detail: format!("{} elements of {}", self.shape(), self.dtype),
-            })
-    }
-}
-
-/// Mutable per-layer cache state owned by a [`Session`].
-///
-/// `capacity_tokens` is the allocation bound; `live_len` is the semantic
-/// extent. Reads must never address beyond `live_len`. FN3-12 (#58) implements
-/// the append-and-commit protocol; this skeleton allocates and resets the
-/// buffers so ownership and isolation are already real.
-#[derive(Debug)]
-pub struct KvCacheState {
-    config: KvCacheConfig,
-    keys: Tensor,
-    values: Tensor,
-    live_len: u64,
-}
-
-impl KvCacheState {
-    /// Allocate zero-filled key and value buffers at full capacity.
-    pub fn new(config: KvCacheConfig, device: DeviceId) -> Result<KvCacheState, Fn3Error> {
-        let shape = config.shape();
-        let keys = Tensor::zeros(shape.clone(), config.dtype, device)?;
-        let values = Tensor::zeros(shape, config.dtype, device)?;
-        Ok(KvCacheState {
-            config,
-            keys,
-            values,
-            live_len: 0,
-        })
-    }
-
-    /// Configuration.
-    pub fn config(&self) -> &KvCacheConfig {
-        &self.config
-    }
-
-    /// Key buffer, shape `[batch, n_kv_heads, capacity, head_dim]`.
-    pub fn keys(&self) -> &Tensor {
-        &self.keys
-    }
-
-    /// Value buffer, shape `[batch, n_kv_heads, capacity, head_dim]`.
-    pub fn values(&self) -> &Tensor {
-        &self.values
-    }
-
-    /// Allocated capacity in tokens.
-    pub fn capacity(&self) -> u64 {
-        self.config.capacity_tokens
-    }
-
-    /// Live semantic extent in tokens.
-    pub fn live_len(&self) -> u64 {
-        self.live_len
-    }
-
-    /// Clear the live extent without reallocating or zeroing bytes.
-    ///
-    /// Stale bytes beyond `live_len` are never readable through the session
-    /// contract; a reader uses the live extent, not the buffer length.
-    pub fn reset(&mut self) {
-        self.live_len = 0;
-    }
-
-    /// Check that `additional` more tokens fit, without mutating anything.
-    pub fn check_capacity(&self, additional: u64) -> Result<(), Fn3Error> {
-        let requested =
-            self.live_len
-                .checked_add(additional)
-                .ok_or_else(|| Fn3Error::ShapeOverflow {
-                    context: "KvCacheState::check_capacity",
-                    axis: None,
-                    detail: format!("{} + {additional} exceeds u64::MAX", self.live_len),
-                })?;
-        if requested > self.config.capacity_tokens {
-            return Err(Fn3Error::CapacityExceeded {
-                what: "KV cache live extent",
-                requested,
-                capacity: self.config.capacity_tokens,
-            });
-        }
-        Ok(())
-    }
-}
-
-/// Session lifecycle phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionPhase {
-    /// No prompt has been consumed. `prefill` is allowed.
-    Empty,
-    /// A prompt is being consumed. No call is allowed.
-    Prefilling,
-    /// A prompt has been consumed. `decode` is allowed.
-    Ready,
-}
-
-impl SessionPhase {
-    /// Stable name used in diagnostics.
-    pub const fn name(self) -> &'static str {
-        match self {
-            SessionPhase::Empty => "empty",
-            SessionPhase::Prefilling => "prefilling",
-            SessionPhase::Ready => "ready",
-        }
-    }
-}
-
-/// Mutable inference state for one conversation.
-///
-/// # Concurrency
-///
-/// A session is the unit of exclusive mutable state. One session must be
-/// stepped by one thread at a time: it is `Send` (it can move between threads)
-/// but deliberately not `Sync` (it cannot be shared by reference). Use one
-/// session per concurrent request; they share the [`PreparedModel`] and nothing
-/// else.
-///
-/// # Atomicity
-///
-/// A failed step leaves the KV cache live extents and the step counter
-/// unchanged. `reset` and `cache_len` are always consistent with the last
-/// successful step.
-pub struct Session<'model> {
-    model: &'model PreparedModel,
-    caches: Vec<KvCacheState>,
-    step: u64,
-    phase: SessionPhase,
-    /// Makes `Session` `!Sync` on purpose. See the type-level docs.
-    _not_sync: PhantomData<Cell<()>>,
-}
-
-impl<'model> Session<'model> {
-    /// Create a session over `model`, allocating its KV cache buffers.
-    ///
-    /// Fails if the model's cache geometry is invalid or a buffer does not fit
-    /// the device. Two sessions created from the same model never share a byte
-    /// of mutable state.
-    pub fn new(model: &'model PreparedModel) -> Result<Session<'model>, Fn3Error> {
-        let mut caches = Vec::new();
-        if let Some(config) = model.kv_config() {
-            config.validate(&model.envelope)?;
-            caches.reserve(config.layers as usize);
-            for _ in 0..config.layers {
-                caches.push(KvCacheState::new(*config, model.device())?);
-            }
-        }
-        Ok(Session {
-            model,
-            caches,
-            step: 0,
-            phase: SessionPhase::Empty,
-            _not_sync: PhantomData,
-        })
-    }
-
-    /// The immutable model this session runs.
-    pub fn model(&self) -> &'model PreparedModel {
-        self.model
-    }
-
-    /// The execution plan being run.
-    pub fn plan(&self) -> &ExecutionPlan {
-        self.model.plan()
-    }
-
-    /// Current lifecycle phase.
-    pub fn phase(&self) -> SessionPhase {
-        self.phase
-    }
-
-    /// Number of successfully completed steps.
-    ///
-    /// Incremented only after a step's outputs and cache updates are committed;
-    /// a failed step must not change it.
-    pub fn step(&self) -> u64 {
-        self.step
-    }
-
-    /// Live KV extent of the first layer, or 0 when the model has no cache.
-    pub fn cache_len(&self) -> u64 {
-        self.caches.first().map(KvCacheState::live_len).unwrap_or(0)
-    }
-
-    /// Per-layer cache state. Read-only: mutation happens inside steps.
-    pub fn caches(&self) -> &[KvCacheState] {
-        &self.caches
-    }
-
-    /// Consume a prompt and populate the KV cache.
-    ///
-    /// Contract: requires [`SessionPhase::Empty`]; on success returns the
-    /// logits for the final prompt position and sets
-    /// `cache_len() == tokens.len()` with phase [`SessionPhase::Ready`]. On any
-    /// error the cache and counter are unchanged and the phase stays `Empty`.
-    ///
-    /// Owner: FN3-12 (#58) with the CPU kernels from FN3-07 (#53).
-    pub fn prefill(&mut self, tokens: &[u32]) -> Result<Tensor, Fn3Error> {
-        if self.phase != SessionPhase::Empty {
-            return Err(Fn3Error::SessionState {
-                action: "prefill",
-                phase: self.phase.name(),
-                detail: "prefill requires a fresh session; call reset() first".to_string(),
-            });
-        }
-        if tokens.is_empty() {
-            return Err(Fn3Error::SessionState {
-                action: "prefill",
-                phase: self.phase.name(),
-                detail: "prefill requires at least one token".to_string(),
-            });
-        }
-        for cache in &self.caches {
-            cache.check_capacity(tokens.len() as u64)?;
-        }
-        Err(Fn3Error::NotImplemented {
-            what: "Session::prefill",
-            owner: "FN3-12 (#58)",
-        })
-    }
-
-    /// Consume one or more new tokens, appending to the KV cache.
-    ///
-    /// Contract: requires [`SessionPhase::Ready`]; on success advances
-    /// `cache_len()` by `tokens.len()` and increments [`Session::step`] exactly
-    /// once. On any error the cache live extents and the counter are unchanged.
-    ///
-    /// Owner: FN3-12 (#58).
-    pub fn decode(&mut self, tokens: &[u32]) -> Result<Tensor, Fn3Error> {
-        if self.phase != SessionPhase::Ready {
-            return Err(Fn3Error::SessionState {
-                action: "decode",
-                phase: self.phase.name(),
-                detail: "decode requires a prefilled session; call prefill() first".to_string(),
-            });
-        }
-        if tokens.is_empty() {
-            return Err(Fn3Error::SessionState {
-                action: "decode",
-                phase: self.phase.name(),
-                detail: "decode requires at least one token".to_string(),
-            });
-        }
-        for cache in &self.caches {
-            cache.check_capacity(tokens.len() as u64)?;
-        }
-        Err(Fn3Error::NotImplemented {
-            what: "Session::decode",
-            owner: "FN3-12 (#58)",
-        })
-    }
-
-    /// Clear all cache live extents and return to [`SessionPhase::Empty`].
-    ///
-    /// Buffers are kept, not reallocated; the step counter returns to 0.
-    pub fn reset(&mut self) {
-        for cache in &mut self.caches {
-            cache.reset();
-        }
-        self.step = 0;
-        self.phase = SessionPhase::Empty;
-    }
-}
-
-impl std::fmt::Debug for Session<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("phase", &self.phase)
-            .field("step", &self.step)
-            .field("caches", &self.caches.len())
-            .field("cache_len", &self.cache_len())
-            .finish_non_exhaustive()
-    }
-}
-
 /// An immutable, shareable prepared model.
 ///
 /// Holds the plan, the weights and the declared dynamic bounds. Construct once,
@@ -777,9 +413,15 @@ pub struct PreparedModel {
 impl PreparedModel {
     /// Assemble a model, validating device agreement and the envelope.
     ///
-    /// Does not consult a backend: call [`ExecutionPlan::check_supported`] with
-    /// the backend that will run it (a `Session` does this before its first
-    /// step, FN3-12 / #58).
+    /// Does not consult a backend and does not check op support: call
+    /// [`ExecutionPlan::check_supported`] with the backend that will run it, or
+    /// bind a backend with [`Session::with_runtime`], which preflights every
+    /// specialised plan.
+    ///
+    /// A KV cache configuration is valid on any device. The cache is host
+    /// staging on a Vulkan device (alpha tensor storage is host memory on every
+    /// device), and executing on the host instead would be a device fallback,
+    /// so the session rejects a backend whose device differs from this one.
     pub fn new(
         plan: ExecutionPlan,
         weights: ModelWeights,
@@ -799,13 +441,6 @@ impl PreparedModel {
         }
         if let Some(config) = kv_config {
             config.validate(&envelope)?;
-            if !device.is_cpu() {
-                // The alpha build can only allocate host KV buffers. Report it
-                // instead of silently allocating on the CPU.
-                return Err(
-                    crate::fn3::device::DeviceResolveError::unavailable_device(device).into(),
-                );
-            }
         }
         Ok(PreparedModel {
             plan: Arc::new(plan),
@@ -843,8 +478,9 @@ impl PreparedModel {
 
     /// Run the plan against pre-allocated value slots.
     ///
-    /// See [`ExecutionPlan::execute`]. This is the model-level entry point
-    /// FN3-12 (#58) wraps with cache append and counter commit.
+    /// See [`ExecutionPlan::execute`]. This runs the model's own fixed plan;
+    /// [`Session`] wraps it with per-shape specialisation, cache append and
+    /// counter commit.
     pub fn execute(
         &self,
         backend: &dyn Backend,
@@ -870,6 +506,7 @@ impl PreparedModel {
 mod tests {
     use super::*;
     use crate::fn3::backend::cpu::CpuBackend;
+    use crate::fn3::dtype::DType;
     use crate::fn3::shape::Shape;
 
     fn small_model() -> PreparedModel {
@@ -917,26 +554,5 @@ mod tests {
         let error = ExecutionPlan::new(vec![Instruction::new(OpId::Add, vec![0, 1], vec![0])], 2)
             .unwrap_err();
         assert!(error.to_string().contains("reads and writes"), "{error}");
-    }
-
-    #[test]
-    fn session_isolation_and_phase_rules() {
-        let model = small_model();
-        let mut first = Session::new(&model).unwrap();
-        let second = Session::new(&model).unwrap();
-        assert_eq!(first.cache_len(), 0);
-        assert_eq!(first.phase(), SessionPhase::Empty);
-        let error = first.decode(&[1]).unwrap_err();
-        assert!(matches!(error, Fn3Error::SessionState { .. }));
-        let error = first.prefill(&[1, 2]).unwrap_err();
-        assert!(matches!(error, Fn3Error::NotImplemented { .. }));
-        assert_eq!(first.step(), 0);
-        assert_eq!(first.caches().len(), 1);
-        assert_ne!(
-            first.caches()[0].keys().storage().as_bytes().as_ptr(),
-            second.caches()[0].keys().storage().as_bytes().as_ptr()
-        );
-        first.reset();
-        assert_eq!(first.phase(), SessionPhase::Empty);
     }
 }

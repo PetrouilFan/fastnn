@@ -14,7 +14,13 @@ when the 2.x modules are deleted. The contract authority is
 - `tensor.rs`: metadata, views and owned tensors.
 - `backend/mod.rs`: `Backend`, `Capabilities`, `Support`, `OpParams`.
 - `backend/cpu/`: the alpha reference backend.
-- `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`, `Session`.
+- `model/mod.rs`: `ExecutionPlan`, `ModelWeights`, `PreparedModel`.
+- `model/kv.rs`: `KvCacheConfig`, `KvCacheLayout`, `KvCacheState` — the bounded
+  per-layer key/value buffers, the live extent and the two-phase append
+  protocol (FN3-12 / #58).
+- `model/session.rs`: `Session`, `SessionPhase` — `prefill`/`decode`, the
+  per-session plan cache and slot pool, and the step commit ordering (FN3-12 /
+  #58).
 - `model/plan.rs`: bounded `Plan`, slot table, folded constants, `PlanId`,
   `PlanBound`, `PlanCache` (FN3-10 / #56).
 - `model/specialize.rs`: shape resolution, integer constant folding, typed
@@ -39,6 +45,11 @@ when the 2.x modules are deleted. The contract authority is
 - `PreparedModel` is immutable and `Send + Sync`; all mutable inference state
   lives in `Session`, which is `Send` but deliberately `!Sync`. A failed step
   changes neither the KV live extent nor the step counter.
+- A `Session` executes every instruction through the one backend it was opened
+  with; a backend whose device differs from the model's is rejected before any
+  work. KV buffers and value slots for a Vulkan device are host-staged
+  (`host_staged = true` in the backend's residency record) — that is not a CPU
+  compute path, and no session code owns a second backend.
 - Unsafe code is confined to `storage.rs` and every block carries a `SAFETY:`
   comment covering alignment, bounds, aliasing and lifetime.
 
