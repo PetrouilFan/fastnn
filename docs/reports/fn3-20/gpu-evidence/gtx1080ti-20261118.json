@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "kind": "fastnn-gpu-evidence",
+  "lane": "gpu-physical",
+  "ci_only": false,
+  "generated_utc": "2026-11-18T11:31:33Z",
+  "host": {
+    "hostname": "pixelbeast",
+    "os": "Linux-7.2.14-arch1-1-x86_64-with-glibc2.44",
+    "arch": "x86_64",
+    "python": "3.14.9"
+  },
+  "git": {
+    "branch": "fn3/66-ci",
+    "head": "93fe6074cd7ccad152f6c02072aa19f0b2dcb36d",
+    "dirty": false
+  },
+  "device": {
+    "kind": "physical",
+    "name": "NVIDIA GeForce GTX 1080 Ti",
+    "uuid": "471b2bda-51e1-6451-e692-ff5d1e146f1e",
+    "device_type": "VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU",
+    "driver_name": "NVIDIA",
+    "driver_version": "580.196.07",
+    "api_version": "1.4.312",
+    "instance_api_version": "1.4.312",
+    "vendor_id": 4318,
+    "device_id": 6918,
+    "icd": "loader default",
+    "enumeration_index": null
+  },
+  "validation": {
+    "enabled": true,
+    "layer": "VK_LAYER_KHRONOS_validation",
+    "errors": 0,
+    "warnings": 2,
+    "result": "clean",
+    "source": "spike/vk-bringup auxiliary run (NOT fastnn backend evidence)"
+  },
+  "checks": [
+    {
+      "name": "physical_device",
+      "status": "passed",
+      "detail": "NVIDIA GeForce GTX 1080 Ti [471b2bda-51e1-6451-e692-ff5d1e146f1e]"
+    },
+    {
+      "name": "fastnn_vulkan_smoke",
+      "status": "not_run",
+      "detail": "Vulkan backend not yet implemented (FN3-11 / #57): Cargo.toml declares no 'vulkan' feature; tests/fn3_vulkan_smoke.rs does not exist"
+    },
+    {
+      "name": "auxiliary_spike_bringup",
+      "status": "passed",
+      "detail": "raw Vulkan loader/compute/validation bring-up; proves nothing about the fastnn backend"
+    }
+  ],
+  "timings": {
+    "device_probe_seconds": 0.65,
+    "auxiliary_spike_seconds": 0.194,
+    "total_seconds": 0.86
+  },
+  "result": {
+    "status": "not_verified",
+    "reason": "Vulkan backend not yet implemented (FN3-11 / #57): Cargo.toml declares no 'vulkan' feature; tests/fn3_vulkan_smoke.rs does not exist"
+  },
+  "commands": [
+    "vulkaninfo -j"
+  ],
+  "auxiliary": {
+    "spike_vk_bringup": {
+      "status": "passed",
+      "reason": "raw Vulkan bring-up only; NOT fastnn backend evidence",
+      "command": "/home/petrouil/Projects/github/fastnn-wt-66-ci/spike/vk-bringup/target/release/vk-bringup --device-uuid 471b2bda-51e1-6451-e692-ff5d1e146f1e --validation",
+      "exit_code": 0,
+      "validation_errors": 0,
+      "validation_warnings": 2,
+      "seconds": 0.194,
+      "output_tail": [
+        "  device_memory: created=6 destroyed=6 bytes_allocated=8388736 bytes_freed=8388736",
+        "  fence: created=1 destroyed=1",
+        "  pipeline: created=1 destroyed=1",
+        "  pipeline_layout: created=1 destroyed=1",
+        "  shader_module: created=1 destroyed=1",
+        "[fn3vk] handles[device]:",
+        "  device: created=1 destroyed=1",
+        "[fn3vk] handles[instance]:",
+        "  debug_messenger: created=1 destroyed=1",
+        "  instance: created=1 destroyed=1",
+        "[fn3vk] validation summary: errors=0 warnings=2",
+        "[fn3vk] result: PASS"
+      ]
+    }
+  }
+}
