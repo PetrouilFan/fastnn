@@ -253,7 +253,10 @@ matrix, and clean install verification.
 | `5a055e1` | #54 | strict ONNX import merged (`56852ca`) | 27 import tests on the pinned 27,897,974-byte model, 43 contracts, 637 lib; 9001 insertions, one shared line |
 | `456f3a3` | #54 fix | `model::weights` declared instead of reached into by `#[path]` | 27 import tests with the model present |
 | `e3ac3e4` | #55 | versioned prepared-model artifact merged (`48e4d46`) | 38 format tests, 27 import, 665 lib, fmt; pinned model round-trips byte-identically |
-| `b9a0de6` | #56 | bounded planner + specialisation merged (`4deca05`) | 11 planner tests, 43 contracts, 43 reference, 38 format, 27 import, 677 lib, vulkan build; CPU prefill parity 5.96e-7 |
+| `ae125e9` | #58 | session, KV cache and cached decode merged (`b1a0413`) | 8 session tests, 683 lib; prefill 5.96e-7, decode.step1 6.11e-7, extents 14–17, cached-vs-full bit-identical |
+| `c5b69c2` | #58 fix | a session without a runtime names the constructor that works | 43 contracts |
+| `15f6177` | #52/#57 fix | device enumeration asserted as a rule, not a snapshot | 36 storage tests in both configurations |
+| `304d0f8` | #63 | inference CLI and offline quickstart merged (`669833b`) | 6 CLI tests, 24 CLI unit, 707 lib, 43 contracts; real 10-token prefill, honest Vulkan refusal |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
 | `4771083` | #46 | ledger: whole-tree gate run after #60/#61 | n/a |
@@ -355,7 +358,7 @@ Known non-blocking debt, both owned by #67:
 | GPU pointwise/transform/embedding | proven (#59): Add/Sub/Mul/Neg/Relu/Cast/comparisons/layout byte-exact, Gelu 4.77e-7, embedding exact |
 | Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
 | Python facade | open — #64 |
-| CLI + quickstart | open — #63 |
+| CLI + quickstart | **proven** (#63): `fn3-infer prepare/inspect/run/generate/diagnose`, 27,879,928-byte artifact with verified CRC, 10-token prefill to top-5 [46737, 28597, 16571, 7868, 13]; token IDs only, no approximate tokeniser. `--device vulkan` opens the GPU then refuses at plan instruction 1 instead of falling back to CPU. |
 | Package versions 3.0.0-alpha.1 / 3.0.0a1 | open — #67 |
 | CI lanes | machinery merged (#66); vulkan lanes now genuinely execute |
 
@@ -413,3 +416,15 @@ Known non-blocking debt, both owned by #67:
 - The model is **not** committed: no license is declared upstream. Tests pin
   both the sha256 and an FNV-1a digest and skip with a printed reason when the
   file is absent, so an offline CI lane is honest rather than falsely green.
+
+## Process finding: the orchestrator's own briefs need verification
+
+Twice an orchestrator-supplied constant was wrong and a worker caught it: the
+pinned model sha256 was quoted with a transposed nibble in the #58 brief and
+again in the #63 brief. The authoritative value is
+`e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1`, confirmed
+by `sha256sum` against the file and by `fixtures/parity/tiny-gpt2/model.lock.json`.
+Both workers checked the brief instead of trusting it and reported the
+discrepancy, which is the behaviour the briefs ask for. Standing rule: a
+digest in a brief is a claim to be checked against `model.lock.json`, never a
+fact to be copied into code or a report.
