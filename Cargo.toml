@@ -108,4 +108,11 @@ name = "cpu_baselines"
 path = "benches/cpu_baselines.rs"
 harness = false
 
+# FN3-04 reproducible benchmark harness. Build with --no-default-features
+# (the default `python` feature makes pyo3 an extension-module and breaks
+# standalone binary linking); add simd/parallel/prepared-plan explicitly for
+# measurements that should reflect the default CPU configuration.
+[[bin]]
+name = "fn3-bench"
+path = "tools/bench/main.rs"
 

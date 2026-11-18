@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PetrouilFan/fastnn/docs/reports/fn3-04/result-schema.json",
+  "title": "FastNN FN3 benchmark result",
+  "description": "Versioned machine-readable result for the FN3-04 benchmark harness. `schema_version` is 1; additive fields keep this version, breaking changes bump it. Absent measurements are represented as metrics with status `unavailable` and a `reason`, never omitted or zero-filled.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "schema_name",
+    "run",
+    "git",
+    "build",
+    "host",
+    "gpu",
+    "model",
+    "geometry",
+    "precision",
+    "metrics",
+    "notes",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Breaking-change version of this document."
+    },
+    "schema_name": {
+      "const": "fastnn.fn3.bench.result"
+    },
+    "run": {
+      "type": "object",
+      "required": ["run_id", "timestamp_utc", "started_unix_s", "duration_s", "adapter", "suite", "quick", "seed", "label"],
+      "properties": {
+        "run_id": {"type": "string", "description": "Random 128-bit hex id, unique per invocation."},
+        "timestamp_utc": {"type": "string", "description": "RFC 3339 UTC timestamp at start (second resolution)."},
+        "started_unix_s": {"type": "integer", "minimum": 0},
+        "duration_s": {"type": "number", "minimum": 0},
+        "adapter": {"enum": ["baseline", "fn3"], "description": "Runtime adapter that produced the metrics."},
+        "suite": {"enum": ["smoke", "projections", "model", "criterion"]},
+        "quick": {"type": "boolean"},
+        "seed": {"type": "integer", "minimum": 0, "description": "Seed for deterministic weights and inputs."},
+        "label": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "git": {
+      "type": "object",
+      "required": ["commit", "branch", "dirty", "dirty_entries", "describe"],
+      "properties": {
+        "commit": {"type": ["string", "null"]},
+        "branch": {"type": ["string", "null"]},
+        "dirty": {"type": ["boolean", "null"], "description": "git status --porcelain non-empty at start; null when git is unavailable."},
+        "dirty_entries": {"type": ["integer", "null"], "minimum": 0},
+        "describe": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "build": {
+      "type": "object",
+      "required": ["package_version", "profile", "debug_assertions", "rustc_version", "cargo_version", "features", "target_arch", "target_os", "target_family", "command_line"],
+      "properties": {
+        "package_version": {"type": "string"},
+        "profile": {"enum": ["release", "debug"]},
+        "debug_assertions": {"type": "boolean"},
+        "rustc_version": {"type": ["string", "null"]},
+        "cargo_version": {"type": ["string", "null"]},
+        "features": {
+          "type": "object",
+          "description": "Compile-time features that change measured behavior.",
+          "additionalProperties": {"type": "boolean"}
+        },
+        "target_arch": {"type": "string"},
+        "target_os": {"type": "string"},
+        "target_family": {"type": ["string", "null"]},
+        "command_line": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "host": {
+      "type": "object",
+      "required": ["os", "kernel", "arch", "cpu_model", "physical_cores", "logical_cores", "threads_used", "memory_total_bytes", "load", "competing_build_pids", "competing_benchmark_pids"],
+      "properties": {
+        "os": {"type": ["string", "null"]},
+        "kernel": {"type": ["string", "null"]},
+        "arch": {"type": "string"},
+        "cpu_model": {"type": ["string", "null"]},
+        "physical_cores": {"type": ["integer", "null"], "minimum": 1},
+        "logical_cores": {"type": "integer", "minimum": 1},
+        "threads_used": {"type": "integer", "minimum": 1},
+        "memory_total_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "load": {
+          "type": "object",
+          "required": ["one", "five", "fifteen", "threshold", "exceeded", "reason"],
+          "properties": {
+            "one": {"type": ["number", "null"]},
+            "five": {"type": ["number", "null"]},
+            "fifteen": {"type": ["number", "null"]},
+            "threshold": {"type": "number"},
+            "exceeded": {"type": "boolean"},
+            "reason": {"type": ["string", "null"], "description": "Why load could not be read; null when read succeeded."}
+          },
+          "additionalProperties": true
+        },
+        "competing_build_pids": {
+          "type": "array",
+          "items": {"type": "integer"},
+          "description": "Other cargo/rustc/rustdoc processes at start; non-empty means a competing build was running."
+        },
+        "competing_benchmark_pids": {
+          "type": "array",
+          "items": {"type": "integer"},
+          "description": "Other fn3-bench processes at start; non-empty means two benchmark jobs overlapped."
+        }
+      },
+      "additionalProperties": true
+    },
+    "gpu": {
+      "type": "object",
+      "required": ["status", "reason", "vulkan_instance_version", "devices", "selected_device_index", "execution_backend", "execution_reason"],
+      "properties": {
+        "status": {"enum": ["present", "unavailable"]},
+        "reason": {"type": ["string", "null"]},
+        "vulkan_instance_version": {"type": ["string", "null"]},
+        "devices": {"type": "array", "items": {"$ref": "#/$defs/gpu_device"}},
+        "selected_device_index": {
+          "type": ["integer", "null"],
+          "description": "Index into devices used for measured work; null when metrics came from the CPU."
+        },
+        "execution_backend": {"type": "string", "examples": ["cpu", "wgpu", "fn3"]},
+        "execution_reason": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "model": {
+      "type": "object",
+      "required": ["name", "revision", "source", "parameter_count", "weights_bytes", "seed", "checksums"],
+      "properties": {
+        "name": {"type": "string"},
+        "revision": {"type": "string", "description": "Immutable revision for downloaded models; `synthetic:<seed>` for generated fixtures; `not_applicable` otherwise."},
+        "source": {"type": "string", "examples": ["synthetic-random-weights", "local-artifact", "downloaded", "criterion", "spec-defined-shapes"]},
+        "parameter_count": {"type": ["integer", "null"], "minimum": 0},
+        "weights_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "seed": {"type": ["integer", "null"], "minimum": 0},
+        "checksums": {"type": "array", "items": {"$ref": "#/$defs/checksum"}}
+      },
+      "additionalProperties": true
+    },
+    "geometry": {
+      "type": "object",
+      "required": ["batch", "prompt_tokens", "decode_tokens", "context_capacity", "hidden_size", "num_heads", "num_kv_heads", "head_dim", "num_layers", "intermediate_size", "vocab_size", "attention", "kv_cache"],
+      "properties": {
+        "batch": {"type": "integer", "minimum": 1},
+        "prompt_tokens": {"type": "integer", "minimum": 0, "description": "Tokens in the prefill / time-to-first-token measurement."},
+        "decode_tokens": {"type": "integer", "minimum": 0, "description": "Steady decode steps measured."},
+        "context_capacity": {"type": "integer", "minimum": 0},
+        "hidden_size": {"type": "integer", "minimum": 0},
+        "num_heads": {"type": "integer", "minimum": 0},
+        "num_kv_heads": {"type": ["integer", "null"], "minimum": 1},
+        "head_dim": {"type": "integer", "minimum": 0},
+        "num_layers": {"type": "integer", "minimum": 0},
+        "intermediate_size": {"type": "integer", "minimum": 0},
+        "vocab_size": {"type": "integer", "minimum": 0},
+        "attention": {"type": "string", "examples": ["full", "causal", "causal_kv_cache", "not_applicable"]},
+        "kv_cache": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "precision": {
+      "type": "object",
+      "required": ["weights_dtype", "activations_dtype", "accumulation_dtype", "quantization"],
+      "properties": {
+        "weights_dtype": {"type": "string", "examples": ["f32", "f16", "bf16", "i8", "u4", "f4"]},
+        "activations_dtype": {"type": "string"},
+        "accumulation_dtype": {"type": "string"},
+        "quantization": {"type": ["string", "null"], "examples": [null, "i8_weight_only", "u4_weight_only"]}
+      },
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/metric"}
+    },
+    "notes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Suite-level methodology notes (KV cache, masking, measurement scope)."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Load-guard, competing-build, environment-capture and adapter warnings."
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "checksum": {
+      "type": "object",
+      "required": ["subject", "algorithm", "value"],
+      "properties": {
+        "subject": {"type": "string", "examples": ["weights", "graph", "inputs", "spec"]},
+        "algorithm": {"type": "string", "examples": ["fnv1a64"]},
+        "value": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "gpu_device": {
+      "type": "object",
+      "required": ["index", "name", "vendor", "vendor_id", "device_id", "device_type", "software_icd", "driver_name", "driver_info", "driver_version", "api_version", "device_uuid"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 0},
+        "name": {"type": "string"},
+        "vendor": {"type": ["string", "null"]},
+        "vendor_id": {"type": ["string", "null"]},
+        "device_id": {"type": ["string", "null"]},
+        "device_type": {"enum": ["physical", "software", "unknown"]},
+        "software_icd": {"type": "boolean"},
+        "driver_name": {"type": ["string", "null"]},
+        "driver_info": {"type": ["string", "null"]},
+        "driver_version": {"type": ["string", "null"]},
+        "api_version": {"type": ["string", "null"], "description": "Vulkan API version reported by vulkaninfo."},
+        "device_uuid": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "stats": {
+      "type": "object",
+      "required": ["min", "p50", "p95", "p99", "max", "mean", "stddev"],
+      "properties": {
+        "min": {"type": "number"},
+        "p50": {"type": "number", "description": "Linear-interpolation percentile over sorted samples (R-7 / NumPy default)."},
+        "p95": {"type": "number"},
+        "p99": {"type": "number"},
+        "max": {"type": "number"},
+        "mean": {"type": "number"},
+        "stddev": {"type": "number", "description": "Sample standard deviation (n-1); 0 for a single sample."}
+      },
+      "additionalProperties": true
+    },
+    "sample_block": {
+      "type": "object",
+      "required": ["unit", "samples", "sample_count", "warmup_count", "repetition_count", "stats"],
+      "properties": {
+        "unit": {"type": "string", "examples": ["ms", "tokens/s", "GFLOP/s", "MiB", "count"]},
+        "samples": {
+          "type": "array",
+          "items": {"type": "number"},
+          "description": "Every finite raw sample. Non-finite values are dropped before serialization."
+        },
+        "sample_count": {"type": "integer", "minimum": 0},
+        "warmup_count": {"type": "integer", "minimum": 0, "description": "Unmeasured iterations per batch."},
+        "repetition_count": {"type": "integer", "minimum": 0, "description": "Independent measurement batches pooled into samples."},
+        "stats": {
+          "oneOf": [{"$ref": "#/$defs/stats"}, {"type": "null"}],
+          "description": "Null only when the metric is unavailable or no finite sample remains."
+        }
+      },
+      "additionalProperties": true
+    },
+    "device_time": {
+      "type": "object",
+      "required": ["status", "reason", "source", "samples", "stats"],
+      "properties": {
+        "status": {"enum": ["ok", "unavailable"]},
+        "reason": {"type": ["string", "null"], "description": "Why device time is unavailable; required when status is unavailable."},
+        "source": {"type": ["string", "null"], "examples": [null, "wgpu-timestamp-query", "cuda-event"]},
+        "samples": {"type": "array", "items": {"type": "number"}},
+        "stats": {"oneOf": [{"$ref": "#/$defs/stats"}, {"type": "null"}]}
+      },
+      "additionalProperties": true
+    },
+    "metric": {
+      "type": "object",
+      "required": ["name", "category", "unit", "status", "reason", "clock", "host_time", "device_time", "counters", "metadata"],
+      "properties": {
+        "name": {"type": "string", "description": "Stable dotted metric name."},
+        "category": {"enum": ["load", "prepare", "prefill", "decode", "throughput", "memory", "allocation", "microbench", "harness"]},
+        "unit": {"type": "string"},
+        "status": {"enum": ["ok", "unavailable"]},
+        "reason": {"type": ["string", "null"], "description": "Human-readable reason; required when status is unavailable."},
+        "clock": {"enum": ["host_monotonic", "derived", "not_applicable"]},
+        "host_time": {
+          "oneOf": [{"$ref": "#/$defs/sample_block"}, {"type": "null"}],
+          "description": "Primary measured series: host monotonic wall clock for latency metrics, the measured quantity for memory/allocation metrics."
+        },
+        "device_time": {"$ref": "#/$defs/device_time"},
+        "counters": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0},
+          "description": "Runtime counters summed across samples (for example CPU telemetry)."
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "Measurement context: shapes, FLOPs, implementation, cache mode, criterion estimates."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
