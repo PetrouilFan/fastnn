@@ -594,37 +594,40 @@ fn unsupported_ops_and_shapes_are_reported_not_approximated() {
     let Some(backend) = open_physical() else {
         return;
     };
-    assert!(matches!(
-        backend.supports(OpId::Add),
-        Support::Partial { .. }
-    ));
-    let reason = backend
-        .supports(OpId::Add)
-        .reason()
-        .expect("partial support names its subset")
-        .to_string();
-    assert!(reason.contains("#59"), "{reason}");
 
-    for (op, owner) in [
-        (OpId::MatMul, "#60"),
-        (OpId::Softmax, "#61"),
-        (OpId::MaskedAttention, "#61"),
-    ] {
+    // Alpha covers the pinned graph, not the whole id space, so the backend must
+    // still be honest about something. This is deliberately not a snapshot of
+    // which ops are missing: the kernel owners register them one family at a
+    // time (#59, #60, #61), and a test that pinned today's gap would fail on
+    // every one of those merges. The invariant is that a verdict which is not
+    // `Full` names the issue that owns the gap, and that asking for such an op
+    // is rejected by name rather than approximated.
+    let unsupported = OpId::ALL
+        .iter()
+        .copied()
+        .find(|op| !backend.supports(*op).is_full())
+        .expect("alpha must not claim Full support for every op id");
+
+    for op in OpId::ALL {
         let support = backend.supports(op);
-        assert!(!support.is_supported(), "{op} must be unsupported");
-        assert!(support.reason().unwrap().contains(owner), "{op}: {support}");
+        if support.is_full() {
+            continue;
+        }
+        let reason = support
+            .reason()
+            .unwrap_or_else(|| panic!("{op} is not Full and names no owner: {support}"));
+        assert!(reason.contains('#'), "{op} must name its owner: {reason}");
     }
 
     let error = backend
-        .execute_op(OpId::MatMul, &[], &mut [], &OpParams::default())
-        .expect_err("matmul has no Vulkan kernel yet");
+        .execute_op(unsupported, &[], &mut [], &OpParams::default())
+        .expect_err("an op with no Vulkan kernel must be rejected");
     let text = error.to_string();
-    eprintln!("[fn3vk][failure] unsupported-op: {text}");
+    eprintln!("[fn3vk][failure] unsupported-op {unsupported}: {text}");
     assert!(
         matches!(
             error,
             Fn3Error::UnsupportedOp {
-                op: OpId::MatMul,
                 backend: "vulkan",
                 ..
             }
@@ -632,44 +635,7 @@ fn unsupported_ops_and_shapes_are_reported_not_approximated() {
         "{error:?}"
     );
     assert!(text.contains("vulkan"), "{text}");
-    assert!(text.contains("#60"), "{text}");
-
-    // A broadcast-shaped Add reaches the kernel and is rejected there, naming
-    // the owner of broadcasting.
-    let device = backend.device_id();
-    let lhs = host_tensor_on(device, Shape::from_dims([2, 3]), &[1.0; 6]);
-    let rhs = host_tensor_on(device, Shape::from_dims([3]), &[2.0; 3]);
-    let mut out = host_tensor_on(device, Shape::from_dims([2, 3]), &[0.0; 6]);
-    let error = {
-        let lhs_view = lhs.as_view().expect("lhs view");
-        let rhs_view = rhs.as_view().expect("rhs view");
-        let mut out_view = out.as_mut_view().expect("out view");
-        backend
-            .execute_op(
-                OpId::Add,
-                &[lhs_view, rhs_view],
-                std::slice::from_mut(&mut out_view),
-                &OpParams::default(),
-            )
-            .expect_err("broadcasting is not in the smoke kernel")
-    };
-    let text = error.to_string();
-    eprintln!("[fn3vk][failure] unsupported-broadcast: {text}");
-    assert!(
-        matches!(
-            error,
-            Fn3Error::UnsupportedOp {
-                op: OpId::Add,
-                backend: "vulkan",
-                ..
-            }
-        ),
-        "{error:?}"
-    );
-    assert!(
-        text.contains("broadcast") || text.contains("FN3-13"),
-        "{text}"
-    );
+    assert!(text.contains('#'), "{text}");
     assert_eq!(backend.memory_stats().live_bytes, 0);
 }
 
@@ -723,8 +689,19 @@ fn capabilities_match_the_physical_device() {
     );
     assert_eq!(capabilities.dtypes, &[DType::F32][..]);
     assert!(!capabilities.supports_strided_views);
-    assert!(!capabilities.features.broadcasting);
-    assert!(!capabilities.features.masked_attention);
+    // Capability flags are derived from the registered kernels, so they must
+    // agree with the verdicts instead of pinning the kernel set of the day.
+    assert_eq!(
+        capabilities.features.masked_attention,
+        backend.supports(OpId::MaskedAttention).is_full(),
+        "masked_attention must be advertised exactly when the fused kernel is registered"
+    );
+    if capabilities.features.broadcasting {
+        assert!(
+            backend.supports(OpId::Add).is_full(),
+            "broadcasting is advertised but Add is not Full"
+        );
+    }
     assert_eq!(backend.name(), "vulkan");
     assert_eq!(Backend::device(&*backend), backend.device_id());
     assert!(!backend.is_software());
