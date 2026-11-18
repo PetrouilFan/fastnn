@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "status": "unpinned",
+  "owner_issue": 49,
+  "producer": "FN3-03 (#49) owns fixtures/ and the pinned fixture revision",
+  "consumer": "tools/ci/model_pin.py + the pinned-model CI lane",
+  "fixtures_manifest": "fixtures/manifest.json",
+  "fixtures_manifest_sha256": null,
+  "revision": null,
+  "note": "This is the only file CI reads to decide which model fixtures a run uses. status must be 'pinned', revision must be a 40-hex commit, and fixtures_manifest_sha256 must match the manifest bytes before the pinned-model lane runs. While status is 'unpinned' the lane reports NOT VERIFIED naming this file and FN3-03 (#49); it never silently passes. Run 'python3 tools/ci/model_pin.py seal' after FN3-03 publishes fixtures/ to fill the hash."
+}

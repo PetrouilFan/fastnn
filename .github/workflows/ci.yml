@@ -1,3 +1,27 @@
+# FastNN CI — lane-based, 3.0 inference-only
+#
+# Every job maps to a named lane in tools/ci/lanes.json. The lane-summary job
+# renders that inventory and fails if a lane that applies today is not PASSED.
+# A lane that did not run is rendered NOT VERIFIED, never as success.
+#
+# Evidence boundaries, enforced by tools/ci/lane_status.py and
+# tools/ci/verify_evidence.py:
+#   cpu                     build/test, NO GPU
+#   frozen-2x               transitional 2.x compile gate, NOT 3.0 evidence
+#   vulkan-build            SPIR-V + feature compile, NO DEVICE
+#   vulkan-software-smoke   CI-ONLY lavapipe; NOT a GPU
+#   packaging               wheel build/install smoke, NO GPU
+#   pinned-model            one pinned revision, offline; NOT VERIFIED until #49
+#   gpu-physical            evidence validation only; hosted runners have NO GPU
+#
+# Removed under 3.0 (see docs/reports/fn3-20-ci-lanes.md):
+#   * feature-profiles with simd/parallel/fusion/gpu — 2.x feature policy and
+#     the wgpu backend (#65 deletes both);
+#   * aarch64 with 2.x features — list needs redesigning for 3.0;
+#   * coverage with 2.x features — same reason;
+#   * --all-features / --features gpu, which cannot work after #65.
+# None of those may be re-added without a lane entry and a baseline.
+
 name: CI
 
 on:
@@ -7,74 +31,46 @@ on:
     branches: ["main", "dev"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_BUILD_JOBS: 4
+  LANE_STATUS_DIR: ${{ github.workspace }}/target/ci-lane-status
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  quality:
+  cpu-rust:
+    name: "cpu / cpu-rust — build + tests, NO GPU"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Format check
-        run: cargo fmt --check
-      - name: AGENTS.md freshness
-        run: python3 scripts/ci/check-agents-freshness.py
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Rust unit tests
-        run: cargo test --lib -- --test-threads=1
-      - name: Quantized pipeline tests
-        run: cargo test --test quantized_pipeline
-      - name: Optimizer tests
-        run: cargo test --test optim_test
-      - name: Full Rust integration tests
-        run: cargo test --tests -- --test-threads=1
-      - name: Release malformed-input subprocess tests
-        run: cargo test --release --test release_error_paths -- --test-threads=1
-
-  feature-profiles:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: core
-            features: simd,parallel,fusion-forward
-          - name: runtime
-            features: simd,parallel,fusion-forward,prepared-plan,cli
-          - name: gpu
-            features: simd,parallel,fusion-forward,gpu
-    name: feature profile (${{ matrix.name }})
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets --no-default-features --features "${{ matrix.features }}"
-
-  python:
-    needs: quality
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Run the CPU lane
+        run: tools/ci/cpu-lane.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          workspaces: .
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
+
+  cpu-python:
+    name: "cpu / cpu-python — pytest 'not slow', NO GPU"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -82,60 +78,167 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-      - name: Create virtualenv
-        run: uv venv .venv
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
-      - name: Build (Linux/macOS - with OpenBLAS)
-        if: runner.os != 'Windows'
-        uses: PyO3/maturin-action@v1
+      - name: Run the Python half of the CPU lane
+        run: tools/ci/python-lane.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          command: develop
-          args: --features openblas
-      - name: Build (Windows - no OpenBLAS)
-        if: runner.os == 'Windows'
-        uses: PyO3/maturin-action@v1
-        with:
-          command: develop
-      - name: Verify import
-        run: uv run python -c "import fastnn; print('OK')"
-      - name: Install test deps
-        run: uv pip install pytest numpy "onnx==1.17.0" "onnxruntime==1.20.1"
-      - name: Verify ONNX differential test dependencies
-        run: uv run python -c "import onnx, onnxruntime"
-      - name: Run Python tests
-        run: uv run python -m pytest tests/ -x -q
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
 
-  aarch64:
-    needs: quality
+  frozen-2x:
+    name: "frozen-2x — 2.x compile gate (deleted by #65)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install aarch64 target and cross-compiler
+      - name: Run the frozen 2.x lane
+        run: tools/ci/frozen-2x-lane.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
+
+  vulkan-build:
+    name: "vulkan-build — SPIR-V + feature build, NO DEVICE"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install shader tools
         run: |
-          rustup target add aarch64-unknown-linux-gnu
-          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-      - name: Build for aarch64
-        run: cargo build --target aarch64-unknown-linux-gnu
-      - name: Build for aarch64 (all portable features)
-        run: cargo build --target aarch64-unknown-linux-gnu --features "simd,parallel,fusion-forward,fusion-backward,fusion-residual-add-norm"
+          sudo apt-get update
+          sudo apt-get install -y spirv-tools glslc
+      - name: Run the Vulkan build lane (no device is created)
+        run: tools/ci/vulkan-build-lane.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
 
-  coverage:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: quality
+  vulkan-software:
+    name: "CI-ONLY vulkan-software-smoke — lavapipe, NOT a GPU"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-llvm-cov
-      - run: cargo llvm-cov --lib --no-default-features --features "simd,parallel,fusion-forward" --lcov --output-path lcov.info -- --test-threads=1
-      - uses: codecov/codecov-action@v4
+      - name: Install lavapipe and Vulkan tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools libvulkan1
+      - name: Run the CI-ONLY software Vulkan lane
+        env:
+          FN3_SOFTWARE_ICD: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: tools/ci/vulkan-software-lane.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          files: lcov.info
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
+
+  packaging:
+    name: "packaging / ${{ matrix.os }} — wheel install smoke, NO GPU"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install maturin
+        run: python -m pip install "maturin>=1.7,<2.0"
+      - name: Build, install and smoke the wheel outside the source tree
+        run: python tools/ci/packaging_lane.py --job "packaging-${{ matrix.os }}"
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
+
+  pinned-model:
+    name: "pinned-model — offline, single revision (NOT VERIFIED until #49)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the pinned-model lane
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: tools/ci/model-pin-lane.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
+
+  gpu-evidence:
+    name: "gpu-physical — evidence validation only (this runner has NO GPU)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate committed physical-GPU evidence; never run a GPU
+        run: tools/ci/gpu-evidence-status.sh
+      - name: Upload lane status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-status-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ github.workspace }}/target/ci-lane-status/*.json
+          if-no-files-found: ignore
+
+  lane-summary:
+    name: "lane summary — honest evidence table"
+    if: always()
+    needs:
+      - cpu-rust
+      - cpu-python
+      - frozen-2x
+      - vulkan-build
+      - vulkan-software
+      - packaging
+      - pinned-model
+      - gpu-evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Collect lane status records
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lane-status-*
+          path: ${{ github.workspace }}/target/ci-lane-status
+          merge-multiple: true
+      - name: Render the lane table and enforce the gate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 tools/ci/lane_status.py render --status-dir "$LANE_STATUS_DIR" --needs-json "$NEEDS_JSON"

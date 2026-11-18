@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "about": "Lane inventory for FastNN 3.0 CI. Every lane states what it proves and what it does NOT prove. tools/ci/lane_status.py renders this table into the workflow run summary and fails the run when a lane that applies today has no PASSED record. A lane with no record is rendered NOT VERIFIED; absence can never look like success.",
+  "status_values": ["passed", "failed", "not_verified"],
+  "lanes": [
+    {
+      "name": "cpu",
+      "title": "CPU build + tests (no GPU)",
+      "jobs": ["cpu-rust", "cpu-python"],
+      "required": true,
+      "hosted": true,
+      "proves": [
+        "The crate builds with --no-default-features, the library plus fn3 contract and smoke tests pass, formatting is clean, clippy produces zero warnings in src/fn3 and stays within a documented budget, and the Python suite marked 'not slow' passes against an extension built from this tree."
+      ],
+      "does_not_prove": [
+        "No Vulkan device is touched: it proves nothing about the Vulkan backend, shaders, or a physical GPU.",
+        "Today the pytest suite exercises the frozen 2.x Python facade, not a 3.0 surface; FN3-18 (#64) replaces it."
+      ],
+      "reproduce": "tools/ci/cpu-lane.sh"
+    },
+    {
+      "name": "frozen-2x",
+      "title": "Frozen 2.x tree still compiles (transitional, removed by #65)",
+      "jobs": ["frozen-2x"],
+      "required": true,
+      "transitional": true,
+      "removed_by": "#65",
+      "hosted": true,
+      "proves": [
+        "The 2.x modules that src/fn3/ coexists with still compile and their targeted suites still pass, which is the only 2.x gate docs/roadmap/fn3-architecture.md keeps."
+      ],
+      "does_not_prove": [
+        "It is not 3.0 evidence: training, autograd, quantization and wgpu behaviour here say nothing about the inference core.",
+        "FN3-19 (#65) deletes these suites; this lane and its job must be deleted in the same change."
+      ],
+      "reproduce": "tools/ci/frozen-2x-lane.sh"
+    },
+    {
+      "name": "vulkan-build",
+      "title": "Vulkan feature build + committed SPIR-V validation (no device)",
+      "jobs": ["vulkan-build"],
+      "required": false,
+      "required_when": { "cargo_feature": "vulkan" },
+      "hosted": true,
+      "proves": [
+        "Every committed .spv validates with spirv-val, and the shader sources recompile byte-identically through spike/vk-bringup/scripts/compile-shaders.sh.",
+        "Once the vulkan feature exists: the crate compiles with --no-default-features --features vulkan."
+      ],
+      "does_not_prove": [
+        "A build is not execution: no instance or device is created, no shader is dispatched, and no validation layer runs.",
+        "SPIR-V validation proves the artefact is well formed, not that a driver accepts it or that results are correct."
+      ],
+      "reproduce": "tools/ci/vulkan-build-lane.sh"
+    },
+    {
+      "name": "vulkan-software-smoke",
+      "title": "CI-ONLY software Vulkan smoke (lavapipe, no GPU)",
+      "jobs": ["vulkan-software"],
+      "required": false,
+      "required_when": {
+        "cargo_feature": "vulkan",
+        "path": "tests/fn3_vulkan_smoke.rs"
+      },
+      "hosted": true,
+      "software_only": true,
+      "proves": [
+        "With VK_ICD_FILENAMES pinned to lavapipe and validation enabled, the Vulkan smoke test can create an instance/device and dispatch the implemented operations without validation errors."
+      ],
+      "does_not_prove": [
+        "CI-ONLY / SOFTWARE: lavapipe is a CPU implementation of Vulkan. It proves nothing about a physical GPU, its driver, its limits, or its performance.",
+        "This lane must never be cited as GPU evidence; only a tools/ci/run-gpu-lane.sh record satisfies the physical-GPU lane."
+      ],
+      "reproduce": "tools/ci/vulkan-software-lane.sh"
+    },
+    {
+      "name": "packaging",
+      "title": "Wheel build, install and smoke outside the source tree",
+      "jobs": ["packaging"],
+      "required": true,
+      "hosted": true,
+      "proves": [
+        "A wheel builds from this tree, installs into a fresh virtual environment, imports from a temporary directory outside the checkout, reports its version, and runs a minimal inference smoke."
+      ],
+      "does_not_prove": [
+        "It does not prove the Rust test suites pass, that a model file loads, or that Vulkan works from the installed wheel.",
+        "It does not prove the editable-develop path used by the CPU lane behaves the same as an installed wheel."
+      ],
+      "reproduce": "tools/ci/packaging-lane.sh"
+    },
+    {
+      "name": "pinned-model",
+      "title": "Pinned-model end-to-end run (offline, single revision)",
+      "jobs": ["pinned-model"],
+      "required": false,
+      "required_when": { "pin_status": "pinned" },
+      "hosted": true,
+      "proves": [
+        "When tools/ci/model-pin.json is pinned, the E2E fixtures named by that single file are used offline, and the end-to-end test runs against exactly that revision."
+      ],
+      "does_not_prove": [
+        "An unpinned or missing pin is NOT VERIFIED, never a pass: the lane names tools/ci/model-pin.json and FN3-03 (#49).",
+        "A passing run proves numerical agreement on the pinned fixtures only, not general model support."
+      ],
+      "reproduce": "tools/ci/model-pin-lane.sh"
+    },
+    {
+      "name": "gpu-physical",
+      "title": "Physical-GPU evidence (local/protected machine only, never hosted CI)",
+      "jobs": ["gpu-evidence"],
+      "required": false,
+      "hosted": false,
+      "evidence_required": true,
+      "proves": [
+        "A tools/ci/run-gpu-lane.sh record exists and validates: it names a physical Vulkan device, its UUID, driver version, Vulkan API version, validation result, pass/fail and timings."
+      ],
+      "does_not_prove": [
+        "Hosted CI never runs this lane and no hosted job may claim it; a missing record is NOT VERIFIED, never success.",
+        "A software/lavapipe record is rejected by tools/ci/verify_evidence.py and cannot satisfy this lane.",
+        "The record proves only the named device on the named driver; it is not evidence for another GPU, OS or driver."
+      ],
+      "reproduce": "tools/ci/run-gpu-lane.sh --out docs/reports/fn3-20/gpu-evidence/<record>.json"
+    }
+  ]
+}
