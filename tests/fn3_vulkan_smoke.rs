@@ -605,8 +605,12 @@ fn unsupported_ops_and_shapes_are_reported_not_approximated() {
     let unsupported = OpId::ALL
         .iter()
         .copied()
-        .find(|op| !backend.supports(*op).is_full())
-        .expect("alpha must not claim Full support for every op id");
+        // An op that is *registered* but partial is still executable, so asking
+        // it for zero operands is an arity error, not a gap. The probe has to be
+        // an op nobody implements at all, otherwise registering one more kernel
+        // turns this test into a false failure.
+        .find(|op| !backend.supports(*op).is_supported())
+        .expect("alpha must have at least one op that no kernel implements");
 
     for op in OpId::ALL {
         let support = backend.supports(op);

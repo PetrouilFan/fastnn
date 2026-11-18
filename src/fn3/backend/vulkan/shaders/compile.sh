@@ -20,5 +20,5 @@ for shader in *.comp; do
   echo "compiled and validated $shader -> $out"
 done
 
-glslc --version | head -n 1
-spirv-val --version
+glslc --version | head -n 1 || true
+spirv-val --version || true
