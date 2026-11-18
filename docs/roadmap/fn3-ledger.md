@@ -108,7 +108,7 @@ Statuses: ready, in progress, review, integrated, verified, blocked, deferred.
 | #54 | Model import | in progress | `fn3/54-onnx-import-b` | `fastnn-wt-54b-import` | `27fc60d` | ONNX protobuf parser; unblocks #55/#56/#58 |
 | #57 | Vulkan dispatch | verified (integrated `b3db105`) | `fn3/57-vulkan-dispatch` | `fastnn-wt-57-vulkan` | `cfea81b` | done; unblocks #59/#60/#61 |
 | #59 | GPU pointwise | in progress | `fn3/59-gpu-pointwise` | `fastnn-wt-59-gpu-pointwise` | `27fc60d` | pointwise/transform/embedding kernels |
-| #60 | GPU matmul | in progress | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | tiled matmul kernel |
+| #60 | GPU matmul | verified (integrated `2835c32`) | `fn3/60-gpu-matmul` | `fastnn-wt-60-gpu-matmul` | `27fc60d` | done; `MatMul` = Full, 17 tests, 0/0 validation |
 | #61 | GPU attention | in progress | `fn3/61-gpu-attention` | `fastnn-wt-61-gpu-attention` | `27fc60d` | norm/reduce/softmax/masked-attention |
 | #66 | CI | verified (integrated `880b979`) | `fn3/66-ci` | `fastnn-wt-66-ci` | `cfea81b` | done; lanes render NOT VERIFIED honestly |
 
@@ -242,6 +242,8 @@ matrix, and clean install verification.
 | `a522fbf` | #66 fix | software lane proves it dispatched; physical lane pins its device by UUID | lavapipe proof line, `max_abs_error=0`; `verify_evidence.py` VALID for the GTX 1080 Ti record |
 | `2353fc5` | #59/#60/#61 | scaffolded the kernel modules and their registration site | 14/14 smoke, 26 platform unit tests |
 | `27fc60d` | #59/#60/#61 | kernel-set verdict tests made invariant-based | 26 platform unit tests; removes the three-way merge hazard |
+| `4d188e8` | #57 test | Vulkan smoke support-gap assertions made invariant | 14/14 smoke; unblocked #60 and pre-empts #59/#61 |
+| `2835c32` | #60 | Vulkan FP32 matmul merged (`4272aac`) | 17 matmul tests, 14/14 smoke, 30 platform, 43 contracts; 0 errors 0 warnings; fixtures 1.14e-7..2.86e-6 |
 
 ## Integration decisions that bind later issues
 
@@ -259,6 +261,12 @@ matrix, and clean install verification.
   emits `env var VK_INSTANCE_LAYERS defined` messages, which the teardown
   test's zero-delta guard correctly counts as a leak. Both the software lane
   and the physical evidence lane were fixed to stop doing this.
+- **Support gaps are asserted as rules, not snapshots.** Both the kernel-set
+  unit tests and `tests/fn3_vulkan_smoke.rs` used to pin which ops were
+  missing, so every GPU kernel merge broke a test owned by another issue.
+  They now assert that a non-`Full` verdict names its owner, that asking for
+  such an op is rejected by name, and that a capability flag agrees with the
+  verdict it summarises. Do not reintroduce op lists in either place.
 - **A lane that skipped is not a lane that passed.** `vulkan-software-lane.sh`
   now requires the smoke test's `[fn3vk][software-icd][proof]` line; a suite
   where every test returned early exits 0 and would otherwise have gone green.
@@ -280,7 +288,8 @@ matrix, and clean install verification.
 | CPU prefill + cached decode on the pinned tiny model, parity to the #49 fixtures | open — needs #56 + #58 |
 | Named physical Vulkan device, real execution | platform proven (#57); model path open — needs #59/#60/#61 + #62 |
 | Cache bounds and session isolation | open — needs #58 |
-| Residency record proves no silent CPU execution | proven for one op (#57); full-model assertion is #62 |
+| Residency record proves no silent CPU execution | proven for Add (#57) and MatMul (#60); full-model assertion is #62 |
+| GPU matmul on the pinned shapes | proven (#60): real prefill/decode/attention shapes within tolerance, 144,448 ns kernel-only decode `lm_head` |
 | Explicit device requests never run model computation on CPU | proven (#48/#57, both feature configurations) |
 | Python facade | open — #64 |
 | CLI + quickstart | open — #63 |
