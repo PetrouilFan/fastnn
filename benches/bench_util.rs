@@ -1,7 +1,7 @@
 //! Shared benchmark utilities for fastnn Rust benchmarks.
 //!
 //! This module provides common benchmark functions to eliminate code duplication
-//! across benchmark files (packed_bench.rs, wgpu_bench.rs, quantized_vs_pytorch.rs).
+//! across benchmark files (packed_bench.rs, quantized_vs_pytorch.rs).
 #![allow(dead_code)]
 
 use fastnn::backend::cpu::microkernels::gemv_cpu;

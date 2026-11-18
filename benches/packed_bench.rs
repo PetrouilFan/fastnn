@@ -163,5 +163,5 @@ fn main() {
     println!("GEMV is memory-bandwidth-bound: packed types reduce cache misses");
     println!("ReLU SWAR for int types avoids unpacking entirely (bitwise-only)");
     println!("On CPU, gains are modest due to scalar unpack in GEMV inner loop");
-    println!("On GPU (wgpu), gains are larger due to reduced memory traffic");
+    println!("On Vulkan, gains are larger due to reduced memory traffic");
 }
