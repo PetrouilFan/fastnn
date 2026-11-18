@@ -6,8 +6,9 @@
 //! - Rank 0 is a scalar and has exactly one element.
 //! - A zero extent is legal: the tensor has zero elements. Zero extents do not
 //!   propagate into neighbour arithmetic (see [`Shape::numel`]).
-//! - Every element count and byte count is checked. Overflow is
-//!   [`Fn3Error::ShapeOverflow`], never a wrap.
+//! - Every element count and byte count is checked against both `u64` and
+//!   `usize`. Overflow is [`Fn3Error::ShapeOverflow`], never a wrap and never a
+//!   truncation on a 32-bit target.
 //!
 //! # Stride rules (alpha views)
 //!
@@ -38,6 +39,26 @@ use std::fmt;
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
 use crate::fn3::ops::OpId;
+
+/// Convert a `u64` count to `usize` with an explicit overflow report.
+///
+/// On a 32-bit target a count can fit in `u64` and still not fit in `usize`;
+/// this is the one place that conversion is allowed to happen, and it never
+/// truncates.
+pub(crate) fn checked_usize(
+    value: u64,
+    context: &'static str,
+    what: &'static str,
+) -> Result<usize, Fn3Error> {
+    usize::try_from(value).map_err(|_| Fn3Error::ShapeOverflow {
+        context,
+        axis: None,
+        detail: format!(
+            "{what} ({value}) does not fit in a usize on this {}-bit target",
+            usize::BITS
+        ),
+    })
+}
 
 /// An ordered, row-major tensor shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -110,6 +131,16 @@ impl Shape {
         Ok(product)
     }
 
+    /// Total element count as a `usize`.
+    ///
+    /// Checked against both `u64` and `usize` overflow. On a 32-bit target a
+    /// count such as `2^32` elements is [`Fn3Error::ShapeOverflow`], never a
+    /// truncation to zero. Use this before allocating or iterating; use
+    /// [`Shape::numel`] when the count itself is the value of interest.
+    pub fn numel_usize(&self) -> Result<usize, Fn3Error> {
+        checked_usize(self.numel()?, "Shape::numel_usize", "element count")
+    }
+
     /// Total byte length for `dtype`.
     ///
     /// Checked against both `u64` and `usize` overflow. Returns 0 for a
@@ -129,11 +160,7 @@ impl Shape {
                     "{numel} elements of {dtype} ({elements_per_element} bytes each) exceed u64::MAX"
                 ),
             })?;
-        usize::try_from(bytes).map_err(|_| Fn3Error::ShapeOverflow {
-            context: "Shape::byte_len",
-            axis: None,
-            detail: format!("{bytes} bytes do not fit in a usize on this target"),
-        })
+        checked_usize(bytes, "Shape::byte_len", "byte length")
     }
 
     /// Canonical contiguous row-major strides, in elements.
@@ -163,8 +190,10 @@ impl Shape {
     /// `true` if `strides` describe this shape in contiguous row-major order.
     ///
     /// Strides on axes of extent 1 are ignored, matching the usual definition
-    /// of contiguity. A zero-element shape is contiguous when the rank matches.
-    /// Returns `false` (never panics) on rank mismatch or internal overflow.
+    /// of contiguity. A zero-element shape is contiguous when the rank matches:
+    /// it has no element order to violate, so this never divides or subtracts
+    /// on a zero extent. Returns `false` (never panics) on rank mismatch,
+    /// negative strides or internal overflow.
     pub fn is_contiguous(&self, strides: &Strides) -> bool {
         if strides.rank() != self.rank() {
             return false;
@@ -175,7 +204,7 @@ impl Shape {
         let mut expected: u64 = 1;
         for axis in (0..self.rank()).rev() {
             let stride = strides.strides[axis];
-            if self.dims[axis] != 1 && stride != expected as i64 {
+            if self.dims[axis] != 1 && u64::try_from(stride).ok() != Some(expected) {
                 return false;
             }
             match expected.checked_mul(self.dims[axis]) {
@@ -398,6 +427,35 @@ impl Strides {
                 })?;
         }
         Ok(len)
+    }
+
+    /// [`Strides::required_len`] as a `usize`, checked on both widths.
+    pub fn required_len_usize(&self, shape: &Shape) -> Result<usize, Fn3Error> {
+        checked_usize(
+            self.required_len(shape)?,
+            "Strides::required_len_usize",
+            "spanning element count",
+        )
+    }
+
+    /// Bytes spanned by this view from element 0, for `dtype`.
+    ///
+    /// Checked in `u64` and `usize`. This is the span a storage allocation must
+    /// provide at offset 0; a view at a non-zero offset additionally needs its
+    /// offset (see [`crate::fn3::tensor::TensorMeta::required_bytes`]).
+    pub fn required_bytes(&self, shape: &Shape, dtype: DType) -> Result<usize, Fn3Error> {
+        let elements = self.required_len(shape)?;
+        let bytes = elements
+            .checked_mul(dtype.size_bytes() as u64)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "Strides::required_bytes",
+                axis: None,
+                detail: format!(
+                    "spanning {elements} elements of {dtype} ({} bytes each) exceeds u64::MAX",
+                    dtype.size_bytes()
+                ),
+            })?;
+        checked_usize(bytes, "Strides::required_bytes", "spanning byte count")
     }
 
     /// Validate these strides as a writable, non-overlapping view of `shape`.
