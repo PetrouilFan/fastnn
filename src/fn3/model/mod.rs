@@ -49,6 +49,10 @@
 //! [`Fn3Error::NotImplemented`] naming the owner; they never panic and never
 //! approximate.
 
+pub mod weights;
+
+pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::Arc;

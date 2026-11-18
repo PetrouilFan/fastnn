@@ -57,7 +57,7 @@ use crate::fn3::shape::{Shape, Symbol};
 
 use super::error::{Diagnostics, ImportProblemKind, NodeRef};
 use super::proto;
-use super::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
 /// Smallest ONNX IR version this importer accepts.
 ///

@@ -90,26 +90,20 @@
 //! to `f32` would be a silent numerical change. The mapping keeps `i64` intact
 //! and `tests/fn3_import.rs` pins the exact four nodes that need it.
 
-// The weight table lives in `model/` because the architecture decision reserves
-// `src/fn3/model/weights.rs` for this issue (it is typed weight data, not import
-// logic). `src/fn3/model/mod.rs` is owned by FN3-02 (#48) and does not declare
-// the module yet, so the file is wired in here. When the core owner adds
-// `pub mod weights;` to `model/mod.rs`, replace the two lines below with
-// `pub use crate::fn3::model::weights::{...}` and delete this comment.
-#[path = "../model/weights.rs"]
-mod weights;
-
 pub mod error;
 mod graph;
 mod proto;
 
+/// The weight table is typed weight data, not import logic, so it lives in
+/// `model/` (ADR §5 reserves `src/fn3/model/weights.rs` for this issue) and is
+/// re-exported here for import callers.
+pub use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 pub use error::{ImportError, ImportProblem, ImportProblemKind, NodeRef, ProtoError, MAX_PROBLEMS};
 pub use graph::{
     DecoderGeometry, Dim, GraphIr, GraphNode, ImportSummary, ImportWarning, ImportWarningKind,
     KvInterface, ModelImport, OpsetImport, PositionEmbedding, ValueId, ValueInfo, ValueOrigin,
     ValueShape, MAX_IR_VERSION, MAX_OPSET, MIN_IR_VERSION, MIN_OPSET,
 };
-pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
 /// Import an ONNX model from bytes.
 ///
