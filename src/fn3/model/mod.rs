@@ -49,6 +49,7 @@
 //! [`Fn3Error::NotImplemented`] naming the owner; they never panic and never
 //! approximate.
 
+pub mod format;
 pub mod weights;
 
 pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
