@@ -1,0 +1,113 @@
+; SPIR-V
+; Version: 1.3
+; Generator: Google Shaderc over Glslang; 11
+; Bound: 71
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %4 "main" %gl_GlobalInvocationID
+               OpExecutionMode %4 LocalSize 64 1 1
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %_struct_18 Block
+               OpMemberDecorate %_struct_18 0 Offset 0
+               OpMemberDecorate %_struct_18 1 Offset 4
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpDecorate %_struct_32 Block
+               OpMemberDecorate %_struct_32 0 NonReadable
+               OpMemberDecorate %_struct_32 0 Offset 0
+               OpDecorate %34 NonReadable
+               OpDecorate %34 Binding 3
+               OpDecorate %34 DescriptorSet 0
+               OpDecorate %_runtimearr_float_0 ArrayStride 4
+               OpDecorate %_struct_37 Block
+               OpMemberDecorate %_struct_37 0 NonWritable
+               OpMemberDecorate %_struct_37 0 Offset 0
+               OpDecorate %39 NonWritable
+               OpDecorate %39 Binding 0
+               OpDecorate %39 DescriptorSet 0
+               OpDecorate %_runtimearr_float_1 ArrayStride 4
+               OpDecorate %_struct_45 Block
+               OpMemberDecorate %_struct_45 0 NonWritable
+               OpMemberDecorate %_struct_45 0 Offset 0
+               OpDecorate %47 NonWritable
+               OpDecorate %47 Binding 1
+               OpDecorate %47 DescriptorSet 0
+               OpDecorate %_runtimearr_float_2 ArrayStride 4
+               OpDecorate %_struct_53 Block
+               OpMemberDecorate %_struct_53 0 NonWritable
+               OpMemberDecorate %_struct_53 0 Offset 0
+               OpDecorate %55 NonWritable
+               OpDecorate %55 Binding 2
+               OpDecorate %55 DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+      %float = OpTypeFloat 32
+ %_struct_18 = OpTypeStruct %uint %float
+%_ptr_PushConstant__struct_18 = OpTypePointer PushConstant %_struct_18
+         %20 = OpVariable %_ptr_PushConstant__struct_18 PushConstant
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
+       %bool = OpTypeBool
+%_runtimearr_float = OpTypeRuntimeArray %float
+ %_struct_32 = OpTypeStruct %_runtimearr_float
+%_ptr_StorageBuffer__struct_32 = OpTypePointer StorageBuffer %_struct_32
+         %34 = OpVariable %_ptr_StorageBuffer__struct_32 StorageBuffer
+%_runtimearr_float_0 = OpTypeRuntimeArray %float
+ %_struct_37 = OpTypeStruct %_runtimearr_float_0
+%_ptr_StorageBuffer__struct_37 = OpTypePointer StorageBuffer %_struct_37
+         %39 = OpVariable %_ptr_StorageBuffer__struct_37 StorageBuffer
+%_ptr_StorageBuffer_float = OpTypePointer StorageBuffer %float
+%_runtimearr_float_1 = OpTypeRuntimeArray %float
+ %_struct_45 = OpTypeStruct %_runtimearr_float_1
+%_ptr_StorageBuffer__struct_45 = OpTypePointer StorageBuffer %_struct_45
+         %47 = OpVariable %_ptr_StorageBuffer__struct_45 StorageBuffer
+%_runtimearr_float_2 = OpTypeRuntimeArray %float
+ %_struct_53 = OpTypeStruct %_runtimearr_float_2
+%_ptr_StorageBuffer__struct_53 = OpTypePointer StorageBuffer %_struct_53
+         %55 = OpVariable %_ptr_StorageBuffer__struct_53 StorageBuffer
+      %int_1 = OpConstant %int 1
+%_ptr_PushConstant_float = OpTypePointer PushConstant %float
+    %uint_64 = OpConstant %uint 64
+     %uint_1 = OpConstant %uint 1
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_64 %uint_1 %uint_1
+          %4 = OpFunction %void None %3
+          %5 = OpLabel
+               OpSelectionMerge %69 None
+               OpSwitch %uint_0 %70
+         %70 = OpLabel
+         %14 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %uint_0
+         %15 = OpLoad %uint %14
+         %24 = OpAccessChain %_ptr_PushConstant_uint %20 %int_0
+         %25 = OpLoad %uint %24
+         %27 = OpUGreaterThanEqual %bool %15 %25
+               OpSelectionMerge %29 None
+               OpBranchConditional %27 %28 %29
+         %28 = OpLabel
+               OpBranch %69
+         %29 = OpLabel
+         %42 = OpAccessChain %_ptr_StorageBuffer_float %39 %int_0 %15
+         %43 = OpLoad %float %42
+         %49 = OpAccessChain %_ptr_StorageBuffer_float %47 %int_0 %15
+         %50 = OpLoad %float %49
+         %51 = OpFMul %float %43 %50
+         %57 = OpAccessChain %_ptr_StorageBuffer_float %55 %int_0 %15
+         %58 = OpLoad %float %57
+         %59 = OpFAdd %float %51 %58
+         %62 = OpAccessChain %_ptr_PushConstant_float %20 %int_1
+         %63 = OpLoad %float %62
+         %64 = OpFAdd %float %59 %63
+         %65 = OpAccessChain %_ptr_StorageBuffer_float %34 %int_0 %15
+               OpStore %65 %64
+               OpBranch %69
+         %69 = OpLabel
+               OpReturn
+               OpFunctionEnd

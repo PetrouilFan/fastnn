@@ -1,0 +1,8 @@
+[fn3vk] fn3-vk-bringup 0.1.0 (ash 0.38.0, raw Vulkan loader)
+[fn3vk] loader instance API: 1.4.363
+[fn3vk] validation: disabled
+[fn3vk] selector: Uuid("471b2bda-51e1-6451-e692-ff5d1e146f1e")
+[fn3vk] physical devices: 2
+[fn3vk]   [0] NVIDIA GeForce GTX 1080 Ti               type=DISCRETE_GPU api=1.4.312 uuid=471b2bda-51e1-6451-e692-ff5d1e146f1e
+[fn3vk]   [1] llvmpipe (LLVM 23.1.4, 256 bits)         type=CPU api=1.4.354 uuid=6d657361-3236-2e32-2e37-2d6172636800
+[fn3vk][error] device "NVIDIA GeForce GTX 1080 Ti" does not expose required extension VK_EXT_mesh_shader (it exposes 214 device extensions; run --list to inspect them)

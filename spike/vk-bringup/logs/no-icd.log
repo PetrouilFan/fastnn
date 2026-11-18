@@ -1,0 +1,3 @@
+[fn3vk] fn3-vk-bringup 0.1.0 (ash 0.38.0, raw Vulkan loader)
+[fn3vk][error] vkCreateInstance failed: ERROR_INCOMPATIBLE_DRIVER (-9): requesting Vulkan 1.1 with layers [] and extensions []
+[fn3vk][hint] the loader found no usable Vulkan ICD; check VK_ICD_FILENAMES, /usr/share/vulkan/icd.d/ and `vulkaninfo --summary`

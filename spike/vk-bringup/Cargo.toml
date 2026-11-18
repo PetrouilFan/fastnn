@@ -1,0 +1,12 @@
+[package]
+name = "vk-bringup"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root: keeps this spike out of the repository workspace
+# so its manifest and lockfile cannot perturb the main crate.
+[workspace]
+
+[dependencies]
+ash = "0.38.0"
