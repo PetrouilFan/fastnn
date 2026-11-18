@@ -287,6 +287,38 @@ matrix, and clean install verification.
   for kernel chaining. Any claim of zero-copy residency on an op path is false
   until #58.
 
+## Whole-tree gate run (after #60 and #61 merged, HEAD `82e0003`)
+
+Run from the integration checkout with `CARGO_BUILD_JOBS=6`. Every line is an
+observed exit status, not a plan.
+
+| Check | Result |
+|---|---|
+| `cargo fmt --check` | clean |
+| `cargo build --no-default-features` | ok |
+| `cargo build` (default features) | ok |
+| `cargo build --no-default-features --features vulkan` | ok |
+| `cargo test --lib` | **613 passed** |
+| `cargo test --lib --no-default-features` | **596 passed** (one parallel run showed 595/1 — the known 2.x arena-telemetry flake; `--test-threads=1` is always green) |
+| `cargo test --test fn3_contracts` | 43 |
+| `cargo test --test fn3_tensor_storage` | 36 |
+| `cargo test --test fn3_cpu_reference` | 43 |
+| `cargo test --test fn3_ci_smoke` | 5 |
+| `cargo test --features vulkan --test fn3_vulkan_smoke` | 14 (physical GPU, validation 0/0) |
+| `cargo test --features vulkan --test fn3_vulkan_matmul` | 17 |
+| `cargo test --features vulkan --test fn3_vulkan_attention` | 19 |
+| `cargo test --bin fn3-bench` (release feature set) | 24 |
+
+Known non-blocking debt, both owned by #67:
+
+- `cargo clippy --all-targets -- -D warnings` still fails. `src/fn3` has
+  style-only lints carried in from #52/#53 — elidable lifetimes in
+  `backend/cpu/kernels/mod.rs`, `manual_implementation_of_is_multiple_of` in
+  `storage.rs` — plus intentional constant-folded shape arithmetic in
+  `tests/fn3_cpu_reference.rs`. None is a correctness or API finding.
+- `scripts/ci/check-agents-freshness.py` fails at base because `src/fn3/AGENTS.md`
+  contains a literal `"3.0"`.
+
 ## Alpha gate status
 
 | Gate | State |
