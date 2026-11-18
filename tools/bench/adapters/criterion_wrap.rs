@@ -202,6 +202,10 @@ fn collect_metrics(root: &Path, metrics: &mut Vec<Metric>) -> Result<(), String>
             "source".to_string(),
             "benches/cpu_baselines.rs via criterion".to_string(),
         );
+        metric.metadata.insert(
+            "warmup".to_string(),
+            "criterion-managed; warmup count is not recorded in sample.json".to_string(),
+        );
         metrics.push(metric);
     }
     Ok(())

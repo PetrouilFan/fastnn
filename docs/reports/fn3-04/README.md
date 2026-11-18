@@ -133,9 +133,11 @@ hidden [seq, 768] -> 12 x (pre-LN attention + pre-LN MLP) -> LN -> lm_head
 Attention is expressed with rank-2 matmuls per head, which is inside the
 operator set the existing CPU tests exercise. It is **unmasked full attention**
 (causal masking would not change the measured FLOPs), and there is **no KV
-cache** in 2.x, so decode is a one-token full-stack forward. These limitations
-are recorded in `notes` and metric metadata rather than presented as an
-incremental decoder.
+cache** in 2.x, so decode is a one-token full-stack forward. Graphs are
+statically shaped per sequence length: `context_capacity` equals the prompt
+length and the decode graph is built for one token. These limitations are
+recorded in `notes` and metric metadata rather than presented as an incremental
+decoder.
 
 ## GPU timing rule
 

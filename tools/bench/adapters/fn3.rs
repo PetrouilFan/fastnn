@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use super::{BenchConfig, Suite, SuiteOutcome};
+use std::collections::BTreeMap;
 
 /// Base revision of this worktree; recorded in the failure message so a result
 /// can never be mistaken for a fn3 measurement.
@@ -36,6 +37,12 @@ pub trait Fn3Runtime {
     fn last_device_time_ms(&self) -> Option<f64>;
     /// Peak device memory in bytes, when queryable.
     fn peak_device_memory_bytes(&self) -> Option<u64>;
+    /// Counters for the most recent operation (allocation count, arena copies,
+    /// ...). Returning `None` is acceptable and is reported as explicitly
+    /// unavailable, never as zero.
+    fn last_operation_counters(&self) -> Option<BTreeMap<String, u64>> {
+        None
+    }
 }
 
 /// Whether this build contains a linked fn3 runtime.

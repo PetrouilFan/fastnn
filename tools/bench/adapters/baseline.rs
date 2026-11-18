@@ -501,7 +501,7 @@ fn run_model_with_specs(
             .map_err(|error| format!("decode warmup execute failed: {error}"))?;
         black_box(out);
     }
-    let decode_steps = config.quick_samples(5, 30).max(1);
+    let decode_steps = config.samples.unwrap_or(config.decode_tokens.max(1)).max(1);
     let decode_warmup = config.quick_warmup(2, 5);
     let mut decode_samples = Vec::with_capacity(decode_steps as usize);
     let mut tls_alloc_samples = Vec::with_capacity(decode_steps as usize);
@@ -699,5 +699,48 @@ fn run_model_with_specs(
         "Attention is unmasked full attention; causal masking would not change the FLOPs measured here."
             .to_string(),
     );
+    outcome.notes.push(
+        "Graphs are statically shaped per sequence length; context_capacity equals the prefill prompt length and the decode graph is built for one token."
+            .to_string(),
+    );
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tiny_config(decode_tokens: u64) -> BenchConfig {
+        BenchConfig {
+            quick: true,
+            seed: 7,
+            prompt_tokens: 2,
+            layers: 1,
+            decode_tokens,
+            samples: None,
+            warmup: Some(0),
+            manifest_dir: PathBuf::from("."),
+            reuse_criterion: false,
+        }
+    }
+
+    #[test]
+    fn decode_token_count_controls_measured_steps() {
+        let outcome = run_tiny_model(&tiny_config(3), 2).expect("tiny model suite");
+        let metric = outcome
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "decode.per_token")
+            .expect("decode metric");
+        assert_eq!(metric.host_time.as_ref().unwrap().sample_count, 3);
+        assert_eq!(outcome.geometry.decode_tokens, 3);
+    }
+
+    #[test]
+    fn projection_shapes_are_gpt2_small() {
+        assert_eq!(PROJECTION_CASES[0].n_in, 768);
+        assert_eq!(PROJECTION_CASES[0].n_out, 2_304);
+        assert_eq!(PROJECTION_CASES[4].n_out, 50_257);
+    }
 }
