@@ -213,7 +213,9 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
         )
     })?;
     let weights = retag_weights(&weights, backend.device)?;
-    let plan = Planner::new(&import, backend.backend.as_ref())
+    // This internal plan only preflights the session-backed decoder; the
+    // session binds its own tokens and specializes again at each live shape.
+    let plan = Planner::for_session(&import, backend.backend.as_ref())
         .plan(&envelope, fixed_dims)
         .map_err(|error| plan_failure(&backend, error))?;
     let kv_config = geometry.kv_cache_config(capacity, 1);

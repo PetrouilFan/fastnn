@@ -1286,7 +1286,8 @@ pub fn load(
     // 5. Plan, weights, model.
     let import_arc = Arc::new(import);
     let backend_arc = backend;
-    let planner = Planner::new(import_arc.as_ref(), backend_arc.as_ref());
+    // Inference runs through Session, which owns its contiguous token binding.
+    let planner = Planner::for_session(import_arc.as_ref(), backend_arc.as_ref());
     let dims = LiveDims::new(
         1,
         1,
