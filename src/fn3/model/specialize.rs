@@ -764,6 +764,7 @@ impl<'a> Survey<'a> {
         // reshape leaves `Gather` reading the host `input_ids` graph-input
         // slot, which is the operand its host index validation requires.
         if let Some(source) = self.identity_reshape_source(node, &shapes) {
+            self.check_declared(node, node.outputs[0], &shapes[0])?;
             let root = self.alias_of[source.index()].unwrap_or(source);
             self.alias_of[node.outputs[0].index()] = Some(root);
             self.shapes[node.outputs[0].index()] = Some(shapes[0].clone());

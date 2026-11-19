@@ -36,7 +36,7 @@ use fastnn::fn3::import::{
 };
 use fastnn::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 use fastnn::fn3::model::{FoldKind, Plan, Planner, SlotRole};
-use fastnn::fn3::{CpuBackend, DType, LiveDims, OpId, OpParams, Shape};
+use fastnn::fn3::{CpuBackend, DType, Fn3Error, LiveDims, OpId, OpParams, Shape};
 
 const VOCAB: u64 = 4;
 const HIDDEN: u64 = 3;
@@ -64,6 +64,13 @@ fn params(axes: &[i64]) -> OpParams {
 
 /// A reshape of `[1, SEQ]` indices feeding a host-validated `Gather`.
 fn synthetic_import(reshape_dims: [u64; 2]) -> ModelImport {
+    synthetic_import_with_declared_shape(reshape_dims, reshape_dims)
+}
+
+fn synthetic_import_with_declared_shape(
+    reshape_dims: [u64; 2],
+    declared_dims: [u64; 2],
+) -> ModelImport {
     let values = vec![
         value("input_ids", DType::I64, &[1, SEQ], ValueOrigin::GraphInput),
         value(
@@ -81,7 +88,7 @@ fn synthetic_import(reshape_dims: [u64; 2]) -> ModelImport {
         value(
             "/Reshape_output_0",
             DType::I64,
-            &reshape_dims,
+            &declared_dims,
             ValueOrigin::Node(0),
         ),
         value(
@@ -350,6 +357,20 @@ fn identity_reshape_is_folded_and_gather_reads_the_graph_input_slot() {
 }
 
 #[test]
+fn identity_reshape_rejects_a_conflicting_declared_shape() {
+    let import = synthetic_import_with_declared_shape([1, SEQ], [SEQ, 1]);
+    let backend = CpuBackend::new();
+    let planner = Planner::new(&import, &backend);
+    let envelope = planner.envelope(1, SEQ, 0, SEQ).expect("envelope");
+    let result = planner.plan(&envelope, live_dims());
+    assert!(
+        matches!(&result, Err(Fn3Error::InvalidShape { context: "specialize::shape", detail })
+            if detail.contains("/Reshape_output_0") && detail.contains("the two must agree")),
+        "expected a declared reshape shape error, got {result:?}"
+    );
+}
+
+#[test]
 fn shape_changing_reshape_with_equal_element_count_keeps_its_own_slot() {
     let import = synthetic_import([SEQ, 1]);
     let backend = CpuBackend::new();
@@ -410,7 +431,7 @@ mod resident {
     use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
     use fastnn::fn3::device::DeviceRequest;
     use fastnn::fn3::model::ModelWeights;
-    use fastnn::fn3::{Backend, DeviceId, Fn3Error, Tensor, TensorMeta};
+    use fastnn::fn3::{Backend, DeviceId, Tensor, TensorMeta};
 
     fn require_physical() -> bool {
         std::env::var("FN3_VK_REQUIRE_PHYSICAL").as_deref() == Ok("1")
