@@ -41,6 +41,15 @@
 //! [`super::Instruction`] at all, and [`super::plan::Plan::folded`] records it
 //! as evidence.
 //!
+//! A second fold runs before that: a `Reshape` whose resolved shape is exactly
+//! its input's shape is an identity (**not** an arithmetic fold), so it emits
+//! no instruction and its value resolves to the input's slot. This is what
+//! leaves a `Gather` that indexes with `Reshape(input_ids)` reading the host
+//! graph-input slot it validates on the host, instead of a device-resident
+//! instruction output (FN3-26 / #72). The fold is restricted to a `Reshape`
+//! with the same shape, the same dtype and a non-graph-output value, so it can
+//! only remove a copy that was already a byte-for-byte alias.
+//!
 //! If an integer *arithmetic* node cannot fold (because one operand comes from
 //! a runtime tensor), the plan is refused with
 //! [`Fn3Error::UnsupportedOp`] naming the node and both owning issues. That is a
@@ -110,8 +119,8 @@ use crate::fn3::ops::OpId;
 use crate::fn3::shape::{DimBound, LiveDims, Shape, ShapeEnvelope, Symbol};
 
 use super::plan::{
-    BoundValue, Constant, ConstantData, FoldedNode, MaskConstant, MaskRole, Plan, PlanBound,
-    PlanParts, SlotPlan, SlotRole,
+    BoundValue, Constant, ConstantData, FoldKind, FoldedNode, MaskConstant, MaskRole, Plan,
+    PlanBound, PlanParts, SlotPlan, SlotRole,
 };
 use super::{ExecutionPlan, Instruction};
 
@@ -592,6 +601,12 @@ struct Survey<'a> {
     dims: LiveDims,
     shapes: Vec<Option<Shape>>,
     data: Vec<Option<ConstantData>>,
+    /// For an identity-folded value, the value whose slot it resolves to.
+    ///
+    /// The source is always a root (never another alias) and its `GraphIr`
+    /// position is lower, because the importer emits nodes in topological
+    /// order.
+    alias_of: Vec<Option<ValueId>>,
     attrs: Vec<Option<PlanAttr>>,
     surviving: Vec<u32>,
     folded: Vec<FoldedNode>,
@@ -608,6 +623,7 @@ impl<'a> Survey<'a> {
             dims,
             shapes: vec![None; count],
             data: vec![None; count],
+            alias_of: vec![None; count],
             attrs: vec![None; count],
             surviving: Vec::new(),
             folded: Vec::new(),
@@ -733,6 +749,31 @@ impl<'a> Survey<'a> {
                 name: node.name.clone(),
                 op: node.op,
                 outputs: node.outputs.iter().map(|id| id.index() as u32).collect(),
+                kind: FoldKind::Constant,
+            });
+            return Ok(());
+        }
+        // A `Reshape` that resolves to exactly its input's shape, dtype and
+        // element count is an identity: same row-major layout, no reorder, no
+        // broadcast, no conversion. It emits no instruction and produces no
+        // bytes; its value resolves to the input's slot. A graph output keeps
+        // its own binding and is never folded.
+        //
+        // This is also the fix for FN3-26 (#72): the trained GPT-2 feeds the
+        // `wte` `Gather` through `Reshape(input_ids, [1, 13])`. Folding the
+        // reshape leaves `Gather` reading the host `input_ids` graph-input
+        // slot, which is the operand its host index validation requires.
+        if let Some(source) = self.identity_reshape_source(node, &shapes) {
+            let root = self.alias_of[source.index()].unwrap_or(source);
+            self.alias_of[node.outputs[0].index()] = Some(root);
+            self.shapes[node.outputs[0].index()] = Some(shapes[0].clone());
+            self.data[node.outputs[0].index()] = None;
+            self.folded.push(FoldedNode {
+                onnx_index: node.onnx_index,
+                name: node.name.clone(),
+                op: node.op,
+                outputs: node.outputs.iter().map(|id| id.index() as u32).collect(),
+                kind: FoldKind::Identity,
             });
             return Ok(());
         }
@@ -745,6 +786,47 @@ impl<'a> Survey<'a> {
         self.attrs[node_index] = Some(attr);
         self.surviving.push(node_index as u32);
         Ok(())
+    }
+
+    /// The input value of a `Reshape` that is provably an identity.
+    ///
+    /// The proof is deliberately narrow:
+    ///
+    /// * the op is `Reshape` (which never reorders, broadcasts or converts);
+    /// * the planner's resolved output shape equals the resolved input shape,
+    ///   so every extent and the element count agree;
+    /// * the element type is unchanged;
+    /// * the value is not a graph output, which must keep its own slot binding.
+    ///
+    /// Every plan value is a contiguous row-major tensor, so equal shape and
+    /// dtype means the byte sequence is identical. There is no stride to
+    /// compare and no layout to preserve.
+    fn identity_reshape_source(&self, node: &GraphNode, shapes: &[Shape]) -> Option<ValueId> {
+        if node.op != OpId::Reshape {
+            return None;
+        }
+        let source = *node.inputs.first()?;
+        let [output] = node.outputs.as_slice() else {
+            return None;
+        };
+        if self.graph.outputs().contains(output) {
+            return None;
+        }
+        // The importer emits nodes in topological order, so an input's value
+        // position is lower. Refuse the fold rather than rely on it: the slot
+        // table resolves aliases in value order.
+        if source.index() >= output.index() {
+            return None;
+        }
+        let input = self.shapes[source.index()].as_ref()?;
+        let resolved = shapes.first()?;
+        if input != resolved {
+            return None;
+        }
+        if self.graph.value(source).dtype != self.graph.value(*output).dtype {
+            return None;
+        }
+        Some(source)
     }
 
     /// An integer op that survives folding may not be a *compute* op: the CPU
@@ -1448,13 +1530,37 @@ impl<'a> Survey<'a> {
             }
         }
         // Folded values are not written by an instruction; their slot is a
-        // constant (or, if dead, has no slot at all).
+        // constant (or, if dead, has no slot at all). An identity-folded value
+        // has no slot of its own either: it resolves to the slot of the value
+        // it aliases, so that source must stay live.
+        for index in 0..graph.value_count() {
+            if needed[index] {
+                if let Some(source) = self.alias_of[index] {
+                    needed[source.index()] = true;
+                }
+            }
+        }
 
         let mut slots: Vec<SlotPlan> = Vec::new();
         let mut constants: Vec<Constant> = Vec::new();
         let mut slot_of: Vec<Option<u32>> = vec![None; graph.value_count()];
         for (index, value) in graph.values().iter().enumerate() {
             if !needed[index] {
+                continue;
+            }
+            if let Some(source) = self.alias_of[index] {
+                slot_of[index] =
+                    Some(
+                        slot_of[source.index()].ok_or_else(|| Fn3Error::InvalidShape {
+                            context: "Survey::finish",
+                            detail: format!(
+                                "identity-folded value `{}` aliases `{}`, which has no slot; the \
+                             source must be marked needed before the slot table is built",
+                                value.name,
+                                graph.value(source).name
+                            ),
+                        })?,
+                    );
                 continue;
             }
             let shape = self.shapes[index]

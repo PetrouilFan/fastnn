@@ -36,10 +36,11 @@
 
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use fastnn::fn3::import::{import_onnx_file, ModelImport};
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session};
+use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session, SessionOptions};
 use fastnn::fn3::shape::ShapeEnvelope;
 use fastnn::fn3::{CpuBackend, DeviceId, LiveDims, Tensor, TensorMeta};
 
@@ -403,7 +404,18 @@ fn run_step(label: &str, what: &str, result: Result<Tensor, fastnn::fn3::Fn3Erro
     }
 }
 
-/// Run the pinned prompt and two decode steps on one backend.
+/// One executed arm: its JSON report and the logits of every phase. The
+/// resident-vs-staged gate proves residency from the backend's execution
+/// ledger, not from the returned tensor (a session's logits row is always an
+/// explicit host materialisation).
+struct Arm {
+    report: serde_json::Value,
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
+    logits: BTreeMap<String, Vec<f32>>,
+}
+
+/// Run the pinned prompt and two decode steps on one backend with the default
+/// (resident, when the backend supports it) session options.
 fn run(
     import: &ModelImport,
     backend: &dyn fastnn::fn3::Backend,
@@ -411,15 +423,58 @@ fn run(
     label: &str,
     out_dir: &Path,
     expected: &[(&str, &Path)],
-) -> serde_json::Value {
+) -> Arm {
+    run_with_options(
+        import,
+        backend,
+        device,
+        label,
+        out_dir,
+        expected,
+        SessionOptions::default(),
+    )
+}
+
+/// Run the pinned prompt and two decode steps with explicit session options.
+fn run_with_options(
+    import: &ModelImport,
+    backend: &dyn fastnn::fn3::Backend,
+    device: DeviceId,
+    label: &str,
+    out_dir: &Path,
+    expected: &[(&str, &Path)],
+    options: SessionOptions,
+) -> Arm {
     let (model, _envelope) = prepared(import, device, 32);
-    let mut session = Session::with_runtime(&model, import, backend).expect("session");
+    run_session(&model, import, backend, label, out_dir, expected, options)
+}
+
+/// Run one arm over an already-prepared model.
+///
+/// Both comparison arms share one `PreparedModel` on purpose: the persistent
+/// table is keyed by host allocation identity, and building a second model
+/// after the first is dropped can reuse an address and produce a false
+/// persistent hit. One immutable model is also what a real caller shares
+/// between sessions.
+fn run_session(
+    model: &PreparedModel,
+    import: &ModelImport,
+    backend: &dyn fastnn::fn3::Backend,
+    label: &str,
+    out_dir: &Path,
+    expected: &[(&str, &Path)],
+    options: SessionOptions,
+) -> Arm {
+    let mut session =
+        Session::with_runtime_options(model, import, backend, options).expect("session");
     let mut phases = serde_json::Map::new();
+    let mut captured = BTreeMap::new();
 
     let logits = run_step(label, "prefill", session.prefill(&PROMPT));
     let host = logits.to_host().expect("logits to host");
     let values = host.as_f32_slice().expect("host logits").to_vec();
     assert_eq!(values.len(), VOCAB);
+    captured.insert("prefill".to_string(), values.clone());
     write_f32(
         &out_dir.join(format!("{label}.prefill.p13.last_logits.f32")),
         &values,
@@ -449,6 +504,7 @@ fn run(
         let host = logits.to_host().expect("logits to host");
         let values = host.as_f32_slice().expect("host logits").to_vec();
         assert_eq!(values.len(), VOCAB);
+        captured.insert(format!("decode.step{step_number}"), values.clone());
         write_f32(
             &out_dir.join(format!("{label}.decode.step{step_number}.logits.f32")),
             &values,
@@ -494,7 +550,10 @@ fn run(
             );
         }
     }
-    serde_json::Value::Object(phases)
+    Arm {
+        report: serde_json::Value::Object(phases),
+        logits: captured,
+    }
 }
 
 #[test]
@@ -522,7 +581,7 @@ fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
     let mut report_json = serde_json::Map::new();
 
     let backend = CpuBackend::new();
-    let cpu = run(&import, &backend, DeviceId::Cpu, "cpu", &out, &expected);
+    let cpu = run(&import, &backend, DeviceId::Cpu, "cpu", &out, &expected).report;
     report_json.insert("cpu".to_string(), cpu);
 
     #[cfg(feature = "vulkan")]
@@ -564,7 +623,7 @@ fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
             backend.adapter().name,
             backend.adapter().uuid_string()
         );
-        let vulkan = run(&import, &*backend, device, "vulkan", &out, &expected);
+        let vulkan = run(&import, &*backend, device, "vulkan", &out, &expected).report;
         report_json.insert("vulkan".to_string(), vulkan);
     }
 
@@ -575,4 +634,390 @@ fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
     )
     .expect("write report");
     println!("wrote {}", report_path.display());
+}
+
+/// The reference's 5th-place gap: how far the 5th logit is ahead of the 6th.
+#[cfg(feature = "vulkan")]
+fn fifth_gap(reference: &[f32]) -> f64 {
+    let mut order: Vec<usize> = (0..reference.len()).collect();
+    order.sort_by(|&a, &b| reference[b].total_cmp(&reference[a]));
+    f64::from(reference[order[4]]) - f64::from(reference[order[5]])
+}
+
+/// The largest centred residual between two logit vectors.
+#[cfg(feature = "vulkan")]
+fn centered_max(actual: &[f32], reference: &[f32]) -> f64 {
+    let mean: f64 = actual
+        .iter()
+        .zip(reference)
+        .map(|(&got, &want)| f64::from(got) - f64::from(want))
+        .sum::<f64>()
+        / actual.len() as f64;
+    actual
+        .iter()
+        .zip(reference)
+        .map(|(&got, &want)| (f64::from(got) - f64::from(want) - mean).abs())
+        .fold(0.0f64, f64::max)
+}
+
+/// #68's margin rule, applied to a cross-arm comparison: a top-5 difference is
+/// only a failure when the reference's 5th-place gap is above twice the
+/// centred error, and a top-1 difference is never accepted.
+#[cfg(feature = "vulkan")]
+fn assert_cross_arm_agreement(label: &str, resident: &[f32], staged: &[f32]) {
+    let metrics = measure(resident, staged);
+    assert_eq!(
+        metrics.violations, 0,
+        "{label}: resident vs staged exceeded atol {ATOL:e} + rtol {RTOL:e} * |staged|"
+    );
+    assert_eq!(
+        metrics.top1, metrics.reference_top1,
+        "{label}: resident and staged disagree on top-1"
+    );
+    let gap = fifth_gap(staged);
+    let centered = centered_max(resident, staged);
+    if gap > 2.0 * centered {
+        assert!(
+            metrics.top5_overlap >= 4,
+            "{label}: top-5 overlap {} with a 5th-place gap of {gap:.3} and centred error \
+             {centered:.3e}",
+            metrics.top5_overlap
+        );
+    }
+    println!(
+        "{label}: resident vs staged max_abs {:.3e}, mean_abs {:.3e}, centered_rms {:.3e}, \
+         violations {}, top1 {}/{}, top5 {}/5, 5th gap {:.4}, centred max {:.3e}",
+        metrics.max_abs,
+        metrics.mean_abs,
+        metrics.centered_rms,
+        metrics.violations,
+        metrics.top1,
+        metrics.reference_top1,
+        metrics.top5_overlap,
+        gap,
+        centered
+    );
+}
+
+/// FN3-26 (#72) gate: the trained graph must run on the resident default *and*
+/// agree with the staged arm, on the named physical GPU.
+///
+/// This is the arm that failed before the identity-`Reshape` fold:
+/// `Gather(wte, Reshape(input_ids))` validated a device-resident index tensor on
+/// the host and returned `NotImplemented`. It is deliberately not a silent
+/// skip: `FN3_TRAINED_VULKAN=1` means "run on the physical GPU", and a missing
+/// device or a missing validation layer is a failure. The CPU arm is covered by
+/// `trained_gpt2_fp32_parity_cpu_and_vulkan`.
+#[test]
+#[ignore = "needs the 498,126,358-byte trained ONNX graph and a physical Vulkan device"]
+fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
+    let Some(path) = std::env::var("FN3_TRAINED_ONNX").ok().map(PathBuf::from) else {
+        println!(
+            "SKIP: FN3_TRAINED_ONNX is not set; the resident-vs-staged arm needs the pinned \
+             trained graph"
+        );
+        return;
+    };
+    if std::env::var("FN3_TRAINED_VULKAN").as_deref() != Ok("1") {
+        println!("SKIP: FN3_TRAINED_VULKAN is not 1; set it to run the GPU arm");
+        return;
+    }
+    assert!(
+        !matches!(
+            std::env::var("FN3_VK_STAGED").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        ),
+        "FN3_VK_STAGED is set; the comparison uses explicit SessionOptions, and the resident arm \
+         would be silently replaced by staging"
+    );
+
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    assert_eq!(bytes.len(), TRAINED_BYTES, "not the pinned trained graph");
+    assert_eq!(sha256(&bytes), TRAINED_SHA256, "wrong trained graph bytes");
+
+    #[cfg(not(feature = "vulkan"))]
+    {
+        panic!(
+            "FN3_TRAINED_VULKAN=1 but this test binary was built without the `vulkan` feature; \
+             build with --features vulkan"
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    {
+        use fastnn::fn3::backend::vulkan::instance::validation_counts;
+        use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+        use fastnn::fn3::device::DeviceRequest;
+        use fastnn::fn3::model::{FoldKind, SlotRole};
+        use fastnn::fn3::OpId;
+
+        let import = import_onnx_file(&path).expect("trained import");
+
+        let pinned = std::env::var("FN3_VK_DEVICE_UUID")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        let index = adapters()
+            .iter()
+            .find(|adapter| {
+                adapter.has_compute_queue()
+                    && !adapter.is_software()
+                    && pinned
+                        .as_deref()
+                        .map(|uuid| adapter.uuid_string().eq_ignore_ascii_case(uuid))
+                        .unwrap_or(true)
+            })
+            .map(|adapter| adapter.index)
+            .unwrap_or_else(|| {
+                panic!(
+                    "FN3_TRAINED_VULKAN=1 but no physical Vulkan compute device is present \
+                     (pinned uuid {pinned:?}); this gate does not skip"
+                )
+            });
+        let backend = VulkanBackend::open_with(
+            &DeviceRequest::Vulkan { index: Some(index) },
+            VulkanConfig::validated(),
+        )
+        .expect("open the physical Vulkan device");
+        assert!(!backend.is_software(), "the gate requires a real GPU");
+        assert!(
+            backend.validation_enabled(),
+            "the gate requires the validation layer"
+        );
+        println!(
+            "[fn3-72][trained] device=\"{}\" uuid={} validation={}",
+            backend.adapter().name,
+            backend.adapter().uuid_string(),
+            backend.validation_enabled()
+        );
+
+        // The plan-level fix, asserted before any step runs: the wte Gather
+        // consumes the host `input_ids` graph-input slot, and ONNX node 12
+        // (`Reshape(input_ids)`) is recorded as an identity fold.
+        let planner = Planner::new(&import, &*backend);
+        let envelope = planner.envelope(1, 13, 32, 33).expect("trained envelope");
+        for (seq, past) in [(13u64, 0u64), (1, 13)] {
+            let dims = live_dims(seq, past);
+            let plan = planner
+                .plan(&envelope, dims)
+                .expect("trained plan at prefill/decode dims");
+            let gather = plan
+                .instructions()
+                .iter()
+                .find(|instruction| {
+                    instruction.op == OpId::Gather
+                        && plan
+                            .slot(instruction.inputs[0])
+                            .map(|slot| slot.name() == "transformer.wte.weight")
+                            .unwrap_or(false)
+                })
+                .expect("the wte Gather is in the plan");
+            let index = plan.slot(gather.inputs[1]).expect("gather index slot");
+            assert_eq!(
+                index.role(),
+                &SlotRole::GraphInput,
+                "seq={seq} past={past}: the trained Gather must read host input_ids, got {:?}",
+                index.role()
+            );
+            assert_eq!(index.name(), "input_ids");
+            let folded = plan
+                .folded_node(12)
+                .expect("ONNX node 12 (Reshape(input_ids)) must be folded");
+            assert_eq!(folded.op, OpId::Reshape);
+            assert_eq!(folded.kind, FoldKind::Identity);
+            println!(
+                "[fn3-72][trained] seq={seq} past={past}: {} instructions, wte Gather index slot \
+                 {} is `{}` {:?}",
+                plan.instructions().len(),
+                gather.inputs[1],
+                index.name(),
+                index.role()
+            );
+        }
+
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2/tensors");
+        let prefill = root.join("prefill.p13.last_logits.f32");
+        let step1 = root.join("decode.step1.logits.f32");
+        let expected = [
+            ("prefill", prefill.as_path()),
+            ("decode.step1", step1.as_path()),
+        ];
+        let out = output_root().join("resident-vs-staged");
+        std::fs::create_dir_all(&out).expect("output root");
+
+        // One immutable model shared by both sessions: the persistent table is
+        // keyed by host allocation identity, so a second model built after the
+        // first is dropped could alias a freed address.
+        let (model, _envelope) = prepared(&import, backend.device_id(), 32);
+
+        let before = validation_counts();
+
+        // ---- resident (the default) --------------------------------------
+        backend.reset_residency_stats();
+        backend.residency().clear();
+        let resident = run_session(
+            &model,
+            &import,
+            &*backend,
+            "vulkan-resident",
+            &out,
+            &expected,
+            SessionOptions::default(),
+        );
+        // The ledger is the proof of *how* the arm ran: every resident record
+        // joined the step batch and proves device execution, no input was read
+        // back, and only the tiny graph-input uploads crossed from the host.
+        // (A `Gather` and the mask consumers legitimately stage their *graph
+        // input*; weights and intermediates do not.)
+        let resident_records = backend.residency().records();
+        assert!(!resident_records.is_empty(), "the resident arm ran nothing");
+        for record in &resident_records {
+            assert!(
+                record.batch.is_some(),
+                "resident op {} did not join the step batch",
+                record.op
+            );
+            assert!(
+                !record.inputs_read_back,
+                "resident op {} read an input back on the host",
+                record.op
+            );
+            assert!(
+                record.proves_device_execution(),
+                "resident op {} has no device-execution proof",
+                record.op
+            );
+        }
+        let resident_host_staged = resident_records
+            .iter()
+            .filter(|record| record.host_staged)
+            .count();
+        let resident_summary = backend.residency().summary();
+        assert_eq!(
+            resident_summary.input_readbacks, 0,
+            "the resident arm read a device input back on the host"
+        );
+        assert_eq!(
+            resident_summary.readback_bytes, 0,
+            "a resident op record read bytes back to the host; only the explicit logits row may"
+        );
+        assert!(
+            resident_summary.upload_bytes < 64 * 1024,
+            "the resident arm uploaded {} bytes; only graph inputs may cross the host bridge",
+            resident_summary.upload_bytes
+        );
+        println!(
+            "[fn3-72][trained][resident] steps=3 records={} host_staged_input_ops={} \
+             executions={} proven={} input_readbacks={} upload_bytes={} readback_bytes={}",
+            resident_records.len(),
+            resident_host_staged,
+            resident_summary.executions,
+            resident_summary.proven_device_executions,
+            resident_summary.input_readbacks,
+            resident_summary.upload_bytes,
+            resident_summary.readback_bytes
+        );
+
+        // ---- staged comparison arm ---------------------------------------
+        backend.reset_residency_stats();
+        backend.residency().clear();
+        let staged = run_session(
+            &model,
+            &import,
+            &*backend,
+            "vulkan-staged",
+            &out,
+            &expected,
+            SessionOptions::staged(),
+        );
+        let staged_records = backend.residency().records();
+        assert!(!staged_records.is_empty(), "the staged arm ran nothing");
+        for record in &staged_records {
+            assert!(
+                record.host_staged,
+                "staged arm kept op {} on the device",
+                record.op
+            );
+            assert!(
+                record.batch.is_none(),
+                "staged op {} unexpectedly joined a batch",
+                record.op
+            );
+        }
+        let staged_summary = backend.residency().summary();
+        println!(
+            "[fn3-72][trained][staged] steps=3 records={} executions={} proven={} \
+             input_readbacks={} upload_bytes={} readback_bytes={}",
+            staged_records.len(),
+            staged_summary.executions,
+            staged_summary.proven_device_executions,
+            staged_summary.input_readbacks,
+            staged_summary.upload_bytes,
+            staged_summary.readback_bytes
+        );
+
+        // ---- resident vs staged, per phase -------------------------------
+        let mut comparison = serde_json::Map::new();
+        for phase in ["prefill", "decode.step1", "decode.step2"] {
+            let resident_logits = resident
+                .logits
+                .get(phase)
+                .unwrap_or_else(|| panic!("resident {phase} logits"));
+            let staged_logits = staged
+                .logits
+                .get(phase)
+                .unwrap_or_else(|| panic!("staged {phase} logits"));
+            assert_cross_arm_agreement(
+                &format!("[fn3-72][trained] {phase}"),
+                resident_logits,
+                staged_logits,
+            );
+            // Every decode step's top-1 is asserted against the reference
+            // independently inside `report`; step 2 has no committed payload,
+            // so its reference is the manifest argmax and the staged arm.
+            let metrics = measure(resident_logits, staged_logits);
+            comparison.insert(
+                phase.to_string(),
+                serde_json::json!({
+                    "max_abs": metrics.max_abs,
+                    "mean_abs": metrics.mean_abs,
+                    "centered_rms": metrics.centered_rms,
+                    "elementwise_violations": metrics.violations,
+                    "top1_resident": metrics.top1,
+                    "top1_staged": metrics.reference_top1,
+                    "top5_overlap": metrics.top5_overlap,
+                }),
+            );
+        }
+
+        let after = validation_counts();
+        assert_eq!(
+            after, before,
+            "validation messages changed during the trained resident-vs-staged run"
+        );
+        println!(
+            "[fn3-72][trained] validation errors {} warnings {}",
+            after.0, after.1
+        );
+
+        let report_path = out.join("resident-vs-staged.json");
+        std::fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "device": {
+                    "name": backend.adapter().name,
+                    "uuid": backend.adapter().uuid_string(),
+                    "validation_errors": after.0,
+                    "validation_warnings": after.1,
+                },
+                "resident": resident.report,
+                "staged": staged.report,
+                "resident_vs_staged": comparison,
+            }))
+            .expect("json"),
+        )
+        .expect("write report");
+        println!("wrote {}", report_path.display());
+    }
 }

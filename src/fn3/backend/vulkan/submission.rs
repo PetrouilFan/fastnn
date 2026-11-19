@@ -38,12 +38,19 @@ use super::error::{check, Error, Result};
 
 /// Maximum descriptor sets one recording may allocate.
 ///
-/// A per-op recording needs one set; a step batch needs one per op of the plan
-/// (144 for the pinned decoder) with room to spare, because the transient pool
-/// cannot be reset while the batch is still recording.
-const DESCRIPTOR_SETS_PER_RECORDING: u32 = 640;
+/// A per-op recording needs one set; a step batch needs one per op of the plan.
+/// The trained GPT-2 decoder is 774 op records (the tiny model is 144), so the
+/// cap carries 32% headroom over the larger pinned graph. The transient pool
+/// cannot be reset while the batch is still recording, which is why the bound
+/// is reserved up front rather than grown.
+const DESCRIPTOR_SETS_PER_RECORDING: u32 = 1024;
 /// Timestamp pairs a step batch may record (one pair per op).
-const BATCH_QUERY_PAIRS: u32 = 512;
+///
+/// The same 774-record trained plan must fit in one submission; 1024 keeps the
+/// "one resident step is one submission" contract. If a device rejects the
+/// query pool, `Submitter::new` degrades to no device timings rather than
+/// failing, and the batch bound still holds.
+const BATCH_QUERY_PAIRS: u32 = 1024;
 /// Storage-buffer descriptors per set reserved in the transient pool.
 const STORAGE_DESCRIPTORS_PER_SET: u32 = 16;
 /// Uniform-buffer descriptors per set reserved in the transient pool.

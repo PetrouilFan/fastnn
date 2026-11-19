@@ -456,10 +456,22 @@ impl BoundValue {
 // Diagnostics recorded by the planner
 // ---------------------------------------------------------------------------
 
+/// Why a node was removed from the instruction list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldKind {
+    /// Evaluated at plan time; the result lives in [`Plan::constants`].
+    Constant,
+    /// Proven identical to one of its inputs, so its value resolves to that
+    /// input's slot. No bytes are produced and no instruction is emitted.
+    Identity,
+}
+
 /// An imported node the planner folded away instead of executing.
 ///
 /// This is the evidence that shape arithmetic never reaches a kernel: a folded
-/// node has no [`Instruction`], and its result lives in [`Plan::constants`].
+/// node has no [`Instruction`], and its result lives in [`Plan::constants`]
+/// ([`FoldKind::Constant`]) or in the slot of the value it aliases
+/// ([`FoldKind::Identity`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FoldedNode {
     /// `GraphNode::onnx_index` of the node that was folded.
@@ -470,6 +482,8 @@ pub struct FoldedNode {
     pub op: OpId,
     /// `GraphIr` value indices it produced.
     pub outputs: Vec<u32>,
+    /// Constant evaluation or proven identity.
+    pub kind: FoldKind,
 }
 
 /// Why a float constant is recorded as a mask value.

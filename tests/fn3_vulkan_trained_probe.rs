@@ -1,20 +1,23 @@
-//! FN3-30 (#76) diagnostic: name the instruction that fails on resident Vulkan.
+//! FN3-30 (#76) diagnostic turned regression probe: the trained GPT-2 on the
+//! resident Vulkan default.
 //!
-//! The trained GPT-2 runs on the GTX 1080 Ti with `FN3_VK_STAGED=1`, but the
-//! resident default fails inside `Session::prefill` with
-//! `NotImplemented { what: "reading a device-resident tensor through the host
-//! slice API" }`. This wrapper delegates every `Backend` call to the real
-//! Vulkan backend and prints the op and operand metadata, so the failure can be
-//! attributed to one instruction without editing `src/fn3/backend/**`.
+//! Before FN3-26 (#72)'s identity-`Reshape` fold, this run failed inside
+//! `Session::prefill` with `NotImplemented { what: "reading a device-resident
+//! tensor through the host slice API" }`: the trained `Gather` consumed
+//! `Reshape(input_ids, [1, 13])`, and the planner had placed that reshape's
+//! output in a device-resident slot. The wrapper delegates every `Backend` call
+//! to the real Vulkan backend and prints the op and operand metadata, so a
+//! future regression still names the instruction that failed.
+//!
+//! The probe now asserts the prefill succeeds and its top-1 is the pinned
+//! `640`. It does not set `FN3_VK_STAGED`; the default (resident) path is the
+//! subject.
 //!
 //! ```bash
 //! FN3_TRAINED_ONNX=/path/to/model.onnx FN3_VK_DEVICE_UUID=... \
 //!   cargo test --release --features vulkan --test fn3_vulkan_trained_probe \
 //!   -- --ignored --nocapture
 //! ```
-//!
-//! It proves a defect; it is not part of the passing gate. Remove or fold into
-//! the assigned fix once the resident path is repaired.
 
 #![cfg(feature = "vulkan")]
 
@@ -215,18 +218,22 @@ fn resident_vulkan_trained_prefill_names_the_failing_op() {
     match session.prefill(&PROMPT) {
         Ok(logits) => {
             let host = logits.to_host().expect("download");
-            println!(
-                "resident Vulkan trained prefill succeeded, argmax {}",
-                host.as_f32_slice()
-                    .expect("logits")
-                    .iter()
-                    .enumerate()
-                    .fold((0, f32::NEG_INFINITY), |best, (i, &v)| if v > best.1 {
+            let values = host.as_f32_slice().expect("logits");
+            let argmax = values
+                .iter()
+                .enumerate()
+                .fold((0, f32::NEG_INFINITY), |best, (i, &v)| {
+                    if v > best.1 {
                         (i, v)
                     } else {
                         best
-                    })
-                    .0
+                    }
+                })
+                .0;
+            println!("resident Vulkan trained prefill succeeded, argmax {argmax}");
+            assert_eq!(
+                argmax, 640,
+                "the pinned trained prompt's argmax changed on the resident path"
             );
         }
         Err(error) => {
