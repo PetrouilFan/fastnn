@@ -1,6 +1,9 @@
 # IO & Serialization
 
-Model persistence, format conversion, and serialization utilities in `fastnn.io`.
+Legacy 2.x model persistence, format conversion, and serialization in
+`fastnn.io`. The installed `fastnn-convert` command writes `.fnn` files. For
+3.0 decoder artifacts (`.fnn3`), use [`fastnn.inference`](python-api.md) or
+the [inference CLI](../quickstart-fn3.md).
 
 ## Save / Load
 
@@ -24,9 +27,7 @@ loaded_model = fnn.io.load("model.fnn")
 Use the loaded model for inference:
 
 ```python
-loaded_model.eval()
-with fnn.no_grad():
-    prediction = loaded_model(test_input)
+prediction = loaded_model(test_input)
 ```
 
 ## Format Conversion

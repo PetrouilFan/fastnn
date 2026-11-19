@@ -2,11 +2,16 @@
 
 Current development priorities and historical planning documents.
 
+The shipped product is the 3.0 inference runtime described in
+[FastNN 3.0 Architecture](fn3-architecture.md). Everything below the 3.0
+section is 2.x planning context; the retained surfaces and their callers are
+listed in the [2.x disposition](../internals/legacy-2x.md).
+
 ---
 
-## Current Focus
+## Historical 2.x Focus
 
-fastnn v2.6.0 is released. Current development is establishing an
+fastnn v2.6.0 was released from the 2.x line. That work established an
 architecture-neutral transformer and LLM runtime rather than adding a
 model-specific GPT-2 path.
 
