@@ -5,9 +5,9 @@
 `6389186d4599471c4cb3ebc1156a5c1b872cd423` (audited integration HEAD).
 **Worktree:** `/home/petrouil/Projects/github/fastnn-wt-trained-fp32`.
 **Commits:** `ea5e5f7` adds the tooling and the three ignored probes;
-`0c2ac8f` is this report and its reduced outputs. Branch HEAD is
-`0c2ac8f68f9e21b8ca13b8e0a7bb2c2924f6ae32`. Every commit carries
-`Refs #76, #68` and no auto-closing keyword.
+`0c2ac8f` adds this report and its reduced outputs. Later commits on the
+branch are documentation-only and do not change the evidence. Every commit
+carries `Refs #76, #68` and no auto-closing keyword.
 
 ## Decision summary
 
