@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "fastnn"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 dependencies = [
  "bincode",
  "bytemuck",

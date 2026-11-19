@@ -13,7 +13,7 @@ import numpy as np
 import fastnn._core as _core
 import fastnn.precision as precision
 
-__version__ = "3.0.0a1"
+__version__ = "3.0.0"
 
 # ---------------------------------------------------------------------------
 # Exception hierarchy (from Rust side)

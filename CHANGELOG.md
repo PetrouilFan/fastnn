@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.0.0]
+
 ### Changed
 - Migrate Rust imports from `fastnn::fn3` to `fastnn::inference`, Python
   imports from `fastnn.fn3` to `fastnn.inference`, and CLI invocations from

@@ -1,6 +1,6 @@
 [package]
 name = "fastnn"
-version = "3.0.0-alpha.1"
+version = "3.0.0"
 edition = "2021"
 autobenches = false
 description = "Inference-only neural networks in Rust: ONNX decoder import, prepared-model artifacts, and CPU or Vulkan prefill/decode."
@@ -156,4 +156,3 @@ path = "tools/bench/main.rs"
 name = "fastnn-infer"
 path = "src/bin/fastnn-infer.rs"
 required-features = ["cli"]
-

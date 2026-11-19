@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "fastnn"
-version = "3.0.0a1"
+version = "3.0.0"
 description = "Inference-only neural networks in Rust: ONNX decoder import, prepared-model artifacts, and CPU or Vulkan prefill/decode."
 readme = "README.md"
 license = "MIT"
