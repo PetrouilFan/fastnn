@@ -559,12 +559,16 @@ corrected in place with the old figures kept and labelled.
   per-instruction kernels are too short to hold a boost state. Host wall time is
   the comparable metric. Pinning the clock needs root: owner decision.
 - **A release wheel cannot pass on an import alone.** `--require-inference`
-  makes a missing pinned model a failure in `wheel_smoke.py` (exit 2, named
-  path) and `packaging_lane.py` (exit 1 before the build, with the pinned URL
-  and sha256). The release workflow fetches the model from the URL derived from
-  `fixtures/parity/tiny-gpt2/model.lock.json` and verifies size and sha256; a
-  fetch failure is a named `::error::pinned-model` failure. The local default
-  stays non-strict and records `not_run` with its reason.
+  makes a missing pinned model a failure before installation: the lane exits 1
+  with the expected path (or the unset `FASTNN_FN3_ONNX_MODEL`), the pinned URL
+  and its sha256. The installed wheel then prepares a `.fnn3` and replays CPU
+  FP32 prefill/decode in a second process that has only the artifact, no
+  `source=`, and asserts `loaded.source is None`. The release workflow fetches
+  the model from the URL derived from `fixtures/parity/tiny-gpt2/model.lock.json`,
+  verifies size and sha256, and fails closed unless `wheel-inference.json`
+  records `strict: true` and `status: passed`. Inference is env-only: a local
+  run without `FASTNN_FN3_ONNX_MODEL` attempts nothing and records `not_run`
+  with its reason.
 - **The crate package is trimmed and described.** `cargo package` ships 306
   files / 1.0 MiB (was 672 / 3.1 MiB) with no fixtures, models, docs, tests or
   artifacts; `cargo publish --dry-run` stops at upload with no manifest

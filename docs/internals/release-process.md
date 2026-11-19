@@ -73,16 +73,31 @@ workflow first fetches `onnx/model.onnx` from the revision recorded in
 
 The lane then runs
 `python tools/ci/packaging_lane.py --skip-build --require-inference`. With that
-flag a missing model is a failure: `wheel_smoke.py` exits 2, the lane exits 1,
-and the built-in smoke requires the installed wheel to prepare, load, prefill
-and decode the pinned graph and reproduce top-5
-`[46737, 28597, 16571, 7868, 13]`.
+flag a missing model fails the lane before wheel installation. The lane
+installs the wheel in a fresh virtualenv outside the checkout and checks that
+both the Python facade and native extension import from that environment.
+The installed wheel verifies the staged ONNX size and SHA-256 and prepares a
+new `.fnn3`. The lane then removes the staging directory and starts a separate
+isolated Python process with only the artifact in its working directory and
+no ONNX argument or model environment variable. It loads without `source=` on
+the explicit CPU device and asserts `loaded.source is None`, finite FP32
+logits, prefill top-5 `[46737, 28597, 16571, 7868, 13]`, and KV cache growth.
+The three decode inputs are the separate tokens `640, 11, 612` (not the
+10-token prefill prompt); their top-1 results `[32493, 11724, 612]` correspond
+to cache lengths 11, 12 and 13. The workflow uploads the JSON evidence,
+including the observed source state and both digests, but no model bytes.
 
-Local runs keep the non-strict default. `python3 tools/ci/packaging_lane.py`
-with no model prints a skip reason, writes `status: skipped` with
-`strict: false`, records the `wheel_inference` check as `not_run`, and exits 0.
-That is a packaging check, not a release gate, and the distinction is recorded
-in `tools/ci/lanes.json`.
+Inference is opt-in through `FASTNN_FN3_ONNX_MODEL`; there is no default model
+path. A local run without it prints the unset reason, writes `status: not_run`
+with `strict: false`, records the `wheel_inference` check as `not_run`, and
+exits 0. Hosted packaging CI names an absent path explicitly so `not_run` is
+deterministic. That is a packaging check, not a release gate, and the
+distinction is recorded in `tools/ci/lanes.json`.
+
+This is the `tiny-gpt2-cpu-fp32` Python-wheel case only. A future quantized CLI
+release gate must add a separate required case with its own pinned inputs,
+packaged CLI, source-free replay and quantized acceptance oracle; CPU FP32
+success is not evidence for that case, trained models, or Vulkan.
 
 ## How to Run a Release
 
