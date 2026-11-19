@@ -265,6 +265,7 @@ matrix, and clean install verification.
 | `f772f10` | #65 | wgpu + training removed, inference surface promoted (`43396e5`) | lib 673 (37 training tests enumerated), ten fn3 binaries unchanged, 10/10 e2e on the GTX 1080 Ti, 0/0 validation, no wgpu in `cargo tree` |
 | `1cebabd` | #62 | end-to-end on CPU and the physical GPU merged (`44081e0`) | 10 e2e tests, 719/719 proven executions, 0 readbacks, validation 0/0 |
 | `0becaca` | #52/#57/#62 fix | device errors name the request in any configuration | lib 710 default / 753 vulkan / 690 no-default |
+| `d0c7b00` | #67 | alpha candidate: versions, wheel smoke, clippy zero, fn3 bench adapter | lib 673, 10 fn3 binaries, 378 pytest, wheel top-5 exact, clippy clean in six configurations, GPU e2e 10/10 with 0/0 validation; see `docs/reports/fn3-21-alpha-release.md` |
 | `db94d6c` | #64 | Python facade `fastnn.fn3` merged (`1e32752`) | 27 Python tests, 710 lib, 43 contracts, 36 storage, 5 ci-smoke; wheel installed in a clean venv outside the checkout reproduces the CLI's top-5 exactly |
 | `117e51a` | #61 | Vulkan norm/softmax/reduce/fused-attention merged (`c69a890`) | 19 attention tests, 14/14 smoke, 41 platform, 43 contracts; all-masked row exactly [0.25;4] |
 | `82e0003` | #46 | ledger: #61 state, fused-id decision, gate rows | n/a |
@@ -442,7 +443,10 @@ fact to be copied into code or a report.
 ## Remote state (owner authorised writes)
 
 `rewrite/fastnn-3` is pushed to `origin` and tracks it; `origin/rewrite/fastnn-3`
-is `0becaca1c6c4044ac60ea266bcb0a5b94f9b4261`. No PR to `main` was created and
+is `0becaca1c6c4044ac60ea266bcb0a5b94f9b4261`. The #67 candidate
+(`fn3/67-alpha-release`, `d0c7b00`) is **local only**: this issue performed no
+push, tag, package upload, pull request or merge. The owner actions are listed
+in `docs/reports/fn3-21-alpha-release.md`. No PR to `main` was created and
 `main` is untouched, so the original prohibition on merging into `main` still
 holds. **Nineteen issues are closed as completed** (#47-#64 except none, plus
 #66) each with an evidence comment naming the branch HEAD and the measured
