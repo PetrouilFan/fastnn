@@ -31,10 +31,10 @@ Session.reset() -> None
 ```python
 import fastnn.inference as fn3
 
-report = fn3.prepare("model.onnx", "model.fn3prep")
+report = fn3.prepare("model.onnx", "model.fnn3")
 print(report.status, report.size_bytes, report.sha256)
 
-model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
 session = model.session()
 logits = session.prefill([464, 2068, 7586, 21831])
 print(int(logits.argmax()), session.cache_len)

@@ -20,7 +20,7 @@ deleted in FN3-19 (#65); the pinned 2.x revision `a2c0759` is the archive.
 
 - [Tensors](reference/tensors.md) — inference tensor creation, operations, devices and NumPy interop
 - [Neural Network Modules](reference/nn-modules.md) — forward layer reference (Linear, Conv, Normalization, etc.)
-- [IO & Serialization](reference/io.md) — save/load models, ONNX import, `.fnn` and `.fn3prep` artifacts
+- [IO & Serialization](reference/io.md) — save/load models, ONNX import, `.fnn` and `.fnn3` artifacts
 - [API Reference](reference/api-reference.md) — forward Rust and Python API
 - [Python API](reference/python-api.md) — the `fastnn.inference` inference surface
 

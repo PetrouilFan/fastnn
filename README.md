@@ -32,7 +32,7 @@ no wgpu backend in this tree.
 - **Strict ONNX import** — a bounds-checked protobuf reader maps the pinned
   GPT-2 decoder to a bounded graph, folds integer shape arithmetic at plan
   time, and rejects unsupported ops by name.
-- **Versioned artifact** — the `.fn3prep` payload carries a format version,
+- **Versioned artifact** — the `.fnn3` payload carries a format version,
   dtype codes, the value/node tables and weight bytes with CRC and SHA-256
   verification.
 - **CPU + Vulkan** — a portable FP32 reference backend, plus Vulkan transform,
@@ -63,10 +63,10 @@ The Python package is built with `maturin` and exposes the Rust extension as
 ```python
 import fastnn.inference as fn3
 
-report = fn3.prepare("model.onnx", "model.fn3prep")
+report = fn3.prepare("model.onnx", "model.fnn3")
 print(report.status, report.geometry)
 
-model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
 session = model.session()
 
 logits = session.prefill([464, 2068, 7586, 21831])
@@ -85,10 +85,10 @@ raises `Fn3DeviceError`; it never falls back to CPU.
 
 ```bash
 cargo build --release --no-default-features --features cli --bin fastnn-infer
-./target/release/fastnn-infer prepare --onnx model.onnx --out model.fn3prep
-./target/release/fastnn-infer inspect model.fn3prep
-./target/release/fastnn-infer run --model model.fn3prep --onnx model.onnx --tokens 464,2068,7586
-./target/release/fastnn-infer generate --model model.fn3prep --onnx model.onnx --tokens 464,2068 --steps 4
+./target/release/fastnn-infer prepare --onnx model.onnx --out model.fnn3
+./target/release/fastnn-infer inspect model.fnn3
+./target/release/fastnn-infer run --model model.fnn3 --onnx model.onnx --tokens 464,2068,7586
+./target/release/fastnn-infer generate --model model.fnn3 --onnx model.onnx --tokens 464,2068 --steps 4
 ```
 
 ### Rust
@@ -98,7 +98,7 @@ use fastnn::inference::model::PreparedModel;
 use fastnn::inference::DeviceRequest;
 
 let request = DeviceRequest::parse("cpu")?;
-let model = PreparedModel::load("model.fn3prep", None, request)?;
+let model = PreparedModel::load("model.fnn3", None, request)?;
 let mut session = model.session()?;
 let logits = session.prefill(&[464, 2068, 7586, 21831])?;
 ```

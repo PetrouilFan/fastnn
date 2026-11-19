@@ -27,6 +27,23 @@ fn fastnn_infer_binary_help() {
     assert!(help.contains("fastnn-infer <command> [options]"), "{help}");
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn fastnn_infer_binary_inspect_missing_file() {
+    let directory = scratch("binary-inspect-missing");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fastnn-infer"))
+        .arg("inspect")
+        .arg(directory.join("missing.fnn3"))
+        .output();
+    std::fs::remove_dir(&directory).expect("remove scratch directory");
+    let output = output.expect("launch fastnn-infer inspect");
+    assert_eq!(output.status.code(), Some(EXIT_MODEL), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("fastnn-infer prepare"), "{stderr}");
+    assert!(!stderr.contains("fn3-infer"), "{stderr}");
+}
+
 /// Bytes and FNV-1a fingerprint of the pinned graph, matching `fn3_session`.
 const PINNED_BYTES: usize = 27_897_974;
 const PINNED_FNV1A: u64 = 0xc294_d3ab_837f_b1be;

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Migrate Rust imports from `fastnn::fn3` to `fastnn::inference`, Python
+  imports from `fastnn.fn3` to `fastnn.inference`, and CLI invocations from
+  `fn3-infer` to `fastnn-infer`. The old names are not aliases. Existing
+  `.fnn3` artifacts and plan fingerprints are unchanged.
+
 ## [3.0.0-alpha.1] - 2026-11-19
 
 The first 3.0 alpha. The crate is `3.0.0-alpha.1`; the Python wheel is

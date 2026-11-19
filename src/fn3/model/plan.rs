@@ -706,7 +706,8 @@ impl Plan {
     /// Fingerprint over everything that determines execution.
     fn compute_identity(&self) -> PlanId {
         let mut digest = Digest::new();
-        digest.write(b"fastnn.inference.plan.v1");
+        // This digest domain is independent of the public module name.
+        digest.write(b"fastnn.fn3.plan.v1");
         digest.text(self.backend);
         digest.envelope(&self.envelope);
         digest.dims(&self.dims);

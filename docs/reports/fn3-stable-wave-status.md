@@ -614,6 +614,10 @@ Open: **#70, #74, #75, #76**; deferred and untouched: **#77 (CUDA)** and
 
 ## 9. Stable-gate checklist (#76)
 
+> **Naming recommendation superseded:** the canonical names are now
+> `fastnn::inference`, `fastnn.inference`, and `fastnn-infer`. The checklist
+> below remains a snapshot of the original report.
+
 | Item | State |
 |---|---|
 | Exact final candidate SHA | pending; current HEAD `a3e9723` is not the stable candidate |

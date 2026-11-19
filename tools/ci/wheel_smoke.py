@@ -192,8 +192,20 @@ def main(argv: list[str] | None = None) -> int:
     # The shipped Python surface is the 3.0 inference API. It must import
     # without a model and without a GPU.
     import fastnn.inference as fn3
+    import fastnn._core.inference as core_inference
+    from importlib import import_module
 
-    if fn3.Session is not fastnn._core.inference.Session:
+    for obsolete in ("fastnn.fn3", "fastnn._core.fn3"):
+        try:
+            import_module(obsolete)
+        except ModuleNotFoundError as exc:
+            if exc.name != obsolete:
+                raise
+        else:
+            print(f"FAIL: obsolete inference module {obsolete} still imports", file=sys.stderr)
+            return 1
+
+    if fn3.Session is not core_inference.Session:
         print("FAIL: fastnn.inference.Session is not fastnn._core.inference.Session", file=sys.stderr)
         return 1
     devices = fn3.devices()

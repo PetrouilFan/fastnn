@@ -463,6 +463,10 @@ was moved to active.
 
 ## Alpha scope decision recorded at #65
 
+> **Superseded for public naming:** use `fastnn::inference`,
+> `fastnn.inference`, and `fastnn-infer`. The alpha decision below is retained
+> as history; the rename does not change `.fnn3` artifacts or move `src/fn3/`.
+
 FN3-19 was written when 3.0 was expected to move `src/fn3/` to the crate root
 and drop the `fn3` prefix. The ADR still says so. That rename did **not**
 happen, and the reason is recorded here rather than left as an omission: the

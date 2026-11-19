@@ -12,11 +12,11 @@ Prepare once, then load and run::
 
     import fastnn.inference as fn3
 
-    report = fn3.prepare("model.onnx", "model.fn3prep")
+    report = fn3.prepare("model.onnx", "model.fnn3")
     print(report.status, report.size_bytes, report.sha256)
     # created 27879928 dc03b3c2...     (the artifact's digest, not the ONNX's)
 
-    model = fn3.load("model.fn3prep", source="model.onnx", device="cpu")
+    model = fn3.load("model.fnn3", source="model.onnx", device="cpu")
     session = model.session()
     logits = session.prefill(prompt_token_ids)
     print(int(logits.argmax()), session.cache_len)   # 257 13
@@ -180,7 +180,7 @@ def load(
     Parameters
     ----------
     artifact:
-        Path of a ``.fn3prep`` artifact produced by :func:`prepare`.
+        Path of a ``.fnn3`` artifact produced by :func:`prepare`.
     source:
         Optional path of the ONNX file the artifact was prepared from. When
         given, the two files are proved to describe the same model before
