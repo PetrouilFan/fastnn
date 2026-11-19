@@ -1,0 +1,543 @@
+{
+  "backends": [
+    {
+      "backend": "cpu",
+      "correctness": {
+        "decode_argmax_per_step": [
+          [
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493
+          ],
+          [
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724
+          ],
+          [
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612
+          ]
+        ],
+        "expected_top5": [
+          46737,
+          28597,
+          16571,
+          7868,
+          13
+        ],
+        "prefill_top5": [
+          46737,
+          28597,
+          16571,
+          7868,
+          13
+        ]
+      },
+      "decode": {
+        "argmax_per_step": [
+          [
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493,
+            32493
+          ],
+          [
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724,
+            11724
+          ],
+          [
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612,
+            612
+          ]
+        ],
+        "device_ms_per_iteration": {
+          "reason": "a decode step reported no device timestamp",
+          "status": "unavailable"
+        },
+        "host": {
+          "max": 266.263804,
+          "mean": 206.02943831666673,
+          "min": 152.11329500000002,
+          "n": 60,
+          "p50": 204.935556,
+          "p95": 227.837726,
+          "percentile_rule": "nearest-rank, rank = ceil(p/100 * n), 1-based over sorted samples",
+          "samples_ms": [
+            198.189635,
+            204.935556,
+            206.05194,
+            204.40204500000002,
+            195.710378,
+            199.69298,
+            196.853802,
+            197.948815,
+            206.970852,
+            208.205316,
+            207.287114,
+            201.707846,
+            196.259609,
+            198.519147,
+            195.105206,
+            198.330616,
+            210.254473,
+            220.343443,
+            220.888285,
+            217.172473,
+            195.732889,
+            205.486668,
+            205.809079,
+            206.19545,
+            216.69248299999998,
+            201.587996,
+            202.586239,
+            189.83398000000003,
+            211.31544599999998,
+            152.11329500000002,
+            227.711185,
+            193.58262200000001,
+            158.535784,
+            197.05585200000002,
+            228.000557,
+            208.991119,
+            213.658683,
+            222.073889,
+            227.837726,
+            209.39036,
+            200.058031,
+            216.06423999999998,
+            204.014684,
+            226.91514400000003,
+            195.941489,
+            195.77196899999998,
+            195.766478,
+            196.18905,
+            206.33307100000002,
+            217.94334600000002,
+            227.393845,
+            203.244571,
+            194.634705,
+            193.296481,
+            197.69841399999999,
+            210.055932,
+            210.55855300000002,
+            266.263804,
+            234.230056,
+            210.371603
+          ]
+        },
+        "per_step": [
+          {
+            "context_after_step": 11,
+            "counters": {
+              "reason": "the CPU backend keeps no residency ledger: it has no queue submissions, no upload/readback transfers and no device timestamps",
+              "status": "unavailable"
+            },
+            "device": {
+              "reason": "only 0/20 phases reported a device timestamp for every record; the backend has no device clock for the rest",
+              "status": "unavailable"
+            },
+            "host": {
+              "max": 220.888285,
+              "mean": 204.24147655000004,
+              "min": 195.105206,
+              "n": 20,
+              "p50": 201.707846,
+              "p95": 220.343443,
+              "percentile_rule": "nearest-rank, rank = ceil(p/100 * n), 1-based over sorted samples",
+              "samples_ms": [
+                198.189635,
+                204.935556,
+                206.05194,
+                204.40204500000002,
+                195.710378,
+                199.69298,
+                196.853802,
+                197.948815,
+                206.970852,
+                208.205316,
+                207.287114,
+                201.707846,
+                196.259609,
+                198.519147,
+                195.105206,
+                198.330616,
+                210.254473,
+                220.343443,
+                220.888285,
+                217.172473
+              ]
+            },
+            "past": 10,
+            "step": 1,
+            "token": 640
+          },
+          {
+            "context_after_step": 12,
+            "counters": {
+              "reason": "the CPU backend keeps no residency ledger: it has no queue submissions, no upload/readback transfers and no device timestamps",
+              "status": "unavailable"
+            },
+            "device": {
+              "reason": "only 0/20 phases reported a device timestamp for every record; the backend has no device clock for the rest",
+              "status": "unavailable"
+            },
+            "host": {
+              "max": 228.000557,
+              "mean": 203.70956510000002,
+              "min": 152.11329500000002,
+              "n": 20,
+              "p50": 205.809079,
+              "p95": 227.837726,
+              "percentile_rule": "nearest-rank, rank = ceil(p/100 * n), 1-based over sorted samples",
+              "samples_ms": [
+                195.732889,
+                205.486668,
+                205.809079,
+                206.19545,
+                216.69248299999998,
+                201.587996,
+                202.586239,
+                189.83398000000003,
+                211.31544599999998,
+                152.11329500000002,
+                227.711185,
+                193.58262200000001,
+                158.535784,
+                197.05585200000002,
+                228.000557,
+                208.991119,
+                213.658683,
+                222.073889,
+                227.837726,
+                209.39036
+              ]
+            },
+            "past": 11,
+            "step": 2,
+            "token": 11
+          },
+          {
+            "context_after_step": 13,
+            "counters": {
+              "reason": "the CPU backend keeps no residency ledger: it has no queue submissions, no upload/readback transfers and no device timestamps",
+              "status": "unavailable"
+            },
+            "device": {
+              "reason": "only 0/20 phases reported a device timestamp for every record; the backend has no device clock for the rest",
+              "status": "unavailable"
+            },
+            "host": {
+              "max": 266.263804,
+              "mean": 210.1372733,
+              "min": 193.296481,
+              "n": 20,
+              "p50": 204.014684,
+              "p95": 234.230056,
+              "percentile_rule": "nearest-rank, rank = ceil(p/100 * n), 1-based over sorted samples",
+              "samples_ms": [
+                200.058031,
+                216.06423999999998,
+                204.014684,
+                226.91514400000003,
+                195.941489,
+                195.77196899999998,
+                195.766478,
+                196.18905,
+                206.33307100000002,
+                217.94334600000002,
+                227.393845,
+                203.244571,
+                194.634705,
+                193.296481,
+                197.69841399999999,
+                210.055932,
+                210.55855300000002,
+                266.263804,
+                234.230056,
+                210.371603
+              ]
+            },
+            "past": 12,
+            "step": 3,
+            "token": 612
+          }
+        ],
+        "tokens_per_second_p50": 4.879582730875652
+      },
+      "device": "cpu",
+      "label": "cpu",
+      "memory": {
+        "device": {
+          "reason": "the CPU backend has no device allocator; device memory is not a metric it can report and it is never zero-filled",
+          "status": "unavailable"
+        },
+        "host_source": "/proc/self/status VmHWM (process high-water) and VmRSS",
+        "peak_host_rss_bytes": 93204480,
+        "rss_at_end_bytes": 93204480,
+        "rss_before_run_bytes": 60915712
+      },
+      "plan": {
+        "cached": 4,
+        "evictions_after_warmup": 0,
+        "evictions_total": 0,
+        "hits_after_warmup": 8,
+        "hits_total": 88,
+        "kv_bytes": 26624,
+        "misses_after_warmup": 4,
+        "misses_total": 4,
+        "slot_allocations": 8073,
+        "slot_reuses": 5543
+      },
+      "prefill": {
+        "counters": {
+          "reason": "the CPU backend keeps no residency ledger: it has no queue submissions, no upload/readback transfers and no device timestamps",
+          "status": "unavailable"
+        },
+        "device": {
+          "reason": "only 0/20 phases reported a device timestamp for every record; the backend has no device clock for the rest",
+          "status": "unavailable"
+        },
+        "host": {
+          "max": 319.752678,
+          "mean": 287.08217295,
+          "min": 223.06398199999998,
+          "n": 20,
+          "p50": 288.312071,
+          "p95": 307.80249999999995,
+          "percentile_rule": "nearest-rank, rank = ceil(p/100 * n), 1-based over sorted samples",
+          "samples_ms": [
+            279.851776,
+            285.720423,
+            287.031118,
+            294.027729,
+            319.752678,
+            279.558634,
+            274.72781000000003,
+            278.491551,
+            289.423235,
+            297.18027800000004,
+            295.87579400000004,
+            291.79867199999995,
+            276.718305,
+            223.06398199999998,
+            288.312071,
+            275.757563,
+            301.383291,
+            295.117972,
+            300.04807700000003,
+            307.80249999999995
+          ]
+        },
+        "tokens_per_second_p50": 34.68463864629518
+      },
+      "prepare": {
+        "ms": 8.984456999999999,
+        "n": 1,
+        "what": "Planner + envelope + host weights + PreparedModel; a single shot, not a percentile"
+      },
+      "transfers": {
+        "measured_total": {
+          "executions": 0,
+          "input_readbacks": 0,
+          "iterations": 20,
+          "proven_device_executions": 0,
+          "readback_bytes": 0,
+          "submissions": 0,
+          "upload_bytes": 0
+        },
+        "one_chain": {
+          "readback_bytes": 0,
+          "submissions": 0,
+          "upload_bytes": 0,
+          "what": "prefill(10) + three cached decode steps, iteration 1"
+        },
+        "status": "unavailable"
+      },
+      "validation": {
+        "reason": "no Vulkan device in this run",
+        "status": "unavailable"
+      }
+    }
+  ],
+  "command": "cargo test --release --features vulkan --test fn3_alpha_bench -- --nocapture --test-threads=1 (FN3_BENCH_BACKEND=cpu, run 2)",
+  "crate_version": "3.0.0-alpha.1",
+  "evidence": true,
+  "features": {
+    "vulkan": true
+  },
+  "generated_unix_s": 1795075726,
+  "host": {
+    "arch": "x86_64",
+    "cpu_model": "AMD Ryzen 7 3700X 8-Core Processor",
+    "loadavg_end": "5.77 5.58 3.87 6/1932 1191877",
+    "loadavg_start": "6.37 5.68 3.86 4/1896 1191621",
+    "logical_cpus": 16,
+    "os": "linux",
+    "peak_host_rss_bytes": 93204480,
+    "rss_at_end_bytes": 93204480
+  },
+  "model": {
+    "bytes": 27897974,
+    "geometry": {
+      "head_dim": 64,
+      "hidden_size": 128,
+      "kv_heads": 2,
+      "layers": 2,
+      "mlp_hidden_size": 512,
+      "query_heads": 2,
+      "vocab_size": 50257
+    },
+    "load_ms": 8.916667,
+    "load_what": "read the ONNX file, verify it against the lock, parse/import the graph; single shot",
+    "lock": "fixtures/parity/tiny-gpt2/model.lock.json",
+    "path": "/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx",
+    "revision": "90f61e71d6fa8e571d0ab0f95a637a5d7d8ed52f",
+    "sha256": "e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1"
+  },
+  "profile": "release",
+  "purpose": "matched release-build baseline for the FastNN 3.0 alpha handoff",
+  "report": "fn3-21-alpha-followup",
+  "schema": 1,
+  "timing": {
+    "device_clock": "Vulkan: sum of per-instruction timestamp queries recorded by the residency ledger (gpu_ns), so kernel time only, not host submission gaps or fences. CPU: unavailable, the backend has no device clock.",
+    "host_clock": "std::time::Instant (monotonic) around Session::prefill/decode plus acquisition of the returned logits slice; top-k is computed outside the timed region",
+    "host_clock_covers": "call entry to logits available on the host",
+    "iterations": 20,
+    "warmups": 3
+  },
+  "workload": {
+    "decode_context_lengths_after_each_step": [
+      11,
+      12,
+      13
+    ],
+    "decode_tokens": [
+      640,
+      11,
+      612
+    ],
+    "kv_capacity_tokens": 13,
+    "measured_iterations": 20,
+    "prompt_length": 10,
+    "prompt_tokens": [
+      464,
+      2068,
+      7586,
+      21831,
+      18045,
+      625,
+      262,
+      16931,
+      3290,
+      13
+    ],
+    "reset_note": "reset() keeps the KV buffers and the four cached plans and clears the value-slot pool; every measured prefill therefore runs at (seq=10, past=0) and every measured decode at past=10,11,12",
+    "session_reset_between_iterations": true,
+    "warmup_iterations": 3
+  }
+}
