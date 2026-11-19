@@ -16,11 +16,8 @@
 //! input_ids [1, 13] i64 ──► Reshape([1, 13]) ──► Gather(wte, axis 0) ──► [1, 13, 3] f32
 //! ```
 //!
-//! The planner test proves the structural fold in any feature configuration.
-//! The Vulkan test executes the plan with the resident session's allocation and
-//! batching policy (`allocate_resident` for every instruction output,
-//! `begin_step(..., batch = true)`), asserts the exact output, and asserts that
-//! the index operand is the host `input_ids` slot with no input readback.
+//! The public planner retains the copy for external slot bindings. The
+//! resident session folds it because it owns the contiguous token binding.
 //!
 //! ```bash
 //! FN3_VK_DEVICE_UUID=471b2bda-51e1-6451-e692-ff5d1e146f1e \
@@ -34,14 +31,16 @@ use fastnn::fn3::import::{
     PositionEmbedding, ValueInfo, ValueOrigin, ValueShape,
 };
 use fastnn::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
-use fastnn::fn3::model::{FoldKind, Plan, Planner, SlotRole};
-use fastnn::fn3::{CpuBackend, DType, LiveDims, OpId, OpParams, Shape};
+use fastnn::fn3::model::{Plan, Planner, SlotRole};
+use fastnn::fn3::{
+    CpuBackend, DType, DeviceId, Fn3Error, LiveDims, OpId, OpParams, Shape, Strides, Tensor,
+    TensorMeta,
+};
 
 const VOCAB: u64 = 4;
 const HIDDEN: u64 = 3;
 const SEQ: u64 = 13;
 /// Deliberately includes every row and repeats, so a permutation cannot pass.
-#[cfg(feature = "vulkan")]
 const TOKENS: [i64; SEQ as usize] = [0, 3, 1, 0, 2, 3, 0, 1, 3, 2, 0, 1, 3];
 
 fn shape(dims: &[u64]) -> Shape {
@@ -61,9 +60,15 @@ fn params(axes: &[i64]) -> OpParams {
     OpParams::new().with_axes(axes.iter().copied())
 }
 
-/// A graph with exactly one thing to prove: `Reshape(input_ids)` is an
-/// identity in front of a host-validated `Gather`.
-fn synthetic_import() -> ModelImport {
+/// A reshape of `[1, SEQ]` indices feeding a host-validated `Gather`.
+fn synthetic_import(reshape_dims: [u64; 2]) -> ModelImport {
+    synthetic_import_with_declared_shape(reshape_dims, reshape_dims)
+}
+
+fn synthetic_import_with_declared_shape(
+    reshape_dims: [u64; 2],
+    declared_dims: [u64; 2],
+) -> ModelImport {
     let values = vec![
         value("input_ids", DType::I64, &[1, SEQ], ValueOrigin::GraphInput),
         value(
@@ -81,13 +86,13 @@ fn synthetic_import() -> ModelImport {
         value(
             "/Reshape_output_0",
             DType::I64,
-            &[1, SEQ],
+            &declared_dims,
             ValueOrigin::Node(0),
         ),
         value(
             "logits",
             DType::F32,
-            &[1, SEQ, HIDDEN],
+            &[reshape_dims[0], reshape_dims[1], HIDDEN],
             ValueOrigin::Node(1),
         ),
     ];
@@ -131,9 +136,9 @@ fn synthetic_import() -> ModelImport {
         })
         .collect();
     let table_bytes = table.iter().flat_map(|value| value.to_le_bytes()).collect();
-    let target_bytes: Vec<u8> = [1i64, SEQ as i64]
+    let target_bytes: Vec<u8> = reshape_dims
         .iter()
-        .flat_map(|value| value.to_le_bytes())
+        .flat_map(|&value| (value as i64).to_le_bytes())
         .collect();
     let weights = WeightSet::new(vec![
         WeightTensor::new(
@@ -193,7 +198,6 @@ fn live_dims() -> LiveDims {
     LiveDims::new(1, SEQ, 0, 1, 1, 1).expect("synthetic dims")
 }
 
-#[cfg(feature = "vulkan")]
 fn expected_output() -> Vec<f32> {
     TOKENS
         .iter()
@@ -297,54 +301,98 @@ fn gather_instruction(plan: &Plan) -> &fastnn::fn3::Instruction {
 }
 
 #[test]
-fn identity_reshape_is_folded_and_gather_reads_the_graph_input_slot() {
-    let import = synthetic_import();
+fn public_reshape_copies_strided_inputs_for_both_execution_entry_points() {
+    let import = synthetic_import([1, SEQ]);
     let backend = CpuBackend::new();
     let planner = Planner::new(&import, &backend);
     let envelope = planner.envelope(1, SEQ, 0, SEQ).expect("envelope");
     let plan = planner.plan(&envelope, live_dims()).expect("plan");
 
-    // The reshape emits no instruction and has no slot of its own ...
-    assert_eq!(
-        plan.instructions().len(),
-        1,
-        "the identity Reshape must not survive as an instruction"
-    );
-    assert!(
-        plan.instructions()
-            .iter()
-            .all(|instruction| instruction.op != OpId::Reshape),
-        "a Reshape instruction survived the identity fold"
-    );
-    let folded = plan
-        .folded_node(0)
-        .expect("ONNX node 0 (Reshape) must be recorded as folded");
-    assert_eq!(folded.op, OpId::Reshape);
-    assert_eq!(
-        folded.kind,
-        FoldKind::Identity,
-        "the fold is an identity alias, not constant evaluation"
-    );
-    assert!(
-        plan.slot_of("/Reshape_output_0").is_none(),
-        "the folded value must not own a slot"
-    );
-
-    // ... so Gather's index operand is the host `input_ids` slot itself.
+    assert!(plan.folded_node(0).is_none());
+    let reshape = &plan.instructions()[0];
+    assert_eq!(reshape.op, OpId::Reshape);
+    let input = plan.input("input_ids").expect("input").slot() as usize;
+    let reshaped = reshape.outputs[0] as usize;
     let gather = gather_instruction(&plan);
-    let index = plan.slot(gather.inputs[1]).expect("index slot");
-    assert_eq!(
-        index.role(),
-        &SlotRole::GraphInput,
-        "Gather indices must be host-visible; got role {:?}",
-        index.role()
+    assert_eq!(gather.inputs[1] as usize, reshaped);
+    assert_ne!(input, reshaped);
+
+    let padded: Vec<_> = TOKENS.iter().flat_map(|&token| [token, i64::MAX]).collect();
+    let storage = Tensor::from_i64(shape(&[2 * SEQ]), &padded).expect("padded tokens");
+    let meta = TensorMeta::strided(
+        shape(&[1, SEQ]),
+        Strides::from_elements(vec![2 * SEQ as i64, 2]),
+        0,
+        DType::I64,
+        DeviceId::Cpu,
+    )
+    .expect("strided token metadata");
+    let tokens = Tensor::from_storage(storage.storage().clone(), meta).expect("strided tokens");
+    assert!(!tokens.as_view().expect("token view").is_contiguous());
+    let weights = import.to_model_weights().expect("weights");
+    for use_execution in [false, true] {
+        let mut slots = plan.materialise(&weights, DeviceId::Cpu).expect("slots");
+        slots[input] = Some(tokens.clone());
+        if use_execution {
+            plan.execution()
+                .execute(&backend, &mut slots)
+                .expect("execution().execute");
+        } else {
+            plan.execute(&backend, &mut slots).expect("Plan::execute");
+        }
+        assert_eq!(
+            slots[reshaped].as_ref().unwrap().as_i64_slice().unwrap(),
+            &TOKENS
+        );
+        assert_eq!(
+            slots[gather.outputs[0] as usize]
+                .as_ref()
+                .unwrap()
+                .as_f32_slice()
+                .unwrap(),
+            expected_output()
+        );
+    }
+}
+
+#[test]
+fn identity_reshape_rejects_a_conflicting_declared_shape() {
+    let import = synthetic_import_with_declared_shape([1, SEQ], [SEQ, 1]);
+    let backend = CpuBackend::new();
+    let planner = Planner::new(&import, &backend);
+    let envelope = planner.envelope(1, SEQ, 0, SEQ).expect("envelope");
+    let result = planner.plan(&envelope, live_dims());
+    assert!(
+        matches!(&result, Err(Fn3Error::InvalidShape { context: "specialize::shape", detail })
+            if detail.contains("/Reshape_output_0") && detail.contains("the two must agree")),
+        "expected a declared reshape shape error, got {result:?}"
     );
-    assert_eq!(index.name(), "input_ids");
-    assert_eq!(index.shape().dims(), &[1, SEQ]);
+}
+
+#[test]
+fn shape_changing_reshape_with_equal_element_count_keeps_its_own_slot() {
+    let import = synthetic_import([SEQ, 1]);
+    let backend = CpuBackend::new();
+    let planner = Planner::new(&import, &backend);
+    let envelope = planner.envelope(1, SEQ, 0, SEQ).expect("envelope");
+    let plan = planner.plan(&envelope, live_dims()).expect("plan");
+
+    assert_eq!(plan.instructions().len(), 2);
+    assert!(plan.folded_node(0).is_none());
+    let reshape = &plan.instructions()[0];
+    assert_eq!(reshape.op, OpId::Reshape);
+    let input_slot = plan.input("input_ids").expect("graph input").slot();
+    assert_eq!(reshape.inputs[0], input_slot);
+    let reshaped_slot = reshape.outputs[0];
+    assert_ne!(reshaped_slot, input_slot);
+    let reshaped = plan.slot(reshaped_slot).expect("reshape output slot");
+    assert_eq!(reshaped.name(), "/Reshape_output_0");
+    assert_eq!(reshaped.shape().dims(), &[SEQ, 1]);
     assert_eq!(
-        index.name(),
-        plan.input("input_ids").expect("graph input").name()
+        reshaped.role(),
+        &SlotRole::InstructionOutput { instruction: 0 }
     );
+    assert_eq!(gather_instruction(&plan).inputs[1], reshaped_slot);
 }
 
 #[test]
@@ -381,8 +429,104 @@ mod resident {
     use fastnn::fn3::backend::vulkan::instance::validation_counts;
     use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
     use fastnn::fn3::device::DeviceRequest;
-    use fastnn::fn3::model::ModelWeights;
-    use fastnn::fn3::{Backend, DeviceId, Tensor, TensorMeta};
+    use fastnn::fn3::import::{KvInterface, ValueId};
+    use fastnn::fn3::model::{ModelWeights, PreparedModel, Session};
+
+    // Supply the decoder interface needed by a real prefill. The cache has
+    // one lane and both key and value use the same synthetic present tensor.
+    fn session_import(declared_dims: [u64; 2]) -> ModelImport {
+        let import = synthetic_import_with_declared_shape([1, SEQ], declared_dims);
+        let mut geometry = import.geometry().clone();
+        let (graph, weights) = import.into_parts();
+        let mut values = graph.values().to_vec();
+        let mut nodes = graph.nodes().to_vec();
+        let mut inputs = graph.inputs().to_vec();
+        let mut outputs = graph.outputs().to_vec();
+        for (name, dtype, dims) in [
+            ("position_ids", DType::I64, vec![1, SEQ]),
+            ("attention_mask", DType::I64, vec![1, SEQ]),
+            ("past_key", DType::F32, vec![1, 1, 0, 1]),
+            ("past_value", DType::F32, vec![1, 1, 0, 1]),
+        ] {
+            inputs.push(ValueId::new(values.len() as u32));
+            values.push(value(name, dtype, &dims, ValueOrigin::GraphInput));
+        }
+        let past_key = inputs[3];
+        let past_value = inputs[4];
+        outputs.push(past_value);
+        let chunk = ValueId::new(values.len() as u32);
+        let cache_dims = [1, 1, SEQ, 1];
+        values.push(value(
+            "cache_chunk",
+            DType::F32,
+            &cache_dims,
+            ValueOrigin::Weight(WeightId::new(2)),
+        ));
+        let present = ValueId::new(values.len() as u32);
+        values.push(value(
+            "present",
+            DType::F32,
+            &cache_dims,
+            ValueOrigin::Node(2),
+        ));
+        nodes.push(GraphNode {
+            onnx_index: 2,
+            name: "Concat".into(),
+            onnx_op: "Concat".into(),
+            op: OpId::Concat,
+            inputs: vec![past_key, chunk],
+            outputs: vec![present],
+            params: params(&[2]),
+        });
+        outputs.push(present);
+        for (name, input) in [("positions", inputs[1]), ("mask", inputs[2])] {
+            let output = ValueId::new(values.len() as u32);
+            let node = nodes.len() as u32;
+            values.push(value(name, DType::F32, &[1, SEQ], ValueOrigin::Node(node)));
+            nodes.push(GraphNode {
+                onnx_index: node,
+                name: name.into(),
+                onnx_op: "Cast".into(),
+                op: OpId::Cast,
+                inputs: vec![input],
+                outputs: vec![output],
+                params: OpParams::new(),
+            });
+            outputs.push(output);
+        }
+        geometry.kv.push(KvInterface {
+            past_key,
+            past_value,
+            present_key: present,
+            present_value: present,
+        });
+        let mut weights: Vec<_> = weights.iter().cloned().collect();
+        weights.push(
+            WeightTensor::new(
+                "cache_chunk",
+                DType::F32,
+                shape(&cache_dims),
+                vec![0; SEQ as usize * 4],
+                WeightSource::Initializer,
+            )
+            .expect("cache chunk"),
+        );
+        ModelImport::from_parts(
+            GraphIr::from_parts(values, nodes, inputs, outputs),
+            WeightSet::new(weights).expect("weights"),
+            geometry,
+            ModelProvenance {
+                ir_version: 8,
+                opset: OpsetImport {
+                    domain: String::new(),
+                    version: 14,
+                },
+                producer: "synthetic session test".into(),
+                producer_version: "1".into(),
+                graph_name: "synthetic_reshape_session".into(),
+            },
+        )
+    }
 
     fn require_physical() -> bool {
         std::env::var("FN3_VK_REQUIRE_PHYSICAL").as_deref() == Ok("1")
@@ -430,53 +574,6 @@ mod resident {
         ModelWeights::with_names(named).expect("weights share one device")
     }
 
-    /// Allocate every slot as a resident session does: graph inputs stay for
-    /// the caller to bind, weights share the model's storage, and every
-    /// instruction output is a device buffer.
-    fn materialise_resident(
-        plan: &Plan,
-        weights: &ModelWeights,
-        backend: &VulkanBackend,
-    ) -> Vec<Option<Tensor>> {
-        let device = backend.device_id();
-        let mut slots = Vec::with_capacity(plan.slots().len());
-        for slot in plan.slots() {
-            let tensor = match slot.role() {
-                SlotRole::GraphInput => None,
-                SlotRole::Weight { id } => {
-                    let tensor = weights.get(id.index()).expect("weight").clone();
-                    assert_eq!(tensor.dtype(), slot.dtype());
-                    assert_eq!(tensor.shape(), slot.shape());
-                    Some(tensor)
-                }
-                SlotRole::Constant { index } => {
-                    let tensor = plan.constants()[*index as usize]
-                        .to_tensor()
-                        .expect("constant tensor");
-                    let meta = TensorMeta::contiguous(slot.shape().clone(), slot.dtype(), device)
-                        .expect("constant metadata");
-                    Some(
-                        Tensor::from_storage(tensor.storage().clone(), meta)
-                            .expect("re-tagged constant"),
-                    )
-                }
-                SlotRole::InstructionOutput { .. } => {
-                    if slot.shape().numel().expect("slot elements") > 0 {
-                        Some(
-                            backend
-                                .allocate_resident(slot.shape(), slot.dtype())
-                                .expect("resident output"),
-                        )
-                    } else {
-                        None
-                    }
-                }
-            };
-            slots.push(tensor);
-        }
-        slots
-    }
-
     #[test]
     fn resident_gather_reads_host_input_ids_after_the_fold() {
         let Some(backend) = open_physical() else {
@@ -501,103 +598,66 @@ mod resident {
         );
         let before = validation_counts();
 
-        let import = synthetic_import();
-        let planner = Planner::new(&import, backend.as_ref());
+        let import = session_import([1, SEQ]);
+        let cpu = CpuBackend::new();
+        let planner = Planner::new(&import, &cpu);
         let envelope = planner.envelope(1, SEQ, 0, SEQ).expect("envelope");
         let plan = planner.plan(&envelope, live_dims()).expect("plan");
-        let gather_position = plan
-            .instructions()
-            .iter()
-            .position(|instruction| instruction.op == OpId::Gather)
-            .expect("the plan has a Gather instruction");
-        let gather = &plan.instructions()[gather_position];
-        let index_slot = gather.inputs[1];
-        let index = plan.slot(index_slot).expect("index slot");
-
         let device = backend.device_id();
         let weights = retag(&import.to_model_weights().expect("weights"), device);
-        backend
-            .as_ref()
-            .prepare_persistent(&persistent_weights(&weights))
-            .expect("persistent weights");
-        let mut slots = materialise_resident(&plan, &weights, &backend);
-
-        let tokens = Tensor::from_i64(shape(&[1, SEQ]), &TOKENS).expect("token tensor");
-        let tokens = Tensor::from_storage(
-            tokens.storage().clone(),
-            TensorMeta::contiguous(shape(&[1, SEQ]), DType::I64, device).expect("token metadata"),
+        let model = PreparedModel::new(
+            plan.execution().clone(),
+            weights,
+            device,
+            envelope,
+            Some(import.geometry().kv_cache_config(SEQ, 1)),
         )
-        .expect("retag tokens");
-        slots[plan
-            .input("input_ids")
-            .expect("input_ids is a graph input")
-            .slot() as usize] = Some(tokens);
-
-        // The resident session's execution shape: every output is a device
-        // buffer and the whole plan records into one submission.
-        backend
-            .as_ref()
-            .begin_step("synthetic-prefill", true)
-            .expect("begin step");
-        let executed = plan.execute(&*backend, &mut slots);
-        let closed = backend.as_ref().end_step();
-        match executed {
-            Ok(()) => {}
-            Err(error) => {
-                panic!(
-                    "resident plan execution failed: {error}; the Gather index slot is {:?} \
-                     (device_resident={})",
-                    index.role(),
-                    slots[index_slot as usize]
-                        .as_ref()
-                        .map(Tensor::is_device_resident)
-                        .unwrap_or(false)
-                );
-            }
-        }
-        closed.expect("end step");
-
-        // The execution succeeded; now prove *why*: the reshape was folded and
-        // the Gather index operand is the host graph input, not a device slot.
+        .expect("prepared model");
+        let mut session =
+            Session::with_runtime(&model, &import, backend.as_ref()).expect("session");
+        let tokens = TOKENS.map(|token| token as u32);
+        let logits = session
+            .prefill(&tokens)
+            .expect("resident Gather needs host indices");
+        let expected = expected_output();
+        let values = logits.as_f32_slice().expect("f32 logits");
+        assert_eq!(values, &expected[expected.len() - HIDDEN as usize..]);
+        assert_eq!(logits.shape().dims(), &[1, 1, HIDDEN]);
         assert_eq!(
-            plan.instructions().len(),
-            1,
-            "after the identity fold the synthetic plan contains only the Gather"
+            session.slot_allocations(),
+            4,
+            "Gather, Concat and two casts, but no Reshape"
         );
-        assert_eq!(
-            index.role(),
-            &SlotRole::GraphInput,
-            "the resident plan must read host indices, not a device slot"
-        );
-        assert_eq!(index.name(), "input_ids");
-        assert_eq!(
-            plan.folded_node(0).expect("Reshape fold").kind,
-            FoldKind::Identity
-        );
-
         let summary = backend.residency().summary();
         assert_eq!(
             summary.input_readbacks, 0,
             "a batched resident step read a device tensor back on the host"
         );
-        assert_eq!(summary.executions, 1);
-        assert_eq!(summary.proven_device_executions, 1);
-
-        let downloaded = slots[gather.outputs[0] as usize]
-            .as_ref()
-            .expect("Gather wrote its output")
-            .to_host()
-            .expect("download the explicit result");
-        let values = downloaded.as_f32_slice().expect("f32 logits");
-        assert_eq!(
-            values,
-            expected_output().as_slice(),
-            "the gathered rows are not the exact table rows in token order"
+        let mut rejected =
+            Session::with_runtime(&model, &import, backend.as_ref()).expect("session");
+        let mut invalid = tokens;
+        invalid[SEQ as usize - 1] = VOCAB as u32;
+        let result = rejected.prefill(&invalid);
+        assert!(
+            matches!(
+                result,
+                Err(Fn3Error::OutOfBounds {
+                    what: "gather index",
+                    index: VOCAB,
+                    len: VOCAB
+                })
+            ),
+            "expected Gather's typed bounds error, got {result:?}"
         );
-        assert_eq!(
-            downloaded.shape().dims(),
-            &[1, SEQ, HIDDEN],
-            "Gather output shape"
+
+        let malformed_import = session_import([SEQ, 1]);
+        let mut malformed =
+            Session::with_runtime(&model, &malformed_import, backend.as_ref()).expect("session");
+        let result = malformed.prefill(&tokens);
+        assert!(
+            matches!(&result, Err(Fn3Error::InvalidShape { context: "specialize::shape", detail })
+                if detail.contains("/Reshape_output_0") && detail.contains("the two must agree")),
+            "expected a declared shape error from the session planner, got {result:?}"
         );
 
         let after = validation_counts();
@@ -613,11 +673,5 @@ mod resident {
             after.0,
             after.1
         );
-    }
-
-    fn persistent_weights(weights: &ModelWeights) -> Vec<&Tensor> {
-        (0..weights.len())
-            .filter_map(|index| weights.get(index))
-            .collect()
     }
 }

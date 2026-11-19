@@ -355,12 +355,28 @@ impl PlanAttr {
 pub struct Planner<'a> {
     import: &'a ModelImport,
     backend: &'a dyn Backend,
+    session_token_aliases: bool,
 }
 
 impl<'a> Planner<'a> {
     /// Bind a planner to an import and the backend that will run its plans.
     pub fn new(import: &'a ModelImport, backend: &'a dyn Backend) -> Planner<'a> {
-        Planner { import, backend }
+        Planner {
+            import,
+            backend,
+            session_token_aliases: false,
+        }
+    }
+
+    /// Session-only specialization: `Session` owns the binding for `input_ids`
+    /// and always supplies a contiguous, host-backed I64 tensor. Use only for
+    /// session execution or internal preflight for a session-backed entry point,
+    /// never for a plan that accepts caller-supplied slot tensors.
+    pub(crate) fn for_session(import: &'a ModelImport, backend: &'a dyn Backend) -> Self {
+        Self {
+            session_token_aliases: true,
+            ..Self::new(import, backend)
+        }
     }
 
     /// The imported model.
@@ -425,8 +441,9 @@ impl<'a> Planner<'a> {
 
     /// Specialise the model for one concrete shape environment.
     ///
-    /// This is the entry point #58 (session), #62 (end-to-end) and #63 (CLI)
-    /// call. The plan is deterministic: the same import, envelope and dims
+    /// Public planners keep reshape copies because execution accepts externally
+    /// bound tensors, which need not have contiguous layout. The plan is
+    /// deterministic: the same import, envelope and dims
     /// always produce an equal [`Plan`] with the same
     /// [`identity`](Plan::identity).
     pub fn plan(&self, envelope: &ShapeEnvelope, dims: LiveDims) -> Result<Plan, Fn3Error> {
@@ -434,7 +451,7 @@ impl<'a> Planner<'a> {
         envelope.check(&dims)?;
         envelope.check_consistency(&dims)?;
         self.check_geometry(&dims)?;
-        let survey = Survey::resolve(self.import, dims)?;
+        let survey = Survey::resolve(self.import, dims, self.session_token_aliases)?;
         survey.finish(self.backend, *envelope)
     }
 
@@ -599,6 +616,7 @@ struct Survey<'a> {
     graph: &'a GraphIr,
     weights: &'a WeightSet,
     dims: LiveDims,
+    session_token_aliases: bool,
     shapes: Vec<Option<Shape>>,
     data: Vec<Option<ConstantData>>,
     /// For an identity-folded value, the value whose slot it resolves to.
@@ -613,7 +631,11 @@ struct Survey<'a> {
 }
 
 impl<'a> Survey<'a> {
-    fn resolve(import: &'a ModelImport, dims: LiveDims) -> Result<Survey<'a>, Fn3Error> {
+    fn resolve(
+        import: &'a ModelImport,
+        dims: LiveDims,
+        session_token_aliases: bool,
+    ) -> Result<Survey<'a>, Fn3Error> {
         let graph = import.graph();
         let weights = import.weights();
         let count = graph.value_count();
@@ -621,6 +643,7 @@ impl<'a> Survey<'a> {
             graph,
             weights,
             dims,
+            session_token_aliases,
             shapes: vec![None; count],
             data: vec![None; count],
             alias_of: vec![None; count],
@@ -754,16 +777,17 @@ impl<'a> Survey<'a> {
             return Ok(());
         }
         // A `Reshape` that resolves to exactly its input's shape, dtype and
-        // element count is an identity: same row-major layout, no reorder, no
-        // broadcast, no conversion. It emits no instruction and produces no
-        // bytes; its value resolves to the input's slot. A graph output keeps
-        // its own binding and is never folded.
+        // element count on the session's contiguous token input is an identity:
+        // same row-major layout, no reorder, broadcast or conversion. It emits
+        // no instruction; its value resolves to the input's slot. A graph
+        // output keeps its own binding and is never folded.
         //
         // This is also the fix for FN3-26 (#72): the trained GPT-2 feeds the
         // `wte` `Gather` through `Reshape(input_ids, [1, 13])`. Folding the
         // reshape leaves `Gather` reading the host `input_ids` graph-input
         // slot, which is the operand its host index validation requires.
         if let Some(source) = self.identity_reshape_source(node, &shapes) {
+            self.check_declared(node, node.outputs[0], &shapes[0])?;
             let root = self.alias_of[source.index()].unwrap_or(source);
             self.alias_of[node.outputs[0].index()] = Some(root);
             self.shapes[node.outputs[0].index()] = Some(shapes[0].clone());
@@ -798,14 +822,23 @@ impl<'a> Survey<'a> {
     /// * the element type is unchanged;
     /// * the value is not a graph output, which must keep its own slot binding.
     ///
-    /// Every plan value is a contiguous row-major tensor, so equal shape and
-    /// dtype means the byte sequence is identical. There is no stride to
-    /// compare and no layout to preserve.
+    /// Only the session's own `input_ids` binding (or an alias of it) is
+    /// eligible. Public execution accepts strided external roots, and a
+    /// reshape copy can normalize their layout before downstream consumers.
     fn identity_reshape_source(&self, node: &GraphNode, shapes: &[Shape]) -> Option<ValueId> {
-        if node.op != OpId::Reshape {
+        if !self.session_token_aliases || node.op != OpId::Reshape {
             return None;
         }
         let source = *node.inputs.first()?;
+        let root = self
+            .graph
+            .value(self.alias_of[source.index()].unwrap_or(source));
+        if root.origin != ValueOrigin::GraphInput
+            || root.name != "input_ids"
+            || root.dtype != DType::I64
+        {
+            return None;
+        }
         let [output] = node.outputs.as_slice() else {
             return None;
         };

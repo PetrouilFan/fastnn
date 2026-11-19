@@ -516,7 +516,7 @@ impl<'model> Session<'model> {
         Ok(Session {
             model,
             runtime: Some(StepRuntime {
-                planner: Planner::new(import, backend),
+                planner: Planner::for_session(import, backend),
                 backend,
                 plans,
                 kv,
@@ -1167,7 +1167,8 @@ fn bind_ids(
     bind_i64(backend, plan, slots, name, &values, device)
 }
 
-/// Allocate a host-backed `i64` input on `device` and bind it.
+/// Allocate a contiguous host-backed `i64` input on `device` and bind it.
+/// Session planning relies on this layout for `input_ids` reshape aliases.
 ///
 /// Graph inputs stay host-backed even in a resident session: they are computed
 /// on the host every step, they are the step-boundary upload the contract
