@@ -449,8 +449,13 @@ fn allocation_on_a_missing_device_is_not_substituted() {
 
     #[cfg(feature = "vulkan")]
     {
-        assert!(text.contains("host memory"), "{text}");
-        assert!(text.contains("FN3-12"), "{text}");
+        assert!(text.contains("host storage only"), "{text}");
+        assert!(
+            text.contains("only the cpu device can own a tensor"),
+            "{text}"
+        );
+        assert!(text.contains("device-resident storage"), "{text}");
+        assert!(!text.contains("FN3-12"), "{text}");
         assert!(!text.contains("no backend for this device"), "{text}");
     }
 }

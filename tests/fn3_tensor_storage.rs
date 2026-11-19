@@ -875,10 +875,11 @@ fn allocation_on_a_device_without_a_backend_is_refused_for_every_dtype() {
         assert!(text.contains("available devices: [cpu"), "{text}");
         // Whatever the configuration, the message must say what to do about it.
         #[cfg(feature = "vulkan")]
-        assert!(
-            text.contains("host memory") && text.contains("FN3-12"),
-            "{text}"
-        );
+        {
+            assert!(text.contains("host storage only"), "{text}");
+            assert!(text.contains("only the cpu device"), "{text}");
+            assert!(!text.contains("FN3-12"), "{text}");
+        }
         #[cfg(not(feature = "vulkan"))]
         assert!(text.contains("--features vulkan"), "{text}");
     }
