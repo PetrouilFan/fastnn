@@ -1447,14 +1447,24 @@ mod gpu {
         );
         let mut device_local_bindings = 0usize;
         let mut bindings = 0usize;
+        let mut batches = std::collections::BTreeSet::new();
         for record in ledger.records() {
             assert_eq!(record.backend, "vulkan");
             assert_eq!(record.device, device);
-            assert!(
-                record.submissions >= 1,
-                "record {} submitted nothing",
-                record.sequence
-            );
+            // Resident execution records each instruction into the step batch
+            // and submits that batch once, so a record either carries a batch
+            // id or reports its own submission. The staged path, which submits
+            // per op, is covered by `fn3_e2e` with `FN3_VK_STAGED=1`.
+            match record.batch {
+                Some(batch) => {
+                    batches.insert(batch);
+                }
+                None => assert!(
+                    record.submissions >= 1,
+                    "record {} neither joined a batch nor submitted",
+                    record.sequence
+                ),
+            }
             assert!(
                 record.workgroups.iter().all(|count| *count > 0),
                 "record {} dispatched no workgroup",
@@ -1470,11 +1480,6 @@ mod gpu {
                 "record {} read an input back to the host",
                 record.sequence
             );
-            assert!(
-                record.host_staged,
-                "record {} must state that alpha storage is host-staged",
-                record.sequence
-            );
             assert!(record.proves_device_execution());
             bindings += record.bindings.len();
             device_local_bindings += record
@@ -1484,17 +1489,42 @@ mod gpu {
                 .count();
         }
         assert_eq!(
+            batches.len(),
+            4,
+            "one batch per decode step; the prefill submits per op"
+        );
+        assert_eq!(
             device_local_bindings, bindings,
             "every binding is device-local"
         );
         let summary = ledger.summary();
         assert_eq!(summary.input_readbacks, 0);
+        assert_eq!(summary.batches, 4, "one batch per decode step");
+        // Weights are device-resident after prepare; the only uploads left in a
+        // decode step are small index and mask operands.
+        assert!(
+            summary.upload_bytes <= 64 * 1024,
+            "decode uploaded {} bytes: weights are supposed to be resident",
+            summary.upload_bytes
+        );
+        assert_eq!(
+            summary.batched_executions, records as u64,
+            "every instruction joined a step batch"
+        );
+
         assert_eq!(summary.proven_device_executions, records as u64);
         assert_eq!(summary.executions, records as u64);
-        assert!(summary.submissions >= records as u64);
+        assert!(
+            summary.submissions >= summary.batches,
+            "each step batch must submit at least once"
+        );
+        assert!(
+            summary.submissions < records as u64,
+            "batching must submit fewer times than there are instructions"
+        );
         println!(
             "gpu residency: executions {} submissions {} proven {} input_readbacks {} upload {} \
-             readback {} device_local_bindings {}/{} host_staged true",
+             readback {} device_local_bindings {}/{} resident default",
             summary.executions,
             summary.submissions,
             summary.proven_device_executions,
