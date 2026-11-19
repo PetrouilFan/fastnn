@@ -10,9 +10,8 @@
 #     which imports the fastnn.inference inference surface;
 #   * the wheel smoke is STRICT: the pinned tiny-GPT-2 ONNX is fetched from the
 #     URL and sha256 recorded in fixtures/parity/tiny-gpt2/model.lock.json, and
-#     the lane fails by name if the model cannot be fetched or the pinned
-#     inference does not pass. A release wheel is never accepted on import
-#     alone.
+#     the lane fails by name if the model cannot be fetched or the separate
+#     CPU FP32 artifact-only replay fails. An import alone is not enough.
 #
 # Nothing here is enabled by this change; it only alters the committed files.
 
@@ -112,6 +111,7 @@ jobs:
         run: |
           import hashlib
           import json
+          import os
           import pathlib
           import sys
           import urllib.request
@@ -124,7 +124,7 @@ jobs:
               f"https://huggingface.co/{lock['model_id']}/resolve/"
               f"{lock['revision']}/onnx/model.onnx"
           )
-          target = pathlib.Path("tools/parity/.cache/models/tiny-gpt2/onnx/model.onnx")
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "fastnn-tiny-gpt2" / "model.onnx"
           target.parent.mkdir(parents=True, exist_ok=True)
           print(f"fetching pinned model: {url}")
           try:
@@ -150,10 +150,44 @@ jobs:
               )
               raise SystemExit(1)
           print(f"pinned model verified: {len(data)} bytes, sha256 {actual}")
-      - name: Install and smoke-test the wheel outside the checkout (strict inference)
+      - name: Install the wheel and require CPU FP32 artifact-only replay
         env:
-          FASTNN_FN3_ONNX_MODEL: ${{ github.workspace }}/tools/parity/.cache/models/tiny-gpt2/onnx/model.onnx
+          FASTNN_FN3_ONNX_MODEL: ${{ runner.temp }}/fastnn-tiny-gpt2/model.onnx
         run: python tools/ci/packaging_lane.py --skip-build --require-inference --out target/ci-packaging --job "release-wheel-${{ matrix.os }}"
+      - name: Require the strict wheel evidence to be a pass
+        if: always()
+        shell: python
+        run: |
+          import json
+          import pathlib
+          import sys
+
+          report = pathlib.Path("target/ci-packaging/wheel-inference.json")
+          try:
+              record = json.loads(report.read_text(encoding="utf-8"))
+          except (OSError, ValueError) as error:
+              print(
+                  f"::error::strict wheel evidence missing or unreadable at {report}: {error}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          if record.get("strict") is not True or record.get("status") != "passed":
+              print(
+                  "::error::strict wheel evidence is not a pass: "
+                  f"strict={record.get('strict')!r} status={record.get('status')!r}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+      - name: Upload wheel smoke evidence (no model weights)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-smoke-${{ matrix.os }}
+          overwrite: true
+          path: |
+            target/ci-packaging/wheel-inference.json
+            target/ci-lane-status/*.json
+          if-no-files-found: ignore
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

@@ -1,28 +1,8 @@
 #!/usr/bin/env python3
-"""Smoke-test an installed FastNN wheel from outside the source tree.
+"""Worker for packaging_lane.py, run by the installed wheel's Python (-I).
 
-Run with the wheel's virtualenv interpreter and a temporary working directory,
-so a source-tree import (editable install) cannot masquerade as a wheel install.
-
-Exits 0 only when:
-  * fastnn imports from the virtualenv site-packages, not the checkout;
-  * the version matches the expected version when one is given;
-  * the 3.0 inference surface imports and lists at least the CPU device.
-
-When the pinned tiny-GPT-2 ONNX model is present, the same process also runs a
-real inference from the installed wheel: `prepare` -> `load` -> `prefill` ->
-`decode`, and asserts the pinned 10-token prompt produces the top-5 token IDs
-`46737, 28597, 16571, 7868, 13`. Without the model the inference step prints
-and records a SKIP with the reason; a skip is never reported as a pass.
-
-`--require-inference` makes a missing model a **failure** (exit 2) instead of a
-skip. The release workflow uses it so a release wheel is never accepted on the
-strength of an import alone. `--expect-model-sha256` additionally pins the
-model bytes; the packaging lane passes the value from
-`fixtures/parity/tiny-gpt2/model.lock.json`.
-
-`--report <path>` writes a small JSON record (`passed`, `skipped` or `failed`
-plus the observed top-5) so the packaging lane can record a truthful check.
+`prepare` accepts a pinned ONNX file. `replay` accepts only the prepared
+artifact, in a fresh working directory without the ONNX or a source hint.
 """
 
 from __future__ import annotations
@@ -31,170 +11,43 @@ import argparse
 import hashlib
 import json
 import os
-import pathlib
 import sys
-import tempfile
+import sysconfig
+from importlib import import_module
+from pathlib import Path
 
-DEFAULT_ONNX = "/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx"
-
-#: The 10-token prompt used by the CLI, the Python quickstart and FN3-21.
+CASE = "tiny-gpt2-cpu-fp32"
+MODEL_ENV = "FASTNN_FN3_ONNX_MODEL"
+ARTIFACT = "tiny-gpt2.fnn3"
+ARTIFACT_BYTES = 27_879_928
 PROMPT = [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
 EXPECTED_TOP5 = [46737, 28597, 16571, 7868, 13]
-DECODE_TOKENS = [640, 11, 612]
+EXPECTED_DECODE = [(640, 32493), (11, 11724), (612, 612)]
+VOCAB = 50_257
 
 
-def top_k(values, k: int = 5) -> list[int]:
-    """Token IDs by descending logit, ties to the lowest ID (the CLI rule)."""
-    order = sorted(range(len(values)), key=lambda index: (-float(values[index]), index))
-    return order[:k]
+def sha256(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def write_report(path: str | None, record: dict) -> None:
-    if not path:
-        return
-    pathlib.Path(path).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-
-
-def run_inference(model: pathlib.Path, expect_sha256: str = "") -> dict:
-    import numpy as np
-
-    import fastnn.inference as fn3
-
-    digest = hashlib.sha256()
-    with model.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    sha256 = digest.hexdigest()
-    if expect_sha256 and sha256 != expect_sha256:
-        raise AssertionError(
-            f"model sha256 is {sha256}, expected {expect_sha256} "
-            "(fixtures/parity/tiny-gpt2/model.lock.json)"
-        )
-    print(f"inference model: {model} ({model.stat().st_size} bytes, sha256 {sha256})")
-
-    with tempfile.TemporaryDirectory(prefix="fastnn-wheel-inference-") as directory:
-        artifact = pathlib.Path(directory) / "tiny-gpt2.fnn3"
-        report = fn3.prepare(model, artifact)
-        print(
-            f"prepare: status={report.status} bytes={report.size_bytes} "
-            f"sha256={report.sha256}"
-        )
-        if report.status not in ("created", "replaced", "already_valid"):
-            raise AssertionError(f"unexpected prepare status {report.status!r}")
-        if report.size_bytes != 27_879_928:
-            raise AssertionError(
-                f"artifact is {report.size_bytes} bytes, expected 27,879,928 "
-                "(the pinned prepared artifact)"
-            )
-
-        loaded = fn3.load(artifact, source=model, device="cpu")
-        geometry = loaded.geometry
-        print(
-            f"load: layers={geometry.layers} hidden={geometry.hidden_size} "
-            f"kv_heads={geometry.kv_heads} head_dim={geometry.head_dim} "
-            f"vocab={geometry.vocab_size}"
-        )
-        session = loaded.session()
-        logits = np.asarray(session.prefill(PROMPT)).reshape(-1)
-        if not np.isfinite(logits).all():
-            raise AssertionError("prefill logits contain NaN or infinity")
-        observed = top_k(logits)
-        print(f"prefill: tokens={len(PROMPT)} cache={session.cache_len} top-5={observed}")
-        if observed != EXPECTED_TOP5:
-            raise AssertionError(
-                f"prefill top-5 is {observed}, expected {EXPECTED_TOP5}; the installed "
-                "wheel did not reproduce the pinned model's logits"
-            )
-
-        decoded = []
-        for token in DECODE_TOKENS:
-            step = np.asarray(session.decode([token])).reshape(-1)
-            if not np.isfinite(step).all():
-                raise AssertionError(f"decode({token}) logits contain NaN or infinity")
-            decoded.append({"token": token, "top1": top_k(step, 1)[0]})
-        if session.cache_len != len(PROMPT) + len(DECODE_TOKENS):
-            raise AssertionError(
-                f"cache is {session.cache_len}, expected "
-                f"{len(PROMPT) + len(DECODE_TOKENS)} after {len(DECODE_TOKENS)} decode steps"
-            )
-        summary = ", ".join(f"{item['token']}->{item['top1']}" for item in decoded)
-        print(
-            f"decode: {len(DECODE_TOKENS)} cached steps ({summary}), "
-            f"cache={session.cache_len}"
-        )
-
-    return {
-        "status": "passed",
-        "model": str(model),
-        "model_bytes": model.stat().st_size,
-        "model_sha256": sha256,
-        "prompt_tokens": PROMPT,
-        "top5": observed,
-        "decode": decoded,
-        "cache_len": len(PROMPT) + len(DECODE_TOKENS),
-    }
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--expect-version", default="")
-    parser.add_argument("--source-root", default="")
-    parser.add_argument(
-        "--model",
-        default=os.environ.get("FASTNN_FN3_ONNX_MODEL", DEFAULT_ONNX),
-        help="pinned tiny-GPT-2 ONNX file; skipped with a printed reason when absent",
-    )
-    parser.add_argument(
-        "--report",
-        default="",
-        help="write a JSON record of the inference step (passed/skipped/failed)",
-    )
-    parser.add_argument(
-        "--require-inference",
-        action="store_true",
-        help="fail with exit 2 when the pinned model is absent instead of recording a skip",
-    )
-    parser.add_argument(
-        "--expect-model-sha256",
-        default="",
-        help="require the model to hash to this value (from the committed model lock)",
-    )
-    args = parser.parse_args(argv)
-
+def installed_api(expect_version: str):
     import fastnn
-
-    location = pathlib.Path(fastnn.__file__).resolve()
-    print(f"fastnn imported from: {location}")
-    if args.source_root:
-        source = pathlib.Path(args.source_root).resolve()
-        # Build artifacts live under <source>/target, so only reject an import
-        # from the source package itself, not from any path under the checkout.
-        for forbidden in (source / "fastnn", source / "src"):
-            if location == forbidden or forbidden in location.parents:
-                print(
-                    f"FAIL: fastnn was imported from the source tree ({forbidden}), "
-                    "not an installed wheel",
-                    file=sys.stderr,
-                )
-                return 1
-
-    version = getattr(fastnn, "__version__", "")
-    print(f"fastnn.__version__ = {version}")
-    if args.expect_version and version != args.expect_version:
-        print(
-            f"FAIL: expected version {args.expect_version!r}, got {version!r}",
-            file=sys.stderr,
-        )
-        return 1
-
-    # The shipped Python surface is the 3.0 inference API. It must import
-    # without a model and without a GPU.
-    import fastnn.inference as fn3
+    import fastnn._core
     import fastnn._core.inference as core_inference
-    from importlib import import_module
+    import fastnn.inference as fn3
 
+    if sys.prefix == sys.base_prefix or not sys.flags.isolated:
+        raise AssertionError("wheel smoke requires a fresh venv and isolated Python (-I)")
+    site_packages = [Path(sysconfig.get_path(key)).resolve() for key in ("purelib", "platlib")]
+    for module in (fastnn, fastnn._core, fn3):
+        location = Path(module.__file__).resolve()
+        if not any(location.is_relative_to(site) for site in site_packages):
+            raise AssertionError(f"{module.__name__} imported from {location}, not venv site-packages")
+        print(f"{module.__name__} imported from: {location}")
+
+    if fastnn.__version__ != expect_version:
+        raise AssertionError(f"expected version {expect_version!r}, got {fastnn.__version__!r}")
     for obsolete in ("fastnn.fn3", "fastnn._core.fn3"):
         try:
             import_module(obsolete)
@@ -202,58 +55,140 @@ def main(argv: list[str] | None = None) -> int:
             if exc.name != obsolete:
                 raise
         else:
-            print(f"FAIL: obsolete inference module {obsolete} still imports", file=sys.stderr)
-            return 1
-
+            raise AssertionError(f"obsolete inference module {obsolete} still imports")
     if fn3.Session is not core_inference.Session:
-        print("FAIL: fastnn.inference.Session is not fastnn._core.inference.Session", file=sys.stderr)
-        return 1
+        raise AssertionError("fastnn.inference.Session is not fastnn._core.inference.Session")
     devices = fn3.devices()
     if not devices or devices[0].kind != "cpu":
-        print(
-            f"FAIL: fn3.devices() = {devices!r}; the CPU device must always be listed",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"inference smoke: fastnn.inference imported, devices={[d.id for d in devices]}")
+        raise AssertionError(f"fastnn.inference.devices() = {devices!r}; CPU must be listed first")
+    return fn3
 
-    model = pathlib.Path(args.model).expanduser()
-    if not model.is_file():
-        reason = (
-            f"pinned tiny-GPT-2 ONNX not present at {model}; set FASTNN_FN3_ONNX_MODEL "
-            "or pass --model to run the installed-wheel prepare/load/prefill/decode smoke"
-        )
-        if args.require_inference:
-            print(f"WHEEL INFERENCE: FAILED — {reason}", file=sys.stderr)
-            print(
-                "STRICT MODE: --require-inference was given, so a missing pinned model is a "
-                "failure, not a skip. Fetch it from the documented URL in "
-                "fixtures/parity/tiny-gpt2/model.lock.json and verify its sha256.",
-                file=sys.stderr,
+
+def prepare(fn3, model: Path, expected_bytes: int, expected_sha256: str) -> dict:
+    size = model.stat().st_size
+    if size != expected_bytes:
+        raise AssertionError(f"model size mismatch: {size} bytes, expected {expected_bytes}")
+    digest = sha256(model)
+    if digest != expected_sha256:
+        raise AssertionError(f"model sha256 mismatch: {digest}, expected {expected_sha256}")
+    print(f"pinned model: {model} ({size} bytes, sha256 {digest})")
+
+    artifact = Path(ARTIFACT)
+    report = fn3.prepare(model, artifact)
+    if report.status != "created" or not report.wrote:
+        raise AssertionError(f"expected a newly prepared artifact, got {report.status!r}")
+    if artifact.stat().st_size != ARTIFACT_BYTES or report.size_bytes != ARTIFACT_BYTES:
+        raise AssertionError(f"expected a {ARTIFACT_BYTES}-byte artifact, got {report.size_bytes}")
+    artifact_sha256 = sha256(artifact)
+    if report.sha256 != artifact_sha256:
+        raise AssertionError("the prepare report digest does not match the produced artifact")
+    print(f"prepare: {ARTIFACT} ({ARTIFACT_BYTES} bytes, sha256 {artifact_sha256})")
+    return {
+        "model_bytes": size,
+        "model_sha256": digest,
+        "artifact_bytes": ARTIFACT_BYTES,
+        "artifact_sha256": artifact_sha256,
+    }
+
+
+def _load_artifact_only(fn3, artifact: Path):
+    """Load with no source hint and prove the model records that observation."""
+    loaded = fn3.load(artifact, device="cpu")
+    if loaded.source is not None:
+        raise AssertionError(f"artifact-only replay loaded with a source attached: {loaded.source!r}")
+    return loaded
+
+
+def top_k(logits, k: int, stage: str) -> list[int]:
+    import numpy as np
+
+    values = np.asarray(logits)
+    if values.dtype != np.float32 or values.size != VOCAB or not np.isfinite(values).all():
+        raise AssertionError(f"{stage}: expected {VOCAB} finite FP32 logits, got {values.shape} {values.dtype}")
+    values = values.reshape(-1)
+    # Highest logit first, with ties broken by the lowest token ID.
+    return sorted(range(VOCAB), key=lambda i: (-float(values[i]), i))[:k]
+
+
+def replay(fn3, expected_sha256: str) -> dict:
+    artifact = Path(ARTIFACT)
+    if set(Path.cwd().iterdir()) != {artifact.absolute()} or artifact.is_symlink():
+        raise AssertionError("replay must start in a directory containing only the regular .fnn3 artifact")
+    if MODEL_ENV in os.environ:
+        raise AssertionError(f"replay must not inherit {MODEL_ENV}")
+    digest = sha256(artifact)
+    if digest != expected_sha256:
+        raise AssertionError("replay artifact sha256 differs from the prepare phase")
+    print(
+        f"replay: cwd={Path.cwd()} entries={sorted(path.name for path in Path.cwd().iterdir())}; "
+        f"{MODEL_ENV} unset; source=None; device=cpu"
+    )
+
+    # Intentionally no source= argument, no ONNX input, and no re-prepare.
+    loaded = _load_artifact_only(fn3, artifact)
+    if loaded.sha256 != digest:
+        raise AssertionError("the loaded model does not report the artifact digest that was verified")
+    print(f"model: source={loaded.source!r} device={loaded.device.kind} sha256={loaded.sha256}")
+    if loaded.device.kind != "cpu" or loaded.geometry.vocab_size != VOCAB:
+        raise AssertionError("expected the pinned tiny-GPT-2 model on the explicit CPU device")
+    session = loaded.session()
+    observed = top_k(session.prefill(PROMPT), 5, "prefill")
+    if observed != EXPECTED_TOP5 or session.cache_len != len(PROMPT):
+        raise AssertionError(f"prefill: top-5 {observed} != {EXPECTED_TOP5} or unexpected cache {session.cache_len}")
+    print(f"prefill: tokens={len(PROMPT)} cache={session.cache_len} top-5={observed}")
+
+    decoded = []
+    for cache, (token, expected) in enumerate(EXPECTED_DECODE, start=len(PROMPT) + 1):
+        observed_top1 = top_k(session.decode([token]), 1, f"decode({token})")[0]
+        if observed_top1 != expected or session.cache_len != cache:
+            raise AssertionError(
+                f"decode({token}): top-1 {observed_top1} (expected {expected}), "
+                f"cache {session.cache_len} (expected {cache})"
             )
-            write_report(
-                args.report,
-                {"status": "failed", "reason": reason, "strict": True},
-            )
-            return 2
-        print(f"WHEEL INFERENCE: SKIPPED — {reason}")
-        write_report(args.report, {"status": "skipped", "reason": reason, "strict": False})
-        print("WHEEL SMOKE: PASSED (without the pinned-model inference step)")
-        return 0
+        decoded.append({"token": token, "top1": observed_top1})
+    print(f"decode: {decoded}, cache={session.cache_len}")
+    return {
+        "device": "cpu",
+        "precision": "fp32",
+        "artifact_only": loaded.source is None,
+        "artifact_sha256": digest,
+        "prompt_tokens": PROMPT,
+        "top5": observed,
+        "decode": decoded,
+        "cache_len": session.cache_len,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expect-version", required=True)
+    phases = parser.add_subparsers(dest="phase", required=True)
+    phases.add_parser("import")
+    prepare_parser = phases.add_parser("prepare")
+    prepare_parser.add_argument("--model", required=True, type=Path)
+    prepare_parser.add_argument("--expect-model-bytes", required=True, type=int)
+    prepare_parser.add_argument("--expect-model-sha256", required=True)
+    prepare_parser.add_argument("--report", required=True, type=Path)
+    replay_parser = phases.add_parser("replay")
+    replay_parser.add_argument("--expect-artifact-sha256", required=True)
+    replay_parser.add_argument("--report", required=True, type=Path)
+    args = parser.parse_args(argv)
 
     try:
-        record = run_inference(model, args.expect_model_sha256)
-    except Exception as error:  # noqa: BLE001 - the report needs the real message
-        write_report(
-            args.report,
-            {"status": "failed", "reason": str(error), "strict": args.require_inference},
-        )
-        raise
+        fn3 = installed_api(args.expect_version)
+        if args.phase == "import":
+            return 0
+        if args.phase == "prepare":
+            record = prepare(fn3, args.model, args.expect_model_bytes, args.expect_model_sha256)
+        else:
+            record = replay(fn3, args.expect_artifact_sha256)
+    except Exception as error:  # phase-specific diagnostic for CI, including native exceptions
+        print(f"WHEEL SMOKE {args.phase} FAILED: {error}", file=sys.stderr)
+        if args.phase != "import":
+            args.report.write_text(json.dumps({"status": "failed", "reason": str(error)}), encoding="utf-8")
+        return 1
 
-    record["strict"] = args.require_inference
-    write_report(args.report, record)
-    print(f"WHEEL INFERENCE: PASSED — top-5 {record['top5']}")
-    print("WHEEL SMOKE: PASSED")
+    args.report.write_text(json.dumps({"status": "passed", **record}), encoding="utf-8")
     return 0
 
 

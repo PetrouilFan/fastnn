@@ -79,11 +79,11 @@
       "proves": [
         "Package versions agree across Cargo.toml, both Cargo lockfiles, pyproject.toml, uv.lock, fastnn/__init__.py and CHANGELOG.md.",
         "A wheel builds from this tree and installs into a fresh virtual environment with only its declared dependencies.",
-        "The installed package imports from a temporary directory outside the checkout and reports its version.",
-        "When the pinned tiny-GPT-2 ONNX model is present, the installed wheel prepares, loads, prefills and decodes it and reproduces the pinned top-5 token IDs."
+        "The facade and native extension import from the virtual environment outside the checkout and report the expected version.",
+        "When the pinned tiny-GPT-2 ONNX model is present (required for release), the wheel prepares a .fnn3 and replays CPU FP32 prefill and cached decode in a separate process without the source ONNX."
       ],
       "does_not_prove": [
-        "It does not prove the Rust test suites pass, GPU support, or manylinux compliance.",
+        "It does not prove quantized inference, the Rust test suites pass, GPU support, or manylinux compliance.",
         "When the pinned model is absent the inference step is recorded not_run with its reason; the lane then proves import and packaging only, never numerical inference."
       ],
       "reproduce": "python3 tools/ci/packaging_lane.py"

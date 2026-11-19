@@ -152,7 +152,12 @@ jobs:
           python-version: "3.12"
       - name: Install maturin
         run: python -m pip install "maturin>=1.7,<2.0"
+      - name: Test the packaging gate and its failure cases
+        run: python -m unittest discover -s tools/ci -p test_packaging_lane.py
       - name: Build, install and smoke the wheel outside the source tree
+        env:
+          # CI has no pinned weights: name an absent path so not_run is explicit.
+          FASTNN_FN3_ONNX_MODEL: ${{ runner.temp }}/fastnn-no-pinned-model.onnx
         run: python tools/ci/packaging_lane.py --job "packaging-${{ matrix.os }}"
       - name: Upload lane status
         if: always()
