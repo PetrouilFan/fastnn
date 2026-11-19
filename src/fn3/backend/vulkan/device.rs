@@ -476,12 +476,12 @@ impl Device {
         self.ensure_usable()?;
         #[cfg(feature = "vulkan-fault-injection")]
         if self.faults.take(super::fault::FaultPoint::Allocation) {
-            // The failure is reported at the same seam as a real
-            // `vkAllocateMemory` failure, before any range is handed out, so
-            // `Buffer::new` destroys the `VkBuffer` it had just created.
-            return Err(Error::vk(
-                "vkAllocateMemory",
+            // The fault fires before the allocator chooses a range or chunk,
+            // so report the buffer requirement, not a hypothetical chunk size.
+            return Err(Error::vk_allocation(
+                "buffer memory allocation (injected)",
                 vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+                requirements.size,
                 format!(
                     "{what}: injected allocation failure (FN3-27) for {} bytes on \"{}\"",
                     requirements.size, self.adapter.name

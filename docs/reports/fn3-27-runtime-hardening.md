@@ -380,11 +380,14 @@ unsafe-audit file was edited.
 
 ## 14. Cross-cutting observations not edited
 
-1. **`Fn3Error::Allocation` loses the requested size for a Vulkan OOM**
-   (`vulkan/error.rs`, `Error::Vk { ERROR_OUT_OF_DEVICE_MEMORY }` maps to
-   `bytes: 0`). The size is present in the detail string, but a typed field would
-   be better; changing the mapping is a shared-error-surface decision, not a
-   #73 runtime fix.
+1. **`Fn3Error::Allocation` loses the requested size for a Vulkan OOM** —
+   fixed after this report. `Error::Vk` now carries `requested_bytes` from the
+   allocator calls that know it (buffer size, `vkAllocateMemory` chunk,
+   `vkMapMemory`), so a known-size OOM reports that number. An OOM with no
+   known request size maps to `Fn3Error::AllocationSizeUnknown` instead of
+   `Allocation { bytes: 0 }`; `bytes` is the failed operation's request, not
+   the tensor size or bytes consumed. Adding the variant is a source-compatible
+   break for exhaustive matches only.
 2. **`prepare_persistent` is idempotent but not transactional.** If an upload
    fails halfway through the weight list, the already-uploaded entries stay in
    the table and a later session completes it. That is safe (no leak, no stale

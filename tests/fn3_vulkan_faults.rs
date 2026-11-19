@@ -25,7 +25,7 @@
 //! | fence wait (device lost) | terminal | unchanged, poisoned | typed terminal error |
 //!
 //! ```bash
-//! flock /tmp/opencode/fn3-gpu.lock \
+//! flock /tmp/opencode/fn3-measure.lock env \
 //! FN3_VK_DEVICE_UUID=471b2bda-51e1-6451-e692-ff5d1e146f1e \
 //! FN3_VK_REQUIRE_PHYSICAL=1 \
 //! FASTNN_FN3_ONNX_MODEL=/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx \
@@ -38,7 +38,9 @@
 use std::sync::Mutex;
 
 use fastnn::inference::backend::vulkan::instance::validation_counts;
-use fastnn::inference::backend::vulkan::{adapters, FaultPoint, VulkanBackend, VulkanConfig};
+use fastnn::inference::backend::vulkan::{
+    adapters, BufferDesc, FaultPoint, VulkanBackend, VulkanConfig,
+};
 use fastnn::inference::device::DeviceRequest;
 use fastnn::inference::model::{SessionOptions, SessionPhase};
 use fastnn::inference::{Fn3Error, Session};
@@ -114,6 +116,40 @@ fn open_physical() -> Option<std::sync::Arc<VulkanBackend>> {
         backend.validation_enabled()
     );
     Some(backend)
+}
+
+#[test]
+fn injected_allocation_oom_reports_buffer_memory_requirements() {
+    let _lock = gpu_lock();
+    let counts_before = validation_counts();
+    let Some(backend) = open_physical() else {
+        return;
+    };
+    let desc = BufferDesc::device_storage(1025, "oom-byte-reporting");
+    let baseline = backend.alloc_buffer(&desc).expect("baseline buffer");
+    // SAFETY: the live buffer belongs to this device and stays alive through
+    // the read-only requirements query, which takes no host pointer.
+    let requirements = unsafe {
+        backend
+            .vulkan_device()
+            .ash()
+            .get_buffer_memory_requirements(baseline.raw())
+    };
+    drop(baseline);
+
+    backend.faults().arm(FaultPoint::Allocation, 0);
+    let error = backend.alloc_buffer(&desc).expect_err("injected OOM");
+    assert_eq!(backend.faults().fired_at(), Some(FaultPoint::Allocation));
+    match error {
+        Fn3Error::Allocation { bytes, detail } => {
+            assert_eq!(bytes, requirements.size);
+            assert!(detail.contains("ERROR_OUT_OF_DEVICE_MEMORY"), "{detail}");
+            assert!(detail.contains("injected allocation failure"), "{detail}");
+        }
+        other => panic!("expected a sized allocation failure, found {other:?}"),
+    }
+    drop(backend);
+    assert_eq!(validation_counts().0, counts_before.0, "validation errors");
 }
 
 /// The observable session state a failure must not change.
