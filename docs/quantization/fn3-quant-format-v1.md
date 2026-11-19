@@ -4,7 +4,7 @@
 #69 (CPU quantized inference) and #70 (Vulkan quantized inference). Any layout
 change is a new `format_version` and a new identifier; v1 is not renegotiated.
 
-**Identifier:** `fn3-quant-format-v1` (`fastnn::fn3::quant::FORMAT_ID`)
+**Identifier:** `fn3-quant-format-v1` (`fastnn::inference::quant::FORMAT_ID`)
 **Version:** 1
 **Rust implementation:** `src/fn3/quant/`
 **Independent implementation:** `tools/quant/fn3_quant.py` (standard library +

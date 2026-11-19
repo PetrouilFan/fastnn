@@ -4,7 +4,7 @@
 The wheel is installed into a fresh virtual environment and imported from a
 temporary directory outside the checkout, so an editable install cannot pass by
 accident. When the pinned tiny-GPT-2 ONNX model is present, the smoke also runs
-a real `fastnn.fn3` prepare/load/prefill/decode and asserts the pinned top-5
+a real `fastnn.inference` prepare/load/prefill/decode and asserts the pinned top-5
 tokens; without the model the step is recorded as `not_run` with its reason,
 never as a pass.
 
@@ -160,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("LANE packaging — wheel build/install smoke")
     print("  PROVES: versions agree everywhere, a wheel builds, installs into a clean venv")
-    print("          outside the checkout with only its declared dependencies, the fastnn.fn3")
+    print("          outside the checkout with only its declared dependencies, the fastnn.inference")
     print("          surface imports, and (when the pinned model is present) a real")
     print("          prepare/load/prefill/decode reproduces the pinned top-5 tokens.")
     if args.require_inference:

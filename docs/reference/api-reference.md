@@ -188,5 +188,5 @@ Every tensor exposes these properties and methods:
 - [Tensors](tensors.md) -- Tensor creation and ops
 - [Neural Network Modules](nn-modules.md) -- Module catalog with examples
 - [IO & Serialization](io.md) -- Save/load and format conversion
-- [Python API](python-api.md) -- the `fastnn.fn3` inference API
+- [Python API](python-api.md) -- the `fastnn.inference` inference API
 - [Index](../index.md) -- Full documentation index

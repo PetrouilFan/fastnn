@@ -67,12 +67,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::{LiveDims, Shape, ShapeEnvelope, Symbol};
-use crate::fn3::tensor::Tensor;
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::{LiveDims, Shape, ShapeEnvelope, Symbol};
+use crate::inference::tensor::Tensor;
 
 use super::weights::WeightId;
 use super::{ExecutionPlan, Instruction, ModelWeights};
@@ -706,7 +706,7 @@ impl Plan {
     /// Fingerprint over everything that determines execution.
     fn compute_identity(&self) -> PlanId {
         let mut digest = Digest::new();
-        digest.write(b"fastnn.fn3.plan.v1");
+        digest.write(b"fastnn.inference.plan.v1");
         digest.text(self.backend);
         digest.envelope(&self.envelope);
         digest.dims(&self.dims);
@@ -880,7 +880,7 @@ impl Plan {
     /// Reject a plan that contains an op the backend cannot run at all.
     pub fn check_supported(
         &self,
-        backend: &dyn crate::fn3::backend::Backend,
+        backend: &dyn crate::inference::backend::Backend,
     ) -> Result<(), Fn3Error> {
         self.execution.check_supported(backend)
     }
@@ -888,7 +888,7 @@ impl Plan {
     /// Execute the plan against pre-allocated slots.
     pub fn execute(
         &self,
-        backend: &dyn crate::fn3::backend::Backend,
+        backend: &dyn crate::inference::backend::Backend,
         slots: &mut [Option<Tensor>],
     ) -> Result<(), Fn3Error> {
         self.execution.execute(backend, slots)

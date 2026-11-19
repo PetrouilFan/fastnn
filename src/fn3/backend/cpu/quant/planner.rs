@@ -6,7 +6,7 @@
 //! `Support::Full` on the CPU because the FP32 kernel serves every documented
 //! shape, and the W8A16 path is an alternative *weight representation* for one
 //! concrete `MatMul` whose right-hand side is a static 2-D FP32 weight. Adding a
-//! quantized `OpId`, changing [`crate::fn3::backend::Backend::admits`] or
+//! quantized `OpId`, changing [`crate::inference::backend::Backend::admits`] or
 //! claiming a new dtype would change the backend contract; none of that happens
 //! here.
 //!
@@ -56,13 +56,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::fn3::backend::Support;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::model::{ModelWeights, Plan, SlotRole};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{Tensor, TensorView};
+use crate::inference::backend::Support;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::model::{ModelWeights, Plan, SlotRole};
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{Tensor, TensorView};
 
 use super::pack::{PackedWeight, MIN_K, MIN_NUMEL};
 

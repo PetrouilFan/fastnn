@@ -33,7 +33,7 @@ adapt stable Rust APIs rather than implement compiler semantics.
 - Preserve graph mutation/cache invariants and backend instruction semantics.
 - Do not add a training, autograd, optimizer or wgpu path; those are deleted.
 - Unsafe code needs a local `SAFETY:` explanation.
-- Follow the subsystem guide when changing `fn3`, `ir`, `backend/cpu`, compiler
+- Follow the subsystem guide when changing `src/fn3/`, `ir`, `backend/cpu`, compiler
   passes or PyO3 bindings.
 
 See `docs/roadmap/fn3-architecture.md` for the inference contract and

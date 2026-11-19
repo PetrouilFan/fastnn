@@ -1,6 +1,6 @@
 def test_modular_python_facades_import():
     import fastnn as fnn
-    import fastnn.fn3 as fn3
+    import fastnn.inference as fn3
     import fastnn.tensor as tensor
 
     # fastnn.tensor is a callable wrapper around the tensor module
@@ -12,5 +12,5 @@ def test_modular_python_facades_import():
 
     # The 3.0 inference surface is importable and is the same object the
     # extension registers.
-    assert fnn.fn3 is fn3
-    assert fn3.Session is fnn._core.fn3.Session
+    assert fnn.inference is fn3
+    assert fn3.Session is fnn._core.inference.Session

@@ -1,13 +1,13 @@
 # Python API Reference
 
-The 3.0 inference API is `fastnn.fn3`: one versioned artifact, an explicit
+The 3.0 inference API is `fastnn.inference`: one versioned artifact, an explicit
 device, and sessions that own their KV cache. The 2.x eager tensor/nn forward
 facade remains importable as a secondary surface; it has no training names.
 
-## `fastnn.fn3`
+## `fastnn.inference`
 
 ```python
-import fastnn.fn3 as fn3
+import fastnn.inference as fn3
 
 fn3.devices() -> list[Device]
 
@@ -24,12 +24,12 @@ Session.reset() -> None
 
 `Device.id / kind / index / name`; `Geometry`, `Envelope`, `Metadata`,
 `PrepareReport`, `ArtifactInfo`, `SessionStats` and `Logits` are documented in
-`fastnn/fn3/__init__.py` and expose the same fields as the Rust types.
+`fastnn/inference/__init__.py` and expose the same fields as the Rust types.
 
 ### Example
 
 ```python
-import fastnn.fn3 as fn3
+import fastnn.inference as fn3
 
 report = fn3.prepare("model.onnx", "model.fn3prep")
 print(report.status, report.size_bytes, report.sha256)

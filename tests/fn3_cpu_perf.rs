@@ -61,14 +61,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use fastnn::fn3::backend::cpu::{
+use fastnn::inference::backend::cpu::{
     cpu_process_budget, cpu_thread_budget_note, parallel_stats, reset_parallel_stats,
     warm_parallel_pool, ThreadBudget,
 };
-use fastnn::fn3::import::{import_onnx_model, DecoderGeometry, ModelImport};
-use fastnn::fn3::model::{PreparedModel, Session};
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{
+use fastnn::inference::import::{import_onnx_model, DecoderGeometry, ModelImport};
+use fastnn::inference::model::{PreparedModel, Session};
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{
     Backend, Capabilities, CpuBackend, DeviceId, Fn3Error, LiveDims, OpId, OpParams, Support,
     Tensor, TensorMut, TensorView,
 };
@@ -239,8 +239,8 @@ impl Backend for TimingBackend {
     fn admits(
         &self,
         op: OpId,
-        shapes: &[fastnn::fn3::Shape],
-        dtypes: &[fastnn::fn3::DType],
+        shapes: &[fastnn::inference::Shape],
+        dtypes: &[fastnn::inference::DType],
         params: &OpParams,
     ) -> Support {
         self.inner.admits(op, shapes, dtypes, params)
@@ -524,7 +524,7 @@ impl ModelUnderTest {
 
     fn envelope(&self) -> ShapeEnvelope {
         let backend = CpuBackend::with_thread_budget(ThreadBudget::fixed(1));
-        let planner = fastnn::fn3::model::Planner::new(&self.import, &backend);
+        let planner = fastnn::inference::model::Planner::new(&self.import, &backend);
         planner
             .envelope(1, self.max_seq(), self.context(), self.context() + 1)
             .expect("envelope")
@@ -581,7 +581,7 @@ fn prepared_for(
     context: u64,
     max_seq: u64,
 ) -> (PreparedModel, ShapeEnvelope) {
-    use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel};
+    use fastnn::inference::model::{ModelWeights, Planner, PreparedModel};
     let backend = CpuBackend::with_thread_budget(ThreadBudget::fixed(1));
     let planner = Planner::new(import, &backend);
     let envelope = planner
@@ -978,7 +978,7 @@ fn report_chain(
     past_end: u64,
     budget: Option<usize>,
     selected: usize,
-    observed: &fastnn::fn3::backend::cpu::CpuParallelStats,
+    observed: &fastnn::inference::backend::cpu::CpuParallelStats,
     (samples, allocations, allocated_bytes): (Vec<u128>, u64, u64),
     checksum: u64,
 ) {
@@ -1016,7 +1016,7 @@ fn report_sweep(
     past: u64,
     budget: Option<usize>,
     selected: usize,
-    observed: &fastnn::fn3::backend::cpu::CpuParallelStats,
+    observed: &fastnn::inference::backend::cpu::CpuParallelStats,
     (samples, allocations, allocated_bytes): (Vec<u128>, u64, u64),
     checksum: u64,
 ) {
@@ -1400,13 +1400,13 @@ fn filled(shape: &[u64], seed: f32) -> Tensor {
             x.sin() * 2.0
         })
         .collect();
-    Tensor::from_f32(fastnn::fn3::Shape::from_dims(shape.to_vec()), &values).expect("tensor")
+    Tensor::from_f32(fastnn::inference::Shape::from_dims(shape.to_vec()), &values).expect("tensor")
 }
 
 fn constant(shape: &[u64], value: f32) -> Tensor {
     let numel: u64 = shape.iter().product();
     Tensor::from_f32(
-        fastnn::fn3::Shape::from_dims(shape.to_vec()),
+        fastnn::inference::Shape::from_dims(shape.to_vec()),
         &vec![value; numel as usize],
     )
     .expect("tensor")
@@ -1424,8 +1424,8 @@ fn kernel_microbenchmarks_cover_the_model_shapes() {
             let weight = constant(&[128], 1.0);
             let bias = constant(&[128], 0.0);
             let mut out = Tensor::zeros(
-                fastnn::fn3::Shape::from_dims(case.out.clone()),
-                fastnn::fn3::DType::F32,
+                fastnn::inference::Shape::from_dims(case.out.clone()),
+                fastnn::inference::DType::F32,
                 DeviceId::Cpu,
             )
             .expect("output");
@@ -1493,8 +1493,8 @@ fn kernel_matmul_is_bit_identical_to_ascending_k_scalar_order() {
             let lhs = filled(&case.lhs, 0.25);
             let rhs = filled(case.rhs.as_ref().expect("rhs"), 1.75);
             let mut out = Tensor::zeros(
-                fastnn::fn3::Shape::from_dims(case.out.clone()),
-                fastnn::fn3::DType::F32,
+                fastnn::inference::Shape::from_dims(case.out.clone()),
+                fastnn::inference::DType::F32,
                 DeviceId::Cpu,
             )
             .expect("output");
@@ -1647,7 +1647,7 @@ fn planner_shape_census_matches_the_profile() {
         ("prefill", *model.prompts().first().unwrap_or(&10), 0),
         ("decode", 1, *model.decode_pasts().first().unwrap_or(&10)),
     ] {
-        let plan = fastnn::fn3::model::Planner::new(&model.import, &backend)
+        let plan = fastnn::inference::model::Planner::new(&model.import, &backend)
             .plan(&model.envelope(), model.dims(seq, past))
             .unwrap_or_else(|error| panic!("plan {label}: {error}"));
         println!(
@@ -1763,8 +1763,8 @@ fn cache_versus_host_state_experiment() {
     // The transpose under test: the real tied-embedding table and its output.
     let source = filled(&[50_257, 128], 0.25);
     let mut destination = Tensor::zeros(
-        fastnn::fn3::Shape::from_dims([128, 50_257]),
-        fastnn::fn3::DType::F32,
+        fastnn::inference::Shape::from_dims([128, 50_257]),
+        fastnn::inference::DType::F32,
         DeviceId::Cpu,
     )
     .expect("transpose output");
@@ -1788,8 +1788,8 @@ fn cache_versus_host_state_experiment() {
     let big_lhs = filled(&[1, 10, 128], 0.5);
     let big_rhs = filled(&[128, 50_257], 1.5);
     let mut big_out = Tensor::zeros(
-        fastnn::fn3::Shape::from_dims([1, 10, 50_257]),
-        fastnn::fn3::DType::F32,
+        fastnn::inference::Shape::from_dims([1, 10, 50_257]),
+        fastnn::inference::DType::F32,
         DeviceId::Cpu,
     )
     .expect("big out");
@@ -1813,8 +1813,8 @@ fn cache_versus_host_state_experiment() {
     let small_lhs = filled(&[128, 256], 0.75);
     let small_rhs = filled(&[256, 512], 1.25);
     let mut small_out = Tensor::zeros(
-        fastnn::fn3::Shape::from_dims([128, 512]),
-        fastnn::fn3::DType::F32,
+        fastnn::inference::Shape::from_dims([128, 512]),
+        fastnn::inference::DType::F32,
         DeviceId::Cpu,
     )
     .expect("small out");

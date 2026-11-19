@@ -14,7 +14,7 @@ use std::fmt;
 
 use ash::vk;
 
-use crate::fn3::error::Fn3Error;
+use crate::inference::error::Fn3Error;
 
 /// Result alias for the Vulkan platform layer.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -213,9 +213,9 @@ impl Error {
     pub fn to_fn3(&self) -> Fn3Error {
         match self {
             Error::Loader(detail) => {
-                Fn3Error::DeviceUnavailable(crate::fn3::device::DeviceResolveError::new(
+                Fn3Error::DeviceUnavailable(crate::inference::device::DeviceResolveError::new(
                     "vulkan",
-                    &crate::fn3::device::available_devices(),
+                    &crate::inference::device::available_devices(),
                     format!("the Vulkan loader is unavailable: {detail}"),
                 ))
             }
@@ -272,15 +272,15 @@ impl Error {
                 code: vk::Result::ERROR_DEVICE_LOST,
                 detail,
                 ..
-            } => Fn3Error::DeviceUnavailable(crate::fn3::device::DeviceResolveError::new(
+            } => Fn3Error::DeviceUnavailable(crate::inference::device::DeviceResolveError::new(
                 "the Vulkan device",
-                &crate::fn3::device::available_devices(),
+                &crate::inference::device::available_devices(),
                 format!("the device was lost and is unusable: {detail}"),
             )),
             Error::Lost { device, detail } => {
-                Fn3Error::DeviceUnavailable(crate::fn3::device::DeviceResolveError::new(
+                Fn3Error::DeviceUnavailable(crate::inference::device::DeviceResolveError::new(
                     "the Vulkan device",
-                    &crate::fn3::device::available_devices(),
+                    &crate::inference::device::available_devices(),
                     format!(
                         "adapter \"{device}\" is no longer usable: {detail}. The device is \
                          poisoned; drop the backend and open a new one"

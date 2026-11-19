@@ -2,7 +2,7 @@
 //!
 //! # Why this type exists
 //!
-//! The importer ([`crate::fn3::import`]) owns the graph IR: [`GraphIr`] has
+//! The importer ([`crate::inference::import`]) owns the graph IR: [`GraphIr`] has
 //! private fields and is only ever built by decoding an ONNX file. A reader of a
 //! serialized artifact must be able to *reconstruct* the same graph from bytes,
 //! which `GraphIr` cannot express today. `PreparedGraph` is therefore the
@@ -32,7 +32,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::fn3::import::{GraphIr, GraphNode, ValueId, ValueInfo, ValueOrigin};
+use crate::inference::import::{GraphIr, GraphNode, ValueId, ValueInfo, ValueOrigin};
 
 use super::error::FormatError;
 
@@ -336,16 +336,16 @@ impl PreparedGraph {
 mod tests {
     use super::*;
 
-    use crate::fn3::dtype::DType;
-    use crate::fn3::import::ValueShape;
-    use crate::fn3::ops::OpId;
-    use crate::fn3::shape::Symbol;
+    use crate::inference::dtype::DType;
+    use crate::inference::import::ValueShape;
+    use crate::inference::ops::OpId;
+    use crate::inference::shape::Symbol;
 
     fn value(name: &str, origin: ValueOrigin) -> ValueInfo {
         ValueInfo {
             name: name.to_string(),
             dtype: DType::F32,
-            shape: ValueShape::Dims(vec![crate::fn3::import::Dim::Known(2)]),
+            shape: ValueShape::Dims(vec![crate::inference::import::Dim::Known(2)]),
             origin,
         }
     }
@@ -369,7 +369,7 @@ mod tests {
                 value("a", ValueOrigin::GraphInput),
                 value(
                     "b",
-                    ValueOrigin::Weight(crate::fn3::model::WeightId::new(0)),
+                    ValueOrigin::Weight(crate::inference::model::WeightId::new(0)),
                 ),
                 value("c", ValueOrigin::Node(0)),
             ],
@@ -427,7 +427,7 @@ mod tests {
                 value("a", ValueOrigin::GraphInput),
                 value(
                     "a",
-                    ValueOrigin::Weight(crate::fn3::model::WeightId::new(0)),
+                    ValueOrigin::Weight(crate::inference::model::WeightId::new(0)),
                 ),
             ],
             vec![],
@@ -469,8 +469,8 @@ mod tests {
     fn a_symbolic_dimension_survives_the_round_trip_through_parts() {
         let mut info = value("a", ValueOrigin::GraphInput);
         info.shape = ValueShape::Dims(vec![
-            crate::fn3::import::Dim::Symbol(Symbol::Batch),
-            crate::fn3::import::Dim::unknown("batch * seq"),
+            crate::inference::import::Dim::Symbol(Symbol::Batch),
+            crate::inference::import::Dim::unknown("batch * seq"),
         ]);
         let graph = PreparedGraph::new(
             vec![info],

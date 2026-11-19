@@ -50,6 +50,8 @@ ci::run "fn3 contract tests" \
     "cargo test --test fn3_contracts"
 ci::run "fn3 CI smoke tests" \
     "cargo test --test fn3_ci_smoke"
+ci::run "Inference CLI help smoke" \
+    "cargo test --no-default-features --features cli --test fn3_cli fastnn_infer_binary_help"
 ci::run "CI tooling selftests" \
     "python3 tools/ci/model_pin.py selftest && python3 tools/ci/lane_status.py selftest"
 

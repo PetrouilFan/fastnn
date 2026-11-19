@@ -135,7 +135,7 @@ mod tests {
         // the lower layer; `model::format` asserts the other direction.
         assert_eq!(
             MAX_MODEL_BYTES,
-            crate::fn3::model::format::MAX_PAYLOAD_BYTES
+            crate::inference::model::format::MAX_PAYLOAD_BYTES
         );
     }
 
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn the_importer_budgets_equal_the_artifact_budgets() {
-        use crate::fn3::model::format;
+        use crate::inference::model::format;
         assert_eq!(MAX_NODES as u64, format::MAX_NODES);
         assert_eq!(MAX_VALUES as u64, format::MAX_VALUES);
         assert_eq!(MAX_WEIGHTS as u64, format::MAX_WEIGHTS);

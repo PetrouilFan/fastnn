@@ -95,13 +95,13 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-use crate::fn3::backend::Backend;
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::import::{ModelImport, PositionEmbedding};
-use crate::fn3::shape::{LiveDims, Shape, Strides, Symbol};
-use crate::fn3::tensor::{Tensor, TensorMeta, TensorView};
+use crate::inference::backend::Backend;
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::import::{ModelImport, PositionEmbedding};
+use crate::inference::shape::{LiveDims, Shape, Strides, Symbol};
+use crate::inference::tensor::{Tensor, TensorMeta, TensorView};
 
 use super::kv::{allocate, KvCacheConfig, KvCacheState};
 use super::plan::{Plan, PlanId, SlotPlan, SlotRole};
@@ -1362,11 +1362,11 @@ fn present_slice<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::dtype::DType as TestDType;
-    use crate::fn3::model::{ExecutionPlan, Instruction};
-    use crate::fn3::ops::OpId;
-    use crate::fn3::shape::{Shape, ShapeEnvelope};
-    use crate::fn3::{DeviceId, ModelWeights};
+    use crate::inference::dtype::DType as TestDType;
+    use crate::inference::model::{ExecutionPlan, Instruction};
+    use crate::inference::ops::OpId;
+    use crate::inference::shape::{Shape, ShapeEnvelope};
+    use crate::inference::{DeviceId, ModelWeights};
 
     fn small_model() -> PreparedModel {
         let plan =

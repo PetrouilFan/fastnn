@@ -12,7 +12,7 @@
 //!
 //! - [`Instance`] holds `entry` and destroys the `vk::Instance` before
 //!   unloading the loader (field order is not enough: `Drop` is explicit).
-//! - [`crate::fn3::backend::vulkan::Device`] holds `Arc<Instance>`.
+//! - [`crate::inference::backend::vulkan::Device`] holds `Arc<Instance>`.
 //! - every resource holds `Arc<Device>`.
 //!
 //! # Validation
@@ -313,7 +313,7 @@ impl Instance {
     /// Adapters probed at construction, in discovery order.
     ///
     /// The index of an adapter in this slice is exactly the index carried by
-    /// [`crate::fn3::device::PhysicalDeviceId`].
+    /// [`crate::inference::device::PhysicalDeviceId`].
     pub fn adapters(&self) -> &[AdapterInfo] {
         &self.adapters
     }
@@ -367,10 +367,10 @@ impl std::fmt::Debug for Instance {
 }
 
 /// The process-wide probe instance used by
-/// [`crate::fn3::device::available_devices`].
+/// [`crate::inference::device::available_devices`].
 ///
 /// It is created once and intentionally never destroyed: device indices in
-/// [`crate::fn3::device::PhysicalDeviceId`] are defined by this probe's
+/// [`crate::inference::device::PhysicalDeviceId`] are defined by this probe's
 /// discovery order, so the table must not change under a running process. The
 /// backend never executes on this instance; it creates its own instance and
 /// resolves the probed UUID against it. A failure is cached so a missing loader

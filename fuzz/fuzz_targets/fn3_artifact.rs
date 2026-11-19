@@ -9,7 +9,7 @@
 //! re-encodes differently is a reader that accepted something the writer would
 //! not produce, which is exactly the bug class this target exists to find.
 
-use fastnn::fn3::model::format::PreparedArtifact;
+use fastnn::inference::model::format::PreparedArtifact;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

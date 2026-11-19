@@ -5,11 +5,11 @@
 //! offset-bearing windows over shared storage, the view families the alpha
 //! supports, materialisation, the aliasing rule, and the scalar/empty edges.
 //!
-//! Every test uses only the public `fastnn::fn3` surface.
+//! Every test uses only the public `fastnn::inference` surface.
 
-use fastnn::fn3::device::{available_devices, DeviceRequest, PhysicalDeviceId};
-use fastnn::fn3::storage::{DTypeAlignment, StorageWindow};
-use fastnn::fn3::{
+use fastnn::inference::device::{available_devices, DeviceRequest, PhysicalDeviceId};
+use fastnn::inference::storage::{DTypeAlignment, StorageWindow};
+use fastnn::inference::{
     AlignedBuffer, Backend, CpuBackend, DType, DeviceId, Fn3Error, OpId, OpParams, Shape, Storage,
     Strides, Tensor, TensorMeta, TensorMut, TensorView,
 };

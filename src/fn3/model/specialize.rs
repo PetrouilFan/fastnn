@@ -108,15 +108,15 @@
 //! declared-vs-resolved shape check and refused; see the report for the
 //! requested `Flatten { axis }` variant.
 
-use crate::fn3::backend::{Backend, OpParams};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::import::{
+use crate::inference::backend::{Backend, OpParams};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::import::{
     DecoderGeometry, Dim, GraphIr, GraphNode, ModelImport, ValueId, ValueOrigin, ValueShape,
 };
-use crate::fn3::model::weights::{WeightSet, WeightTensor};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::{DimBound, LiveDims, Shape, ShapeEnvelope, Symbol};
+use crate::inference::model::weights::{WeightSet, WeightTensor};
+use crate::inference::ops::OpId;
+use crate::inference::shape::{DimBound, LiveDims, Shape, ShapeEnvelope, Symbol};
 
 use super::plan::{
     BoundValue, Constant, ConstantData, FoldKind, FoldedNode, MaskConstant, MaskRole, Plan,
@@ -2691,7 +2691,7 @@ fn concat_values(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::model::weights::WeightId;
+    use crate::inference::model::weights::WeightId;
 
     fn node(op: OpId) -> GraphNode {
         GraphNode {
@@ -2839,7 +2839,7 @@ mod tests {
             kv_heads: 2,
             head_dim: 64,
             vocab_size: 50_257,
-            positions: crate::fn3::import::PositionEmbedding::Learned {
+            positions: crate::inference::import::PositionEmbedding::Learned {
                 weight: WeightId::new(0),
                 max_positions: 1024,
             },

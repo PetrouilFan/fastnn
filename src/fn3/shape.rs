@@ -25,7 +25,7 @@
 //! are rejected with [`Fn3Error::InvalidStride`]. A zero stride is accepted only
 //! through [`Strides::validate_broadcast_for`], i.e. when the view is explicitly
 //! declared as a broadcast view; such a view is read-only (see
-//! [`crate::fn3::tensor::TensorMeta`]).
+//! [`crate::inference::tensor::TensorMeta`]).
 //!
 //! # Dynamic bounds
 //!
@@ -36,9 +36,9 @@
 
 use std::fmt;
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
 
 /// Convert a `u64` count to `usize` with an explicit overflow report.
 ///
@@ -442,7 +442,7 @@ impl Strides {
     ///
     /// Checked in `u64` and `usize`. This is the span a storage allocation must
     /// provide at offset 0; a view at a non-zero offset additionally needs its
-    /// offset (see [`crate::fn3::tensor::TensorMeta::required_bytes`]).
+    /// offset (see [`crate::inference::tensor::TensorMeta::required_bytes`]).
     pub fn required_bytes(&self, shape: &Shape, dtype: DType) -> Result<usize, Fn3Error> {
         let elements = self.required_len(shape)?;
         let bytes = elements
@@ -500,7 +500,7 @@ impl Strides {
     /// Zero strides are accepted (they re-read one element), negative strides
     /// are still rejected, and overlap is checked only between axes that claim
     /// distinct elements. Views validated this way are read-only; see
-    /// [`crate::fn3::tensor::TensorMeta`].
+    /// [`crate::inference::tensor::TensorMeta`].
     pub fn validate_broadcast_for(&self, shape: &Shape) -> Result<(), Fn3Error> {
         if self.rank() != shape.rank() {
             return Err(Fn3Error::RankMismatch {

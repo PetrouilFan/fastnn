@@ -268,6 +268,6 @@ model.eval()    # Disable dropout, freeze BN
 
 - [Tensors](tensors.md) -- Tensor creation and operations
 - [API Reference](api-reference.md) -- Complete module signatures
-- [Python API](python-api.md) -- the `fastnn.fn3` inference API
+- [Python API](python-api.md) -- the `fastnn.inference` inference API
 - [ONNX Support](../models/onnx.md) -- Quantized inference
 - [Index](../index.md) -- Full documentation index

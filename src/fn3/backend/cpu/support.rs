@@ -1,8 +1,8 @@
 //! The CPU backend's honest support table.
 //!
 //! [`support`] is the single place that answers "can the alpha CPU reference run
-//! this op?". [`crate::fn3::backend::cpu::CpuBackend::supports`] delegates to it
-//! and [`crate::fn3::backend::cpu::CpuBackend::execute_op`] dispatches from the
+//! this op?". [`crate::inference::backend::cpu::CpuBackend::supports`] delegates to it
+//! and [`crate::inference::backend::cpu::CpuBackend::execute_op`] dispatches from the
 //! same answer, so a supported id can never fall through to "not implemented"
 //! and an unsupported id can never be executed.
 //!
@@ -66,7 +66,7 @@
 //! # Why every other id is `Full`
 //!
 //! `Support::Full` is only claimed for an id that has a kernel in
-//! [`crate::fn3::backend::cpu::kernels`], a dispatch arm, and at least one test
+//! [`crate::inference::backend::cpu::kernels`], a dispatch arm, and at least one test
 //! in `tests/fn3_cpu_reference.rs`. `Support::Partial` is never returned: the
 //! documented contract of each kernel is its whole implemented surface, and a
 //! request outside it (for example a rank-1 `MatMul` operand, or a LayerNorm
@@ -74,8 +74,8 @@
 //! FN3-07 (#53) and the reason. That keeps "supported" from decaying into
 //! "sometimes approximates".
 
-use crate::fn3::backend::Support;
-use crate::fn3::ops::OpId;
+use crate::inference::backend::Support;
+use crate::inference::ops::OpId;
 
 /// Every op id the alpha CPU reference executes.
 pub(crate) const IMPLEMENTED: [OpId; 39] = [

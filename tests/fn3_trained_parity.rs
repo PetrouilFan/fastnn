@@ -33,10 +33,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fastnn::fn3::import::{import_onnx_file, ModelImport};
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session, SessionOptions};
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{CpuBackend, DeviceId, LiveDims, Tensor, TensorMeta};
+use fastnn::inference::import::{import_onnx_file, ModelImport};
+use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, Session, SessionOptions};
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{CpuBackend, DeviceId, LiveDims, Tensor, TensorMeta};
 
 const PROMPT: [u32; 13] = [
     464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 4874, 2402, 257,
@@ -504,7 +504,11 @@ fn trained_logits_policy_rejects_offset_and_distortion_independently() {
     }
 }
 
-fn run_step(label: &str, what: &str, result: Result<Tensor, fastnn::fn3::Fn3Error>) -> Tensor {
+fn run_step(
+    label: &str,
+    what: &str,
+    result: Result<Tensor, fastnn::inference::Fn3Error>,
+) -> Tensor {
     result.unwrap_or_else(|error| panic!("{label} {what} failed: {error}"))
 }
 
@@ -522,7 +526,7 @@ struct Arm {
 /// (resident, when the backend supports it) session options.
 fn run(
     import: &ModelImport,
-    backend: &dyn fastnn::fn3::Backend,
+    backend: &dyn fastnn::inference::Backend,
     device: DeviceId,
     label: &str,
     out_dir: &Path,
@@ -542,7 +546,7 @@ fn run(
 /// Run the pinned prompt and two decode steps with explicit session options.
 fn run_with_options(
     import: &ModelImport,
-    backend: &dyn fastnn::fn3::Backend,
+    backend: &dyn fastnn::inference::Backend,
     device: DeviceId,
     label: &str,
     out_dir: &Path,
@@ -563,7 +567,7 @@ fn run_with_options(
 fn run_session(
     model: &PreparedModel,
     import: &ModelImport,
-    backend: &dyn fastnn::fn3::Backend,
+    backend: &dyn fastnn::inference::Backend,
     label: &str,
     out_dir: &Path,
     expected: &References,
@@ -639,9 +643,9 @@ fn reject_staged_override() {
 }
 
 #[cfg(feature = "vulkan")]
-fn open_pinned_physical() -> std::sync::Arc<fastnn::fn3::backend::vulkan::VulkanBackend> {
-    use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-    use fastnn::fn3::device::DeviceRequest;
+fn open_pinned_physical() -> std::sync::Arc<fastnn::inference::backend::vulkan::VulkanBackend> {
+    use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+    use fastnn::inference::device::DeviceRequest;
 
     let pinned =
         std::env::var("FN3_VK_DEVICE_UUID").expect("set FN3_VK_DEVICE_UUID for the physical gate");
@@ -694,7 +698,7 @@ fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
 
     #[cfg(feature = "vulkan")]
     if let Some(backend) = gpu {
-        use fastnn::fn3::backend::vulkan::instance::validation_counts;
+        use fastnn::inference::backend::vulkan::instance::validation_counts;
         let device = backend.device_id();
         println!(
             "vulkan device: {} ({})",
@@ -806,8 +810,8 @@ fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
 
     #[cfg(feature = "vulkan")]
     {
-        use fastnn::fn3::backend::vulkan::instance::validation_counts;
-        use fastnn::fn3::OpId;
+        use fastnn::inference::backend::vulkan::instance::validation_counts;
+        use fastnn::inference::OpId;
 
         let path = pinned_model_path();
         let backend = open_pinned_physical();

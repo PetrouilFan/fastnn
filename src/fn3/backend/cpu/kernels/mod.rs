@@ -7,7 +7,7 @@
 //! faster implementation (SIMD, blocking, threads: FN3-42 / #71) or a portable
 //! GPU implementation (Vulkan: #59/#60/#61) has something exact to compare
 //! against. Nothing here is tuned; the seams that performance work may replace
-//! are named in [`crate::fn3::backend::cpu::kernels::optimization_handoff`]
+//! are named in [`crate::inference::backend::cpu::kernels::optimization_handoff`]
 //! and in each kernel's doc comment.
 //!
 //! # Indexing model
@@ -43,12 +43,12 @@
 //! - A failed op writes nothing: every kernel validates arity, dtype, shape,
 //!   attributes and output geometry before its first output write.
 
-use crate::fn3::backend::OpParams;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMeta, TensorMut, TensorView};
+use crate::inference::backend::OpParams;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMeta, TensorMut, TensorView};
 
 pub(crate) mod elementwise;
 pub(crate) mod gemm;
@@ -558,7 +558,7 @@ mod tests {
         let meta = TensorMeta::contiguous(
             Shape::from_dims([1, 3]),
             DType::F32,
-            crate::fn3::device::DeviceId::Cpu,
+            crate::inference::device::DeviceId::Cpu,
         )
         .unwrap();
         let locator = Locator::new(OpId::Add, &meta, &Shape::from_dims([4, 3])).unwrap();

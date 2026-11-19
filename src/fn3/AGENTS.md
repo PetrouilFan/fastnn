@@ -6,7 +6,7 @@ authority is `docs/roadmap/fn3-architecture.md`.
 ## Ownership
 
 - `dtype.rs`, `ops/mod.rs`, `device.rs`: leaf contracts (no imports from other
-  `fn3` modules).
+  `inference` modules).
 - `error.rs`: the single error type. Depends on `dtype`, `device`, `ops` only.
 - `shape.rs`, `storage.rs`: shape/stride/bound algebra and the aligned buffer.
 - `tensor.rs`: metadata, views and owned tensors.
@@ -27,14 +27,14 @@ authority is `docs/roadmap/fn3-architecture.md`.
   `OpParams` mapping and the `Planner` that builds plans.
 - `model/format/`: the versioned prepared-model artifact.
 - `python/`: the PyO3 binding, declared by path from `src/python/mod.rs`.
-- `cli/`: the `fn3-infer` implementation.
+- `cli/`: the `fastnn-infer` implementation.
 - `mod.rs`: facade and re-exports.
 
 ## Invariants
 
 - Dependency direction is a DAG (`dtype/device/ops → error → shape/storage →
   tensor → backend → model`); do not import upward.
-- `src/fn3/` imports no 2.x module and 2.x imports nothing from `fn3`.
+- `src/fn3/` imports no 2.x module and 2.x imports nothing from `inference`.
 - All element-count, byte-count and stride arithmetic is checked; overflow is
   `Fn3Error::ShapeOverflow`, never a wrap.
 - Strides are elements and signed. Writable views require positive,
@@ -100,7 +100,7 @@ authority is `docs/roadmap/fn3-architecture.md`.
 cargo fmt --check
 cargo build --no-default-features
 cargo build
-cargo test --lib fn3
+cargo test --lib inference
 cargo test --test fn3_contracts
 cargo test --test fn3_cpu_reference
 ```

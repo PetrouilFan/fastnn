@@ -1,4 +1,4 @@
-"""FN3-18 (#64): the ``fastnn.fn3`` Python facade over the 3.0 inference runtime.
+"""FN3-18 (#64): the ``fastnn.inference`` Python facade over the 3.0 inference runtime.
 
 What is covered, in the order the issue asks for it:
 
@@ -32,7 +32,7 @@ import numpy as np
 import pytest
 
 import fastnn
-import fastnn.fn3 as fn3
+import fastnn.inference as fn3
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_ONNX = "/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx"
@@ -103,22 +103,25 @@ def session(model) -> fn3.Session:
 
 def test_namespace_is_reachable_from_the_package_and_the_extension():
     # `import fastnn` alone must expose the namespace ...
-    assert fastnn.fn3 is fn3
-    assert "fn3" in fastnn.__all__
+    assert fastnn.inference is fn3
+    assert "inference" in fastnn.__all__
+    assert not hasattr(fastnn, "fn3")
     # ... and the extension module is importable by its dotted name.
-    import fastnn._core.fn3 as core_fn3
+    import fastnn._core.inference as core_fn3
 
     # The Python package adds path handling and docstrings around the same
     # objects; the classes and exceptions are the extension's, unchanged.
     assert core_fn3.Session is fn3.Session
+    assert fn3.Session.__module__ == "fastnn._core.inference"
+    assert not hasattr(fastnn._core, "fn3")
     assert core_fn3.Logits is fn3.Logits
     assert core_fn3.Fn3DeviceError is fn3.Fn3DeviceError
     assert callable(core_fn3.load) and callable(core_fn3.prepare)
-    assert fn3.load.__module__ == "fastnn.fn3"
+    assert fn3.load.__module__ == "fastnn.inference"
     for name in fn3.__all__:
         assert hasattr(fn3, name), f"fn3.__all__ names {name} but it is missing"
     for name in core_fn3.__all__:
-        assert hasattr(core_fn3, name), f"_core.fn3.__all__ names {name} but it is missing"
+        assert hasattr(core_fn3, name), f"_core.inference.__all__ names {name} but it is missing"
 
 
 def test_error_hierarchy_is_catchable_at_every_level():
@@ -377,7 +380,7 @@ def test_artifact_only_load_works_in_a_clean_process(artifact_path, tmp_path):
     script = (
         "import json, pathlib, sys\n"
         "import numpy as np\n"
-        "import fastnn.fn3 as fn3\n"
+        "import fastnn.inference as fn3\n"
         "model = fn3.load(sys.argv[1], device='cpu')\n"
         "session = model.session()\n"
         "logits = np.asarray(session.prefill([464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13])).reshape(-1)\n"

@@ -1,4 +1,4 @@
-"""fastnn.fn3 — the FastNN 3.0 inference API.
+"""fastnn.inference — the FastNN 3.0 inference API.
 
 This is the surface that survives the 2.x removal (#65). It is a thin Python
 layer over the same Rust engine the CLI and the Rust tests use: one versioned
@@ -10,7 +10,7 @@ Quick start
 
 Prepare once, then load and run::
 
-    import fastnn.fn3 as fn3
+    import fastnn.inference as fn3
 
     report = fn3.prepare("model.onnx", "model.fn3prep")
     print(report.status, report.size_bytes, report.sha256)
@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import os
 
-from fastnn._core.fn3 import (
+from fastnn._core.inference import (
     ArtifactInfo,
     Device,
     Envelope,
@@ -59,7 +59,7 @@ from fastnn._core.fn3 import (
     load as _load,
     prepare as _prepare,
 )
-from fastnn._core.fn3 import (
+from fastnn._core.inference import (
     Fn3CapacityError,
     Fn3DeviceError,
     Fn3EnvelopeError,

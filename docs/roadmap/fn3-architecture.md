@@ -5,9 +5,10 @@
 **Base of record:** `a2c0759fff8bdcb7c943e53442f3382b86e59b66` (crate version 2.6.0).
 
 The 3.0 candidate lives in `src/fn3/`. It is a new inference-only core built
-beside the 2.x tree so parallel workers never collide with 2.x paths. FN3-19
-(#65) promotes and renames the tree when the 2.x modules are deleted; until then
-`fn3` is a temporary name and the two trees share only `Cargo.toml`.
+beside the 2.x tree so parallel workers never collide with 2.x paths. The
+canonical entry points are `fastnn::inference`, `fastnn.inference` and
+`fastnn-infer`. This public rename is independent of any 2.x teardown or
+physical move of `src/fn3/`; it does not change the `.fnn3` artifact format.
 
 ## 1. Scope decision (do not re-litigate)
 
@@ -93,8 +94,8 @@ dtype   device   ops
 
 `src/fn3/` must not import any 2.x module (`crate::tensor`, `crate::ir`,
 `crate::backend`, `crate::compiler`, ...). The reverse is also forbidden: 2.x
-code must not depend on `fn3`. The only shared file is `src/lib.rs`, which
-declares `pub mod fn3;` unconditionally.
+code must not depend on `inference`. `src/lib.rs` exposes `pub mod inference;`
+unconditionally using `#[path = "fn3/mod.rs"]`.
 
 ## 3. Contract summary
 
@@ -215,8 +216,8 @@ tree; changing a shared contract requires coordination with the core owner.
 | #60 FN3-14 | Vulkan matmul | `src/fn3/backend/vulkan/kernels/matmul.rs` |
 | #61 FN3-15 | Vulkan norm/reduce/attention | `src/fn3/backend/vulkan/kernels/{norm,reduce,attention}.rs` |
 | #62 FN3-16 | end-to-end pinned model | `tests/fn3_e2e/` |
-| #63 FN3-17 | inference CLI | `src/fn3/cli/` (new), `src/bin/fn3-infer.rs` (new), `tests/fn3_cli.rs` |
-| #64 FN3-18 | minimal Python API | `src/fn3/python/` (new, behind the existing `python` feature), `fastnn/fn3/` (new), `tests/test_fn3_api.py` |
+| #63 FN3-17 | inference CLI | `src/fn3/cli/`, `src/bin/fastnn-infer.rs`, `tests/fn3_cli.rs` |
+| #64 FN3-18 | minimal Python API | `src/fn3/python/` (behind the `python` feature), `fastnn/inference/`, `tests/test_fn3_python.py` |
 | #66 FN3-20 | CI | `.github/workflows/`, `tests/fn3_ci_smoke.rs` |
 
 `src/fn3/model/mod.rs` and `src/fn3/backend/cpu/mod.rs` stay single files owned by
@@ -295,11 +296,10 @@ lands. `src/fn3/mod.rs`, `error.rs`, `dtype.rs`, `device.rs`, `ops/`, and
 
 - `src/fn3/` is a second implementation during the alpha. It is kept honest by
   importing nothing from 2.x and by owning its own tests.
-- No Python surface exists for 3.0 yet. `tests/` Python suites still target 2.x
-  and must keep passing for the frozen tree until FN3-19 removes it.
+- The `fastnn.inference` Python facade and the secondary 2.x Python facade
+  coexist and have separate test coverage.
 - Quantization dtype codes are not assigned. `DType::from_code` rejects
   `4..=255`; the first quantized milestone must add codes and a `DType` variant
   together.
-- FN3-19 (#65) must move this file's module tree, drop the `fn3` prefix, delete
-  the superseded 2.x gates from CI, and update `AGENTS.md` files in the same
-  change.
+- A physical move of `src/fn3/` and any deletion of superseded 2.x gates are
+  outside the public rename.

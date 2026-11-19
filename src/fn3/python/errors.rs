@@ -38,10 +38,10 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-use crate::fn3::device::DeviceResolveError;
-use crate::fn3::error::Fn3Error as CoreError;
-use crate::fn3::import::{ImportError, ImportProblemKind};
-use crate::fn3::model::format::{FormatError, FormatErrorKind};
+use crate::inference::device::DeviceResolveError;
+use crate::inference::error::Fn3Error as CoreError;
+use crate::inference::import::{ImportError, ImportProblemKind};
+use crate::inference::model::format::{FormatError, FormatErrorKind};
 
 create_exception!(
     fastnn,
@@ -134,7 +134,7 @@ create_exception!(
     "The core rejected the request; the message is the core's own."
 );
 
-/// Register this module's exceptions on the `fn3` submodule.
+/// Register this module's exceptions on the `inference` submodule.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
     module.add("Fn3Error", py.get_type::<Fn3Error>())?;
@@ -333,9 +333,9 @@ pub(crate) fn from_core(py: Python<'_>, error: CoreError) -> PyErr {
             let requested = expected.diagnostic();
             let actual = actual.diagnostic();
             let op = op.map(|op| op.to_string());
-            let available: Vec<String> = crate::fn3::device::available_devices()
+            let available: Vec<String> = crate::inference::device::available_devices()
                 .iter()
-                .map(crate::fn3::device::DeviceInfo::label)
+                .map(crate::inference::device::DeviceInfo::label)
                 .collect();
             typed::<Fn3DeviceError>(py, message, |value| {
                 value.setattr("requested", requested)?;
@@ -432,7 +432,7 @@ pub(crate) fn from_core(py: Python<'_>, error: CoreError) -> PyErr {
 /// Register the public exception names on the Python package's dynamism.
 ///
 /// Kept for symmetry with the other registration helpers: the Python facade
-/// re-exports these classes so `except fastnn.fn3.Fn3DeviceError` works.
+/// re-exports these classes so `except fastnn.inference.Fn3DeviceError` works.
 pub(crate) const NAMES: &[&str] = &[
     "Fn3Error",
     "Fn3ModelError",

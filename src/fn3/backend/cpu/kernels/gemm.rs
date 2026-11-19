@@ -65,8 +65,8 @@
 //! `#[target_feature]` on individual functions that are never called unless
 //! detection succeeded.
 
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
 
 use super::super::parallel::{self, MIN_MACS_PER_TASK};
 use super::kernel_bounds_error;

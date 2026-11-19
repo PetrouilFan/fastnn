@@ -44,7 +44,7 @@ use super::error::{check, Error, Result};
 use super::instance::Instance;
 use super::ledger::HandleLedger;
 use super::memory::{MemoryAllocation, MemoryAllocator, MemoryClass, MemoryStats};
-use crate::fn3::device::{DeviceId, PhysicalDeviceId};
+use crate::inference::device::{DeviceId, PhysicalDeviceId};
 
 /// How a logical device is created.
 #[derive(Debug, Clone)]

@@ -48,19 +48,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use fastnn::fn3::backend::OpParams;
-use fastnn::fn3::dtype::DType;
-use fastnn::fn3::import::{
+use fastnn::inference::backend::OpParams;
+use fastnn::inference::dtype::DType;
+use fastnn::inference::import::{
     import_onnx_model, DecoderGeometry, Dim, GraphNode, KvInterface, PositionEmbedding, ValueId,
     ValueInfo, ValueOrigin, ValueShape,
 };
-use fastnn::fn3::model::format::{
+use fastnn::inference::model::format::{
     ArtifactMetadata, FormatErrorKind, PreparedArtifact, PreparedGraph, HEADER_BYTES, MAGIC,
     MAX_VALUES,
 };
-use fastnn::fn3::model::{WeightId, WeightSet, WeightSource, WeightTensor};
-use fastnn::fn3::ops::OpId;
-use fastnn::fn3::shape::{Shape, ShapeEnvelope, Symbol};
+use fastnn::inference::model::{WeightId, WeightSet, WeightSource, WeightTensor};
+use fastnn::inference::ops::OpId;
+use fastnn::inference::shape::{Shape, ShapeEnvelope, Symbol};
 
 // ---------------------------------------------------------------------------
 // Counting allocator
@@ -376,7 +376,7 @@ fn tiny_artifact() -> Vec<u8> {
     .expect("names are unique");
     let metadata = ArtifactMetadata {
         ir_version: 7,
-        opset: fastnn::fn3::import::OpsetImport {
+        opset: fastnn::inference::import::OpsetImport {
             domain: String::new(),
             version: 14,
         },
@@ -960,7 +960,7 @@ fn a_graph_of_a_million_nodes_is_refused_by_the_node_budget() {
     // Each node is two bytes (a tag and a zero length), so a two-megabyte file
     // declares one node over the budget. This is the case the budget exists for:
     // the decoded node is far larger than its encoding.
-    let over = fastnn::fn3::import::MAX_NODES + 1;
+    let over = fastnn::inference::import::MAX_NODES + 1;
     let mut graph = Vec::with_capacity(over * 2);
     for _ in 0..over {
         tag(1, 2, &mut graph);

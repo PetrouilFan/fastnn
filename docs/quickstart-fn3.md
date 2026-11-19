@@ -9,8 +9,9 @@ on disk.
 The CLI takes **token IDs**, not text. This alpha does not ship a tokenizer and
 does not approximate one; see [Token IDs](#token-ids) at the end.
 
-All commands below were run from the repository root on the pinned tiny-GPT-2
-model.
+Run the commands below from the repository root on the pinned tiny-GPT-2
+model. The sample output uses the current CLI name; the original run is
+recorded in [FN3-17 evidence](reports/fn3-17-cli-quickstart.md).
 
 ## 0. Build
 
@@ -18,7 +19,7 @@ model.
 cargo build --release --no-default-features --features cli
 ```
 
-The binary is `target/release/fn3-infer`. A Vulkan build is the same command with
+The binary is `target/release/fastnn-infer`. A Vulkan build is the same command with
 `--features cli,vulkan`; the Vulkan section below shows that exact build.
 
 ## 1. The model
@@ -54,13 +55,13 @@ MODEL=/tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx
 
 ```bash
 mkdir -p /tmp/opencode/fn3-cli/release
-./target/release/fn3-infer prepare \
+./target/release/fastnn-infer prepare \
   --onnx "$MODEL" \
   --out /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
 ```
 
 ```text
-fn3-infer prepare
+fastnn-infer prepare
   source: /tmp/opencode/parity-fresh/models/tiny-gpt2/onnx/model.onnx
     bytes:  27,897,974
     sha256: e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1
@@ -84,11 +85,11 @@ the defaults are 128 / 1023 / 1024 and match the model's 1024 learned positions.
 Header only (no sections decoded):
 
 ```bash
-./target/release/fn3-infer inspect /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
+./target/release/fastnn-infer inspect /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
 ```
 
 ```text
-fn3-infer inspect
+fastnn-infer inspect
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:   27,879,928
     sha256:  33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
@@ -100,11 +101,11 @@ fn3-infer inspect
 Full decode of META, GEOM, ENV, VALS, NODE and WGHT:
 
 ```bash
-./target/release/fn3-infer inspect --sections /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
+./target/release/fastnn-infer inspect --sections /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
 ```
 
 ```text
-fn3-infer inspect
+fastnn-infer inspect
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:   27,879,928
     sha256:  33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
@@ -128,7 +129,7 @@ still match the artifact. `--verify-source` states that intent explicitly and
 requires `--onnx`.
 
 ```bash
-./target/release/fn3-infer run \
+./target/release/fastnn-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --onnx "$MODEL" \
   --verify-source \
@@ -138,7 +139,7 @@ requires `--onnx`.
 ```
 
 ```text
-fn3-infer inference
+fastnn-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
@@ -165,7 +166,7 @@ message names the first difference:
 
 ```text
 error: `/tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3` and `/tmp/opencode/fn3-artifact-exec/flipped.onnx` do not describe the same model: weight `transformer.h.1.mlp.c_proj.weight` differs
-next: pass the exact ONNX the artifact was prepared from, or re-run `fn3-infer prepare` with this ONNX; without `--onnx` the artifact runs on its own
+next: pass the exact ONNX the artifact was prepared from, or re-run `fastnn-infer prepare` with this ONNX; without `--onnx` the artifact runs on its own
 ```
 
 `--verify-source` without `--onnx` is a usage error (exit code 2), so a script
@@ -188,7 +189,7 @@ whitespace separated, or `@file`.
 ```bash
 TOKENS=464,2068,7586,21831,18045,625,262,16931,3290,13
 
-./target/release/fn3-infer run \
+./target/release/fastnn-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --tokens "$TOKENS" \
   --device cpu \
@@ -196,7 +197,7 @@ TOKENS=464,2068,7586,21831,18045,625,262,16931,3290,13
 ```
 
 ```text
-fn3-infer inference
+fastnn-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
@@ -223,7 +224,7 @@ backend that actually executed.
 ## 6. Generate greedily
 
 ```bash
-./target/release/fn3-infer generate \
+./target/release/fastnn-infer generate \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --tokens "$TOKENS" \
   --max-new-tokens 3 \
@@ -233,7 +234,7 @@ backend that actually executed.
 ```
 
 ```text
-fn3-infer inference
+fastnn-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
@@ -268,7 +269,7 @@ hits/misses and wall time for every decode.
 13-token fixture prefix and three cached steps:
 
 ```bash
-./target/release/fn3-infer run \
+./target/release/fastnn-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --tokens 464,2068,7586,21831,18045,625,262,16931,3290,13,4874,2402,257 \
   --decode 640,11,612 \
@@ -277,7 +278,7 @@ hits/misses and wall time for every decode.
 ```
 
 ```text
-fn3-infer inference
+fastnn-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
@@ -314,11 +315,11 @@ Build with Vulkan and diagnose first:
 
 ```bash
 cargo build --release --no-default-features --features cli,vulkan
-./target/release/fn3-infer diagnose
+./target/release/fastnn-infer diagnose
 ```
 
 ```text
-fn3-infer 3.0.0-alpha.1 — build/device/backend diagnosis
+fastnn-infer 3.0.0-alpha.1 — build/device/backend diagnosis
   vulkan feature: enabled
 
 device matrix:
@@ -341,7 +342,7 @@ claim a GPU result just because the loader lists a device.
 The equivalent run command on a physical GPU is:
 
 ```bash
-./target/release/fn3-infer run \
+./target/release/fastnn-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --tokens "$TOKENS" \
   --device vulkan \
@@ -352,7 +353,7 @@ On this host it opens the GTX 1080 Ti and runs the full decoder plan:
 
 ```text
 [fn3vk] backend=vulkan adapter="NVIDIA GeForce GTX 1080 Ti" type=DISCRETE_GPU uuid=471b2bda-51e1-6451-e692-ff5d1e146f1e api=1.4.312 driver=580.196.7.0 queue_family=2 validation=false software=false maxMemoryAllocationSize=4292870144 maxStorageBufferRange=4294967295 chunk_cap=536870912
-fn3-infer inference
+fastnn-infer inference
   artifact: /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3
     bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
     payload crc32: 0xe02e9330
@@ -375,7 +376,7 @@ The cached decode path runs on the same device (the full gate is
 `tests/fn3_e2e.rs` with `--features vulkan`):
 
 ```bash
-./target/release/fn3-infer generate \
+./target/release/fastnn-infer generate \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --tokens "$TOKENS" \
   --max-new-tokens 3 \
@@ -398,7 +399,7 @@ driver the failure is earlier and is exit code 4:
 
 ```bash
 VK_ICD_FILENAMES=/nonexistent/icd.json VK_DRIVER_FILES=/nonexistent/icd.json \
-./target/release/fn3-infer run \
+./target/release/fastnn-infer run \
   --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
   --tokens "$TOKENS" \
   --device vulkan
@@ -407,7 +408,7 @@ VK_ICD_FILENAMES=/nonexistent/icd.json VK_DRIVER_FILES=/nonexistent/icd.json \
 ```text
 [fn3vk][warn] Vulkan device discovery unavailable: Vulkan loader unavailable: vkCreateInstance failed: ERROR_INCOMPATIBLE_DRIVER (-9): requesting Vulkan 1.1 with layers [] and extensions []
 error: cannot open the requested Vulkan device: device unavailable: requested device vulkan is unavailable: no Vulkan device is usable: Vulkan loader unavailable: vkCreateInstance failed: ERROR_INCOMPATIBLE_DRIVER (-9): requesting Vulkan 1.1 with layers [] and extensions []. Install a Vulkan ICD (`vulkan-icd-loader` and the GPU driver package), or point VK_ICD_FILENAMES at a valid ICD; `vulkaninfo --summary` shows what the loader sees; available devices: [cpu]
-next: install or repair the Vulkan ICD/GPU driver, or run `--device cpu`; `fn3-infer diagnose` shows the loader's view
+next: install or repair the Vulkan ICD/GPU driver, or run `--device cpu`; `fastnn-infer diagnose` shows the loader's view
 ```
 
 ## Token IDs

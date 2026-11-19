@@ -3,7 +3,7 @@
 //!
 //! # The contract is the CPU reference
 //!
-//! [`crate::fn3::backend::cpu::kernels::matmul`] defines the semantics this
+//! [`crate::inference::backend::cpu::kernels::matmul`] defines the semantics this
 //! kernel implements; it is not free to invent a different one:
 //!
 //! ```text
@@ -60,13 +60,13 @@ use super::super::VulkanBackend;
 use super::io::{self};
 use super::pointwise::Job;
 use super::{BindingSpec, GridInput, KernelSet, KernelSpec, OpKernel};
-use crate::fn3::backend::vulkan::VULKAN_BACKEND_NAME;
-use crate::fn3::backend::{check_arity, Backend, CapabilityFeatures, OpParams, Support};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::{Fn3Error, Fn3Result};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::vulkan::VULKAN_BACKEND_NAME;
+use crate::inference::backend::{check_arity, Backend, CapabilityFeatures, OpParams, Support};
+use crate::inference::dtype::DType;
+use crate::inference::error::{Fn3Error, Fn3Result};
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// Owning issue named in this family's rejection messages.
 const KERNEL_OWNER: &str = "FN3-14 (#60)";

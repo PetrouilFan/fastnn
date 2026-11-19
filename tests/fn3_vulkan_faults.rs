@@ -37,11 +37,11 @@
 
 use std::sync::Mutex;
 
-use fastnn::fn3::backend::vulkan::instance::validation_counts;
-use fastnn::fn3::backend::vulkan::{adapters, FaultPoint, VulkanBackend, VulkanConfig};
-use fastnn::fn3::device::DeviceRequest;
-use fastnn::fn3::model::{SessionOptions, SessionPhase};
-use fastnn::fn3::{Fn3Error, Session};
+use fastnn::inference::backend::vulkan::instance::validation_counts;
+use fastnn::inference::backend::vulkan::{adapters, FaultPoint, VulkanBackend, VulkanConfig};
+use fastnn::inference::device::DeviceRequest;
+use fastnn::inference::model::{SessionOptions, SessionPhase};
+use fastnn::inference::{Fn3Error, Session};
 
 #[path = "fn3_e2e/harness.rs"]
 mod harness;

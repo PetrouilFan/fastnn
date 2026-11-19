@@ -45,10 +45,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use fastnn::fn3::import::{import_onnx_model, ModelImport};
-use fastnn::fn3::model::{ModelWeights, Planner, PreparedModel, Session, SessionPhase};
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{
+use fastnn::inference::import::{import_onnx_model, ModelImport};
+use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, Session, SessionPhase};
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{
     Backend, Capabilities, CpuBackend, DType, DeviceId, Fn3Error, LiveDims, OpId, OpParams,
     Support, Tensor, TensorMeta, TensorMut, TensorView,
 };
@@ -1137,7 +1137,7 @@ fn a_model_prepared_for_vulkan_is_never_stepped_by_the_cpu_backend() {
     let Some(import) = pinned() else {
         return;
     };
-    let vulkan = DeviceId::Vulkan(fastnn::fn3::PhysicalDeviceId::new(0));
+    let vulkan = DeviceId::Vulkan(fastnn::inference::PhysicalDeviceId::new(0));
     let (model, _) = prepared(&import, vulkan);
     assert_eq!(model.device(), vulkan);
     let backend = CpuBackend::new();
@@ -1263,9 +1263,9 @@ fn the_mask_the_session_runs_is_finite_and_an_all_masked_row_is_uniform() {
 #[cfg(feature = "vulkan")]
 mod gpu {
     use super::*;
-    use fastnn::fn3::backend::vulkan::instance::validation_counts;
-    use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-    use fastnn::fn3::device::DeviceRequest;
+    use fastnn::inference::backend::vulkan::instance::validation_counts;
+    use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+    use fastnn::inference::device::DeviceRequest;
 
     /// Serialises physical-GPU use and validation-count assertions.
     static GPU_LOCK: Mutex<()> = Mutex::new(());
@@ -1338,7 +1338,7 @@ mod gpu {
             "[fn3vk][test] device=\"{}\" uuid={} api={} driver={} validation={}",
             adapter.name,
             adapter.uuid_string(),
-            fastnn::fn3::backend::vulkan::device_info::format_version(adapter.api_version),
+            fastnn::inference::backend::vulkan::device_info::format_version(adapter.api_version),
             adapter.driver_version_string(),
             backend.validation_enabled()
         );

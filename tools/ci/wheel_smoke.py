@@ -58,7 +58,7 @@ def write_report(path: str | None, record: dict) -> None:
 def run_inference(model: pathlib.Path, expect_sha256: str = "") -> dict:
     import numpy as np
 
-    import fastnn.fn3 as fn3
+    import fastnn.inference as fn3
 
     digest = hashlib.sha256()
     with model.open("rb") as handle:
@@ -191,10 +191,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # The shipped Python surface is the 3.0 inference API. It must import
     # without a model and without a GPU.
-    import fastnn.fn3 as fn3
+    import fastnn.inference as fn3
 
-    if fn3.Session is not fastnn._core.fn3.Session:
-        print("FAIL: fastnn.fn3.Session is not fastnn._core.fn3.Session", file=sys.stderr)
+    if fn3.Session is not fastnn._core.inference.Session:
+        print("FAIL: fastnn.inference.Session is not fastnn._core.inference.Session", file=sys.stderr)
         return 1
     devices = fn3.devices()
     if not devices or devices[0].kind != "cpu":
@@ -203,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"inference smoke: fastnn.fn3 imported, devices={[d.id for d in devices]}")
+    print(f"inference smoke: fastnn.inference imported, devices={[d.id for d in devices]}")
 
     model = pathlib.Path(args.model).expanduser()
     if not model.is_file():

@@ -40,10 +40,10 @@
 //! `src/backend/cpu/microkernels/activations.rs`), the origin is named in the
 //! function's doc comment.
 
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{at, at_mut, decompose, require_dtype, require_output_shape, Locator};
 

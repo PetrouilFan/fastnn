@@ -7,9 +7,9 @@
 //! makes the two parser budgets in `src/fn3/import/budget.rs` a single contract
 //! rather than two independent guesses.
 
-use fastnn::fn3::import::import_onnx_model;
-use fastnn::fn3::model::format::PreparedArtifact;
-use fastnn::fn3::shape::ShapeEnvelope;
+use fastnn::inference::import::import_onnx_model;
+use fastnn::inference::model::format::PreparedArtifact;
+use fastnn::inference::shape::ShapeEnvelope;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

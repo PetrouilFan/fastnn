@@ -33,20 +33,20 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use fastnn::fn3::import::{
+use fastnn::inference::import::{
     import_onnx_model, DecoderGeometry, Dim, GraphNode, KvInterface, ModelImport, OpsetImport,
     PositionEmbedding, ValueId, ValueInfo, ValueOrigin, ValueShape,
 };
-use fastnn::fn3::model::format::{
+use fastnn::inference::model::format::{
     ArtifactMetadata, FormatError, FormatErrorKind, PreparedArtifact, PreparedGraph,
     FORMAT_VERSION, HEADER_BYTES, MAGIC, MAX_RANK, MAX_VALUES,
 };
-use fastnn::fn3::model::{
+use fastnn::inference::model::{
     weights::{WeightId, WeightSet, WeightSource, WeightTensor},
     ExecutionPlan, ModelWeights, PreparedModel, Session, MAX_KV_LAYERS,
 };
-use fastnn::fn3::shape::{DimBound, Shape, ShapeEnvelope, Symbol};
-use fastnn::fn3::{DType, DeviceId, OpId, OpParams};
+use fastnn::inference::shape::{DimBound, Shape, ShapeEnvelope, Symbol};
+use fastnn::inference::{DType, DeviceId, OpId, OpParams};
 
 // ---------------------------------------------------------------------------
 // Pinned artifact
@@ -565,8 +565,8 @@ const PROMPT_10: [u32; 10] = [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 32
 
 /// Plan, run and prefill `prompt` through one CPU session over `import`.
 fn prefill_logits(import: &ModelImport) -> Vec<f32> {
-    use fastnn::fn3::model::Planner;
-    use fastnn::fn3::{CpuBackend, LiveDims};
+    use fastnn::inference::model::Planner;
+    use fastnn::inference::{CpuBackend, LiveDims};
 
     let backend = CpuBackend::new();
     let envelope = pinned_envelope();

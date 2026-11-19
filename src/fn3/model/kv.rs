@@ -52,13 +52,13 @@
 //! moves no KV byte through the host. The host accessors still work: they
 //! download explicitly rather than returning stale bytes.
 
-use crate::fn3::backend::Backend;
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::shape::{DimBound, Shape, ShapeEnvelope};
-use crate::fn3::storage::Storage;
-use crate::fn3::tensor::{Tensor, TensorMeta, TensorView};
+use crate::inference::backend::Backend;
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::shape::{DimBound, Shape, ShapeEnvelope};
+use crate::inference::storage::Storage;
+use crate::inference::tensor::{Tensor, TensorMeta, TensorView};
 
 /// Layout of the key and value cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +135,7 @@ impl KvCacheConfig {
                 detail: "a KV cache needs capacity for at least one token".to_string(),
             });
         }
-        let total = envelope.get(crate::fn3::shape::Symbol::Total);
+        let total = envelope.get(crate::inference::shape::Symbol::Total);
         if self.capacity_tokens > total.max() {
             return Err(Fn3Error::CapacityExceeded {
                 what: "KV cache capacity vs envelope total",
@@ -742,7 +742,7 @@ fn write_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::shape::ShapeEnvelope;
+    use crate::inference::shape::ShapeEnvelope;
 
     fn config(capacity: u64) -> KvCacheConfig {
         KvCacheConfig {

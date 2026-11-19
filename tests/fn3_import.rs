@@ -33,10 +33,10 @@
 
 use std::path::PathBuf;
 
-use fastnn::fn3::import::{
+use fastnn::inference::import::{
     import_onnx_model, ImportError, ImportProblemKind, ModelImport, ProtoError, WeightSource,
 };
-use fastnn::fn3::OpId;
+use fastnn::inference::OpId;
 
 // ---------------------------------------------------------------------------
 // Pinned artifact
@@ -135,12 +135,12 @@ fn pinned_model_imports_with_the_documented_inventory() {
     let f32_initializers = imported
         .weights()
         .initializers()
-        .filter(|weight| weight.dtype() == fastnn::fn3::DType::F32)
+        .filter(|weight| weight.dtype() == fastnn::inference::DType::F32)
         .count();
     let i64_initializers = imported
         .weights()
         .initializers()
-        .filter(|weight| weight.dtype() == fastnn::fn3::DType::I64)
+        .filter(|weight| weight.dtype() == fastnn::inference::DType::I64)
         .count();
     assert_eq!((f32_initializers, i64_initializers), (24, 24));
 
@@ -216,7 +216,7 @@ fn pinned_model_geometry_is_detected_and_validated() {
     assert_eq!(geometry.head_dim, 64);
     assert_eq!(geometry.vocab_size, 50_257);
     assert_eq!(geometry.positions, {
-        fastnn::fn3::import::PositionEmbedding::Learned {
+        fastnn::inference::import::PositionEmbedding::Learned {
             weight: imported.weights().id_of("transformer.wpe.weight").unwrap(),
             max_positions: 1024,
         }
@@ -228,7 +228,7 @@ fn pinned_model_geometry_is_detected_and_validated() {
     );
     assert_eq!(geometry.kv.len(), 2);
     let logits = imported.graph().value(geometry.logits);
-    assert_eq!(logits.dtype, fastnn::fn3::DType::F32);
+    assert_eq!(logits.dtype, fastnn::inference::DType::F32);
     assert_eq!(logits.shape.rank(), Some(3));
     assert_eq!(logits.shape.dims()[2].as_known(), Some(50_257));
     assert_eq!(
@@ -274,10 +274,10 @@ fn pinned_model_geometry_is_detected_and_validated() {
         .values()
         .iter()
         .filter(|value| match &value.shape {
-            fastnn::fn3::import::ValueShape::Unknown => true,
-            fastnn::fn3::import::ValueShape::Dims(dims) => dims
+            fastnn::inference::import::ValueShape::Unknown => true,
+            fastnn::inference::import::ValueShape::Dims(dims) => dims
                 .iter()
-                .any(|dim| matches!(dim, fastnn::fn3::import::Dim::Unknown(_))),
+                .any(|dim| matches!(dim, fastnn::inference::import::Dim::Unknown(_))),
         })
         .map(|value| value.name.as_str())
         .collect();
@@ -293,17 +293,17 @@ fn every_mapped_node_has_an_implemented_op_id() {
     let Some((_, imported)) = pinned() else {
         return;
     };
-    let backend = fastnn::fn3::CpuBackend::new();
+    let backend = fastnn::inference::CpuBackend::new();
     let mut census = std::collections::BTreeMap::new();
     for node in imported.graph().nodes() {
         assert!(
-            fastnn::fn3::OpId::ALL.contains(&node.op),
+            fastnn::inference::OpId::ALL.contains(&node.op),
             "node {} maps to {:?}, which is not in OpId::ALL",
             node.onnx_index,
             node.op
         );
         assert!(
-            fastnn::fn3::Backend::supports(&backend, node.op).is_supported(),
+            fastnn::inference::Backend::supports(&backend, node.op).is_supported(),
             "node {} maps to {}, which the CPU backend reports as unsupported",
             node.onnx_index,
             node.op
@@ -338,7 +338,7 @@ fn integer_arithmetic_is_preserved_rather_than_cast() {
             continue;
         }
         let dtype = imported.graph().value(node.inputs[0]).dtype;
-        if dtype == fastnn::fn3::DType::I64 {
+        if dtype == fastnn::inference::DType::I64 {
             integer_arithmetic.push((node.onnx_index, node.op.name(), node.name.clone()));
         }
     }
@@ -372,7 +372,7 @@ fn pinned_model_ir_is_self_consistent() {
         }
         // Every input is defined before the node that reads it.
         for id in &node.inputs {
-            if let fastnn::fn3::import::ValueOrigin::Node(index) = graph.value(*id).origin {
+            if let fastnn::inference::import::ValueOrigin::Node(index) = graph.value(*id).origin {
                 assert!(
                     (index as usize) < graph.nodes().len(),
                     "value {} claims producer {index}",
@@ -957,7 +957,7 @@ fn a_constant_of_shape_attribute_value_becomes_a_scalar_weight() {
     let value = imported.graph().value(node.inputs[1]);
     assert_eq!(
         value.shape.static_shape(),
-        Some(fastnn::fn3::Shape::from_dims([1]))
+        Some(fastnn::inference::Shape::from_dims([1]))
     );
     let weight = imported.weights().find(&value.name).expect("lifted weight");
     assert_eq!(weight.source(), WeightSource::AttributeConstant);
@@ -969,7 +969,7 @@ fn a_constant_of_shape_attribute_value_becomes_a_scalar_weight() {
             .value(node.primary_output().unwrap())
             .shape
             .static_shape(),
-        Some(fastnn::fn3::Shape::from_dims([1, 4, 16]))
+        Some(fastnn::inference::Shape::from_dims([1, 4, 16]))
     );
     assert_eq!(imported.summary().attribute_constants, 1);
 }
@@ -989,7 +989,7 @@ fn a_synthetic_decoder_imports_with_fully_static_shapes() {
     let logits = imported.graph().value(geometry.logits);
     assert_eq!(
         logits.shape.static_shape(),
-        Some(fastnn::fn3::Shape::from_dims([1, 4, 16]))
+        Some(fastnn::inference::Shape::from_dims([1, 4, 16]))
     );
     // Every value is fully static in this model.
     for value in imported.graph().values() {
@@ -1006,14 +1006,14 @@ fn a_synthetic_decoder_imports_with_fully_static_shapes() {
 fn gemm_becomes_matmul_then_add_with_the_matmul_plus_bias_shape() {
     let imported = import(&synthetic_gpt2()).expect("synthetic decoder");
     let graph = imported.graph();
-    let gemm_nodes: Vec<&fastnn::fn3::import::GraphNode> = graph
+    let gemm_nodes: Vec<&fastnn::inference::import::GraphNode> = graph
         .nodes()
         .iter()
         .filter(|node| node.onnx_op == "Gemm")
         .collect();
     // Two Gemm nodes, each MatMul + Add.
     assert_eq!(gemm_nodes.len(), 4);
-    let project: Vec<&fastnn::fn3::import::GraphNode> = gemm_nodes
+    let project: Vec<&fastnn::inference::import::GraphNode> = gemm_nodes
         .iter()
         .copied()
         .filter(|node| node.onnx_index == 2)
@@ -1028,7 +1028,7 @@ fn gemm_becomes_matmul_then_add_with_the_matmul_plus_bias_shape() {
         .clone();
     assert_eq!(
         matmul_shape,
-        fastnn::fn3::import::ValueShape::from_dims([4, 24])
+        fastnn::inference::import::ValueShape::from_dims([4, 24])
     );
     let add = &project[1];
     assert_eq!(
@@ -1042,12 +1042,12 @@ fn gemm_becomes_matmul_then_add_with_the_matmul_plus_bias_shape() {
     assert_eq!(bias.name, "transformer.h.0.attn.c_attn.bias");
     assert_eq!(
         bias.shape.static_shape(),
-        Some(fastnn::fn3::Shape::from_dims([24]))
+        Some(fastnn::inference::Shape::from_dims([24]))
     );
 
     // The lm head is [4, 8] x [8, 16] -> [4, 16] and its consumer reshapes it
     // back to [1, 4, 16].
-    let head: Vec<&fastnn::fn3::import::GraphNode> = graph
+    let head: Vec<&fastnn::inference::import::GraphNode> = graph
         .nodes()
         .iter()
         .filter(|node| node.onnx_index == 3)
@@ -1055,12 +1055,12 @@ fn gemm_becomes_matmul_then_add_with_the_matmul_plus_bias_shape() {
     assert_eq!(head.len(), 2);
     assert_eq!(
         graph.value(head[1].primary_output().unwrap()).shape,
-        fastnn::fn3::import::ValueShape::from_dims([4, 16])
+        fastnn::inference::import::ValueShape::from_dims([4, 16])
     );
     let logits = graph.lookup("logits").unwrap();
     assert_eq!(
         graph.value(logits).shape,
-        fastnn::fn3::import::ValueShape::from_dims([1, 4, 16])
+        fastnn::inference::import::ValueShape::from_dims([1, 4, 16])
     );
 }
 
@@ -1070,7 +1070,7 @@ fn constant_of_shape_lifts_its_value_attribute_into_a_constant_input() {
         return;
     };
     let graph = imported.graph();
-    let nodes: Vec<&fastnn::fn3::import::GraphNode> = graph
+    let nodes: Vec<&fastnn::inference::import::GraphNode> = graph
         .nodes()
         .iter()
         .filter(|node| node.onnx_op == "ConstantOfShape")
@@ -1086,7 +1086,7 @@ fn constant_of_shape_lifts_its_value_attribute_into_a_constant_input() {
         let value = graph.value(node.inputs[1]);
         assert_eq!(
             value.origin,
-            fastnn::fn3::import::ValueOrigin::Weight(
+            fastnn::inference::import::ValueOrigin::Weight(
                 imported
                     .weights()
                     .id_of(&value.name)
@@ -1095,7 +1095,7 @@ fn constant_of_shape_lifts_its_value_attribute_into_a_constant_input() {
         );
         let weight = imported.weights().find(&value.name).expect("weight");
         assert_eq!(weight.source(), WeightSource::AttributeConstant);
-        assert_eq!(weight.dtype(), fastnn::fn3::DType::F32);
+        assert_eq!(weight.dtype(), fastnn::inference::DType::F32);
         assert_eq!(weight.byte_len(), 4);
         // The node's output dtype is the lifted value's dtype.
         assert_eq!(
@@ -1128,7 +1128,7 @@ fn reshape_keeps_allowzero_zero_semantics_and_rejects_one() {
     // Every Reshape in the pinned graph declares allowzero = 0 (or omits it,
     // which defaults to 0) and maps to the `Reshape` op with the shape as its
     // second operand; the semantics live in the kernel, not in OpParams.
-    let reshapes: Vec<&fastnn::fn3::import::GraphNode> = imported
+    let reshapes: Vec<&fastnn::inference::import::GraphNode> = imported
         .graph()
         .nodes()
         .iter()
@@ -1141,7 +1141,7 @@ fn reshape_keeps_allowzero_zero_semantics_and_rejects_one() {
         assert!(node.params.axes.is_empty(), "Reshape has no axis attribute");
         assert_eq!(
             imported.graph().value(node.inputs[1]).dtype,
-            fastnn::fn3::DType::I64
+            fastnn::inference::DType::I64
         );
     }
     // `allowzero = 1` is not representable and must be reported, not silently
@@ -1784,15 +1784,15 @@ fn the_import_budgets_are_public_and_match_the_format() {
     // Documented budget values, asserted so a change is deliberate. The equality
     // with the artifact's caps is what makes "imports but cannot be written" a
     // contradiction rather than a surprise.
-    assert_eq!(fastnn::fn3::import::MAX_MODEL_BYTES, 8 * (1 << 30));
-    assert_eq!(fastnn::fn3::import::MAX_NODES, 1 << 20);
-    assert_eq!(fastnn::fn3::import::MAX_VALUES, 1 << 20);
-    assert_eq!(fastnn::fn3::import::MAX_WEIGHTS, 1 << 20);
-    assert_eq!(fastnn::fn3::import::MAX_RANK, 64);
-    assert_eq!(fastnn::fn3::import::MAX_PARAM_AXES, 1024);
+    assert_eq!(fastnn::inference::import::MAX_MODEL_BYTES, 8 * (1 << 30));
+    assert_eq!(fastnn::inference::import::MAX_NODES, 1 << 20);
+    assert_eq!(fastnn::inference::import::MAX_VALUES, 1 << 20);
+    assert_eq!(fastnn::inference::import::MAX_WEIGHTS, 1 << 20);
+    assert_eq!(fastnn::inference::import::MAX_RANK, 64);
+    assert_eq!(fastnn::inference::import::MAX_PARAM_AXES, 1024);
     assert_eq!(
-        fastnn::fn3::import::MAX_MODEL_BYTES,
-        fastnn::fn3::model::format::MAX_PAYLOAD_BYTES
+        fastnn::inference::import::MAX_MODEL_BYTES,
+        fastnn::inference::model::format::MAX_PAYLOAD_BYTES
     );
 }
 

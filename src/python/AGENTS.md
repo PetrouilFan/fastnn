@@ -11,7 +11,7 @@ as part of a deliberate binding redesign.
 - Binding modules adapt Rust APIs; they do not own graph compilation or create
   competing compiler semantics.
 - The inference surface is declared by path from this directory:
-  `#[path = "../fn3/python/mod.rs"] pub mod fn3;`. `src/fn3/` itself stays free
+  `#[path = "../fn3/python/mod.rs"] pub mod inference;`. `src/fn3/` itself stays free
   of PyO3.
 - The 2.x binding surface is forward-only. There is no autograd, optimizer,
   loss, trainer or gradient binding to extend.

@@ -33,10 +33,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fastnn::fn3::import::import_onnx_file;
-use fastnn::fn3::model::{ModelWeights, Planner};
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{
+use fastnn::inference::import::import_onnx_file;
+use fastnn::inference::model::{ModelWeights, Planner};
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{
     Backend, CpuBackend, DeviceId, LiveDims, Tensor, TensorMeta, TensorMut, TensorView,
 };
 
@@ -220,7 +220,7 @@ fn live_dims(seq: u64, past: u64) -> LiveDims {
 /// does, snapshotting the requested output slots after each dispatch.
 fn execute_and_capture(
     backend: &CpuBackend,
-    plan: &fastnn::fn3::model::Plan,
+    plan: &fastnn::inference::model::Plan,
     slots: &mut [Option<Tensor>],
     out_dir: &Path,
     index: &mut Vec<serde_json::Value>,
@@ -288,7 +288,7 @@ fn execute_and_capture(
 }
 
 fn bind_i64(
-    plan: &fastnn::fn3::model::Plan,
+    plan: &fastnn::inference::model::Plan,
     slots: &mut [Option<Tensor>],
     name: &str,
     values: &[i64],
@@ -301,7 +301,7 @@ fn bind_i64(
 }
 
 fn bind_tensor(
-    plan: &fastnn::fn3::model::Plan,
+    plan: &fastnn::inference::model::Plan,
     slots: &mut [Option<Tensor>],
     name: &str,
     tensor: Tensor,
@@ -316,7 +316,7 @@ fn bind_tensor(
 /// Collect `present.N.key/value` outputs so the next decode step can consume
 /// them as `past_key_values.N.key/value`.
 fn collect_present(
-    plan: &fastnn::fn3::model::Plan,
+    plan: &fastnn::inference::model::Plan,
     slots: &[Option<Tensor>],
 ) -> BTreeMap<String, Tensor> {
     let mut present = BTreeMap::new();

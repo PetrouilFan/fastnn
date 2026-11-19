@@ -1,13 +1,13 @@
 # Python package guide
 
-`fastnn/fn3/` is the shipped inference API and a thin wrapper over
-`fastnn._core.fn3`. `fastnn/__init__.py` also re-exports the surviving 2.x
+`fastnn/inference/` is the shipped inference API and a thin wrapper over
+`fastnn._core.inference`. `fastnn/__init__.py` also re-exports the surviving 2.x
 forward facade. fastnn has no external users, so imports, lazy names, `__all__`
 and error behavior may be simplified.
 
 ## Ownership
 
-- `fastnn/fn3/` owns path coercion, docstrings and `__all__` for the inference
+- `fastnn/inference/` owns path coercion, docstrings and `__all__` for the inference
   API; the classes themselves are the extension's own objects.
 - Python facade modules provide ergonomic composition and Python-only behavior
   such as model helpers and user-facing I/O.

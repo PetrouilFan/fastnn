@@ -13,8 +13,8 @@
 
 use std::path::PathBuf;
 
-use fastnn::fn3::device::available_devices;
-use fastnn::fn3::{
+use fastnn::inference::device::available_devices;
+use fastnn::inference::{
     CpuBackend, DType, DeviceId, DeviceRequest, ExecutionPlan, Instruction, ModelWeights, OpId,
     PreparedModel, Session, Shape, ShapeEnvelope, Tensor,
 };

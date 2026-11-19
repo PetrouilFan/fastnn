@@ -31,10 +31,10 @@
 
 #![cfg(feature = "vulkan")]
 
-use fastnn::fn3::backend::vulkan::resident::ResidencyPhase;
-use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-use fastnn::fn3::device::DeviceRequest;
-use fastnn::fn3::Session;
+use fastnn::inference::backend::vulkan::resident::ResidencyPhase;
+use fastnn::inference::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+use fastnn::inference::device::DeviceRequest;
+use fastnn::inference::Session;
 
 #[path = "fn3_e2e/harness.rs"]
 mod harness;
@@ -97,7 +97,7 @@ fn open_physical() -> Option<std::sync::Arc<VulkanBackend>> {
 /// The persistent tensors `prepare_persistent` will keep: every contiguous,
 /// non-empty weight (a zero-byte or strided immutable tensor is not bindable as
 /// one buffer and deliberately keeps the staged path).
-fn expected_persistent(weights: &fastnn::fn3::ModelWeights) -> (u64, u64) {
+fn expected_persistent(weights: &fastnn::inference::ModelWeights) -> (u64, u64) {
     let mut count = 0u64;
     let mut bytes = 0u64;
     for index in 0..weights.len() {
@@ -254,7 +254,7 @@ fn persistent_weights_upload_once_and_are_rebound_by_handle() {
     let again = second_logits.as_f32_slice().expect("host logits");
     assert_eq!(first, again, "persistent weights changed the result");
 
-    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    let (errors, warnings) = fastnn::inference::backend::vulkan::instance::validation_counts();
     assert_eq!((errors, warnings), (0, 0), "validation counts");
     println!("[fn3-26][validation] errors {errors} warnings {warnings}");
 }

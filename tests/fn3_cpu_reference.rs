@@ -27,7 +27,7 @@ mod fn3_fixtures;
 
 use fn3_fixtures::{Actual, Agreement, Suite};
 
-use fastnn::fn3::{
+use fastnn::inference::{
     Backend, CpuBackend, DType, DeviceId, ExecutionPlan, Fn3Error, Instruction, OpId, OpParams,
     Shape, Strides, Tensor, TensorMeta, TensorMut, TensorView,
 };
@@ -83,7 +83,11 @@ fn tensor_from_bytes(dims: &[u64], dtype: DType, bytes: Vec<u8>) -> Tensor {
         meta.required_bytes().unwrap(),
         "test tensor bytes"
     );
-    Tensor::from_storage(fastnn::fn3::Storage::from_bytes(&bytes).unwrap(), meta).unwrap()
+    Tensor::from_storage(
+        fastnn::inference::Storage::from_bytes(&bytes).unwrap(),
+        meta,
+    )
+    .unwrap()
 }
 
 fn f32_tensor(dims: &[u64], values: &[f32]) -> Tensor {
@@ -125,7 +129,7 @@ fn mask_tensor(dims: &[u64], values: &[bool]) -> Tensor {
 fn zeros_with(dims: &[u64], dtype: DType) -> Tensor {
     let meta = meta_for(dims, dtype);
     let bytes = meta.required_bytes().unwrap();
-    Tensor::from_storage(fastnn::fn3::Storage::zeroed(bytes).unwrap(), meta).unwrap()
+    Tensor::from_storage(fastnn::inference::Storage::zeroed(bytes).unwrap(), meta).unwrap()
 }
 
 fn zeros_f32(dims: &[u64]) -> Tensor {
@@ -1790,13 +1794,13 @@ fn adversarial_arity_mismatch_is_rejected() {
 
 #[test]
 fn adversarial_device_mismatch_is_rejected() {
-    use fastnn::fn3::storage::Storage;
+    use fastnn::inference::storage::Storage;
     let foreign_storage =
         Storage::from_bytes(&[1.0f32.to_ne_bytes(), 2.0f32.to_ne_bytes()].concat()).unwrap();
     let meta = TensorMeta::contiguous(
         Shape::from_dims([2]),
         DType::F32,
-        DeviceId::Vulkan(fastnn::fn3::PhysicalDeviceId::new(0)),
+        DeviceId::Vulkan(fastnn::inference::PhysicalDeviceId::new(0)),
     )
     .unwrap();
     let foreign = Tensor::from_storage(foreign_storage, meta).unwrap();
@@ -1948,7 +1952,7 @@ fn failed_execution_leaves_outputs_untouched() {
     assert_eq!(out.as_f32_slice().unwrap(), &[sentinel; 4]);
 
     // 5. A cross-device operand.
-    use fastnn::fn3::storage::Storage;
+    use fastnn::inference::storage::Storage;
     let foreign_storage =
         Storage::from_bytes(&[1.0f32.to_ne_bytes(), 2.0f32.to_ne_bytes()].concat()).unwrap();
     let foreign = Tensor::from_storage(
@@ -1956,7 +1960,7 @@ fn failed_execution_leaves_outputs_untouched() {
         TensorMeta::contiguous(
             Shape::from_dims([2]),
             DType::F32,
-            DeviceId::Vulkan(fastnn::fn3::PhysicalDeviceId::new(0)),
+            DeviceId::Vulkan(fastnn::inference::PhysicalDeviceId::new(0)),
         )
         .unwrap(),
     )
@@ -2016,7 +2020,7 @@ fn support_table_matches_the_documented_contract() {
     for op in OpId::ALL {
         let support = backend.supports(op);
         assert!(
-            !matches!(support, fastnn::fn3::Support::Partial { .. }),
+            !matches!(support, fastnn::inference::Support::Partial { .. }),
             "{op} must not hide a gap behind Partial"
         );
         if op == OpId::MaskedAttention {

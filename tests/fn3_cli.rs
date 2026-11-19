@@ -1,6 +1,6 @@
-//! FN3-17 (#63): the `fn3-infer` command line on the pinned model.
+//! FN3-17 (#63): the `fastnn-infer` command line on the pinned model.
 //!
-//! These tests drive `fastnn::fn3::cli::run` directly, with captured writers, so
+//! Most tests drive `fastnn::inference::cli::run` directly, with captured writers, so
 //! they assert the same messages and exit codes a user sees. The pinned model is
 //! not committed (no declared licence); every model-dependent test prints a
 //! skip reason and passes when it is absent.
@@ -12,7 +12,20 @@
 
 use std::path::{Path, PathBuf};
 
-use fastnn::fn3::cli::{run, EXIT_DEVICE, EXIT_INFERENCE, EXIT_MODEL, EXIT_OK, EXIT_USAGE};
+use fastnn::inference::cli::{run, EXIT_DEVICE, EXIT_INFERENCE, EXIT_MODEL, EXIT_OK, EXIT_USAGE};
+
+#[cfg(feature = "cli")]
+#[test]
+fn fastnn_infer_binary_help() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fastnn-infer"))
+        .arg("--help")
+        .output()
+        .expect("launch fastnn-infer");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains("fastnn-infer <command> [options]"), "{help}");
+}
 
 /// Bytes and FNV-1a fingerprint of the pinned graph, matching `fn3_session`.
 const PINNED_BYTES: usize = 27_897_974;
@@ -127,7 +140,7 @@ fn inspect_reports_a_missing_file_as_a_model_error() {
     let output = cli(&["inspect", path_text(&missing)]);
     assert_eq!(output.code, EXIT_MODEL);
     assert!(
-        output.stderr.contains("fn3-infer prepare"),
+        output.stderr.contains("fastnn-infer prepare"),
         "{}",
         output.stderr
     );

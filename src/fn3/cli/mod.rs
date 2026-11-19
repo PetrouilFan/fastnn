@@ -1,4 +1,4 @@
-//! `fn3-infer`: the FastNN 3.0 inference command line (FN3-17 / #63).
+//! `fastnn-infer`: the FastNN 3.0 inference command line (FN3-17 / #63).
 //!
 //! The binary is a thin wrapper over [`run`]: argument parsing, dispatch and
 //! exit codes live here so the integration tests can drive the same code path
@@ -72,7 +72,7 @@ impl CliError {
 
     /// The command line was not understood.
     pub fn usage(message: impl Into<String>) -> CliError {
-        CliError::new(EXIT_USAGE, message).with_next("run `fn3-infer help` for the command list")
+        CliError::new(EXIT_USAGE, message).with_next("run `fastnn-infer help` for the command list")
     }
 
     /// The model file or its ONNX source is unusable.
@@ -83,7 +83,7 @@ impl CliError {
     /// The requested device is not available in this build or on this host.
     pub fn device(message: impl Into<String>) -> CliError {
         CliError::new(EXIT_DEVICE, message)
-            .with_next("run `fn3-infer diagnose` to list the devices this build can open")
+            .with_next("run `fastnn-infer diagnose` to list the devices this build can open")
     }
 
     /// Inference was refused by a bound, a capacity or a backend.
@@ -133,7 +133,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             EXIT_OK
         }
         Ok(Command::Version) => {
-            let _ = writeln!(out, "fn3-infer {}", env!("CARGO_PKG_VERSION"));
+            let _ = writeln!(out, "fastnn-infer {}", env!("CARGO_PKG_VERSION"));
             EXIT_OK
         }
         Ok(command) => match dispatch(command, out) {
@@ -190,11 +190,11 @@ mod tests {
     #[test]
     fn errors_render_two_lines_and_keep_the_code() {
         let error = CliError::device("requested device vulkan is unavailable")
-            .with_next("run `fn3-infer diagnose`");
+            .with_next("run `fastnn-infer diagnose`");
         assert_eq!(error.code(), EXIT_DEVICE);
         assert_eq!(
             error.render(),
-            "error: requested device vulkan is unavailable\nnext: run `fn3-infer diagnose`"
+            "error: requested device vulkan is unavailable\nnext: run `fastnn-infer diagnose`"
         );
     }
 

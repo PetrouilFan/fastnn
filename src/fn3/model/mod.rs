@@ -68,12 +68,12 @@ pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
 use std::sync::Arc;
 
-use crate::fn3::backend::Backend;
-use crate::fn3::device::DeviceId;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::{LiveDims, ShapeEnvelope};
-use crate::fn3::tensor::Tensor;
+use crate::inference::backend::Backend;
+use crate::inference::device::DeviceId;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::shape::{LiveDims, ShapeEnvelope};
+use crate::inference::tensor::Tensor;
 
 /// One op invocation inside an [`ExecutionPlan`].
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +85,7 @@ pub struct Instruction {
     /// Value slots written by the op, in result order.
     pub outputs: Vec<u32>,
     /// Op attributes.
-    pub params: crate::fn3::backend::OpParams,
+    pub params: crate::inference::backend::OpParams,
 }
 
 impl Instruction {
@@ -95,12 +95,12 @@ impl Instruction {
             op,
             inputs,
             outputs,
-            params: crate::fn3::backend::OpParams::default(),
+            params: crate::inference::backend::OpParams::default(),
         }
     }
 
     /// Builder: replace the attributes.
-    pub fn with_params(mut self, params: crate::fn3::backend::OpParams) -> Instruction {
+    pub fn with_params(mut self, params: crate::inference::backend::OpParams) -> Instruction {
         self.params = params;
         self
     }
@@ -190,7 +190,7 @@ impl ExecutionPlan {
     /// Reject plans that contain an op no backend can run.
     ///
     /// `Partial` support is accepted here; the op itself must reject the shapes
-    /// it does not implement. Use [`crate::fn3::backend::Support::require_full`]
+    /// it does not implement. Use [`crate::inference::backend::Support::require_full`]
     /// when a plan must be guaranteed to run without falling back to a
     /// decomposed path.
     pub fn check_supported(&self, backend: &dyn Backend) -> Result<(), Fn3Error> {
@@ -312,7 +312,7 @@ fn context_note(error: Fn3Error, op: OpId, index: usize) -> Fn3Error {
 /// session clone share one copy of every weight buffer. There is no API that
 /// mutates a weight: a plan reads weights through [`TensorView`] only.
 ///
-/// [`TensorView`]: crate::fn3::tensor::TensorView
+/// [`TensorView`]: crate::inference::tensor::TensorView
 #[derive(Debug, Clone, Default)]
 pub struct ModelWeights {
     tensors: Vec<Arc<Tensor>>,
@@ -505,9 +505,9 @@ impl PreparedModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::backend::cpu::CpuBackend;
-    use crate::fn3::dtype::DType;
-    use crate::fn3::shape::Shape;
+    use crate::inference::backend::cpu::CpuBackend;
+    use crate::inference::dtype::DType;
+    use crate::inference::shape::Shape;
 
     fn small_model() -> PreparedModel {
         let plan =

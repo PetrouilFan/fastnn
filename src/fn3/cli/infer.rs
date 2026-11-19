@@ -19,10 +19,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::fn3::import::{import_onnx_model, ModelImport};
-use crate::fn3::model::format::{FormatError, FormatErrorKind, PreparedArtifact, PreparedHeader};
-use crate::fn3::model::{ModelWeights, Planner, PreparedModel, Session};
-use crate::fn3::{DType, DeviceId, Fn3Error, LiveDims, ShapeEnvelope, Symbol, Tensor, TensorMeta};
+use crate::inference::import::{import_onnx_model, ModelImport};
+use crate::inference::model::format::{
+    FormatError, FormatErrorKind, PreparedArtifact, PreparedHeader,
+};
+use crate::inference::model::{ModelWeights, Planner, PreparedModel, Session};
+use crate::inference::{
+    DType, DeviceId, Fn3Error, LiveDims, ShapeEnvelope, Symbol, Tensor, TensorMeta,
+};
 
 use super::args::{GenerateArgs, InferArgs, RunArgs};
 use super::devices::OpenedBackend;
@@ -255,7 +259,7 @@ fn read_artifact(path: &Path) -> Result<(PreparedArtifact, String, u32, u64), Cl
             path.display()
         ))
         .with_next(
-            "create it with `fn3-infer prepare --onnx <model.onnx> --out <model.fnn3>`, or check \
+            "create it with `fastnn-infer prepare --onnx <model.onnx> --out <model.fnn3>`, or check \
              the path",
         )
     })?;
@@ -266,7 +270,7 @@ fn read_artifact(path: &Path) -> Result<(PreparedArtifact, String, u32, u64), Cl
         let cli = format_failure(path, &error);
         if error.is_corruption() {
             cli.with_next(
-                "the payload does not match its checksum; re-run `fn3-infer prepare` from the \
+                "the payload does not match its checksum; re-run `fastnn-infer prepare` from the \
                  source ONNX",
             )
         } else {
@@ -304,7 +308,7 @@ fn verify_pair(
     artifact_path: &Path,
     onnx_path: &Path,
 ) -> Result<(), CliError> {
-    let expected = crate::fn3::model::format::ArtifactMetadata::from_import(import);
+    let expected = crate::inference::model::format::ArtifactMetadata::from_import(import);
     if &expected != artifact.metadata() {
         return Err(mismatch(
             artifact_path,
@@ -349,7 +353,7 @@ fn mismatch(artifact: &Path, onnx: &Path, what: &str) -> CliError {
         onnx.display()
     ))
     .with_next(
-        "pass the exact ONNX the artifact was prepared from, or re-run `fn3-infer prepare` with \
+        "pass the exact ONNX the artifact was prepared from, or re-run `fastnn-infer prepare` with \
          this ONNX; without `--onnx` the artifact runs on its own",
     )
 }
@@ -358,7 +362,7 @@ fn format_failure(path: &Path, error: &FormatError) -> CliError {
     let next = match error.kind() {
         FormatErrorKind::UnsupportedVersion { found, supported } => format!(
             "this file uses format version {found}; this build reads version {supported} only. \
-             Use a matching `fn3-infer`, or re-prepare the ONNX with this build"
+             Use a matching `fastnn-infer`, or re-prepare the ONNX with this build"
         ),
         FormatErrorKind::BadMagic { .. } => "the first eight bytes must be `FNN3PREP`; a 2.x \
              `.fnnc` file is a different format and is never read by FastNN 3.0"
@@ -367,10 +371,10 @@ fn format_failure(path: &Path, error: &FormatError) -> CliError {
             "this file uses dtype encoding {found}; this build reads encoding {supported} only"
         ),
         FormatErrorKind::Io { .. } => {
-            "check the path and file permissions, then create the artifact with `fn3-infer prepare`"
+            "check the path and file permissions, then create the artifact with `fastnn-infer prepare`"
                 .to_string()
         }
-        _ => "the file is truncated, corrupt or inconsistent; re-run `fn3-infer prepare` from \
+        _ => "the file is truncated, corrupt or inconsistent; re-run `fastnn-infer prepare` from \
               the source ONNX"
             .to_string(),
     };
@@ -412,7 +416,7 @@ fn plan_failure(backend: &OpenedBackend, error: Fn3Error) -> CliError {
             backend.device
         ))
         .with_next(
-            "this plan contains an operation the requested backend does not implement for these              operand types; an explicit device never falls back to CPU. `fn3-infer diagnose`              shows what the device opened, and `--device cpu` is a different, explicit choice",
+            "this plan contains an operation the requested backend does not implement for these              operand types; an explicit device never falls back to CPU. `fastnn-infer diagnose`              shows what the device opened, and `--device cpu` is a different, explicit choice",
         );
     }
     failure("building the initial decoder plan", error, backend.device)
@@ -434,13 +438,13 @@ fn failure(context: &str, error: Fn3Error, device: DeviceId) -> CliError {
              artifact SHA-256 printed above"
         } else {
             "this backend cannot run the full decoder graph yet; run `--device cpu`, and use \
-             `fn3-infer diagnose` to see which devices actually opened"
+             `fastnn-infer diagnose` to see which devices actually opened"
         };
         cli = cli.with_next(next);
     } else if cli.next_step().is_none() {
         cli = cli.with_next(
             "re-run with `--steps` to see the failing step; if the device is involved, run \
-             `fn3-infer diagnose`",
+             `fastnn-infer diagnose`",
         );
     }
     cli
@@ -764,7 +768,7 @@ fn print_logits(summary: &Summary, logits: &Tensor, top_k: usize, out: &mut dyn 
 fn print_header(setup: &Setup, out: &mut dyn Write) {
     let geometry = setup.import.geometry();
     let envelope = setup.envelope;
-    let _ = writeln!(out, "fn3-infer inference");
+    let _ = writeln!(out, "fastnn-infer inference");
     let _ = writeln!(out, "  artifact: {}", setup.artifact_path.display());
     let _ = writeln!(
         out,

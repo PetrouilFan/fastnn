@@ -37,7 +37,7 @@ print(y.numpy())
 ## Prepare and run an inference session
 
 ```python
-import fastnn.fn3 as fn3
+import fastnn.inference as fn3
 
 report = fn3.prepare("model.onnx", "model.fn3prep")
 print(report.status, report.geometry)

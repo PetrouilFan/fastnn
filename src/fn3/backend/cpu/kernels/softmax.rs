@@ -32,11 +32,11 @@
 //! None. The input and output shapes must match; the additive mask is an
 //! explicit `Add` before the `Softmax`, exactly as the graph does it.
 
-use crate::fn3::backend::OpParams;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::ops::OpId;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::OpParams;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::ops::OpId;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 use super::{
     at, at_mut, checked_product, decompose, require_dtype, require_output_shape, single_axis,
@@ -123,9 +123,9 @@ pub(crate) fn softmax(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn3::device::DeviceId;
-    use crate::fn3::shape::Shape;
-    use crate::fn3::tensor::Tensor;
+    use crate::inference::device::DeviceId;
+    use crate::inference::shape::Shape;
+    use crate::inference::tensor::Tensor;
 
     fn run(input: &[f32], shape: [u64; 2]) -> Vec<f32> {
         let input = Tensor::from_f32(Shape::from_dims(shape), input).unwrap();

@@ -10,7 +10,7 @@
 use ash::vk;
 
 use super::error::{Error, Result};
-use crate::fn3::ops::OpId;
+use crate::inference::ops::OpId;
 
 /// Extensions the 3.0 Vulkan backend reports explicitly. Presence is a fact,
 /// not a requirement; kernels that need one probe it before enabling the path.
@@ -104,7 +104,7 @@ pub struct HeapInfo {
 #[derive(Debug, Clone)]
 pub struct AdapterInfo {
     /// Index in the process-wide discovery order. This is the value carried by
-    /// [`crate::fn3::device::PhysicalDeviceId`].
+    /// [`crate::inference::device::PhysicalDeviceId`].
     pub index: u32,
     /// Adapter name (`"NVIDIA GeForce GTX 1080 Ti"`).
     pub name: String,
@@ -469,7 +469,7 @@ impl AdapterInfo {
 /// Enumerate every physical device visible to `instance`.
 ///
 /// An empty list is not an error: it means no ICD exposed a device, which
-/// [`crate::fn3::backend::vulkan::available_devices`] reports as "no Vulkan".
+/// [`crate::inference::backend::vulkan::available_devices`] reports as "no Vulkan".
 pub fn enumerate(instance: &ash::Instance) -> Result<Vec<AdapterInfo>> {
     // SAFETY: standard enumeration of physical devices owned by this instance;
     // ash allocates the result vector. The handles stay valid while the

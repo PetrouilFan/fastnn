@@ -62,17 +62,17 @@ pub mod smoke;
 pub mod transform;
 
 use super::error::{Error, Result};
-use crate::fn3::backend::{CapabilityFeatures, OpParams, Support};
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Result;
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::Shape;
-use crate::fn3::tensor::{TensorMut, TensorView};
+use crate::inference::backend::{CapabilityFeatures, OpParams, Support};
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Result;
+use crate::inference::ops::OpId;
+use crate::inference::shape::Shape;
+use crate::inference::tensor::{TensorMut, TensorView};
 
 /// The dtypes the registered kernels can move and compute on.
 ///
 /// Kernel owners append to this table when they register a kernel that accepts
-/// another dtype. It is a `&'static` slice because [`crate::fn3::backend::Capabilities`]
+/// another dtype. It is a `&'static` slice because [`crate::inference::backend::Capabilities`]
 /// stores one; an op still rejects a dtype its own kernel does not implement.
 pub const KERNEL_DTYPES: &[DType] = &[DType::F32];
 

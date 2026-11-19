@@ -4,7 +4,7 @@
 //!
 //! A caller who names a device gets exactly that device or an exception. Only
 //! `"auto"` (or `None`) may choose, and it chooses what
-//! [`crate::fn3::device::available_devices`] lists first, which is always the
+//! [`crate::inference::device::available_devices`] lists first, which is always the
 //! CPU in this alpha. There is no "Vulkan was requested, CPU will do" path:
 //! [`super::errors::from_device`] renders the request, the reason and the list
 //! of devices this process can actually execute on.
@@ -26,12 +26,12 @@
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-use crate::fn3::device::{available_devices, DeviceId, DeviceInfo, DeviceRequest};
+use crate::inference::device::{available_devices, DeviceId, DeviceInfo, DeviceRequest};
 
 use super::errors;
 
 /// One device this process can execute on.
-#[pyclass(module = "fastnn._core.fn3", name = "Device", frozen)]
+#[pyclass(module = "fastnn._core.inference", name = "Device", frozen)]
 pub struct PyDevice {
     id: String,
     kind: String,
@@ -131,7 +131,7 @@ fn device_error(py: Python<'_>, requested: &str, reason: &str) -> PyErr {
     let available: Vec<String> = available_devices().iter().map(DeviceInfo::label).collect();
     let message = format!(
         "unrecognised device request {requested:?}: {reason}; accepted forms are \"auto\", \
-         \"cpu\", \"vulkan\", \"vulkan:<index>\" and a Device object from fastnn.fn3.devices(); \
+         \"cpu\", \"vulkan\", \"vulkan:<index>\" and a Device object from fastnn.inference.devices(); \
          available devices: [{}]",
         available.join(", ")
     );

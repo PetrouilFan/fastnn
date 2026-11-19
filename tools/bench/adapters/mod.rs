@@ -1,7 +1,7 @@
 //! Adapter seam between the benchmark harness and the runtime under test.
 //!
 //! `baseline` measures the 2.x runtime in this revision. `fn3` is the seam for
-//! the 3.0 `fastnn::fn3` runtime; it is not built here and fails loudly rather
+//! the 3.0 `fastnn::inference` runtime; it is not built here and fails loudly rather
 //! than emitting placeholder numbers.
 
 pub mod baseline;

@@ -4,7 +4,7 @@
 //! index/shape dtype (`I64`), one auxiliary integer dtype (`I32`) and one mask
 //! dtype (`Bool`). Quantized formats (`U4`, `I8`, `F16`, ...) are represented
 //! nowhere in the alpha type system; they get their own variants in a later
-//! milestone and their own reserved `OpId` range (see [`crate::fn3::ops`]).
+//! milestone and their own reserved `OpId` range (see [`crate::inference::ops`]).
 //!
 //! # Rejection, not coercion
 //!
@@ -111,7 +111,7 @@ impl fmt::Display for DType {
 
 /// A numeric dtype code that this build of the 3.0 core does not define.
 ///
-/// Kept separate from [`crate::fn3::error::Fn3Error`] so that `dtype` stays a
+/// Kept separate from [`crate::inference::error::Fn3Error`] so that `dtype` stays a
 /// dependency-free leaf; `Fn3Error` converts it with [`From`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownDTypeCode {

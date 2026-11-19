@@ -53,20 +53,20 @@ use std::sync::{Arc, Mutex};
 
 use fn3_fixtures::{Actual, Suite};
 
-use fastnn::fn3::backend::cpu::CpuBackend;
-use fastnn::fn3::backend::vulkan::instance::validation_counts;
-use fastnn::fn3::backend::vulkan::kernels::matmul as matmul_kernel;
-use fastnn::fn3::backend::vulkan::{
+use fastnn::inference::backend::cpu::CpuBackend;
+use fastnn::inference::backend::vulkan::instance::validation_counts;
+use fastnn::inference::backend::vulkan::kernels::matmul as matmul_kernel;
+use fastnn::inference::backend::vulkan::{
     adapters, BindingArg, BindingRole, BufferDesc, KernelInvocation, VulkanBackend, VulkanConfig,
 };
-use fastnn::fn3::backend::{Backend, OpParams, Support};
-use fastnn::fn3::device::{DeviceId, DeviceRequest};
-use fastnn::fn3::dtype::DType;
-use fastnn::fn3::error::Fn3Error;
-use fastnn::fn3::ops::OpId;
-use fastnn::fn3::shape::{Shape, Strides};
-use fastnn::fn3::storage::Storage;
-use fastnn::fn3::tensor::{Tensor, TensorMeta};
+use fastnn::inference::backend::{Backend, OpParams, Support};
+use fastnn::inference::device::{DeviceId, DeviceRequest};
+use fastnn::inference::dtype::DType;
+use fastnn::inference::error::Fn3Error;
+use fastnn::inference::ops::OpId;
+use fastnn::inference::shape::{Shape, Strides};
+use fastnn::inference::storage::Storage;
+use fastnn::inference::tensor::{Tensor, TensorMeta};
 
 // ---------------------------------------------------------------------------
 // Device selection (mirrors tests/fn3_vulkan_smoke.rs, which #60 may not edit)
@@ -134,7 +134,9 @@ fn open_physical() -> Option<Arc<VulkanBackend>> {
                  validate={} maxPushConstantsSize={} maxComputeSharedMemorySize={}",
                 adapter.name,
                 adapter.uuid_string(),
-                fastnn::fn3::backend::vulkan::device_info::format_version(adapter.api_version),
+                fastnn::inference::backend::vulkan::device_info::format_version(
+                    adapter.api_version
+                ),
                 adapter.driver_version_string(),
                 backend.vulkan_device().queue_family(),
                 backend.validation_enabled(),

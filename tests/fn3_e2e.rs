@@ -32,15 +32,15 @@ mod harness;
 #[path = "fn3_e2e/gpu.rs"]
 mod gpu;
 
-use fastnn::fn3::shape::ShapeEnvelope;
-use fastnn::fn3::{
+use fastnn::inference::shape::ShapeEnvelope;
+use fastnn::inference::{
     CpuBackend, DeviceId, Fn3Error, PhysicalDeviceId, PreparedModel, Session, Tensor,
 };
 
 use harness::*;
 
 /// Prepare the pinned model on CPU at the fixture context.
-fn prepared_cpu(import: &fastnn::fn3::import::ModelImport) -> (PreparedModel, ShapeEnvelope) {
+fn prepared_cpu(import: &fastnn::inference::import::ModelImport) -> (PreparedModel, ShapeEnvelope) {
     prepared(import, DeviceId::Cpu, FIXTURE_CONTEXT)
 }
 
@@ -269,8 +269,8 @@ fn a_model_prepared_for_vulkan_is_never_executed_by_the_cpu_backend() {
     // same thing as a Vulkan tensor: `Tensor::zeros` reports the device, it
     // does not quietly allocate host memory for it.
     let error = Tensor::zeros(
-        fastnn::fn3::shape::Shape::from_dims([1, 4]),
-        fastnn::fn3::DType::F32,
+        fastnn::inference::shape::Shape::from_dims([1, 4]),
+        fastnn::inference::DType::F32,
         vulkan,
     )
     .expect_err("there is no Vulkan allocator without a backend");

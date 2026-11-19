@@ -2,7 +2,7 @@
 //!
 //! # Why a byte-level weight table
 //!
-//! The runtime type [`crate::fn3::model::ModelWeights`] holds `Tensor`s that
+//! The runtime type [`crate::inference::model::ModelWeights`] holds `Tensor`s that
 //! live on a device. Import must not tie weights to a device before a planner
 //! chooses one, and the versioned prepared-model format (FN3-09 / #55) has to
 //! serialize them. Both needs are satisfied by one intermediate form: a name, a
@@ -31,13 +31,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::fn3::device::DeviceId;
-use crate::fn3::dtype::DType;
-use crate::fn3::error::Fn3Error;
-use crate::fn3::model::ModelWeights;
-use crate::fn3::shape::Shape;
-use crate::fn3::storage::Storage;
-use crate::fn3::tensor::{Tensor, TensorMeta};
+use crate::inference::device::DeviceId;
+use crate::inference::dtype::DType;
+use crate::inference::error::Fn3Error;
+use crate::inference::model::ModelWeights;
+use crate::inference::shape::Shape;
+use crate::inference::storage::Storage;
+use crate::inference::tensor::{Tensor, TensorMeta};
 
 /// Position of one weight inside its [`WeightSet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -68,7 +68,7 @@ pub enum WeightSource {
     /// A `GraphProto.initializer`.
     Initializer,
     /// A constant lifted out of a node attribute, for example
-    /// `ConstantOfShape.value`, which [`crate::fn3::backend::OpParams`] cannot
+    /// `ConstantOfShape.value`, which [`crate::inference::backend::OpParams`] cannot
     /// express. It becomes a real weight so the planner can reference it like
     /// any other constant input.
     AttributeConstant,

@@ -172,7 +172,7 @@ x_cpu = fnn.randn([3, 4])
 fnn.set_default_device("cpu")
 ```
 
-The 3.0 `fastnn.fn3` session API is where acceleration is selected; an
+The 3.0 `fastnn.inference` session API is where acceleration is selected; an
 explicit `device="vulkan"` either runs on that device or raises.
 
 ## FlashAttention
@@ -211,5 +211,5 @@ x = fnn.tensor_from_numpy(arr)
 
 - [API Reference](api-reference.md) -- Complete catalog of tensor functions
 - [Neural Network Modules](nn-modules.md) -- Layers that consume tensors
-- [Python API](python-api.md) -- the `fastnn.fn3` inference API
+- [Python API](python-api.md) -- the `fastnn.inference` inference API
 - [Index](../index.md) -- Full documentation index

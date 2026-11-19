@@ -1,6 +1,6 @@
 //! # fastnn — inference-only neural-network runtime
 //!
-//! FastNN 3.0 is an inference product. The primary API is [`fn3`]: tensor
+//! FastNN 3.0 is an inference product. The primary API is [`inference`]: tensor
 //! storage, a portable CPU reference, a Vulkan compute backend, strict ONNX
 //! import, a versioned prepared-model artifact, a bounded planner, sessions
 //! that own their KV cache, an inference CLI and a Python binding. There is no
@@ -11,8 +11,8 @@
 //!                                   (CPU or Vulkan)
 //! ```
 //!
-//! Start with [`fn3::model::PreparedModel`] and [`fn3::model::Session`]; the
-//! CLI (`fn3-infer`) and the `fastnn.fn3` Python package call the same path.
+//! Start with [`inference::model::PreparedModel`] and [`inference::model::Session`]; the
+//! CLI (`fastnn-infer`) and the `fastnn.inference` Python package call the same path.
 //!
 //! # Secondary 2.x AOT tree
 //!
@@ -21,7 +21,7 @@
 //! prepared-plan runtime ([`backend`]), the eager [`tensor`]/[`nn`] forward
 //! API, ONNX conversion ([`onnx`]) and `.fnn` I/O ([`io`]). They are kept for
 //! the legacy AOT path and its quantized CPU pipeline; new code should use
-//! [`fn3`].
+//! [`inference`].
 //!
 //! ```rust
 //! use fastnn::ir::builder::GraphBuilder;
@@ -52,7 +52,8 @@
 //
 // Pure Rust, no optional features and no dependency on the 2.x modules. See
 // docs/roadmap/fn3-architecture.md for the contract.
-pub mod fn3;
+#[path = "fn3/mod.rs"]
+pub mod inference;
 
 // ── Shared infrastructure ───────────────────────────────────────────────────
 pub mod error;

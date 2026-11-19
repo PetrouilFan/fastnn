@@ -11,7 +11,7 @@
 //!    accepts only the identity form (`alpha = beta = 1`, `transA = transB = 0`)
 //!    and reports anything else instead of dropping the scaling.
 //! 2. `ConstantOfShape` carries its fill value in an attribute that
-//!    [`crate::fn3::backend::OpParams`] cannot express, so the value is lifted
+//!    [`crate::inference::backend::OpParams`] cannot express, so the value is lifted
 //!    into a scalar constant input, which is the shape the CPU kernel
 //!    documents. The constant is registered as a weight
 //!    ([`WeightSource::AttributeConstant`]) so the planner can reference it.
@@ -49,18 +49,18 @@
 
 use std::collections::BTreeMap;
 
-use crate::fn3::backend::OpParams;
-use crate::fn3::dtype::DType;
-use crate::fn3::model::{KvCacheConfig, KvCacheLayout};
-use crate::fn3::ops::OpId;
-use crate::fn3::shape::{Shape, Symbol};
+use crate::inference::backend::OpParams;
+use crate::inference::dtype::DType;
+use crate::inference::model::{KvCacheConfig, KvCacheLayout};
+use crate::inference::ops::OpId;
+use crate::inference::shape::{Shape, Symbol};
 
 use super::budget::{
     model_bytes_within_cap, MAX_MODEL_BYTES, MAX_NODES, MAX_RANK, MAX_VALUES, MAX_WEIGHTS,
 };
 use super::error::{Diagnostics, ImportProblemKind, NodeRef};
 use super::proto;
-use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+use crate::inference::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 
 /// Smallest ONNX IR version this importer accepts.
 ///
@@ -115,7 +115,7 @@ impl std::fmt::Display for ValueId {
 pub enum Dim {
     /// A statically known extent.
     Known(u64),
-    /// One of the decoder symbols of [`crate::fn3::shape`].
+    /// One of the decoder symbols of [`crate::inference::shape`].
     Symbol(Symbol),
     /// An extent this importer cannot prove, with the reason.
     Unknown(String),
@@ -387,12 +387,12 @@ impl GraphIr {
     /// Build a graph from parts a caller already validated.
     ///
     /// The importer builds a `GraphIr` while decoding an ONNX file. A reader of
-    /// a serialized model ([`crate::fn3::model::format::PreparedGraph`], which
+    /// a serialized model ([`crate::inference::model::format::PreparedGraph`], which
     /// validates the same invariants) needs the identical container without an
     /// ONNX file present, and private fields make that otherwise impossible.
     /// This is the additive seam those callers use; it performs no validation,
     /// so the caller owns the invariants listed on
-    /// [`crate::fn3::model::format::PreparedGraph`].
+    /// [`crate::inference::model::format::PreparedGraph`].
     pub fn from_parts(
         values: Vec<ValueInfo>,
         nodes: Vec<GraphNode>,
@@ -499,7 +499,7 @@ impl DecoderGeometry {
         &self,
         capacity_tokens: u64,
         batch: u64,
-    ) -> Result<u64, crate::fn3::error::Fn3Error> {
+    ) -> Result<u64, crate::inference::error::Fn3Error> {
         let config = self.kv_cache_config(capacity_tokens, batch);
         Ok(config.buffer_bytes()?.saturating_mul(2))
     }
@@ -647,7 +647,7 @@ impl ModelImport {
     ///
     /// The artifact reader is the caller: it has already validated the graph,
     /// the weights and the geometry (see
-    /// [`crate::fn3::model::format::PreparedArtifact::validate`]), and the
+    /// [`crate::inference::model::format::PreparedArtifact::validate`]), and the
     /// metadata section supplies [`ModelProvenance`]. Nothing here re-detects
     /// the architecture, so a caller that has no validated geometry must use
     /// the ONNX path instead.
@@ -735,7 +735,7 @@ impl ModelImport {
     /// Copy every weight into host tensors on the CPU.
     pub fn to_model_weights(
         &self,
-    ) -> Result<crate::fn3::model::ModelWeights, crate::fn3::error::Fn3Error> {
+    ) -> Result<crate::inference::model::ModelWeights, crate::inference::error::Fn3Error> {
         self.weights.to_model_weights()
     }
 }
