@@ -1,0 +1,46 @@
+{
+  "format": "fastnn-model-fetch-index",
+  "format_version": 1,
+  "description": "Top-level fetch record for the opt-in parity models. The per-suite model.lock.json files remain authoritative for the complete file inventory, graph geometry and regeneration; this index adds the bytes that were actually downloaded and hashed locally for FN3-22 (#68). No weights are committed.",
+  "authoritative_locks": {
+    "tiny-gpt2": "fixtures/parity/tiny-gpt2/model.lock.json",
+    "trained-gpt2": "fixtures/parity/trained-gpt2/model.lock.json"
+  },
+  "models": [
+    {
+      "suite": "trained-gpt2",
+      "model_id": "onnx-community/gpt2-ONNX",
+      "revision": "1975fb9b4a2a92bd99f457407337ee25ab6cfde0",
+      "hub_url": "https://huggingface.co/onnx-community/gpt2-ONNX/tree/1975fb9b4a2a92bd99f457407337ee25ab6cfde0",
+      "ci": false,
+      "ci_reason": "498,126,358-byte graph; the ONNX repository does not repeat the base GPT-2 MIT declaration. CI never downloads a model.",
+      "license": {
+        "base_model": "openai-community/gpt2",
+        "base_license": "MIT",
+        "redistribution": "weight files are not committed; only checksums, commands and numeric fixtures are"
+      },
+      "verified_on": "2026-11-19",
+      "verification": "Each file below was downloaded from the pinned revision and hashed locally with sha256sum. The digests match the corresponding entries in fixtures/parity/trained-gpt2/model.lock.json.",
+      "fetch_commands": [
+        "curl -L --fail -o onnx/model.onnx https://huggingface.co/onnx-community/gpt2-ONNX/resolve/1975fb9b4a2a92bd99f457407337ee25ab6cfde0/onnx/model.onnx",
+        "curl -L --fail -o config.json https://huggingface.co/onnx-community/gpt2-ONNX/resolve/1975fb9b4a2a92bd99f457407337ee25ab6cfde0/config.json"
+      ],
+      "files": [
+        {
+          "path": "onnx/model.onnx",
+          "role": "graph",
+          "bytes": 498126358,
+          "sha256": "42c1e92a21c41ebd3c536d4c6f09732450a43db35977593236f696d3346c7c0d",
+          "verification": "local_sha256"
+        },
+        {
+          "path": "config.json",
+          "role": "config",
+          "bytes": 896,
+          "sha256": "d23d70079d44f51bca546fd5bab31268642283337950681cf136ec94665d4a1b",
+          "verification": "local_sha256"
+        }
+      ]
+    }
+  ]
+}
