@@ -747,5 +747,7 @@ release and any package publication remain owner actions; `main` is still at
 Deferred and recorded in the release report, not passed: unknown fence
 completion can release resources still in use (owner deferred), concurrent
 prepare races with an executing step, `end_step` reports `Ok(0)` for a discarded
-batch, `Submission::Drop` re-waits a poisoned device, and `PersistentKey` is an
-allocation address held alive by a pinned `Storage`.
+batch, and `Submission::Drop` re-waits a poisoned device. The `PersistentKey`
+address alias is fixed on `fn3/persistent-identity`: keys are process-global
+storage generations and entries are released with the last `Storage` handle,
+with `tests/fn3_vulkan_persistent_identity.rs` as the regression.
