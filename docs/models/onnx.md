@@ -1,6 +1,8 @@
 # ONNX Model Support in FastNN
 
-FastNN imports ONNX two ways: the 3.0 `fastnn.inference` path prepares a versioned artifact for the session runtime, and the 2.x AOT pipeline converts operator graphs into a CPU executable plan.
+This page covers the retained 2.x AOT pipeline, which converts operator graphs
+into a CPU executable plan. For the separate 3.0 ONNX decoder importer and its
+versioned `.fnn3` artifact, see the [inference quickstart](../quickstart-fn3.md).
 
 ## Pipeline Overview
 

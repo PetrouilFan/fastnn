@@ -20,21 +20,10 @@ uv pip install -e .
 
 This builds the Rust extension via maturin and installs the `fastnn` Python package.
 
-## Your First Program
-
-A forward tensor operation:
-
-```python
-import fastnn as fnn
-
-x = fnn.tensor([1.0, 2.0, 3.0, 4.0], [2, 2])
-w = fnn.tensor([0.5, 0.0, 0.0, 0.5], [2, 2])
-
-y = fnn.matmul(x, w)
-print(y.numpy())
-```
-
 ## Prepare and run an inference session
+
+Start with a supported ONNX decoder export (see the
+[pinned example in the CLI quickstart](../quickstart-fn3.md#1-the-model)).
 
 ```python
 import fastnn.inference as fn3
@@ -60,6 +49,6 @@ back to CPU.
 
 ## Next Steps
 
-- [Tensor Reference](../reference/tensors.md) — tensor creation and operations
-- [NN Module Catalog](../reference/nn-modules.md) — available layer types
-- [API Reference](../reference/api-reference.md) — full function reference
+- [Python API](../reference/python-api.md) — prepare, load and run sessions
+- [CLI Quickstart](../quickstart-fn3.md) — run on CPU or Vulkan with `fastnn-infer`
+- [Migration from 2.x](migrate-from-2x.md) — transition from the old command or find the retained eager and AOT APIs

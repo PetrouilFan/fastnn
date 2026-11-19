@@ -23,7 +23,7 @@ no wgpu backend in this tree.
 
 ## Highlights
 
-- **One inference path** — `PreparedModel` is immutable and shareable; each
+- **One 3.0 inference engine** — `PreparedModel` is immutable and shareable; each
   `Session` owns its KV cache, step counter and plan cache. CPU and Vulkan run
   the same plan through the same backend trait.
 - **No silent fallback** — an explicit device request either resolves to that
@@ -117,8 +117,10 @@ See `src/fn3/AGENTS.md` and `docs/roadmap/fn3-architecture.md` for the contract.
 ## Documentation
 
 - [Getting Started](docs/guides/getting-started.md) — build, prepare a model, run a session
-- [Architecture](docs/internals/architecture.md) — the 3.0 inference core and the secondary AOT pipeline
-- [API Reference](docs/reference/api-reference.md) — Rust and Python surface
+- [Inference Architecture](docs/roadmap/fn3-architecture.md) — 3.0 runtime and contracts
+- [Python API](docs/reference/python-api.md) — `fastnn.inference`
+- [Migration from 2.x](docs/guides/migrate-from-2x.md) — replacement for the standalone `fastnn-runtime` and retained APIs
+- [Documentation Index](docs/index.md) — 3.0 guides, retained 2.x reference, and historical evidence
 - [CHANGELOG](CHANGELOG.md) — release history
 
 ## Testing

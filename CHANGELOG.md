@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Removed
+- Retire the standalone `fastnn-runtime` binary. Prepare supported decoders
+  from the original ONNX with `fastnn-infer`; legacy `.fnnc` plans are not
+  accepted by the 3.0 CLI. `fastnn-convert` and the secondary eager/AOT APIs
+  remain. See the [migration guide](docs/guides/migrate-from-2x.md).
+
 ## [3.0.0]
 
 ### Changed

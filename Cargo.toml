@@ -50,7 +50,6 @@ raw-cpuid = "11.0"
 openblas-src = { version = "0.10", optional = true }
 blas-src     = { version = "0.10", features = ["openblas"], optional = true }
 rustc-hash  = "2.0"
-clap         = { version = "4", features = ["derive"], optional = true }
 # FN3-11 (#57): raw Vulkan loader for the 3.0 Vulkan backend. Optional so a
 # default build never touches the loader; enabled by `--features vulkan`.
 ash          = { version = "0.38", optional = true }
@@ -106,7 +105,9 @@ fusion-matmul-add-silu = []
 fusion-residual-add-norm = []
 
 # ── CLI binary ────────────────────────────────────────────────────────
-cli = ["dep:clap"]
+# Target gate only: `fastnn-infer` declares `required-features = ["cli"]`.
+# The feature enables no dependency.
+cli = []
 
 [[example]]
 name = "gemm_bench"
@@ -115,11 +116,6 @@ path = "examples/gemm_bench.rs"
 [[example]]
 name = "packed_bench"
 path = "benches/packed_bench.rs"
-
-[[bin]]
-name = "fastnn-runtime"
-path = "src/bin/runtime.rs"
-required-features = ["cli"]
 
 [profile.release]
 lto = true
@@ -149,9 +145,8 @@ harness = false
 name = "fn3-bench"
 path = "tools/bench/main.rs"
 
-# FN3-17 (#63) inference CLI. Gated on the existing `cli` feature for the same
-# reason as `fastnn-runtime`: a standalone binary is built without the default
-# `python` feature, whose pyo3 extension-module mode is for shared libraries.
+# The inference CLI is built without the default `python` feature: PyO3's
+# extension-module mode is for shared libraries, not standalone binaries.
 [[bin]]
 name = "fastnn-infer"
 path = "src/bin/fastnn-infer.rs"

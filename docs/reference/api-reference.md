@@ -1,6 +1,8 @@
 # API Reference
 
-The stable public Python API. All symbols accessible from `import fastnn as fnn` unless otherwise noted.
+Reference for the retained 2.x eager and AOT Python API. All symbols are
+accessible from `import fastnn as fnn` unless otherwise noted. For decoder
+sessions use the [3.0 Python API](python-api.md).
 
 ## Tensor Creation
 

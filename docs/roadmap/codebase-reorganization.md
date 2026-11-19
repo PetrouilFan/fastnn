@@ -13,6 +13,9 @@ autograd, quantization and wgpu structural gates; see
 `docs/roadmap/fn3-architecture.md`. This file remains authoritative for the 2.x
 tree while it exists.
 
+The legacy standalone binary has been retired. See the
+[caller-backed disposition](../internals/legacy-2x.md) for current 2.x surfaces.
+
 ## Goals
 
 - Make ownership, dependency direction, and entry points obvious from the directory tree.
@@ -44,7 +47,7 @@ kernel expansion. CPU low-bit storage/compute-family policy is evaluated in
 | Tensor/eager API | `src/tensor/`, `src/nn/`, `src/optim/` | Change signatures only as part of an explicit redesign. | Rust library and Python API tests. |
 | Python extension module | `src/python/mod.rs`, `pyproject.toml` | Registration and names may change with a deliberate binding redesign. | Build/install plus Python modular API smoke tests. |
 | Python facade | `fastnn/__init__.py` | Remove or rename façade aliases when a cleaner API warrants it. | Python import/API tests. |
-| CLI | `src/bin/runtime.rs`, `Cargo.toml` | Reorganize or replace CLI behavior with the owning subsystem. | CLI smoke tests after relevant moves. |
+| CLI | `src/bin/fastnn-infer.rs`, `Cargo.toml` | 3.0 decoder CLI; the 2.x standalone target is retired. | `fn3_cli` smoke tests. |
 | Python CLI | `pyproject.toml` | Revisit entry points only with their Python I/O owner. | CLI help/smoke test. |
 | `.fnn` tensor/model files | `src/io/serialize.rs`, `fastnn/io/` | Consolidate format ownership and version deliberately; legacy readers are optional. | New-format round-trip tests. |
 | `.fnnc` executable plans | `src/backend/mod.rs`, `src/backend/runtime.rs` | Redesign serialization if prepared-plan architecture benefits. | Prepared-plan execution test. |
