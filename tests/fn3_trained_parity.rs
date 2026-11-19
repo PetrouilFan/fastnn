@@ -8,31 +8,25 @@
 //!   pass);
 //! * the **existing** suite-level `mean_abs` bound (`5e-5`), kept visible even
 //!   when it fails;
-//! * a scale-aware diagnostic (`5e-5 + 5e-6 * mean|ref|`) and the
-//!   ranking-relevant centered RMS, so the stable-gate decision has the numbers
-//!   in the test that will enforce it;
+//! * both enforced aggregate bounds: `mean|delta| <= 5e-5 + 5e-6 * mean|ref|`
+//!   and `rms(delta - mean(delta)) <= 5e-5 * rms(ref - mean(ref))`;
 //! * top-1/top-5 agreement, top-1 margin and KL.
 //!
-//! It is `#[ignore]` because it needs the 498,126,358-byte trained graph. With
-//! the model absent it prints the reason and passes; it never pretends a model
-//! ran. The committed payloads are the authority for prefill and decode step 1;
-//! decode step 2 has no committed payload, so its argmax is checked against the
-//! manifest summary and the full logits are written for the Python comparison.
+//! It is `#[ignore]` because it needs the 498,126,358-byte trained graph. An
+//! explicitly invoked gate fails if its model or required device is missing.
+//! All three committed ORT payloads are verified against the manifest before
+//! decoding; the decode-step-2 payload lives in `gate-reference/` because its
+//! manifest entry remains summary-only for the fixture generator.
 //!
 //! ```bash
 //! FN3_TRAINED_ONNX=/path/to/onnx/model.onnx \
 //!   cargo test --release --no-default-features --test fn3_trained_parity \
-//!   -- --ignored --nocapture
+//!   -- trained_gpt2_fp32_parity_cpu_and_vulkan --ignored --nocapture
 //!
 //! FN3_TRAINED_ONNX=... FN3_TRAINED_VULKAN=1 FN3_VK_DEVICE_UUID=... \
 //!   cargo test --release --features vulkan --test fn3_trained_parity \
-//!   -- --ignored --nocapture
+//!   -- --ignored --nocapture --test-threads=1
 //! ```
-//!
-//! This test deliberately does not assert the proposed policy: the tolerance
-//! decision belongs to the owner (#76). It asserts what is already policy (the
-//! elementwise bound and the committed payload digest) and reports both the
-//! current failure and the proposed bound.
 
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
@@ -56,12 +50,8 @@ const RTOL: f32 = 1e-4;
 /// The existing suite-level bound. It is reported, not asserted: the observed
 /// prefill and decode-step-2 means exceed it, and that is the finding.
 const MEAN_ABS_BOUND: f64 = 5e-5;
-/// The scale-aware diagnostic proposed in `docs/reports/fn3-trained-fp32.md`.
-/// The absolute floor is the existing bound; the relative term is 3.4x the
-/// worst observed CPU `mean_abs / mean|ref|` (1.47e-6) and 2.5x the staged
-/// Vulkan worst (2.03e-6).
-const SCALE_AWARE_FLOOR: f64 = 5e-5;
 const SCALE_AWARE_RELATIVE: f64 = 5e-6;
+const CENTERED_RMS_RELATIVE: f64 = 5e-5;
 
 fn sha256(bytes: &[u8]) -> String {
     fn compress(state: &mut [u32; 8], block: &[u8]) {
@@ -201,12 +191,68 @@ fn write_f32(path: &Path, values: &[f32]) {
     std::fs::write(path, bytes).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
-fn load_f32(path: &Path) -> Vec<f32> {
-    std::fs::read(path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+fn load_f32(path: &Path, entry: &serde_json::Value) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    assert_eq!(entry["dtype"], "f32", "{}", path.display());
+    assert_eq!(
+        entry["bytes"].as_u64(),
+        Some((VOCAB * 4) as u64),
+        "{}: manifest byte length",
+        path.display()
+    );
+    assert_eq!(
+        bytes.len(),
+        VOCAB * 4,
+        "{}: payload byte length",
+        path.display()
+    );
+    assert_eq!(
+        Some(sha256(&bytes).as_str()),
+        entry["sha256"].as_str(),
+        "{}: payload SHA-256",
+        path.display()
+    );
+    bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+type References = [Vec<f32>; 3];
+
+fn load_references() -> References {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("manifest.json")).expect("manifest"))
+            .expect("manifest json");
+    [
+        "prefill.p13.last_logits",
+        "decode.step1.logits",
+        "decode.step2.logits",
+    ]
+    .map(|name| {
+        let entry = manifest["tensors"]
+            .as_array()
+            .expect("tensors")
+            .iter()
+            .find(|tensor| tensor["name"] == name)
+            .expect("manifest reference entry");
+        let path = if name == "decode.step2.logits" {
+            root.join("gate-reference/decode.step2.logits.f32")
+        } else {
+            root.join(entry["path"].as_str().expect("manifest payload path"))
+        };
+        let logits = load_f32(&path, entry);
+        let recorded = entry["summary"]["argmax_flat"]
+            .as_u64()
+            .expect("recorded argmax");
+        assert_eq!(
+            argmax(&logits) as u64,
+            recorded,
+            "{name}: reference argmax vs manifest"
+        );
+        logits
+    })
 }
 
 fn argmax(values: &[f32]) -> usize {
@@ -238,6 +284,8 @@ struct Metrics {
     centered_rms: f64,
     relative_rms: f64,
     rms_reference: f64,
+    mean_abs_reference: f64,
+    centered_rms_reference: f64,
     violations: usize,
     top1: usize,
     reference_top1: usize,
@@ -247,16 +295,37 @@ struct Metrics {
     kl: f64,
 }
 
+impl Metrics {
+    fn aggregate_bounds(&self) -> (f64, f64) {
+        (
+            MEAN_ABS_BOUND + SCALE_AWARE_RELATIVE * self.mean_abs_reference,
+            CENTERED_RMS_RELATIVE * self.centered_rms_reference,
+        )
+    }
+
+    fn aggregate_passes(&self) -> (bool, bool) {
+        let (mean_abs_bound, centered_rms_bound) = self.aggregate_bounds();
+        (
+            self.mean_abs <= mean_abs_bound,
+            self.centered_rms <= centered_rms_bound,
+        )
+    }
+}
+
 fn measure(actual: &[f32], reference: &[f32]) -> Metrics {
     assert_eq!(actual.len(), reference.len(), "logit vector length");
+    assert!(reference.len() >= 2, "need logits for the top-1 margin");
     let mut max_abs = 0.0f64;
     let mut total_abs = 0.0f64;
     let mut total_signed = 0.0f64;
     let mut squared = 0.0f64;
     let mut reference_squared = 0.0f64;
+    let mut reference_total = 0.0f64;
+    let mut reference_abs = 0.0f64;
     let mut violations = 0usize;
     for (&got, &want) in actual.iter().zip(reference) {
         assert!(got.is_finite(), "non-finite fn3 logit");
+        assert!(want.is_finite(), "non-finite reference logit");
         let difference = f64::from(got) - f64::from(want);
         let abs = difference.abs();
         max_abs = max_abs.max(abs);
@@ -264,6 +333,8 @@ fn measure(actual: &[f32], reference: &[f32]) -> Metrics {
         total_signed += difference;
         squared += difference * difference;
         reference_squared += f64::from(want) * f64::from(want);
+        reference_total += f64::from(want);
+        reference_abs += f64::from(want).abs();
         let bound = f64::from(ATOL) + f64::from(RTOL) * f64::from(want).abs();
         if abs > bound {
             violations += 1;
@@ -271,10 +342,14 @@ fn measure(actual: &[f32], reference: &[f32]) -> Metrics {
     }
     let count = actual.len() as f64;
     let mean_signed = total_signed / count;
+    let mean_reference = reference_total / count;
     let mut centered = 0.0f64;
+    let mut reference_centered = 0.0f64;
     for (&got, &want) in actual.iter().zip(reference) {
         let difference = f64::from(got) - f64::from(want) - mean_signed;
         centered += difference * difference;
+        let residual = f64::from(want) - mean_reference;
+        reference_centered += residual * residual;
     }
     let actual_top1 = argmax(actual);
     let reference_top1 = argmax(reference);
@@ -318,6 +393,8 @@ fn measure(actual: &[f32], reference: &[f32]) -> Metrics {
         centered_rms: (centered / count).sqrt(),
         relative_rms: (squared / reference_squared).sqrt(),
         rms_reference: (reference_squared / count).sqrt(),
+        mean_abs_reference: reference_abs / count,
+        centered_rms_reference: (reference_centered / count).sqrt(),
         violations,
         top1: actual_top1,
         reference_top1,
@@ -329,22 +406,24 @@ fn measure(actual: &[f32], reference: &[f32]) -> Metrics {
     }
 }
 
-fn report(label: &str, metrics: &Metrics, mean_reference: f64) -> serde_json::Value {
-    let scale_aware = SCALE_AWARE_FLOOR + SCALE_AWARE_RELATIVE * mean_reference;
+fn report(label: &str, metrics: &Metrics) -> serde_json::Value {
+    let (scale_aware, centered_bound) = metrics.aggregate_bounds();
     let existing_pass = metrics.mean_abs <= MEAN_ABS_BOUND;
-    let proposed_pass = metrics.mean_abs <= scale_aware;
+    let (scale_aware_pass, centered_pass) = metrics.aggregate_passes();
     println!(
         "{label}: max_abs {:.3e}, mean_abs {:.3e} (existing 5e-5: {}; \
-         scale-aware {:.3e}: {}), signed {:.3e}, centered_rms {:.3e}, \
+         scale-aware {:.3e}: {}), signed {:.3e}, centered_rms {:.3e} (bound {:.3e}: {}), \
          relative_rms {:.3e}, violations {}, top1 {}/{} margin {:.4} (actual {:.4}), \
          top5 {}/5, KL {:.3e}",
         metrics.max_abs,
         metrics.mean_abs,
         if existing_pass { "PASS" } else { "FAIL" },
         scale_aware,
-        if proposed_pass { "PASS" } else { "FAIL" },
+        if scale_aware_pass { "PASS" } else { "FAIL" },
         metrics.mean_signed,
         metrics.centered_rms,
+        centered_bound,
+        if centered_pass { "PASS" } else { "FAIL" },
         metrics.relative_rms,
         metrics.violations,
         metrics.top1,
@@ -363,6 +442,13 @@ fn report(label: &str, metrics: &Metrics, mean_reference: f64) -> serde_json::Va
         "{label}: top-1 disagrees"
     );
     assert_eq!(metrics.top5_overlap, 5, "{label}: top-5 disagrees");
+    assert!(
+        scale_aware_pass && centered_pass,
+        "{label}: aggregate logits policy failed: mean_abs {:e} <= {scale_aware:e}: {scale_aware_pass}; \
+         centered_rms {:e} <= {centered_bound:e}: {centered_pass}",
+        metrics.mean_abs,
+        metrics.centered_rms,
+    );
     serde_json::json!({
         "max_abs": metrics.max_abs,
         "mean_abs": metrics.mean_abs,
@@ -370,10 +456,14 @@ fn report(label: &str, metrics: &Metrics, mean_reference: f64) -> serde_json::Va
         "centered_rms": metrics.centered_rms,
         "relative_rms": metrics.relative_rms,
         "rms_reference": metrics.rms_reference,
+        "mean_abs_reference": metrics.mean_abs_reference,
+        "centered_rms_reference": metrics.centered_rms_reference,
+        "centered_rms_bound": centered_bound,
+        "centered_rms_within_bound": centered_pass,
         "mean_abs_bound_existing": MEAN_ABS_BOUND,
         "mean_abs_within_existing_bound": existing_pass,
         "scale_aware_bound": scale_aware,
-        "mean_abs_within_scale_aware_bound": proposed_pass,
+        "mean_abs_within_scale_aware_bound": scale_aware_pass,
         "elementwise_violations": metrics.violations,
         "top1": metrics.top1,
         "reference_top1": metrics.reference_top1,
@@ -385,23 +475,37 @@ fn report(label: &str, metrics: &Metrics, mean_reference: f64) -> serde_json::Va
     })
 }
 
-/// Fail with the known resident-Vulkan diagnosis instead of a bare error.
-fn run_step(label: &str, what: &str, result: Result<Tensor, fastnn::fn3::Fn3Error>) -> Tensor {
-    match result {
-        Ok(tensor) => tensor,
-        Err(error) => {
-            let hint = if label == "vulkan" && std::env::var("FN3_VK_STAGED").as_deref() != Ok("1")
-            {
-                "\nThe resident Vulkan path cannot run this graph at this commit: the wte \
-                 Gather consumes a resident Reshape(input_ids) index tensor and the gather \
-                 kernel validates indices on the host. Set FN3_VK_STAGED=1 for the staged \
-                 arithmetic arm; see docs/reports/fn3-trained-fp32.md §6.2."
-            } else {
-                ""
-            };
-            panic!("{label} {what} failed: {error}{hint}");
-        }
+#[test]
+fn trained_logits_policy_rejects_offset_and_distortion_independently() {
+    let reference = [99.0, 99.125, 99.25, 99.375, 99.5, 99.625, 99.75, 99.875];
+    report("exact control", &measure(&reference, &reference));
+
+    // Binary fractions give an exactly constant FP32 offset, and a separate
+    // zero-mean distortion small enough to pass the mean-absolute bound.
+    let offset = reference.map(|value| value + 1.0 / 1024.0);
+    let mut distortion = reference;
+    distortion[0] += 1.0 / 16384.0;
+    distortion[1] -= 1.0 / 16384.0;
+    for (actual, passes) in [(offset, (false, true)), (distortion, (true, false))] {
+        let metrics = measure(&actual, &reference);
+        assert_eq!(metrics.violations, 0);
+        assert_eq!(metrics.top1, metrics.reference_top1);
+        assert_eq!(metrics.top5_overlap, 5);
+        assert_eq!(metrics.aggregate_passes(), passes);
+        let panic = std::panic::catch_unwind(|| report("negative control", &metrics))
+            .expect_err("the full report/enforcement path must reject the negative control");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("formatted assertion message");
+        assert!(
+            message.contains("aggregate logits policy failed"),
+            "unexpected panic: {message}"
+        );
     }
+}
+
+fn run_step(label: &str, what: &str, result: Result<Tensor, fastnn::fn3::Fn3Error>) -> Tensor {
+    result.unwrap_or_else(|error| panic!("{label} {what} failed: {error}"))
 }
 
 /// One executed arm: its JSON report and the logits of every phase. The
@@ -422,7 +526,7 @@ fn run(
     device: DeviceId,
     label: &str,
     out_dir: &Path,
-    expected: &[(&str, &Path)],
+    expected: &References,
 ) -> Arm {
     run_with_options(
         import,
@@ -442,7 +546,7 @@ fn run_with_options(
     device: DeviceId,
     label: &str,
     out_dir: &Path,
-    expected: &[(&str, &Path)],
+    expected: &References,
     options: SessionOptions,
 ) -> Arm {
     let (model, _envelope) = prepared(import, device, 32);
@@ -462,7 +566,7 @@ fn run_session(
     backend: &dyn fastnn::fn3::Backend,
     label: &str,
     out_dir: &Path,
-    expected: &[(&str, &Path)],
+    expected: &References,
     options: SessionOptions,
 ) -> Arm {
     let mut session =
@@ -479,21 +583,10 @@ fn run_session(
         &out_dir.join(format!("{label}.prefill.p13.last_logits.f32")),
         &values,
     );
-    if let Some((_, path)) = expected.iter().find(|(name, _)| *name == "prefill") {
-        let reference = load_f32(path);
-        let metrics = measure(&values, &reference);
-        let mean_reference =
-            reference.iter().map(|v| f64::from(*v).abs()).sum::<f64>() / reference.len() as f64;
-        phases.insert(
-            "prefill".to_string(),
-            report(&format!("{label} prefill"), &metrics, mean_reference),
-        );
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2");
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(root.join("manifest.json")).expect("manifest"),
-    )
-    .expect("manifest json");
+    phases.insert(
+        "prefill".to_string(),
+        report(&format!("{label} prefill"), &measure(&values, &expected[0])),
+    );
     for (step, token) in DECODE.iter().enumerate() {
         let step_number = step + 1;
         let logits = run_step(
@@ -510,45 +603,8 @@ fn run_session(
             &values,
         );
         let name = format!("decode.step{step_number}");
-        let reference_path = expected
-            .iter()
-            .find(|(expected, _)| *expected == name)
-            .map(|(_, path)| *path);
-        if let Some(path) = reference_path {
-            let reference = load_f32(path);
-            let metrics = measure(&values, &reference);
-            let mean_reference =
-                reference.iter().map(|v| f64::from(*v).abs()).sum::<f64>() / reference.len() as f64;
-            phases.insert(
-                name.clone(),
-                report(&format!("{label} {name}"), &metrics, mean_reference),
-            );
-        } else {
-            let recorded = manifest["tensors"]
-                .as_array()
-                .expect("tensors")
-                .iter()
-                .find(|tensor| tensor["name"] == format!("{name}.logits"))
-                .expect("manifest entry")["summary"]["argmax_flat"]
-                .as_i64()
-                .expect("recorded argmax") as usize;
-            let actual = argmax(&values);
-            println!(
-                "{label} {name}: summary-only reference; argmax {actual} \
-                 (manifest {recorded}), top5 {:?}",
-                top_k(&values, 5)
-            );
-            assert_eq!(actual, recorded, "{label} {name}: argmax vs manifest");
-            phases.insert(
-                name,
-                serde_json::json!({
-                    "argmax": actual,
-                    "recorded_argmax": recorded,
-                    "reference_kind": "summary-only",
-                    "top5": top_k(&values, 5),
-                }),
-            );
-        }
+        let metrics = measure(&values, &expected[step_number]);
+        phases.insert(name.clone(), report(&format!("{label} {name}"), &metrics));
     }
     Arm {
         report: serde_json::Value::Object(phases),
@@ -556,26 +612,78 @@ fn run_session(
     }
 }
 
-#[test]
-#[ignore = "needs the 498,126,358-byte trained ONNX graph; set FN3_TRAINED_ONNX"]
-fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
-    let Some(path) = std::env::var("FN3_TRAINED_ONNX").ok().map(PathBuf::from) else {
-        println!("SKIP: FN3_TRAINED_ONNX is not set; no trained parity run was attempted");
-        return;
-    };
+fn pinned_model_path() -> PathBuf {
+    let path = PathBuf::from(
+        std::env::var("FN3_TRAINED_ONNX")
+            .expect("set FN3_TRAINED_ONNX to the pinned trained model"),
+    );
     let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     assert_eq!(bytes.len(), TRAINED_BYTES, "not the pinned trained graph");
     assert_eq!(sha256(&bytes), TRAINED_SHA256, "wrong trained graph bytes");
+    path
+}
+
+fn vulkan_flag(name: &str) -> bool {
+    match std::env::var(name).as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => panic!("{name} must be unset, 0, or 1"),
+    }
+}
+
+fn reject_staged_override() {
+    assert!(
+        !vulkan_flag("FN3_VK_STAGED"),
+        "FN3_VK_STAGED is set; it would silently replace the required resident arm"
+    );
+}
+
+#[cfg(feature = "vulkan")]
+fn open_pinned_physical() -> std::sync::Arc<fastnn::fn3::backend::vulkan::VulkanBackend> {
+    use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
+    use fastnn::fn3::device::DeviceRequest;
+
+    let pinned =
+        std::env::var("FN3_VK_DEVICE_UUID").expect("set FN3_VK_DEVICE_UUID for the physical gate");
+    let index = adapters()
+        .iter()
+        .find(|adapter| {
+            adapter.has_compute_queue()
+                && !adapter.is_software()
+                && adapter.uuid_string().eq_ignore_ascii_case(pinned.trim())
+        })
+        .unwrap_or_else(|| panic!("no physical Vulkan compute device matches UUID {pinned:?}"))
+        .index;
+    let backend = VulkanBackend::open_with(
+        &DeviceRequest::Vulkan { index: Some(index) },
+        VulkanConfig::validated(),
+    )
+    .expect("open the physical Vulkan device");
+    assert!(!backend.is_software(), "the gate requires a real GPU");
+    assert!(
+        backend.validation_enabled(),
+        "the gate requires the validation layer"
+    );
+    backend
+}
+
+#[test]
+#[ignore = "needs the 498,126,358-byte trained ONNX graph; set FN3_TRAINED_ONNX"]
+fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
+    let trained_vulkan = vulkan_flag("FN3_TRAINED_VULKAN");
+    let require_physical = vulkan_flag("FN3_VK_REQUIRE_PHYSICAL");
+    reject_staged_override();
+    let vulkan_requested = trained_vulkan || require_physical;
+    #[cfg(not(feature = "vulkan"))]
+    if vulkan_requested {
+        panic!("the physical gate requires --features vulkan");
+    }
+    let path = pinned_model_path();
+    #[cfg(feature = "vulkan")]
+    let gpu = vulkan_requested.then(open_pinned_physical);
     let import = import_onnx_file(&path).expect("trained import");
 
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2/tensors");
-    let prefill = root.join("prefill.p13.last_logits.f32");
-    let step1 = root.join("decode.step1.logits.f32");
-    let expected = [
-        ("prefill", prefill.as_path()),
-        ("decode.step1", step1.as_path()),
-    ];
+    let expected = load_references();
     let out = output_root();
     std::fs::create_dir_all(&out).expect("output root");
     let mut report_json = serde_json::Map::new();
@@ -585,45 +693,21 @@ fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
     report_json.insert("cpu".to_string(), cpu);
 
     #[cfg(feature = "vulkan")]
-    if std::env::var("FN3_TRAINED_VULKAN").as_deref() == Ok("1") {
-        use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-        use fastnn::fn3::device::DeviceRequest;
-        let require_physical = std::env::var("FN3_VK_REQUIRE_PHYSICAL").as_deref() == Ok("1");
-        let pinned = std::env::var("FN3_VK_DEVICE_UUID")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
-        let adapter = adapters()
-            .iter()
-            .find(|adapter| {
-                adapter.has_compute_queue()
-                    && !adapter.is_software()
-                    && pinned
-                        .as_deref()
-                        .map(|uuid| adapter.uuid_string().eq_ignore_ascii_case(uuid))
-                        .unwrap_or(true)
-            })
-            .map(|adapter| adapter.index);
-        let Some(index) = adapter else {
-            assert!(
-                !require_physical,
-                "FN3_VK_REQUIRE_PHYSICAL=1 but no physical compute device is present"
-            );
-            println!("SKIP Vulkan: no physical Vulkan compute device is present");
-            return;
-        };
-        let backend = VulkanBackend::open_with(
-            &DeviceRequest::Vulkan { index: Some(index) },
-            VulkanConfig::validated(),
-        )
-        .expect("open physical Vulkan device");
+    if let Some(backend) = gpu {
+        use fastnn::fn3::backend::vulkan::instance::validation_counts;
         let device = backend.device_id();
         println!(
             "vulkan device: {} ({})",
             backend.adapter().name,
             backend.adapter().uuid_string()
         );
+        let before = validation_counts();
         let vulkan = run(&import, &*backend, device, "vulkan", &out, &expected).report;
+        assert_eq!(
+            validation_counts(),
+            before,
+            "validation messages changed during the trained Vulkan run"
+        );
         report_json.insert("vulkan".to_string(), vulkan);
     }
 
@@ -705,85 +789,30 @@ fn assert_cross_arm_agreement(label: &str, resident: &[f32], staged: &[f32]) {
 /// This is the arm that failed before the identity-`Reshape` fold:
 /// `Gather(wte, Reshape(input_ids))` validated a device-resident index tensor on
 /// the host and returned `NotImplemented`. It is deliberately not a silent
-/// skip: `FN3_TRAINED_VULKAN=1` means "run on the physical GPU", and a missing
+/// skip: invoking this test means "run on the physical GPU", and a missing
 /// device or a missing validation layer is a failure. The CPU arm is covered by
 /// `trained_gpt2_fp32_parity_cpu_and_vulkan`.
 #[test]
 #[ignore = "needs the 498,126,358-byte trained ONNX graph and a physical Vulkan device"]
 fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
-    let Some(path) = std::env::var("FN3_TRAINED_ONNX").ok().map(PathBuf::from) else {
-        println!(
-            "SKIP: FN3_TRAINED_ONNX is not set; the resident-vs-staged arm needs the pinned \
-             trained graph"
-        );
-        return;
-    };
-    if std::env::var("FN3_TRAINED_VULKAN").as_deref() != Ok("1") {
-        println!("SKIP: FN3_TRAINED_VULKAN is not 1; set it to run the GPU arm");
-        return;
-    }
-    assert!(
-        !matches!(
-            std::env::var("FN3_VK_STAGED").as_deref(),
-            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-        ),
-        "FN3_VK_STAGED is set; the comparison uses explicit SessionOptions, and the resident arm \
-         would be silently replaced by staging"
-    );
-
-    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    assert_eq!(bytes.len(), TRAINED_BYTES, "not the pinned trained graph");
-    assert_eq!(sha256(&bytes), TRAINED_SHA256, "wrong trained graph bytes");
+    vulkan_flag("FN3_TRAINED_VULKAN");
+    vulkan_flag("FN3_VK_REQUIRE_PHYSICAL");
+    reject_staged_override();
 
     #[cfg(not(feature = "vulkan"))]
     {
-        panic!(
-            "FN3_TRAINED_VULKAN=1 but this test binary was built without the `vulkan` feature; \
-             build with --features vulkan"
-        );
+        panic!("the physical gate requires --features vulkan");
     }
 
     #[cfg(feature = "vulkan")]
     {
         use fastnn::fn3::backend::vulkan::instance::validation_counts;
-        use fastnn::fn3::backend::vulkan::{adapters, VulkanBackend, VulkanConfig};
-        use fastnn::fn3::device::DeviceRequest;
         use fastnn::fn3::model::{FoldKind, SlotRole};
         use fastnn::fn3::OpId;
 
+        let path = pinned_model_path();
+        let backend = open_pinned_physical();
         let import = import_onnx_file(&path).expect("trained import");
-
-        let pinned = std::env::var("FN3_VK_DEVICE_UUID")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty());
-        let index = adapters()
-            .iter()
-            .find(|adapter| {
-                adapter.has_compute_queue()
-                    && !adapter.is_software()
-                    && pinned
-                        .as_deref()
-                        .map(|uuid| adapter.uuid_string().eq_ignore_ascii_case(uuid))
-                        .unwrap_or(true)
-            })
-            .map(|adapter| adapter.index)
-            .unwrap_or_else(|| {
-                panic!(
-                    "FN3_TRAINED_VULKAN=1 but no physical Vulkan compute device is present \
-                     (pinned uuid {pinned:?}); this gate does not skip"
-                )
-            });
-        let backend = VulkanBackend::open_with(
-            &DeviceRequest::Vulkan { index: Some(index) },
-            VulkanConfig::validated(),
-        )
-        .expect("open the physical Vulkan device");
-        assert!(!backend.is_software(), "the gate requires a real GPU");
-        assert!(
-            backend.validation_enabled(),
-            "the gate requires the validation layer"
-        );
         println!(
             "[fn3-72][trained] device=\"{}\" uuid={} validation={}",
             backend.adapter().name,
@@ -835,14 +864,7 @@ fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
             );
         }
 
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2/tensors");
-        let prefill = root.join("prefill.p13.last_logits.f32");
-        let step1 = root.join("decode.step1.logits.f32");
-        let expected = [
-            ("prefill", prefill.as_path()),
-            ("decode.step1", step1.as_path()),
-        ];
+        let expected = load_references();
         let out = output_root().join("resident-vs-staged");
         std::fs::create_dir_all(&out).expect("output root");
 
@@ -973,9 +995,7 @@ fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
                 resident_logits,
                 staged_logits,
             );
-            // Every decode step's top-1 is asserted against the reference
-            // independently inside `report`; step 2 has no committed payload,
-            // so its reference is the manifest argmax and the staged arm.
+            // Both arms are also checked independently against ORT in `report`.
             let metrics = measure(resident_logits, staged_logits);
             comparison.insert(
                 phase.to_string(),

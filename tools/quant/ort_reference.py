@@ -99,7 +99,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument(
+        "--parity-step2", action="store_true",
+        help="write only the digest-verified raw trained-parity decode-2 logits into --out",
+    )
     args = parser.parse_args()
+    if args.parity_step2:
+        return write_parity_step2(args.model, args.out)
     args.out.mkdir(parents=True, exist_ok=True)
     sess = session(args.model)
 
@@ -153,6 +159,34 @@ def main() -> int:
 
     (args.out / "ort.report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
+    return 0
+
+
+def write_parity_step2(model: Path, out: Path) -> int:
+    root = Path(__file__).resolve().parents[2] / "fixtures/parity/trained-gpt2"
+    manifest = json.loads((root / "manifest.json").read_text())
+    model_digest = "42c1e92a21c41ebd3c536d4c6f09732450a43db35977593236f696d3346c7c0d"
+    if model.stat().st_size != 498_126_358 or sha256(model) != model_digest:
+        raise SystemExit("not the pinned trained GPT-2 graph")
+    entry = next(t for t in manifest["tensors"] if t["name"] == "decode.step2.logits")
+    sess = session(model)
+    _, past = run(sess, PROMPT, list(range(len(PROMPT))), empty_past())
+    for index, token in enumerate(DECODE):
+        logits, past = run(sess, [token], [len(PROMPT) + index], past)
+    if list(logits.shape) != entry["shape"] or logits.dtype != np.float32:
+        raise SystemExit(f"unexpected decode-2 logits format: {logits.shape} {logits.dtype}")
+    data = logits.astype("<f4", copy=False).tobytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if len(data) != entry["bytes"] or digest != entry["sha256"]:
+        raise SystemExit(
+            f"decode-2 got {len(data)} bytes SHA-256 {digest}; "
+            f"expected {entry['bytes']} bytes SHA-256 {entry['sha256']} "
+            f"(ORT {ort.__version__}, NumPy {np.__version__}); no output written"
+        )
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "decode.step2.logits.f32"
+    path.write_bytes(data)
+    print(f"{digest}  {path}")
     return 0
 
 
