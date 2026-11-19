@@ -33,17 +33,20 @@
 //! exposes the serialized blob for a caller that wants to persist it keyed by
 //! `(deviceUUID, driverUUID)`; the alpha keeps it in memory only.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ash::vk;
 
-use super::context::{Buffer, BufferDesc};
+use super::context::{Buffer, BufferDesc, BufferTicket};
 use super::device_info::{AdapterInfo, AdapterLimits};
 use super::error::{check, Error, Result};
 use super::instance::Instance;
 use super::ledger::HandleLedger;
 use super::memory::{MemoryAllocation, MemoryAllocator, MemoryClass, MemoryStats};
+use super::quarantine::{
+    self, PendingEntry, Quarantine, QuarantineStats, ReclaimReport, TeardownReport,
+};
 use crate::inference::device::{DeviceId, PhysicalDeviceId};
 
 /// How a logical device is created.
@@ -94,6 +97,17 @@ pub struct Device {
     /// `vulkan-fault-injection` feature is on.
     #[cfg(feature = "vulkan-fault-injection")]
     faults: super::fault::FaultInjector,
+    /// Resources whose GPU completion is unknown, plus the buffer id registry
+    /// that makes destruction a single-owner decision.
+    quarantine: Mutex<Quarantine>,
+    /// Fast mirror of `fatal`: set by [`Device::poison`]. `Buffer::drop` reads
+    /// it to decide between destroying and deferring, without taking the
+    /// error mutex.
+    terminal: AtomicBool,
+    /// Teardown could not quiesce. Nothing may be freed from then on.
+    refuse_destruction: AtomicBool,
+    /// A teardown boundary already recorded its evidence.
+    teardown_recorded: AtomicBool,
     destroyed: bool,
 }
 
@@ -102,6 +116,16 @@ pub struct Device {
 struct DeviceFault {
     call: &'static str,
     detail: String,
+}
+
+/// A failed `vkQueueSubmit` and whether the driver may have seen the work.
+#[derive(Debug)]
+pub(crate) struct SubmitFailure {
+    /// The error to report.
+    pub(crate) error: Error,
+    /// `true` when the submission may have reached the queue; its fence is
+    /// then possibly pending. `false` means nothing was submitted.
+    pub(crate) queued: bool,
 }
 
 impl Device {
@@ -230,6 +254,10 @@ impl Device {
             fatal: Mutex::new(None),
             #[cfg(feature = "vulkan-fault-injection")]
             faults: super::fault::FaultInjector::new(),
+            quarantine: Mutex::new(Quarantine::new()),
+            terminal: AtomicBool::new(false),
+            refuse_destruction: AtomicBool::new(false),
+            teardown_recorded: AtomicBool::new(false),
             destroyed: false,
         }))
     }
@@ -250,6 +278,7 @@ impl Device {
 
     /// Remember the first terminal failure; later ones never overwrite it.
     pub(crate) fn poison(&self, call: &'static str, detail: impl Into<String>) {
+        self.terminal.store(true, Ordering::Release);
         let mut fatal = self
             .fatal
             .lock()
@@ -339,6 +368,162 @@ impl Device {
         self.fence_timeout_ns
     }
 
+    // -- Quarantine ---------------------------------------------------------
+    //
+    // A fence wait that fails, times out, or is refused because the device is
+    // already terminal leaves completion unknown. The submission's resources
+    // move here instead of being dropped, destroyed or recycled; see the
+    // `quarantine` module for the ownership rules.
+
+    /// Register a buffer that this device created.
+    pub(crate) fn register_buffer(&self, id: u64) {
+        self.lock_quarantine().register_live(id);
+    }
+
+    /// `true` when the quarantine owns this buffer's destruction.
+    pub(crate) fn buffer_is_quarantined(&self, id: u64) -> bool {
+        self.lock_quarantine().is_quarantined(id)
+    }
+
+    /// `true` when the quarantine already destroyed this buffer.
+    pub(crate) fn buffer_is_retired(&self, id: u64) -> bool {
+        self.lock_quarantine().is_retired(id)
+    }
+
+    /// Take one device-wide in-flight reference per committed buffer.
+    pub(crate) fn reserve_buffers(&self, tickets: &[BufferTicket]) {
+        self.lock_quarantine().reserve(tickets);
+    }
+
+    /// Release references proven complete or proof-equivalently discarded.
+    pub(crate) fn release_buffers(&self, tickets: &[BufferTicket]) {
+        self.lock_quarantine().release_refs(tickets);
+    }
+
+    /// Decide a dropping buffer's fate.
+    ///
+    /// Returns `true` when the caller must not destroy: the quarantine already
+    /// owns the buffer, or it just took it because the device is terminal (a
+    /// poisoned device releases nothing early).
+    pub(crate) fn defer_buffer_on_drop(&self, ticket: BufferTicket) -> bool {
+        let terminal = self.terminal.load(Ordering::Acquire)
+            || self.refuse_destruction.load(Ordering::Acquire);
+        self.lock_quarantine().defer_on_drop(ticket, terminal)
+    }
+
+    /// Take a submission whose completion is unknown into the quarantine.
+    ///
+    /// `fence_unsignalled` is diagnostic only. Every buffer ticket whose id is
+    /// still live, or already owned by another entry, becomes owned by the
+    /// quarantine; a ticket for a buffer that already dropped releases its
+    /// reserved reference and is counted, so nothing is freed twice.
+    pub(crate) fn quarantine_entry(&self, entry: PendingEntry, fence_unsignalled: bool) {
+        self.lock_quarantine().push_entry(entry, fence_unsignalled);
+    }
+
+    /// Snapshot of what the quarantine owns.
+    pub fn quarantine_stats(&self) -> QuarantineStats {
+        self.lock_quarantine().stats()
+    }
+
+    /// `true` while a submission's completion is unknown.
+    pub fn has_unknown_completion(&self) -> bool {
+        self.lock_quarantine().stats().pending_submissions > 0
+    }
+
+    /// Release every quarantined entry whose fence is proven signalled, then
+    /// destroy quarantined buffers whose device-wide reference count is zero.
+    ///
+    /// This is an explicit proof boundary, not an in-step path: it calls
+    /// `vkWaitForFences` directly and releases only entries that return
+    /// success. A buffer shared with a still-running submission keeps its
+    /// reference and stays owned for a later pass. It deliberately bypasses
+    /// [`Device::ensure_usable`], because a poisoned device can still have a
+    /// live queue and fences the driver can prove; a genuinely lost device
+    /// returns an error and releases nothing.
+    pub fn reclaim_quarantine(&self) -> ReclaimReport {
+        quarantine::reclaim(self)
+    }
+
+    /// Quiesce, then destroy or leak the quarantine.
+    ///
+    /// `idle` must be the result of a successful `vkDeviceWaitIdle` (or an
+    /// equivalent proven boundary). On failure every resource is leaked and
+    /// the reason is recorded by [`quarantine::teardown`]. A failed *second*
+    /// attempt (after an earlier boundary already recorded) is still counted:
+    /// it is new evidence that the device did not quiesce.
+    pub(crate) fn finish_teardown(&self, idle: bool) -> Option<TeardownReport> {
+        if self.destruction_refused() {
+            // A failed boundary already promised to leak. Never destroy, even
+            // if a later wait succeeds; only record a failed retry.
+            if !idle {
+                quarantine::record_failed_quiesce();
+            }
+            return None;
+        }
+        let first = !self.teardown_recorded.swap(true, Ordering::AcqRel);
+        let has_work = {
+            let quarantine = self.lock_quarantine();
+            let stats = quarantine.stats();
+            stats.entries != 0 || stats.loose_buffers != 0 || stats.retained_buffers != 0
+        };
+        if !first && !has_work && idle {
+            return None;
+        }
+        Some(quarantine::teardown(self, idle, first || !idle))
+    }
+
+    /// Quiesce the device for teardown.
+    ///
+    /// This is the one call that deliberately ignores the terminal state: a
+    /// poisoned device must still try to prove that nothing is in flight before
+    /// anything is freed. A failed quiesce means resources are leaked, never
+    /// freed.
+    pub fn quiesce(&self) -> Result<()> {
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self.faults.take(super::fault::FaultPoint::Idle) {
+            return Err(Error::vk(
+                "vkDeviceWaitIdle",
+                vk::Result::ERROR_DEVICE_LOST,
+                "injected quiesce failure at teardown (FN3-27): resources must be leaked, not freed",
+            ));
+        }
+        // SAFETY: teardown is the only caller; the device handle is live and
+        // this is the Vulkan-defined global wait.
+        check(
+            "vkDeviceWaitIdle",
+            unsafe { self.ash.device_wait_idle() },
+            "quiescing every queue before destroying device resources",
+        )
+    }
+
+    /// Mark that nothing may be freed any more (teardown could not quiesce).
+    pub(crate) fn refuse_destruction(&self) {
+        self.refuse_destruction.store(true, Ordering::Release);
+    }
+
+    /// `true` when a failed teardown forbids every free.
+    pub(crate) fn destruction_refused(&self) -> bool {
+        self.refuse_destruction.load(Ordering::Acquire)
+    }
+
+    /// Deliberately keep the loader-owned instance alive.
+    ///
+    /// On the leak path the `vk::Device`, its allocator chunks and their raw
+    /// child handles are never destroyed. `vkDestroyInstance` over a live
+    /// device is invalid, so one extra strong reference is leaked here; after
+    /// the field drops the count stays at least one and [`Instance::drop`]
+    /// never runs.
+    fn leak_instance(&self) {
+        std::mem::forget(Arc::clone(&self.instance));
+    }
+
+    pub(crate) fn lock_quarantine(&self) -> MutexGuard<'_, Quarantine> {
+        self.quarantine
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Allocate a device buffer and bind it to a suballocated range.
     pub fn create_buffer(self: &Arc<Self>, desc: &BufferDesc) -> Result<Buffer> {
         self.ensure_usable()?;
@@ -365,18 +550,35 @@ impl Device {
 
     /// Submit to the compute queue with the queue-level external
     /// synchronisation Vulkan requires.
-    pub(crate) fn submit(&self, submits: &[vk::SubmitInfo<'_>], fence: vk::Fence) -> Result<()> {
-        self.ensure_usable()?;
+    ///
+    /// `queued` distinguishes a failure before the driver saw the submission
+    /// (nothing is in flight, so no fence wait is needed) from a failed
+    /// `vkQueueSubmit` whose queueing is unknown (the fence must be treated as
+    /// possibly pending).
+    pub(crate) fn submit(
+        &self,
+        submits: &[vk::SubmitInfo<'_>],
+        fence: vk::Fence,
+    ) -> std::result::Result<(), SubmitFailure> {
+        if let Err(error) = self.ensure_usable() {
+            return Err(SubmitFailure {
+                error,
+                queued: false,
+            });
+        }
         #[cfg(feature = "vulkan-fault-injection")]
         if self.faults.take(super::fault::FaultPoint::Submit) {
             // Nothing was submitted: the command buffer stays executable and
             // the fence stays unsignalled, so the failure is clean at the
             // driver boundary. It is still terminal because the matrix models
             // a device lost at submit, which is not recoverable in place.
-            return Err(self.lost_now(
-                "vkQueueSubmit",
-                "injected device loss at submit (FN3-27; no command buffer was submitted)",
-            ));
+            return Err(SubmitFailure {
+                error: self.lost_now(
+                    "vkQueueSubmit",
+                    "injected device loss at submit (FN3-27; no command buffer was submitted)",
+                ),
+                queued: false,
+            });
         }
         let _guard = self
             .queue_lock
@@ -393,14 +595,21 @@ impl Device {
             unsafe { self.ash.queue_submit(self.queue, submits, fence) },
             "submitting a recorded command buffer",
         );
-        match &result {
+        match result {
+            Ok(()) => Ok(()),
             Err(error) if error.is_device_lost() => {
                 // Report the terminal form immediately, naming the adapter, and
                 // remember it so every later call returns the same failure.
                 let detail = error.to_string();
-                Err(self.lost_now("vkQueueSubmit", detail))
+                Err(SubmitFailure {
+                    error: self.lost_now("vkQueueSubmit", detail),
+                    queued: true,
+                })
             }
-            _ => result,
+            Err(error) => Err(SubmitFailure {
+                error,
+                queued: true,
+            }),
         }
     }
 
@@ -417,6 +626,18 @@ impl Device {
 
     pub(crate) fn wait_fence(&self, fence: vk::Fence) -> Result<()> {
         self.ensure_usable()?;
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self.faults.take(super::fault::FaultPoint::FenceUnknown) {
+            // The real wait is deliberately NOT performed: this models the
+            // `vkWaitForFences` error/timeout case in which the submission may
+            // still be running. The caller must quarantine every in-flight
+            // resource, never reuse the submitter.
+            return Err(self.lost_now(
+                "vkWaitForFences",
+                "injected unknown completion at the fence wait (FN3-27; the submission may still \
+                 be in flight)",
+            ));
+        }
         // SAFETY: the fence was created by this device and submitted above; the
         // wait is for that exact fence.
         let waited = check(
@@ -432,7 +653,8 @@ impl Device {
             // The real wait above completed, so no work is still in flight.
             // The matrix models a device lost while the fence was being
             // observed: the outcome the caller would see is the same, and the
-            // device is terminal.
+            // device is terminal. Completion is nonetheless proven, which is
+            // why the quarantine can release this entry on its next pass.
             return Err(self.lost_now(
                 "vkWaitForFences",
                 "injected device loss at the fence wait (FN3-27; the submission had completed)",
@@ -549,17 +771,36 @@ impl Drop for Device {
         if self.destroyed {
             return;
         }
-        // Teardown-only global wait. Every measured submission is fence-based;
-        // this is the final "nothing in flight" guard before the allocator's
-        // chunks and the device disappear.
+        self.destroyed = true;
+        // Always attempt the proof, even after an earlier failed boundary: the
+        // result is evidence. A successful second wait does not make a leaked
+        // device destroyable (its raw children and chunks are already
+        // unreachable), but a failed second wait must appear in
+        // `teardown_totals()` instead of being hidden by `teardown_recorded`.
         // SAFETY: no other thread can be using the device: every resource and
         // submitter holds `Arc<Device>`, so this `Drop` runs only when the last
         // handle is gone.
-        if let Err(code) = unsafe { self.ash.device_wait_idle() } {
-            eprintln!(
-                "[fn3vk][warn] vkDeviceWaitIdle during teardown failed: {code:?} ({})",
-                code.as_raw()
-            );
+        let idle = self.quiesce();
+        let _ = self.finish_teardown(idle.is_ok());
+        if self.destruction_refused() || idle.is_err() {
+            self.refuse_destruction();
+            // A destroyed instance under a live device (and its memory) is
+            // exactly the bug this branch exists to avoid: leak the loader
+            // handle with the device.
+            self.leak_instance();
+            match idle {
+                Err(error) => eprintln!(
+                    "[fn3vk][warn] vkDeviceWaitIdle during teardown failed: {error}; leaking the \
+                     loader instance, allocator's chunks, pipeline cache and vk::Device rather \
+                     than freeing resources the GPU may still reference"
+                ),
+                Ok(()) => eprintln!(
+                    "[fn3vk][warn] an earlier teardown boundary could not quiesce the device; \
+                     leaking the loader instance, allocator's chunks, pipeline cache and \
+                     vk::Device rather than freeing resources it may still reference"
+                ),
+            }
+            return;
         }
         {
             let mut memory = self
@@ -584,7 +825,6 @@ impl Drop for Device {
         // because it holds `Arc<Device>`; the device is destroyed exactly once.
         unsafe { self.ash.destroy_device(None) };
         self.ledger.destroy("device");
-        self.destroyed = true;
     }
 }
 

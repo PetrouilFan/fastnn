@@ -71,24 +71,20 @@ authority is `docs/roadmap/fn3-architecture.md`.
   pre-step extent if a device copy fails partway; bytes past the live extent
   are unobservable, so a retry cannot double-append.
 - A device-level failure (device lost at submit, or a fence whose completion
-  is unknown) is **terminal**: the device is poisoned and every later operation
-  returns `Fn3Error::DeviceUnavailable` naming the adapter; `Session::recover`
-  returns that error and never retries. Every other step failure is recoverable
-  in place, and `Session::recover` is the explicit acknowledgement (drops
-  pooled outputs, returns `Ok`).
+  is unknown) is **terminal**: the device is poisoned, later operations return
+  `Fn3Error::DeviceUnavailable` naming the adapter, and `Session::recover`
+  never retries. Every other step failure is recoverable in place; `recover`
+  drops pooled outputs and returns `Ok`.
 - `vulkan-fault-injection` is a non-default, test-only feature: one `take()`
   per allocation, submit, fence, readback, recording and resident-copy seam,
   compiled out of every shipped configuration. Its output is injected
   evidence, never physical-device evidence.
 - Immutable model data is uploaded once (`Backend::prepare_persistent`) and
-  bound by handle afterwards; a prepared tensor reaching a host upload is a
-  hard error (`check_staged_input`), and the host tensors stay valid for the
-  CPU/fallback path. A persistent entry is keyed by the storage's process-unique
-  generation (`Storage::generation`), never by a host address, and is released
-  when the last `Storage` handle drops, so a shared backend cannot serve a
-  dropped model's weights to the next one. Unsafe code lives only in
-  `storage.rs`, each block with a `SAFETY:` comment covering alignment, bounds,
-  aliasing and lifetime.
+  bound by handle; a prepared tensor reaching a host upload is a hard error
+  (`check_staged_input`). Persistent entries are keyed by `Storage::generation`,
+  never a host address, and released with the last handle. Unsafe code lives
+  only in `storage.rs`, each block with a `SAFETY:` comment covering alignment,
+  bounds, aliasing and lifetime.
 
 ## Validation
 

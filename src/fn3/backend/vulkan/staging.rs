@@ -111,7 +111,7 @@ impl StagingPool {
         let candidate = blocks
             .iter()
             .enumerate()
-            .filter(|(_, block)| block.size() >= size)
+            .filter(|(_, block)| block.size() >= size && !block.must_not_reuse())
             .min_by_key(|(_, block)| block.size())
             .map(|(index, _)| index);
         let buffer = match candidate {
@@ -153,6 +153,13 @@ impl StagingPool {
     }
 
     fn release(&self, buffer: Arc<Buffer>) {
+        // A block whose submission is quarantined may still be read by the
+        // GPU. It must never be leased again or freed by the pool; the device
+        // quarantine owns it until completion is proven. A retired block is
+        // already destroyed, so the same rule prevents handing out a tombstone.
+        if buffer.must_not_reuse() {
+            return;
+        }
         // Oversized blocks are dropped instead of pooled: one large upload must
         // not pin host memory forever.
         if buffer.size() > self.max_pooled_bytes {

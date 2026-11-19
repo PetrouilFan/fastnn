@@ -35,6 +35,15 @@ use super::error::{Error, Result};
 
 static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);
 static VALIDATION_WARNINGS: AtomicU64 = AtomicU64::new(0);
+static DESTROYED_INSTANCES: AtomicU64 = AtomicU64::new(0);
+
+/// How many `vk::Instance`s this process has destroyed.
+///
+/// A leak-path teardown must leave this unchanged: destroying the instance
+/// over a leaked device is the use-after-free this counter guards.
+pub fn destroyed_instance_total() -> u64 {
+    DESTROYED_INSTANCES.load(Ordering::Relaxed)
+}
 
 /// Error and warning counts emitted by the validation layer in this process.
 pub fn validation_counts() -> (u64, u64) {
@@ -350,6 +359,7 @@ impl Drop for Instance {
         // `Arc<Instance>` and therefore keep this instance alive); the instance
         // is destroyed exactly once.
         unsafe { self.instance.destroy_instance(None) };
+        DESTROYED_INSTANCES.fetch_add(1, Ordering::Relaxed);
         // Unload the loader only after the instance is gone.
         self.entry = None;
         self.destroyed = true;
