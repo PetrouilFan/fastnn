@@ -55,7 +55,43 @@ use crate::fn3::ops::OpId;
 use crate::fn3::tensor::{TensorMut, TensorView};
 
 pub(crate) mod kernels;
+pub(crate) mod parallel;
+pub(crate) mod simd;
 pub(crate) mod support;
+
+pub use parallel::{CpuParallelStats, ThreadBudget};
+
+/// Snapshot of the CPU backend's parallel dispatch counters.
+///
+/// The counters are incremented *inside* the worker chunk bodies, so they are
+/// evidence that a [`ThreadBudget`] reached the kernels rather than only the
+/// backend's configuration. `max_active` is the highest observed number of
+/// chunks running at one instant; `distinct_threads` is how many threads
+/// executed at least one chunk since the last [`reset_parallel_stats`].
+pub fn parallel_stats() -> CpuParallelStats {
+    parallel::stats()
+}
+
+/// Clear the parallel dispatch counters and start a new observation window.
+pub fn reset_parallel_stats() {
+    parallel::reset_stats()
+}
+
+/// Run a trivial parallel dispatch so the first measured sample does not pay the
+/// global pool's start-up.
+pub fn warm_parallel_pool() {
+    parallel::warm_pool()
+}
+
+/// What decided the process-wide thread budget (environment cap, visible CPUs).
+pub fn cpu_thread_budget_note() -> &'static str {
+    parallel::process_pool_note()
+}
+
+/// The thread count [`ThreadBudget::Auto`] resolves to in this process.
+pub fn cpu_process_budget() -> usize {
+    parallel::process_budget()
+}
 
 /// Backend name used in every CPU diagnostic.
 pub const CPU_BACKEND_NAME: &str = "cpu";
@@ -70,9 +106,7 @@ pub fn cpu_capabilities() -> Capabilities {
         max_buffer_bytes: 16 * 1024 * 1024 * 1024,
         max_shape_rank: 8,
         max_workgroup_size: [1, 1, 1],
-        max_threads: std::thread::available_parallelism()
-            .map(|parallelism| parallelism.get().min(u32::MAX as usize) as u32)
-            .unwrap_or(1),
+        max_threads: parallel::process_budget().min(u32::MAX as usize) as u32,
         supports_strided_views: true,
         features: CapabilityFeatures {
             broadcasting: true,
@@ -89,14 +123,40 @@ pub fn cpu_capabilities() -> Capabilities {
 #[derive(Debug, Clone)]
 pub struct CpuBackend {
     capabilities: Capabilities,
+    budget: ThreadBudget,
 }
 
 impl CpuBackend {
-    /// Construct with the capabilities of this host.
+    /// Construct with the capabilities of this host and [`ThreadBudget::Auto`].
     pub fn new() -> CpuBackend {
         CpuBackend {
             capabilities: cpu_capabilities(),
+            budget: ThreadBudget::Auto,
         }
+    }
+
+    /// Construct with an explicit per-runtime thread budget.
+    ///
+    /// The budget bounds how many threads one instruction may use. It is
+    /// resolved on every dispatch against [`parallel::process_budget`], so a cap
+    /// above the CPUs this process may use is clamped rather than honoured.
+    /// `ThreadBudget::Fixed(1)` is exactly the serial path, which is what the
+    /// parity and allocation baselines use.
+    pub fn with_thread_budget(budget: ThreadBudget) -> CpuBackend {
+        CpuBackend {
+            capabilities: cpu_capabilities(),
+            budget,
+        }
+    }
+
+    /// The budget this backend was built with, before clamping.
+    pub fn thread_budget(&self) -> ThreadBudget {
+        self.budget
+    }
+
+    /// The thread count the next instruction may use.
+    pub fn threads(&self) -> usize {
+        self.budget.threads()
     }
 }
 
@@ -161,7 +221,7 @@ impl CpuBackend {
             OpId::MatMul => {
                 check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
                 kernels::require_no_attributes(op, params)?;
-                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0])
+                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0], self.threads())
             }
 
             // -- elementwise arithmetic ----------------------------------

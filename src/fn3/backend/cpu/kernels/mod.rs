@@ -51,6 +51,7 @@ use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMeta, TensorMut, TensorView};
 
 pub(crate) mod elementwise;
+pub(crate) mod gemm;
 pub(crate) mod logic;
 pub(crate) mod matmul;
 pub(crate) mod norm;
@@ -62,28 +63,29 @@ pub(crate) mod transform;
 ///
 /// # Optimization hand-off (FN3-42 / #71)
 ///
-/// These are the symbols later performance work is expected to replace. Each
+/// These were the symbols the performance work was expected to replace. Each
 /// row states the correctness reference a replacement must keep matching; the
 /// measured margins are from the `fn3_cpu_reference` run recorded in the FN3-07
 /// hand-off report (fixture tolerances from `fixtures/parity/README.md`).
 ///
-/// | Symbol | Why it is the hot spot | Correctness reference (measured) |
-/// |---|---|---|
-/// | `matmul::dot_rows` | the only `O(M*N*K)` loop in the model (`lm_head` is `1x128x50257`) | one `f32` accumulator, ascending `k`; `matmul.*` fixtures max_abs ≤ 4.8e-6 (atol 2e-5) |
-/// | `matmul::matmul` | layout/broadcast shell around `dot_rows` | same fixtures plus the real-shape self-checks (decode max_abs 6.2e-6, bound 1.4e-5) |
-/// | `elementwise::binary` | residual adds, additive masks, `x*w` scaling on `[1,13,128]` and `[1,1,S,S]` | right-aligned broadcast, one rounding per element; `matmul.gemm_k13_bias` bias add 9.5e-7, `attention` mask add 3.0e-8 |
-/// | `elementwise::unary` | GELU / tanh / sqrt chains over the MLP width | `gelu.erf` 1.8e-8, `gelu.tanh` 5.7e-8 (atol 2e-6) |
-/// | `elementwise::erf_f64` | degree-22 Clenshaw in `f64`, per element | `gelu.erf.out` plus its own precision table in `elementwise::tests` |
-/// | `softmax::softmax` | attention probabilities, `O(S^2)` per head | max-subtract, `f32` `exp`, ascending sum, divide; `softmax.*` max_abs 2.98e-8 (atol 2e-6), all-masked row exactly `0.25` |
-/// | `norm::layer_norm` | two passes over the hidden axis | `(x-mean)/sqrt(var+eps)*w+b`; `layernorm.*` max_abs 4.8e-7 (atol 2e-5) |
-/// | `reduce::reduce` / `reduce::argmax` | whole-tensor scans | ascending row-major accumulation; first-wins tie rule |
-/// | `transform::copy_element` | every data-movement kernel copies element by element | byte-exact against the source view; `embedding.out` exact (atol 0) |
-/// | `kernels::Locator::index` | per-element index recomputation in the general path | `TensorMeta::checked_index` semantics with effective broadcast strides |
+/// | Symbol | Why it was the hot spot | What FN3-25 (#71) did | Correctness reference (measured) |
+/// |---|---|---|---|
+/// | `matmul::dot_rows` | the only `O(M*N*K)` loop in the model (`lm_head` is `1x128x50257`) | kept as the strided/broadcast contract; row-major operands now take `gemm::row_major_slab` | one `f32` accumulator, ascending `k`; `matmul.*` fixtures max_abs ≤ 4.8e-6 (atol 2e-5), fast path bit-identical |
+/// | `matmul::matmul` | layout/broadcast shell around `dot_rows` | dispatches to the blocked/AVX2 row-major path when the four matrix strides and the output are packed | same fixtures plus the real-shape self-checks (decode max_abs 6.2e-6, bound 1.4e-5) |
+/// | `transform::transpose` | the graph transposes the `[50257,128]` tied embedding table every step; measured 196 ms/prefill and 212 ms/decode | cache-tiled last-two-axes swap for contiguous 4/8-byte views | byte-exact by construction; `transpose.*` fixtures unchanged |
+/// | `elementwise::binary` | residual adds, additive masks, `x*w` scaling on `[1,13,128]` and `[1,1,S,S]` | unchanged (fast paths for equal shapes and scalars were already there; the general broadcast path is 0.1% of a step after #71) | right-aligned broadcast, one rounding per element; `matmul.gemm_k13_bias` bias add 9.5e-7, `attention` mask add 3.0e-8 |
+/// | `elementwise::unary` | GELU / tanh / sqrt chains over the MLP width | unchanged | `gelu.erf` 1.8e-8, `gelu.tanh` 5.7e-8 (atol 2e-6) |
+/// | `elementwise::erf_f64` | degree-22 Clenshaw in `f64`, per element | unchanged | `gelu.erf.out` plus its own precision table in `elementwise::tests` |
+/// | `softmax::softmax` | attention probabilities, `O(S^2)` per head | unchanged; 0.005% of a step | max-subtract, `f32` `exp`, ascending sum, divide; `softmax.*` max_abs 2.98e-8 (atol 2e-6), all-masked row exactly `0.25` |
+/// | `norm::layer_norm` | two passes over the hidden axis | unchanged; the pinned graph decomposes LayerNorm and never calls this op | `(x-mean)/sqrt(var+eps)*w+b`; `layernorm.*` max_abs 4.8e-7 (atol 2e-5) |
+/// | `reduce::reduce` / `reduce::argmax` | whole-tensor scans | unchanged | ascending row-major accumulation; first-wins tie rule |
+/// | `transform::copy_element` | every data-movement kernel copies element by element | unchanged; `transpose` no longer pays it for the bulk case | byte-exact against the source view; `embedding.out` exact (atol 0) |
+/// | `kernels::Locator::index` | per-element index recomputation in the general path | unchanged; no longer on the matmul or bulk-transpose path | `TensorMeta::checked_index` semantics with effective broadcast strides |
 ///
 /// A replacement must keep these results inside `fixtures/parity/README.md`'s
 /// tolerance, or publish a new measured reference before changing an order.
-/// Nothing in this tree is blocked on the optimisation: the scalar reference is
-/// the contract, and #71 replaces it behind the same op ids.
+/// The two paths #71 added are bit-identical to the reference, so no tolerance
+/// moved. The numbers and method are in `docs/reports/fn3-25-cpu-performance.md`.
 pub(crate) mod optimization_handoff {}
 
 /// Require `meta.dtype == dtype`, naming `op`.
