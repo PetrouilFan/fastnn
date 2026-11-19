@@ -10,18 +10,43 @@
 //!
 //! 1. a later wait proves that fence signalled ([`Device::reclaim_quarantine`]),
 //!    or
-//! 2. device teardown quiesced first ([`Device::finish_teardown`]).
+//! 2. device teardown quiesced first.
 //!
 //! A resource never leaves the quarantine on an unproven path. If teardown's
 //! `vkDeviceWaitIdle` fails, the resources are deliberately leaked and the
 //! reason is printed and counted — a leak is acceptable, a use-after-free is
 //! not.
 //!
+//! # The buffer reference rule
+//!
+//! A buffer can be referenced by more than one submission at a time: a shared
+//! persistent weight or a shared resident tensor is bound by two per-thread
+//! submitters. Proof that *one* submission's fence signalled is therefore not
+//! proof that a buffer is unused.
+//!
+//! Every buffer gets a device-wide reference count while it is inside a
+//! submission's command scope:
+//!
+//! - incremented when the recording is committed to a submission (before
+//!   `vkQueueSubmit`, so the count covers the submit window too),
+//! - decremented only on a proven completion (a successful fence wait) or a
+//!   proof-equivalent discard (a recording that never reached the queue),
+//! - moved, not changed, when the submission retires into the quarantine.
+//!
+//! A buffer is destroyed only when its reference count reaches zero *and* it is
+//! quarantined. `reclaim_quarantine` releases an entry whose own fence is
+//! proven, but sweeps the quarantined buffers only when no live reference
+//! remains; a buffer shared with a still-running submission stays owned and is
+//! freed by a later reclaim (or teardown) once the last reference is released.
+//! A ticket that arrives for an id another entry already quarantined joins the
+//! ownership set instead of being dropped, so that later proof can still free
+//! it.
+//!
 //! # What is owned, per kind
 //!
 //! | Resource | Representation | Released when |
 //! |---|---|---|
-//! | destination/source buffers + allocator ranges | [`BufferTicket`] | that submission's fence is proven, or teardown |
+//! | destination/source buffers + allocator ranges | [`BufferTicket`] | its fence is proven, or teardown |
 //! | staging blocks | [`BufferTicket`] (the pool refuses to re-pool) | same as buffers |
 //! | command pool, command buffer, descriptor pool (and every set it owns), query pool | [`RetainedSubmitter`] | same submission fence proven, or teardown |
 //! | fence | [`RetainedSubmitter::fence`] | after the proof wait, or teardown |
@@ -30,13 +55,11 @@
 //! transient descriptor pool and is freed by it, so quarantining the pool
 //! quarantines the sets.
 //!
-//! # Granularity
+//! # Unrecorded buffers
 //!
-//! Fenced entries may release on their own fence. Buffers that drop while the
-//! device is terminal but that were not recorded in a submission go to a
-//! *loose* set, released only at teardown: after an unknown completion we can
-//! no longer prove that an unrecorded buffer is not referenced by another
-//! thread's in-flight submission.
+//! A buffer that drops while the device is terminal but was never recorded in a
+//! submission is *loose*: it has no fence that could prove it, so it is
+//! released only at teardown, never by a reclaim pass.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,7 +97,9 @@ pub(crate) struct PendingEntry {
     pub(crate) fence: Option<vk::Fence>,
     /// Command/descriptor pools and the fence, when a submitter was in flight.
     pub(crate) submitter: Option<RetainedSubmitter>,
-    /// Buffers and staging blocks the recording referenced.
+    /// Buffers and staging blocks the recording referenced. The buffer's
+    /// reference count was reserved at commit time; this entry owns that
+    /// reference until it is released.
     pub(crate) buffers: Vec<BufferTicket>,
 }
 
@@ -104,11 +129,13 @@ pub struct QuarantineStats {
     pub pending_submissions: usize,
     /// Command/descriptor pools and fences held.
     pub retained_submitters: usize,
-    /// Buffers (destination, source and staging) held by fenced entries.
+    /// Buffers the quarantine owns (entry-held or waiting for a zero reference).
     pub retained_buffers: usize,
     /// Buffers that dropped on a terminal device outside a recorded
     /// submission; released only at teardown.
     pub loose_buffers: usize,
+    /// Distinct buffer ids with at least one live submission reference.
+    pub in_flight_buffers: usize,
     /// Entries captured while their fence had not signalled (diagnostic).
     pub captured_unsignalled: u64,
     /// Entries released after a proven wait.
@@ -121,16 +148,22 @@ pub struct QuarantineStats {
     pub leaked_entries: u64,
     /// Buffers deliberately leaked because teardown could not quiesce.
     pub leaked_buffers: u64,
+    /// Drops whose id was neither live, quarantined nor already retired.
+    /// Must stay zero; a non-zero value is a bookkeeping leak.
+    pub orphan_drops: u64,
+    /// Recorded tickets whose id had no live buffer at retirement. Must stay
+    /// zero; a non-zero value means a caller dropped an in-flight buffer.
+    pub lost_tickets: u64,
 }
 
 /// One explicit reclaim pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReclaimReport {
-    /// Entries released by this pass.
+    /// Entries whose fence was proven and whose submitter was destroyed.
     pub entries: usize,
     /// Submitters destroyed by this pass.
     pub submitters: usize,
-    /// Buffers destroyed by this pass.
+    /// Quarantined buffers destroyed by this pass (reference count zero).
     pub buffers: usize,
     /// Entries whose fence had not signalled (still quarantined).
     pub pending: usize,
@@ -154,7 +187,7 @@ pub struct TeardownReport {
 pub struct TeardownTotals {
     /// Teardowns whose `vkDeviceWaitIdle` succeeded.
     pub quiesced_ok: u64,
-    /// Teardowns whose `vkDeviceWaitIdle` failed (resources are leaked).
+    /// Teardown attempts whose `vkDeviceWaitIdle` failed (resources leaked).
     pub quiesced_failed: u64,
     /// Quarantined entries destroyed after a successful quiesce.
     pub released_entries: u64,
@@ -166,6 +199,8 @@ pub struct TeardownTotals {
     pub leaked_entries: u64,
     /// Buffers deliberately leaked.
     pub leaked_buffers: u64,
+    /// Orphan drops observed over the process lifetime.
+    pub orphan_drops: u64,
 }
 
 static TEARDOWN_QUIESCED_OK: AtomicU64 = AtomicU64::new(0);
@@ -175,6 +210,7 @@ static TEARDOWN_RELEASED_SUBMITTERS: AtomicU64 = AtomicU64::new(0);
 static TEARDOWN_RELEASED_BUFFERS: AtomicU64 = AtomicU64::new(0);
 static TEARDOWN_LEAKED_ENTRIES: AtomicU64 = AtomicU64::new(0);
 static TEARDOWN_LEAKED_BUFFERS: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_DROPS: AtomicU64 = AtomicU64::new(0);
 
 /// Process-wide teardown evidence, for tests and reports.
 pub fn teardown_totals() -> TeardownTotals {
@@ -186,6 +222,7 @@ pub fn teardown_totals() -> TeardownTotals {
         released_buffers: TEARDOWN_RELEASED_BUFFERS.load(Ordering::Relaxed),
         leaked_entries: TEARDOWN_LEAKED_ENTRIES.load(Ordering::Relaxed),
         leaked_buffers: TEARDOWN_LEAKED_BUFFERS.load(Ordering::Relaxed),
+        orphan_drops: ORPHAN_DROPS.load(Ordering::Relaxed),
     }
 }
 
@@ -212,12 +249,18 @@ fn record_teardown(report: &TeardownReport, boundary: bool) {
 pub(crate) struct Quarantine {
     /// Buffer ids this device created and has not handed to the quarantine.
     live: HashSet<u64>,
-    /// Buffer ids whose destruction the quarantine owns.
+    /// Buffer ids whose destruction the quarantine owns (entry-held or loose).
     quarantined: HashSet<u64>,
-    /// How many fenced entries still reference each quarantined buffer. A
-    /// buffer shared by two in-flight submissions is destroyed only when the
-    /// last of their fences is proven.
-    buffer_refs: HashMap<u64, usize>,
+    /// Destruction data for every entry-owned quarantined buffer, keyed by id.
+    /// A buffer stays here while any reference remains, even after every entry
+    /// that introduced it was released.
+    tickets: HashMap<u64, BufferTicket>,
+    /// Live submission references per buffer id. Each committed submission and
+    /// each quarantined entry holds one.
+    inflight: HashMap<u64, usize>,
+    /// Ids the quarantine already destroyed; a late `Buffer::drop` for one is
+    /// a tombstone, not an orphan.
+    gone: HashSet<u64>,
     /// Fenced (and no-submission) entries, oldest first.
     entries: Vec<PendingEntry>,
     /// Buffers that dropped on a terminal device without being recorded.
@@ -228,6 +271,8 @@ pub(crate) struct Quarantine {
     released_buffers: u64,
     leaked_entries: u64,
     leaked_buffers: u64,
+    orphan_drops: u64,
+    lost_tickets: u64,
 }
 
 impl Quarantine {
@@ -246,17 +291,68 @@ impl Quarantine {
         self.quarantined.contains(&id)
     }
 
+    /// `true` after the quarantine destroyed this buffer (a tombstone).
+    pub(crate) fn is_retired(&self, id: u64) -> bool {
+        self.gone.contains(&id)
+    }
+
+    /// Take one reference for every buffer committed to a submission.
+    ///
+    /// Called before `vkQueueSubmit`, so a submit that is still in the queue
+    /// keeps the count. Duplicate ids in one recording count once.
+    pub(crate) fn reserve(&mut self, tickets: &[BufferTicket]) {
+        let mut seen = HashSet::new();
+        for ticket in tickets {
+            if seen.insert(ticket.id) {
+                *self.inflight.entry(ticket.id).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Release references proven complete (a successful wait) or
+    /// proof-equivalently discarded (nothing reached the queue).
+    ///
+    /// A zero count does not destroy anything here: the next reclaim pass (or
+    /// teardown) sweeps a quarantined buffer whose last reference is gone.
+    /// Keeping the sweep in reclaim makes "proven this pass, freed by a later
+    /// reclaim" observable and keeps destruction in one place.
+    pub(crate) fn release_refs(&mut self, tickets: &[BufferTicket]) {
+        let mut seen = HashSet::new();
+        for ticket in tickets {
+            if !seen.insert(ticket.id) {
+                continue;
+            }
+            self.drop_one_ref(ticket.id);
+        }
+    }
+
+    fn drop_one_ref(&mut self, id: u64) {
+        let Some(count) = self.inflight.get_mut(&id) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.inflight.remove(&id);
+        }
+    }
+
     /// Decide whether a dropping buffer must be destroyed or is already owned.
     ///
-    /// Returns `true` when the caller must not destroy it: either the
-    /// quarantine already owns it, or it was just taken into the loose set
-    /// because the device is terminal.
+    /// Returns `true` when the caller must not destroy it: the quarantine
+    /// already owns it, it was already retired, or it is unknown and counted as
+    /// an orphan (never freed twice).
     pub(crate) fn defer_on_drop(&mut self, ticket: BufferTicket, terminal: bool) -> bool {
         if self.quarantined.contains(&ticket.id) {
             return true;
         }
         if !self.live.remove(&ticket.id) {
-            // Unknown to the registry: never destroy twice.
+            if self.gone.remove(&ticket.id) {
+                return true;
+            }
+            // Neither live, quarantined nor retired. Do not free a handle we no
+            // longer track; count it so a bookkeeping bug is visible.
+            self.orphan_drops += 1;
+            ORPHAN_DROPS.fetch_add(1, Ordering::Relaxed);
             return true;
         }
         if !terminal {
@@ -269,9 +365,10 @@ impl Quarantine {
 
     /// Take one submission with every in-flight resource.
     ///
-    /// A buffer shared with an earlier quarantined entry is counted as a
-    /// reference, not duplicated: it is freed only when every entry that
-    /// references it has been proven complete.
+    /// A ticket for an id another entry already quarantined joins that
+    /// ownership set (its reference was reserved at commit); a ticket for an id
+    /// that is neither live nor quarantined releases its reserved reference and
+    /// is counted as a lost ticket instead of being silently dropped.
     pub(crate) fn push_entry(&mut self, mut entry: PendingEntry, fence_unsignalled: bool) {
         let mut retained = Vec::with_capacity(entry.buffers.len());
         let mut seen = HashSet::new();
@@ -286,19 +383,20 @@ impl Quarantine {
                     // is now the authoritative owner; drop the loose copy so
                     // teardown cannot free it twice.
                     self.loose.retain(|loose| loose.id != ticket.id);
-                    self.buffer_refs.insert(ticket.id, 1);
-                } else {
-                    *self.buffer_refs.entry(ticket.id).or_insert(0) += 1;
                 }
+                self.tickets.entry(ticket.id).or_insert(ticket);
                 retained.push(ticket);
             } else if self.live.remove(&ticket.id) {
                 self.quarantined.insert(ticket.id);
-                self.buffer_refs.insert(ticket.id, 1);
+                self.tickets.insert(ticket.id, ticket);
                 retained.push(ticket);
+            } else {
+                // No live resource: the caller dropped an in-flight buffer
+                // before completion became unknown. Release the reserved
+                // reference so it cannot keep another entry pending forever.
+                self.drop_one_ref(ticket.id);
+                self.lost_tickets += 1;
             }
-            // Otherwise the buffer was already destroyed before completion
-            // became unknown (a caller that dropped an in-flight buffer, which
-            // the synchronous API does not do). There is nothing to own.
         }
         entry.buffers = retained;
         if fence_unsignalled {
@@ -317,36 +415,46 @@ impl Quarantine {
         self.entries.extend(entries);
     }
 
-    /// Release one proven entry.
-    ///
-    /// Returns the buffers whose last reference this entry held; those are the
-    /// only ones the caller may destroy. A buffer still referenced by an
-    /// unproven entry stays owned.
-    pub(crate) fn mark_released(
-        &mut self,
-        entry: &PendingEntry,
-        submitters: usize,
-    ) -> Vec<BufferTicket> {
-        let mut freed = Vec::new();
+    /// Release one entry whose fence is proven: its submitter can be destroyed
+    /// and its buffer references are decremented. Buffers whose last reference
+    /// this released are swept by [`Quarantine::sweep_zero_refs`] in the same
+    /// reclaim pass.
+    pub(crate) fn release_entry(&mut self, entry: &PendingEntry) {
+        let mut seen = HashSet::new();
         for ticket in &entry.buffers {
-            let Some(count) = self.buffer_refs.get_mut(&ticket.id) else {
-                continue;
-            };
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.buffer_refs.remove(&ticket.id);
-                self.quarantined.remove(&ticket.id);
-                freed.push(*ticket);
+            if seen.insert(ticket.id) {
+                self.drop_one_ref(ticket.id);
             }
         }
         self.released_entries += 1;
-        self.released_submitters += submitters as u64;
+        self.released_submitters += u64::from(entry.submitter.is_some());
+    }
+
+    /// Destroy every quarantined buffer whose reference count reached zero.
+    ///
+    /// Safe by construction: a live submission or an unproven entry still holds
+    /// a reference, so a zero count means every referencing fence was proven.
+    pub(crate) fn sweep_zero_refs(&mut self) -> Vec<BufferTicket> {
+        let ready: Vec<u64> = self
+            .tickets
+            .keys()
+            .copied()
+            .filter(|id| self.inflight.get(id).copied().unwrap_or(0) == 0)
+            .collect();
+        let mut freed = Vec::with_capacity(ready.len());
+        for id in ready {
+            if let Some(ticket) = self.tickets.remove(&id) {
+                self.quarantined.remove(&id);
+                self.gone.insert(id);
+                freed.push(ticket);
+            }
+        }
         self.released_buffers += freed.len() as u64;
         freed
     }
 
     /// Take everything for teardown. `idle` proves that every GPU operation
-    /// finished; only then are the ids considered released.
+    /// finished; only then may anything be destroyed.
     pub(crate) fn take_all(
         &mut self,
         idle: bool,
@@ -357,34 +465,46 @@ impl Quarantine {
             .iter()
             .filter(|entry| entry.submitter.is_some())
             .count();
-        let buffers = loose.len()
-            + entries
-                .iter()
-                .map(|entry| entry.buffers.len())
-                .sum::<usize>();
+        let mut unique = HashSet::new();
+        let mut tickets = Vec::new();
+        for (id, ticket) in &self.tickets {
+            if unique.insert(*id) {
+                tickets.push(*ticket);
+            }
+        }
+        for entry in &entries {
+            for ticket in &entry.buffers {
+                if unique.insert(ticket.id) {
+                    tickets.push(*self.tickets.get(&ticket.id).unwrap_or(ticket));
+                }
+            }
+        }
+        for ticket in &loose {
+            if unique.insert(ticket.id) {
+                tickets.push(*ticket);
+            }
+        }
         let report = TeardownReport {
             entries: entries.len(),
             submitters,
-            buffers,
+            buffers: tickets.len(),
             leaked: !idle,
         };
         if idle {
-            for entry in &entries {
-                for ticket in &entry.buffers {
-                    self.quarantined.remove(&ticket.id);
-                }
-            }
-            for ticket in &loose {
+            for ticket in &tickets {
                 self.quarantined.remove(&ticket.id);
+                self.gone.insert(ticket.id);
             }
+            self.tickets.clear();
+            self.inflight.clear();
             self.released_entries += entries.len() as u64;
             self.released_submitters += submitters as u64;
-            self.released_buffers += buffers as u64;
+            self.released_buffers += tickets.len() as u64;
         } else {
             self.leaked_entries += entries.len() as u64;
-            self.leaked_buffers += buffers as u64;
+            self.leaked_buffers += tickets.len() as u64;
         }
-        (entries, loose, report)
+        (entries, tickets, report)
     }
 
     /// Current counters.
@@ -401,22 +521,17 @@ impl Quarantine {
                 .iter()
                 .filter(|entry| entry.submitter.is_some())
                 .count(),
-            retained_buffers: {
-                let mut ids = HashSet::new();
-                for entry in &self.entries {
-                    for ticket in &entry.buffers {
-                        ids.insert(ticket.id);
-                    }
-                }
-                ids.len()
-            },
+            retained_buffers: self.tickets.len(),
             loose_buffers: self.loose.len(),
+            in_flight_buffers: self.inflight.len(),
             captured_unsignalled: self.captured_unsignalled,
             released_entries: self.released_entries,
             released_submitters: self.released_submitters,
             released_buffers: self.released_buffers,
             leaked_entries: self.leaked_entries,
             leaked_buffers: self.leaked_buffers,
+            orphan_drops: self.orphan_drops,
+            lost_tickets: self.lost_tickets,
         }
     }
 }
@@ -454,12 +569,14 @@ pub(crate) fn destroy_submitter(device: &Device, submitter: RetainedSubmitter) {
     ledger.destroy("command_pool");
 }
 
-/// Split proven from unproven entries with an explicit, direct wait.
+/// Split proven from unproven entries with an explicit, direct wait, then
+/// release the proven entries and sweep buffers whose last reference is gone.
 ///
 /// This is the only release path that bypasses `Device::ensure_usable`: a
 /// device can be terminal (poisoned after the first unknown wait) while the
 /// driver can still prove that a particular fence signalled. Nothing is
-/// released unless `vkWaitForFences` returns success for that entry's fence.
+/// released unless `vkWaitForFences` returns success for that entry's fence,
+/// and no buffer is destroyed while another submission still references it.
 pub(crate) fn reclaim(device: &Device) -> ReclaimReport {
     let entries = {
         let mut quarantine = device.lock_quarantine();
@@ -488,36 +605,37 @@ pub(crate) fn reclaim(device: &Device) -> ReclaimReport {
             pending.push(entry);
         }
     }
-    let mut report = ReclaimReport {
-        entries: proven.len(),
-        submitters: proven
-            .iter()
-            .filter(|entry| entry.submitter.is_some())
-            .count(),
-        buffers: 0,
-        pending: pending.len(),
-    };
-    let mut freed = Vec::new();
-    {
+    let pending_count = pending.len();
+    let released_entries = proven.len();
+    let released_submitters = proven
+        .iter()
+        .filter(|entry| entry.submitter.is_some())
+        .count();
+    let swept = {
         let mut quarantine = device.lock_quarantine();
         quarantine.restore_entries(pending);
         for entry in &proven {
-            let submitters = usize::from(entry.submitter.is_some());
-            freed.extend(quarantine.mark_released(entry, submitters));
+            quarantine.release_entry(entry);
         }
-    }
-    report.buffers = freed.len();
+        quarantine.sweep_zero_refs()
+    };
     for entry in proven {
         if let Some(submitter) = entry.submitter {
             destroy_submitter(device, submitter);
         }
     }
-    for ticket in freed {
-        // The id is no longer in `quarantined`: a concurrent `Buffer::drop`
-        // cannot destroy it, and this is the only destroy site for it.
-        super::context::destroy_buffer(device, ticket);
+    for ticket in &swept {
+        // The id is out of the quarantine and in the tombstone set: a
+        // concurrent `Buffer::drop` cannot destroy it, and this is its only
+        // destroy site.
+        super::context::destroy_buffer(device, *ticket);
     }
-    report
+    ReclaimReport {
+        entries: released_entries,
+        submitters: released_submitters,
+        buffers: swept.len(),
+        pending: pending_count,
+    }
 }
 
 /// Quiesce-then-destroy the quarantine at a teardown boundary.
@@ -526,39 +644,39 @@ pub(crate) fn reclaim(device: &Device) -> ReclaimReport {
 /// every resource is deliberately leaked and the reason is recorded; nothing
 /// is destroyed. `boundary` distinguishes the first teardown record from a
 /// later drain of resources that deferred after it (the latter releases
-/// resources but does not count as a second quiesce).
+/// resources but does not count as a second successful quiesce; a later
+/// *failure* is always counted because it is new evidence).
 pub(crate) fn teardown(device: &Device, idle: bool, boundary: bool) -> TeardownReport {
-    let (entries, loose, report) = {
+    let (entries, tickets, report) = {
         let mut quarantine = device.lock_quarantine();
         quarantine.take_all(idle)
     };
     if idle {
-        let mut destroyed = HashSet::new();
         for entry in entries {
             if let Some(submitter) = entry.submitter {
                 destroy_submitter(device, submitter);
             }
-            for ticket in entry.buffers {
-                if destroyed.insert(ticket.id) {
-                    super::context::destroy_buffer(device, ticket);
-                }
-            }
         }
-        for ticket in loose {
-            if destroyed.insert(ticket.id) {
-                super::context::destroy_buffer(device, ticket);
-            }
+        for ticket in tickets {
+            super::context::destroy_buffer(device, ticket);
         }
     } else {
-        eprintln!(
-            "[fn3vk][warn] teardown could not quiesce the device; deliberately leaking {} \
-             quarantined entr{} ({} submitter(s), {} buffer(s)) instead of freeing resources the \
-             GPU may still reference",
-            report.entries,
-            if report.entries == 1 { "y" } else { "ies" },
-            report.submitters,
-            report.buffers
-        );
+        if report.entries != 0 || report.submitters != 0 || report.buffers != 0 {
+            eprintln!(
+                "[fn3vk][warn] teardown could not quiesce the device; deliberately leaking {} \
+                 quarantined entr{} ({} submitter(s), {} buffer(s)) instead of freeing resources \
+                 the GPU may still reference",
+                report.entries,
+                if report.entries == 1 { "y" } else { "ies" },
+                report.submitters,
+                report.buffers
+            );
+        } else {
+            eprintln!(
+                "[fn3vk][warn] teardown could not quiesce the device; nothing was quarantined, \
+                 but the device, its chunks and the loader instance are leaked"
+            );
+        }
         for entry in &entries {
             eprintln!(
                 "[fn3vk][warn]   leaked: {} ({:?}, {} buffer(s))",
@@ -572,11 +690,18 @@ pub(crate) fn teardown(device: &Device, idle: bool, boundary: bool) -> TeardownR
     report
 }
 
+/// Record a failed quiesce attempt without draining the quarantine (a retry
+/// after a boundary that already promised to leak).
+pub(crate) fn record_failed_quiesce() {
+    TEARDOWN_QUIESCED_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// The mutex is only ever held for bookkeeping, never across a Vulkan call.
 impl std::fmt::Debug for Quarantine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Quarantine")
             .field("entries", &self.entries.len())
+            .field("tickets", &self.tickets.len())
             .field("loose", &self.loose.len())
             .finish_non_exhaustive()
     }
@@ -625,23 +750,104 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_with_no_live_record_counts_as_an_orphan_not_a_silent_defer() {
+        let mut quarantine = Quarantine::new();
+        assert!(quarantine.defer_on_drop(ticket(99), true));
+        let stats = quarantine.stats();
+        assert_eq!(stats.orphan_drops, 1);
+        assert_eq!(stats.loose_buffers, 0);
+        assert!(!quarantine.is_quarantined(99));
+    }
+
+    #[test]
+    fn a_retired_id_is_a_tombstone_not_an_orphan() {
+        let mut quarantine = Quarantine::new();
+        quarantine.register_live(4);
+        quarantine.reserve(&[ticket(4)]);
+        quarantine.push_entry(
+            PendingEntry::new("test", None, None, vec![ticket(4)]),
+            false,
+        );
+        let entries = quarantine.take_entries();
+        quarantine.release_entry(&entries[0]);
+        let freed = quarantine.sweep_zero_refs();
+        assert_eq!(freed.len(), 1);
+        assert!(quarantine.defer_on_drop(ticket(4), true));
+        assert_eq!(quarantine.stats().orphan_drops, 0);
+    }
+
+    #[test]
     fn an_entry_retains_each_live_buffer_exactly_once() {
         let mut quarantine = Quarantine::new();
         quarantine.register_live(7);
+        quarantine.reserve(&[ticket(7), ticket(7)]);
         let entry = PendingEntry::new("test", None, None, vec![ticket(7), ticket(7), ticket(8)]);
         quarantine.push_entry(entry, false);
         let stats = quarantine.stats();
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.retained_buffers, 1, "deduplicated by id");
+        assert_eq!(stats.in_flight_buffers, 1);
+        assert_eq!(stats.lost_tickets, 1, "id 8 had no live buffer");
         // The buffer's own Drop must not destroy it.
         assert!(quarantine.defer_on_drop(ticket(7), false));
         assert_eq!(quarantine.stats().loose_buffers, 0);
     }
 
     #[test]
+    fn a_buffer_shared_by_two_entries_is_freed_only_by_the_last_release() {
+        let mut quarantine = Quarantine::new();
+        quarantine.register_live(9);
+        quarantine.reserve(&[ticket(9)]);
+        quarantine.push_entry(
+            PendingEntry::new("first", None, None, vec![ticket(9)]),
+            false,
+        );
+        quarantine.reserve(&[ticket(9)]);
+        quarantine.push_entry(
+            PendingEntry::new("second", None, None, vec![ticket(9)]),
+            false,
+        );
+        let entries = quarantine.take_entries();
+        quarantine.release_entry(&entries[0]);
+        assert!(
+            quarantine.sweep_zero_refs().is_empty(),
+            "the second, unproven entry still references the buffer"
+        );
+        assert!(quarantine.is_quarantined(9));
+        quarantine.release_entry(&entries[1]);
+        let freed = quarantine.sweep_zero_refs();
+        assert_eq!(freed.len(), 1, "the last proven reference frees it");
+        assert!(!quarantine.is_quarantined(9));
+        assert_eq!(quarantine.stats().released_buffers, 1);
+    }
+
+    #[test]
+    fn a_live_submission_keeps_a_quarantined_buffer_owned() {
+        let mut quarantine = Quarantine::new();
+        quarantine.register_live(10);
+        quarantine.reserve(&[ticket(10)]);
+        // The second submission commits while the buffer is still live.
+        quarantine.reserve(&[ticket(10)]);
+        quarantine.push_entry(
+            PendingEntry::new("failed", None, None, vec![ticket(10)]),
+            false,
+        );
+        let entries = quarantine.take_entries();
+        quarantine.release_entry(&entries[0]);
+        assert!(quarantine.sweep_zero_refs().is_empty());
+        assert!(quarantine.is_quarantined(10));
+        // The live submission completes successfully.
+        quarantine.release_refs(&[ticket(10)]);
+        let freed = quarantine.sweep_zero_refs();
+        assert_eq!(freed.len(), 1);
+        assert_eq!(quarantine.stats().released_buffers, 1);
+    }
+
+    #[test]
     fn a_loose_buffer_promoted_by_a_late_entry_is_still_freed_once() {
         let mut quarantine = Quarantine::new();
         quarantine.register_live(11);
+        quarantine.reserve(&[ticket(11)]);
         // The buffer drops on the terminal device before the entry registers.
         assert!(quarantine.defer_on_drop(ticket(11), true));
         assert_eq!(quarantine.stats().loose_buffers, 1);
@@ -656,50 +862,26 @@ mod tests {
             "the fenced entry replaces the loose copy"
         );
         let entries = quarantine.take_entries();
-        let freed = quarantine.mark_released(&entries[0], 0);
+        quarantine.release_entry(&entries[0]);
+        let freed = quarantine.sweep_zero_refs();
         assert_eq!(freed.len(), 1);
-        let (_entries, loose, report) = quarantine.take_all(true);
+        let (_entries, tickets, report) = quarantine.take_all(true);
         assert!(
-            loose.is_empty() && report.buffers == 0,
+            tickets.is_empty() && report.buffers == 0,
             "teardown must not see a second copy of the same buffer"
         );
-    }
-
-    #[test]
-    fn a_buffer_shared_by_two_entries_is_freed_only_by_the_last_release() {
-        let mut quarantine = Quarantine::new();
-        quarantine.register_live(9);
-        quarantine.push_entry(
-            PendingEntry::new("first", None, None, vec![ticket(9)]),
-            false,
-        );
-        quarantine.push_entry(
-            PendingEntry::new("second", None, None, vec![ticket(9)]),
-            false,
-        );
-        let entries = quarantine.take_entries();
-        let first = quarantine.mark_released(&entries[0], 0);
-        assert!(
-            first.is_empty(),
-            "the second, unproven entry still references the buffer"
-        );
-        assert!(quarantine.is_quarantined(9));
-        let second = quarantine.mark_released(&entries[1], 0);
-        assert_eq!(second.len(), 1, "the last proven reference frees it");
-        assert!(!quarantine.is_quarantined(9));
-        assert_eq!(quarantine.stats().released_buffers, 1);
     }
 
     #[test]
     fn a_failed_quiesce_reports_a_leak_and_keeps_the_ids_owned() {
         let mut quarantine = Quarantine::new();
         quarantine.register_live(3);
+        quarantine.reserve(&[ticket(3)]);
         quarantine.push_entry(
             PendingEntry::new("test", None, None, vec![ticket(3)]),
             false,
         );
-        let (_entries, loose, report) = quarantine.take_all(false);
-        assert!(loose.is_empty());
+        let (_entries, _tickets, report) = quarantine.take_all(false);
         assert!(report.leaked);
         assert_eq!(report.entries, 1);
         assert_eq!(report.buffers, 1);
@@ -715,17 +897,21 @@ mod tests {
     fn a_successful_quiesce_releases_and_counts_once() {
         let mut quarantine = Quarantine::new();
         quarantine.register_live(4);
+        quarantine.reserve(&[ticket(4)]);
         quarantine.push_entry(
             PendingEntry::new("test", None, None, vec![ticket(4)]),
             false,
         );
-        let (_entries, _loose, report) = quarantine.take_all(true);
+        let (_entries, tickets, report) = quarantine.take_all(true);
+        assert_eq!(tickets.len(), 1);
         assert!(!report.leaked);
         assert!(!quarantine.is_quarantined(4));
+        assert!(quarantine.is_retired(4));
         assert_eq!(quarantine.stats().released_entries, 1);
         assert_eq!(quarantine.stats().released_buffers, 1);
-        // A late drop of the same id is not a second free.
+        // A late drop of the same id is a tombstone, not a second free.
         assert!(quarantine.defer_on_drop(ticket(4), false));
         assert_eq!(quarantine.stats().loose_buffers, 0);
+        assert_eq!(quarantine.stats().orphan_drops, 0);
     }
 }

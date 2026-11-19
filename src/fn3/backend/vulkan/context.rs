@@ -15,6 +15,7 @@
 //! assumed.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ash::vk;
@@ -298,12 +299,11 @@ impl Buffer {
         self.raw
     }
 
-    /// `true` when the device quarantine owns this buffer's destruction.
-    ///
-    /// The staging pool consults this before re-pooling a released block: a
-    /// block the GPU may still reference must never be leased again.
-    pub(crate) fn is_quarantined(&self) -> bool {
-        self.device.buffer_is_quarantined(self.id)
+    /// `true` when the staging pool must drop this block instead of re-pooling
+    /// it: the quarantine owns it, or it was already destroyed while a lease
+    /// survived (a tombstone).
+    pub(crate) fn must_not_reuse(&self) -> bool {
+        self.device.buffer_is_quarantined(self.id) || self.device.buffer_is_retired(self.id)
     }
 
     /// The destruction ticket this buffer would hand to the quarantine.
@@ -541,6 +541,17 @@ pub(crate) struct BufferTicket {
     pub(crate) kind: &'static str,
 }
 
+/// Process-wide count of buffers the platform layer destroyed.
+///
+/// Tests use the delta to prove that a teardown path did **not** free a
+/// resource: a leak-path drop must leave this number unchanged.
+static DESTROYED_BUFFERS: AtomicU64 = AtomicU64::new(0);
+
+/// How many buffers this process has destroyed (Drop or quarantine).
+pub fn destroyed_buffer_total() -> u64 {
+    DESTROYED_BUFFERS.load(Ordering::Relaxed)
+}
+
 /// Destroy one buffer and return its range to the allocator.
 ///
 /// Used by both [`Buffer::drop`] and the device quarantine, so the ledger and
@@ -552,6 +563,7 @@ pub(crate) fn destroy_buffer(device: &Device, ticket: BufferTicket) {
     // handle is live exactly once (the registry hands out one destruction
     // duty per id). It is destroyed before its memory range is returned.
     unsafe { device.ash().destroy_buffer(ticket.raw, None) };
+    DESTROYED_BUFFERS.fetch_add(1, Ordering::Relaxed);
     device.ledger().destroy(ticket.kind);
     device.ledger().free_bytes(ticket.kind, ticket.logical_size);
     if let Err(error) = device.free_range(ticket.allocation) {

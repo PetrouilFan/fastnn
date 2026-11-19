@@ -45,6 +45,17 @@ use ash::vk;
 
 use super::error::{Error, Result};
 
+/// Process-wide count of `vkAllocateMemory` chunks the allocator freed.
+///
+/// Tests use the delta to prove that a leak-path teardown did not destroy the
+/// allocator's chunks under a still-live device.
+static DESTROYED_CHUNKS: AtomicU64 = AtomicU64::new(0);
+
+/// How many memory chunks this process has freed.
+pub fn destroyed_chunk_total() -> u64 {
+    DESTROYED_CHUNKS.load(Ordering::Relaxed)
+}
+
 /// The two allocation classes the backend exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryClass {
@@ -568,6 +579,7 @@ impl MemoryAllocator {
             // exactly once; no buffer is bound to it (all suballocations were
             // freed, and buffers hold the device alive).
             unsafe { device.free_memory(chunk.memory, None) };
+            DESTROYED_CHUNKS.fetch_add(1, Ordering::Relaxed);
         }
         self.live_bytes = 0;
     }

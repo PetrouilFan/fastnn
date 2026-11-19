@@ -70,21 +70,24 @@ pub mod kernels;
 pub mod ledger;
 pub mod memory;
 pub mod pipeline;
-pub mod quarantine;
+mod quarantine;
 pub mod residency;
 pub mod resident;
 pub mod staging;
 pub mod submission;
 
-pub use context::{BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation};
+pub use context::{
+    destroyed_buffer_total, BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation,
+};
 pub use device::{Device, DeviceConfig};
 pub use device_info::{AdapterInfo, AdapterLimits, HeapInfo, QueueFamilyInfo};
 pub use error::{Error, Result};
 #[cfg(feature = "vulkan-fault-injection")]
 pub use fault::{FaultInjector, FaultPoint};
+pub use instance::destroyed_instance_total;
 pub use kernels::{BindingKind, BindingSpec, KernelSet, KernelSpec, OpKernel};
 pub use ledger::HandleLedger;
-pub use memory::{MemoryClass, MemoryStats};
+pub use memory::{destroyed_chunk_total, MemoryClass, MemoryStats};
 pub use pipeline::Kernel;
 pub use quarantine::{
     teardown_totals, QuarantineStats, ReclaimReport, TeardownReport, TeardownTotals,
@@ -693,12 +696,14 @@ impl VulkanBackend {
         self.device.has_unknown_completion()
     }
 
-    /// Release every quarantined entry whose fence is proven signalled.
+    /// Release every quarantined entry whose fence is proven signalled, then
+    /// destroy buffers whose device-wide reference count has reached zero.
     ///
     /// An explicit proof boundary: nothing is released unless a direct
-    /// `vkWaitForFences` on that entry returns success. A poisoned device with
-    /// a live queue can prove completion; a genuinely lost device cannot and
-    /// releases nothing.
+    /// `vkWaitForFences` on that entry returns success, and a buffer shared
+    /// with a still-running submission stays owned until a later pass. A
+    /// poisoned device with a live queue can prove completion; a genuinely
+    /// lost device cannot and releases nothing.
     pub fn reclaim_quarantine(&self) -> ReclaimReport {
         self.device.reclaim_quarantine()
     }
@@ -752,6 +757,10 @@ impl Drop for VulkanBackend {
                 self.device.finish_teardown(true);
             }
             Err(error) => {
+                // Count and leak the quarantine at this boundary first, then
+                // forbid every later free: a retry must not destroy, even if a
+                // subsequent wait-idle succeeds.
+                let report = self.device.finish_teardown(false);
                 self.device.refuse_destruction();
                 let pool = self
                     .submitters
@@ -765,7 +774,6 @@ impl Drop for VulkanBackend {
                         .get_mut()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()),
                 ));
-                let report = self.device.finish_teardown(false);
                 eprintln!(
                     "[fn3vk][warn] backend teardown could not quiesce the device ({error}); \
                      deliberately leaking the submitter pool, compiled pipelines and {:?} rather \

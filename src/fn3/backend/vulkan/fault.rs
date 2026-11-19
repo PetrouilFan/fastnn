@@ -7,7 +7,7 @@
 //! `tests/fn3_vulkan_faults.rs`, and an environment variable would ship a
 //! failure path in the release binary. The `vulkan-fault-injection` feature is
 //! therefore non-default, additive and compiled out of every shipped
-//! configuration; the only code it changes is a `take()` check at the eight
+//! configuration; the only code it changes is a `take()` check at the nine
 //! seams the matrix (and the quarantine regression) exercises.
 //!
 //! # Semantics
@@ -39,6 +39,11 @@ pub enum FaultPoint {
     /// submission may still be running. Every in-flight resource must move to
     /// the device quarantine, never be destroyed or recycled.
     FenceUnknown,
+    /// `vkEndCommandBuffer`, after the recording was built but before it can
+    /// be submitted. Nothing reaches the queue, so the recording's buffer
+    /// references are proof-equivalently released and only the submitter's
+    /// handles are quarantined.
+    EndRecording,
     /// Device → host readback (the logits download).
     Readback,
     /// Recording one dispatch into the open step batch. The failure happens
@@ -54,11 +59,12 @@ pub enum FaultPoint {
 
 impl FaultPoint {
     /// Every point, for exhaustive tests.
-    pub const ALL: [FaultPoint; 8] = [
+    pub const ALL: [FaultPoint; 9] = [
         FaultPoint::Allocation,
         FaultPoint::Submit,
         FaultPoint::Fence,
         FaultPoint::FenceUnknown,
+        FaultPoint::EndRecording,
         FaultPoint::Readback,
         FaultPoint::Record,
         FaultPoint::ResidentCopy,
@@ -76,6 +82,7 @@ impl FaultPoint {
             FaultPoint::Submit => "submit",
             FaultPoint::Fence => "fence",
             FaultPoint::FenceUnknown => "fence-unknown",
+            FaultPoint::EndRecording => "end-recording",
             FaultPoint::Readback => "readback",
             FaultPoint::Record => "record",
             FaultPoint::ResidentCopy => "resident-copy",

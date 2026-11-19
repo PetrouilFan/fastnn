@@ -152,10 +152,14 @@ struct BatchState {
 }
 
 impl BatchState {
-    /// Record one buffer reference.
-    fn note(&mut self, ticket: BufferTicket) {
+    /// Record one buffer reference. Returns `true` when it was new to the
+    /// batch (and therefore needs one reserved reference).
+    fn note(&mut self, ticket: BufferTicket) -> bool {
         if self.touched_ids.insert(ticket.id) {
             self.touched.push(ticket);
+            true
+        } else {
+            false
         }
     }
 }
@@ -346,13 +350,22 @@ impl Submitter {
     /// Hold a staging block until the open batch completes.
     ///
     /// A batched recording copies from a host-visible block that must not be
-    /// reused before the submission runs; the batch owns it from here.
+    /// reused before the submission runs; the batch owns it from here. A block
+    /// the batch has not seen before also takes one device-wide in-flight
+    /// reference, released only when the batch's outcome is known.
     pub fn retain_block(&mut self, block: Arc<super::context::Buffer>) {
-        if let Some(batch) = &mut self.batch {
-            batch.note(block.ticket());
+        let ticket = block.ticket();
+        let new = {
+            let Some(batch) = self.batch.as_mut() else {
+                // Not batching: the block was already safe to release.
+                return;
+            };
+            let new = batch.note(ticket);
             batch.retained.push(block);
-        } else {
-            // Not batching: the block was already safe to release.
+            new
+        };
+        if new {
+            self.device.reserve_buffers(&[ticket]);
         }
     }
 
@@ -459,8 +472,13 @@ impl Submitter {
             // the caller was told had failed. Discard the recording instead
             // (Vulkan allows resetting a recording command buffer that is not
             // pending) and report that nothing was submitted. The retained
-            // staging blocks are released with `batch`.
-            self.device.ensure_usable()?;
+            // staging blocks are released with `batch`, and the references the
+            // successful records reserved are proof-equivalently released.
+            if let Err(error) = self.device.ensure_usable() {
+                self.device.release_buffers(&batch.touched);
+                self.retire("discarded step batch", false, Vec::new());
+                return Err(error);
+            }
             if let Err(error) = check(
                 "vkResetCommandBuffer",
                 unsafe {
@@ -470,40 +488,75 @@ impl Submitter {
                 },
                 "discarding a failed step batch instead of submitting a partial plan",
             ) {
+                self.device.release_buffers(&batch.touched);
                 self.retire("discarded step batch", false, Vec::new());
                 return Err(error);
             }
+            self.device.release_buffers(&batch.touched);
             return Ok(BatchReport::default());
         }
         // SAFETY: recording was begun on this buffer and no other thread uses
         // it.
-        let ended = check(
-            "vkEndCommandBuffer",
-            unsafe { self.device.ash().end_command_buffer(self.cmd) },
-            "finishing a step batch",
-        );
+        let ended = {
+            #[cfg(feature = "vulkan-fault-injection")]
+            if self
+                .device
+                .faults()
+                .take(super::fault::FaultPoint::EndRecording)
+            {
+                Err(Error::vk(
+                    "vkEndCommandBuffer",
+                    vk::Result::ERROR_UNKNOWN,
+                    "injected end-recording failure (FN3-27): the command buffer is not executable",
+                ))
+            } else {
+                check(
+                    "vkEndCommandBuffer",
+                    unsafe { self.device.ash().end_command_buffer(self.cmd) },
+                    "finishing a step batch",
+                )
+            }
+            #[cfg(not(feature = "vulkan-fault-injection"))]
+            check(
+                "vkEndCommandBuffer",
+                unsafe { self.device.ash().end_command_buffer(self.cmd) },
+                "finishing a step batch",
+            )
+        };
         if let Err(error) = ended {
             // The command buffer is in an unknown state; do not reuse it.
-            // Nothing was submitted, so no buffer or staging block is in
-            // flight, but the submitter's handles move to the quarantine.
+            // Nothing was submitted, so no staged copy is in flight: release
+            // the references and quarantine only the submitter's handles.
             self.device.poison("vkEndCommandBuffer", error.to_string());
+            self.device.release_buffers(&batch.touched);
             self.retire("step batch recording", false, Vec::new());
             return Err(error);
         }
         let command_buffers = [self.cmd];
         let submit = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        if let Err(error) = self.device.submit(&[submit], self.fence) {
-            // `vkQueueSubmit` failed: whether the batch reached the queue is
-            // unknown, so every recorded buffer and staging block is retained.
-            self.retire("step batch submit", true, batch.touched);
-            return Err(error);
+        if let Err(failure) = self.device.submit(&[submit], self.fence) {
+            if failure.queued {
+                // The submission may have reached the queue: its fence is
+                // possibly pending, so every recorded buffer is retained.
+                self.retire("step batch submit", true, batch.touched);
+            } else {
+                // Nothing was submitted: the references are proven-equivalent
+                // to done and the buffers can return to their owners.
+                self.device.release_buffers(&batch.touched);
+                self.retire("step batch submit", false, Vec::new());
+            }
+            return Err(failure.error);
         }
         self.serial += 1;
         self.in_flight = true;
+        self.in_flight_buffers = std::mem::take(&mut batch.touched);
         if let Err(error) = self.finish_wait() {
-            let mut tickets = batch.touched;
+            let mut tickets = std::mem::take(&mut self.in_flight_buffers);
             for block in batch.retained.drain(..) {
-                tickets.push(block.ticket());
+                let ticket = block.ticket();
+                if !tickets.iter().any(|seen| seen.id == ticket.id) {
+                    tickets.push(ticket);
+                }
             }
             self.retire("step batch wait", true, tickets);
             return Err(error);
@@ -690,6 +743,11 @@ impl Submitter {
             return Err(error);
         }
 
+        // The recording now references these buffers. Take one device-wide
+        // reference each before the command buffer can be submitted; a later
+        // submit or wait failure keeps them counted for the quarantine.
+        self.device.reserve_buffers(&recorder.buffers);
+
         if let Some(query_pool) = self.query_pool {
             // SAFETY: same buffer, still recording; BOTTOM_OF_PIPE means "after
             // every previously recorded command completed".
@@ -705,13 +763,37 @@ impl Submitter {
 
         // SAFETY: recording was begun on this buffer and no other thread uses
         // it.
-        if let Err(error) = check(
-            "vkEndCommandBuffer",
-            unsafe { self.device.ash().end_command_buffer(self.cmd) },
-            "finishing command recording",
-        ) {
-            // Nothing was submitted, but the command buffer's state is
-            // unknown: never reuse this submitter.
+        let ended = {
+            #[cfg(feature = "vulkan-fault-injection")]
+            if self
+                .device
+                .faults()
+                .take(super::fault::FaultPoint::EndRecording)
+            {
+                Err(Error::vk(
+                    "vkEndCommandBuffer",
+                    vk::Result::ERROR_UNKNOWN,
+                    "injected end-recording failure (FN3-27): the command buffer is not executable",
+                ))
+            } else {
+                check(
+                    "vkEndCommandBuffer",
+                    unsafe { self.device.ash().end_command_buffer(self.cmd) },
+                    "finishing command recording",
+                )
+            }
+            #[cfg(not(feature = "vulkan-fault-injection"))]
+            check(
+                "vkEndCommandBuffer",
+                unsafe { self.device.ash().end_command_buffer(self.cmd) },
+                "finishing command recording",
+            )
+        };
+        if let Err(error) = ended {
+            // Nothing was submitted, so the references are proof-equivalently
+            // done. The command buffer's state is unknown: never reuse this
+            // submitter.
+            self.device.release_buffers(&recorder.buffers);
             self.retire("dispatch recording", false, Vec::new());
             return Err(error);
         }
@@ -722,9 +804,19 @@ impl Submitter {
         self.in_flight_buffers = recorder.buffers;
         let command_buffers = [self.cmd];
         let submit = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        if let Err(error) = self.device.submit(&[submit], self.fence) {
-            self.retire("submission submit", true, Vec::new());
-            return Err(error);
+        if let Err(failure) = self.device.submit(&[submit], self.fence) {
+            if failure.queued {
+                // The driver may have seen the submission: its fence can still
+                // signal, so the buffers stay referenced and quarantined.
+                self.retire("submission submit", true, Vec::new());
+            } else {
+                // Nothing reached the queue: drop the references as a
+                // proof-equivalent discard and quarantine only the handles.
+                self.device.release_buffers(&self.in_flight_buffers);
+                self.in_flight_buffers.clear();
+                self.retire("submission submit", false, Vec::new());
+            }
+            return Err(failure.error);
         }
         self.serial += 1;
         self.in_flight = true;
@@ -801,14 +893,20 @@ impl Submitter {
                 );
             }
         }
-        let batch = self.batch.as_mut().expect("checked above");
-        for ticket in recorder.buffers.drain(..) {
-            batch.note(ticket);
+        let mut reserved = Vec::new();
+        {
+            let batch = self.batch.as_mut().expect("checked above");
+            for ticket in recorder.buffers.drain(..) {
+                if batch.note(ticket) {
+                    reserved.push(ticket);
+                }
+            }
+            batch.records += 1;
+            batch.dispatches += recorder.dispatches;
+            batch.copies += recorder.copies;
+            batch.copied_bytes += recorder.copied_bytes;
         }
-        batch.records += 1;
-        batch.dispatches += recorder.dispatches;
-        batch.copies += recorder.copies;
-        batch.copied_bytes += recorder.copied_bytes;
+        self.device.reserve_buffers(&reserved);
         Ok(Submission {
             submitter: None,
             serial: 0,
@@ -882,6 +980,11 @@ impl Submitter {
 
     fn finish_wait(&mut self) -> Result<Option<(u64, u64)>> {
         self.device.wait_fence(self.fence)?;
+        // The wait proved that every recorded command completed, so each
+        // reserved reference is released before the fence reset. A reset
+        // failure does not un-prove the wait; the buffers are safe either way.
+        self.device.release_buffers(&self.in_flight_buffers);
+        self.in_flight_buffers.clear();
         self.device.reset_fence(self.fence)?;
         let timestamps = if let Some(query_pool) = self.query_pool {
             let mut data = [0u64; 2];
@@ -907,9 +1010,6 @@ impl Submitter {
             None
         };
         self.in_flight = false;
-        // The wait proved that every recorded command completed, so the
-        // submission no longer needs to pin its buffers.
-        self.in_flight_buffers.clear();
         Ok(timestamps)
     }
 
@@ -931,6 +1031,12 @@ impl Submitter {
             self.retire("submitter teardown", true, Vec::new());
             self.destroyed = true;
             return;
+        }
+        if let Some(batch) = self.batch.take() {
+            // An open batch was never submitted. Its recorded commands are
+            // discarded with the command buffer, so their references are
+            // proof-equivalently released before the handles go.
+            self.device.release_buffers(&batch.touched);
         }
         if let Some(query_pool) = self.query_pool.take() {
             // SAFETY: no submission is in flight; the pool is idle.
