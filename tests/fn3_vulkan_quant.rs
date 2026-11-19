@@ -1275,17 +1275,23 @@ fn resident_quantized_projections_upload_nothing() {
         .expect("pack the projection weights");
     let prepare = backend.residency_stats();
     assert_eq!(
-        prepare.staged_upload_bytes[ResidencyPhase::Prepare.index()],
+        prepare.packed_prepare_bytes,
         packed.payload_bytes(),
         "prepare must move exactly the packed payload"
+    );
+    assert_eq!(
+        prepare.staged_upload_bytes[ResidencyPhase::Prepare.index()],
+        0,
+        "packed weights are prepared once, not staged as host operands"
     );
     assert!(packed.smallest_payload() > 0);
     println!(
         "[fn3-24][prepare] projections={} packed_payload_bytes={} packed_device_bytes={} \
-         staged_upload_bytes={}",
+         packed_prepare_bytes={} staged_upload_bytes={}",
         packed.projections.len(),
         packed.payload_bytes(),
         packed.total_device_bytes(),
+        prepare.packed_prepare_bytes,
         prepare.staged_upload_bytes[ResidencyPhase::Prepare.index()]
     );
 

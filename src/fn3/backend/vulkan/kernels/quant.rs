@@ -559,6 +559,51 @@ impl QuantSections {
     }
 }
 
+/// `true` when the fused kernel can bind this projection into a resident step.
+///
+/// Takes the packed row count rather than a prepared projection so an
+/// admission decision can be made *before* any weight bytes are encoded or
+/// uploaded.
+pub(crate) fn admits_projection(
+    backend: &VulkanBackend,
+    n_rows: u32,
+    k: u32,
+    activation: &TensorMeta,
+    out: &TensorMeta,
+) -> bool {
+    // The three packed buffers are part of the admission decision, so a weight
+    // that could not be bound is rejected before it is encoded or uploaded.
+    let codes = u64::from(n_rows) * u64::from(k).div_ceil(16) * 16;
+    let metadata = u64::from(n_rows) * u64::from(k).div_ceil(64) * 2;
+    for bytes in [codes, metadata, metadata] {
+        let bytes = bytes.next_multiple_of(4);
+        if backend.capabilities().check_buffer(bytes).is_err() || bytes / 4 > u64::from(u32::MAX) {
+            return false;
+        }
+    }
+    let shape = activation.shape();
+    if shape.rank() < 2
+        || !leading_extents_are_one(shape)
+        || super::super::resident::require_whole_meta(activation, "packed activation").is_err()
+        || super::super::resident::require_whole_meta(out, "packed output").is_err()
+    {
+        return false;
+    }
+    let m = shape.dims()[shape.rank() - 2];
+    let limits = backend
+        .vulkan_device()
+        .limits()
+        .max_compute_work_group_count;
+    m.div_ceil(u64::from(ROWS_PER_WORKGROUP)) <= u64::from(limits[1])
+        && n_rows.div_ceil(COLUMNS_PER_WORKGROUP) <= limits[0]
+        && [activation, out].into_iter().all(|meta| {
+            meta.byte_len().is_ok_and(|bytes| {
+                bytes / 4 <= u32::MAX as usize
+                    && backend.capabilities().check_buffer(bytes as u64).is_ok()
+            })
+        })
+}
+
 /// One packed projection held in device memory.
 #[derive(Debug, Clone)]
 pub struct PackedProjection {
@@ -574,34 +619,6 @@ pub struct PackedProjection {
 }
 
 impl PackedProjection {
-    pub(crate) fn admits_session(
-        &self,
-        backend: &VulkanBackend,
-        activation: &TensorMeta,
-        out: &TensorMeta,
-    ) -> bool {
-        let shape = activation.shape();
-        if shape.rank() < 2
-            || !leading_extents_are_one(shape)
-            || super::super::resident::require_whole_meta(activation, "packed activation").is_err()
-            || super::super::resident::require_whole_meta(out, "packed output").is_err()
-        {
-            return false;
-        }
-        let m = shape.dims()[shape.rank() - 2];
-        let limits = backend
-            .vulkan_device()
-            .limits()
-            .max_compute_work_group_count;
-        m.div_ceil(u64::from(ROWS_PER_WORKGROUP)) <= u64::from(limits[1])
-            && self.n_rows.div_ceil(COLUMNS_PER_WORKGROUP) <= limits[0]
-            && [activation, out].into_iter().all(|meta| {
-                meta.byte_len().is_ok_and(|bytes| {
-                    bytes / 4 <= u32::MAX as usize
-                        && backend.capabilities().check_buffer(bytes as u64).is_ok()
-                })
-            })
-    }
     /// The name this projection was prepared under.
     pub fn name(&self) -> &str {
         &self.name
@@ -738,10 +755,10 @@ fn upload_section(
     let size = padded_bytes(bytes.len() as u64).max(4);
     backend.capabilities().check_buffer(size)?;
     let buffer = backend.alloc_buffer(&BufferDesc::device_storage(size, name))?;
-    // Count the prepare transfer in the residency ledger's upload accounting.
-    // (`VulkanBackend::upload` is the raw transfer; `check_staged_input` is the
-    // one place that attributes host bytes to a phase.)
-    backend.check_staged_input(None, bytes.len() as u64)?;
+    // A packed section is an immutable weight uploaded once during prepare, not
+    // a host operand staged per step: attribute it to the prepare ledger so a
+    // resident run does not report its payload as staged traffic.
+    backend.note_packed_prepare(bytes.len() as u64);
     let mut padded = Vec::with_capacity(size as usize);
     padded.extend_from_slice(bytes);
     padded.resize(size as usize, 0);
@@ -1204,9 +1221,51 @@ pub fn launch_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::tensor::Tensor;
 
     fn shape(dims: &[u64]) -> Shape {
         Shape::from_dims(dims.iter().copied())
+    }
+
+    /// `K = 70` is not a multiple of 16, so the row stride pads: the packed
+    /// sections must be the CPU packer's codes at the aligned stride, with a
+    /// zero tail per row and the scales/zero-points copied verbatim.
+    #[test]
+    fn from_packed_pads_a_k_that_is_not_a_multiple_of_sixteen() {
+        const N: usize = 5;
+        const K: usize = 70;
+        let values: Vec<f32> = (0..N * K)
+            .map(|index| ((index % 23) as f32 - 11.0) / 7.0)
+            .collect();
+        let tensor = Tensor::from_f32(shape(&[K as u64, N as u64]), &values)
+            .expect("a [K, N] weight on the host");
+        let weight =
+            crate::inference::backend::cpu::quant::PackedWeight::from_tensor("padded", &tensor)
+                .expect("pack the weight");
+        let view = weight.view();
+        let sections = QuantSections::from_packed(view).expect("convert the packed sections");
+
+        assert_eq!(sections.k(), K as u32);
+        assert_eq!(sections.n_rows(), N as u32);
+        assert_eq!(sections.groups_per_row() as usize, K.div_ceil(64));
+        assert_eq!(sections.row_stride_bytes(), 80);
+        assert_eq!(
+            view.row_stride(),
+            K,
+            "the CPU packer keeps compact rows; the device layout pads"
+        );
+        assert_eq!(sections.codes().len(), N * 80);
+        for row in 0..N {
+            let packed_row = &view.codes()[row * view.row_stride()..][..K];
+            let device_row = &sections.codes()[row * 80..][..80];
+            assert_eq!(&device_row[..K], packed_row, "row {row} codes");
+            assert!(
+                device_row[K..].iter().all(|byte| *byte == 0),
+                "row {row} padding must be zero"
+            );
+        }
+        assert_eq!(sections.scales(), view.scales());
+        assert_eq!(sections.zeros(), view.zero_points());
     }
 
     #[test]

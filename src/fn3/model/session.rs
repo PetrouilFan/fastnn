@@ -154,6 +154,53 @@ fn resident_enabled(backend: &dyn Backend, options: SessionOptions) -> bool {
     !staged && backend.supports_resident_storage()
 }
 
+/// Reason prefix of the typed error an INT8-weight session raises on a backend
+/// that cannot host packed projections. The CLI matches this prefix to explain
+/// the fix, so it must stay in one place.
+pub const WEIGHT_INT8_BACKEND_REASON: &str =
+    "INT8 weights need the CPU backend or a resident Vulkan session";
+
+/// The typed error an INT8-weight session raises on a backend that cannot host
+/// packed projections, or `None` when it can.
+fn weight_int8_unsupported(backend: &dyn Backend, resident: bool) -> Option<Fn3Error> {
+    if weight_int8_supported(backend, resident) {
+        return None;
+    }
+    Some(Fn3Error::UnsupportedOp {
+        op: crate::inference::OpId::MatMul,
+        backend: backend.name(),
+        reason: format!(
+            "{WEIGHT_INT8_BACKEND_REASON} ({})",
+            if resident {
+                "this backend has no Vulkan device allocator"
+            } else {
+                "the session is host-staged"
+            }
+        ),
+    })
+}
+
+/// `true` when this backend/session pair can host packed INT8 weights.
+///
+/// The CPU reference keeps host tensors and needs no device allocator; Vulkan
+/// needs both its own resident storage and a session that is not host-staged.
+/// A staged Vulkan session is a configuration error, never a reason to move the
+/// model to the CPU.
+fn weight_int8_supported(backend: &dyn Backend, resident: bool) -> bool {
+    if backend.device() == DeviceId::Cpu {
+        return true;
+    }
+    #[cfg(feature = "vulkan")]
+    {
+        resident && backend.as_vulkan().is_some()
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = resident;
+        false
+    }
+}
+
 /// Session lifecycle phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPhase {
@@ -508,15 +555,8 @@ impl<'model> Session<'model> {
         // CPU/fallback path keeps its bytes.
         let resident = resident_enabled(backend, options);
         if options.weight_int8 {
-            let supported = backend.device() == DeviceId::Cpu;
-            #[cfg(feature = "vulkan")]
-            let supported = supported || (resident && backend.as_vulkan().is_some());
-            if !supported {
-                return Err(Fn3Error::UnsupportedOp {
-                    op: crate::inference::OpId::MatMul,
-                    backend: backend.name(),
-                    reason: "INT8 weights require CPU or resident Vulkan".into(),
-                });
+            if let Some(error) = weight_int8_unsupported(backend, resident) {
+                return Err(error);
             }
         } else {
             let weights = model.weights();
@@ -866,6 +906,12 @@ impl<'model> Session<'model> {
     ///
     /// Buffers are kept, not reallocated; the step and token counters return to
     /// 0. Plans stay cached: a reset session runs the same shapes again.
+    ///
+    /// An INT8-weight session also keeps its packed weights and its prepared
+    /// dense set: both are derived from the immutable model, not from the
+    /// cleared step state, and dropping them would re-pack the model on the
+    /// next prefill. Only the per-step report is cleared, because it describes
+    /// a step this session no longer remembers.
     pub fn reset(&mut self) {
         for cache in &mut self.caches {
             cache.reset();
@@ -876,6 +922,9 @@ impl<'model> Session<'model> {
             runtime.pool.clear();
             runtime.last_plan = None;
             runtime.last_dims = None;
+            if let Some(state) = runtime.weight_int8.as_mut() {
+                state.clear_report();
+            }
         }
         self.phase = SessionPhase::Empty;
     }
@@ -1399,10 +1448,12 @@ fn present_slice<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::backend::cpu::CpuBackend;
     use crate::inference::dtype::DType as TestDType;
     use crate::inference::model::{ExecutionPlan, Instruction};
     use crate::inference::ops::OpId;
     use crate::inference::shape::{Shape, ShapeEnvelope};
+    use crate::inference::tensor::TensorMut;
     use crate::inference::{DeviceId, ModelWeights};
 
     fn small_model() -> PreparedModel {
@@ -1428,6 +1479,105 @@ mod tests {
             }),
         )
         .unwrap()
+    }
+
+    /// A backend that names a Vulkan device but exposes neither a device
+    /// allocator nor the concrete Vulkan backend: the shape of a host-staged
+    /// Vulkan session, without needing a GPU.
+    #[derive(Debug)]
+    struct StagedVulkan {
+        capabilities: crate::inference::backend::Capabilities,
+    }
+
+    impl StagedVulkan {
+        fn new() -> StagedVulkan {
+            StagedVulkan {
+                capabilities: crate::inference::backend::cpu::cpu_capabilities(),
+            }
+        }
+    }
+
+    impl Backend for StagedVulkan {
+        fn name(&self) -> &'static str {
+            "vulkan"
+        }
+
+        fn device(&self) -> DeviceId {
+            DeviceId::Vulkan(crate::inference::device::PhysicalDeviceId::new(0))
+        }
+
+        fn capabilities(&self) -> &crate::inference::backend::Capabilities {
+            &self.capabilities
+        }
+
+        fn supports(&self, _op: OpId) -> crate::inference::backend::Support {
+            crate::inference::backend::Support::full()
+        }
+
+        fn execute_op(
+            &self,
+            op: OpId,
+            _inputs: &[TensorView<'_>],
+            _outputs: &mut [TensorMut<'_>],
+            _params: &crate::inference::backend::OpParams,
+        ) -> Result<(), Fn3Error> {
+            Err(Fn3Error::UnsupportedOp {
+                op,
+                backend: "vulkan",
+                reason: "test stub".into(),
+            })
+        }
+    }
+
+    /// `--weight-int8` is refused on a staged Vulkan session with a typed
+    /// error, and never quietly becomes a CPU run. This needs no GPU: the
+    /// predicate is what `Session::with_runtime_options` consults.
+    #[test]
+    fn int8_weights_are_refused_on_a_staged_vulkan_session() {
+        let cpu = CpuBackend::new();
+        assert!(
+            weight_int8_supported(&cpu, false),
+            "the CPU reference hosts packed weights without a device allocator"
+        );
+
+        let staged = StagedVulkan::new();
+        assert!(
+            !weight_int8_supported(&staged, false),
+            "a host-staged Vulkan session must refuse INT8 weights"
+        );
+        assert!(
+            !weight_int8_supported(&staged, true),
+            "a Vulkan backend without a device allocator must refuse INT8 weights"
+        );
+        assert_eq!(staged.device().kind_name(), "vulkan");
+
+        // The session raises the typed error, not a panic or a CPU fallback.
+        let error = weight_int8_unsupported(&staged, false).expect("a staged session is refused");
+        match &error {
+            Fn3Error::UnsupportedOp {
+                op,
+                backend,
+                reason,
+            } => {
+                assert_eq!(*op, OpId::MatMul);
+                assert_eq!(*backend, "vulkan");
+                assert!(reason.starts_with(WEIGHT_INT8_BACKEND_REASON), "{reason}");
+                assert!(reason.contains("host-staged"), "{reason}");
+            }
+            other => panic!("expected a typed UnsupportedOp, found {other:?}"),
+        }
+        assert!(
+            weight_int8_unsupported(&cpu, false).is_none(),
+            "the CPU reference is accepted"
+        );
+    }
+
+    #[test]
+    fn the_int8_refusal_names_the_supported_backends() {
+        let reason = format!("{WEIGHT_INT8_BACKEND_REASON} (the session is host-staged)");
+        assert!(reason.starts_with(WEIGHT_INT8_BACKEND_REASON));
+        assert!(reason.contains("resident Vulkan"), "{reason}");
+        assert!(reason.contains("CPU"), "{reason}");
     }
 
     #[test]

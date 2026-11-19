@@ -6,54 +6,79 @@ unchanged. Deployment still needs only the existing `.fnn3` artifact: the file
 carries FP32 weights, its size is unchanged, and no conversion tool or ONNX file
 is involved. Activations, accumulators, the KV cache and logits stay FP32.
 
+This is a runtime path, not an artifact section. `fn3-quant-format-v1.md` §6 is
+the fallback policy reused here; §8's packed tensor sections are read from an
+artifact when it has them, and the pinned artifacts used below have none. The
+session therefore packs from the FP32 weights it already loaded, and the format
+and its defaults are untouched.
+
 ## What is packed, and what falls back
 
 The session walks each live plan and treats a `MatMul` right-hand side as a
 candidate only when it is a static 2-D FP32 model weight with `K >= 64` and at
-least 4096 elements (the format's §6 policy). Each admitted weight is packed on
-first use by the existing `PackedWeight` encoder and cached by model weight ID.
-The step then routes:
+least 4096 elements (the §6 policy). Each admitted weight is packed on first use
+by the existing `PackedWeight` encoder and cached by model weight ID. The step
+then routes:
 
 | Operand | Route |
 |---|---|
 | admitted static weight | fused INT8 kernel (`matmul_quantized` on CPU, `launch_projection` on Vulkan) |
-| dynamic RHS (attention products, the computed LM-head transpose) | the same backend's FP32 kernel |
-| weight below the policy floor | FP32 |
-| non-FP32 activation, rank < 2, contraction mismatch, strided operand | FP32, with the typed reason |
-| weight the encoder rejects (non-finite value, unrepresentable scale) | FP32, reason `packing: …` |
-| Vulkan activation or output that is not device-resident / whole-buffer | FP32 |
+| computed RHS: attention products, the tied LM-head transpose | the same backend's FP32 kernel, code `computed-rhs` |
+| folded-constant RHS | FP32, code `constant-rhs` (constants are integer-domain here) |
+| graph-input RHS | FP32, code `graph-input-rhs` |
+| weight below the policy floor / other §6 rule | FP32, the policy's own code (`k-below-min`, `numel-below-min`, …) |
+| non-FP32 activation, rank < 2, contraction mismatch, strided view | FP32, code `activation-layout` |
+| non-contiguous or non-FP32 output | FP32, code `output-layout` |
+| Vulkan operand not resident/whole, or a packed buffer/dispatch limit | FP32, code `vulkan-operands` |
+| weight the encoder rejects (non-finite value, unrepresentable scale) | FP32, code `packing` |
 
-Nothing is approximated: an instruction either runs the packed kernel or the
-backend's FP32 kernel. There is no CPU fallback on a Vulkan session. Requesting
-`--weight-int8` on a Vulkan backend whose session is host-staged is rejected at
-session creation rather than silently degrading.
+No instruction is partially approximated: each one runs wholly on the packed
+kernel or wholly on the backend's FP32 kernel. There is no CPU fallback on a
+Vulkan session. Requesting `--weight-int8` on a host-staged Vulkan session is
+refused at session creation with a typed error, and the CLI's hint names the
+fix rather than suggesting a CPU run.
 
-`--steps` prints one line per `MatMul` with its route, so coverage is auditable
-per step:
+`--steps` prints one line per `MatMul` with its route code, plus the byte and
+traffic counters, so coverage is auditable per step:
 
 ```text
 weight-int8: packed-matmuls=48/73 fp32-matmuls=25 packed-payload=90243072B \
-  dense-weight=...B model-weight=...B route/pack/upload=...
-  matmul[7] model.layers.0.attn.c_attn.weight: packed
-  matmul[9] ...: dynamic-rhs
+  packed-source=339738624B dense-weight=158022256B shared-weight=0B \
+  model-weight=497764984B route/pack/upload=898.52ms
+weight-int8-traffic: packed-prepare=90243072B staged-host-bytes=52B late-persistent=0B
+  matmul[25] transformer.h.0.attn.c_attn.weight: packed
+  matmul[46] /transformer/h.0/attn/Mul_1_output_0: computed-rhs
 ```
 
-`packed-payload` is the packed byte total this session owns (codes + scales +
-zero-points), not RSS, VRAM allocation size or file size. `dense-weight` is the
-byte total of model weights some live consumer still reads as FP32, so
-`model-weight - dense-weight` is the dense residency this session avoided.
+`dense-weight` is Vulkan's label: the FP32 bytes some live consumer still reads
+from a device buffer. On the CPU nothing is uploaded, so the same field is
+printed as `fp32-retained` — weights kept in host memory. `packed-source` is
+what the packed set replaced, so the exact byte reduction is
+`packed-source - packed-payload`. All of these are API-level counters
+(`Storage::len`, `PackedProjection::payload_bytes`), not RSS, VRAM, allocator
+figures or file size.
 
 ## Residency on Vulkan
 
-Packing and the one-time device upload happen before the step's submission
-opens, so a packed projection is three device buffers bound by handle inside the
-resident submission. Before recording, the session collects every instruction
-input and graph output of the live plan; a weight is prepared densely only when
-a consumer other than a packed `MatMul` RHS reads it. A weight that is both
-packed and dense keeps both representations (host FP32 stays owned by the
-model), and a later plan that needs the dense form prepares it then. A
-proven packed-only consumer therefore never reaches `prepare_persistent`, and
-`VulkanBackend::check_staged_input` still rejects any late host upload.
+Admission is decided from the live operands **before** any bytes are encoded or
+uploaded: the activation and output must be resident whole buffers, and the
+packed buffers and dispatch grid must fit the device. A projection that cannot
+be bound leaves no packed copy behind.
+
+Packing and the one-time upload happen before the step's submission opens, so a
+packed projection is three device buffers bound by handle inside the resident
+submission. Before recording, the session collects every instruction input and
+graph output of the live plan; a weight is prepared densely only when a consumer
+other than a packed `MatMul` RHS reads it. A proven packed-only weight is
+therefore never added to the persistent table, and `check_staged_input` — which
+guards *dense* persistent weights against a late host upload — never sees it. A
+weight that is both packed and dense keeps both representations and appears in
+`shared-weight`; a later plan that needs the dense form prepares it then.
+
+Packed sections are counted as prepare traffic (`packed-prepare`), not as staged
+host operands: a resident INT8 run of the trained artifact reports 90,243,072 B
+prepared once, 52 B of staged host bytes (the two token IDs of that prompt) and
+zero late persistent uploads.
 
 ## Correctness on the pinned artifacts
 
@@ -71,6 +96,13 @@ teacher-forced decode tokens (4874, 2402) on CPU and on the GTX 1080 Ti
 `flock /tmp/opencode/fn3-measure.lock`, require the pinned UUID, a physical
 device, `FN3_VK_VALIDATION=1`, zero validation errors and no
 `VK_INSTANCE_LAYERS`. Logits are the CLI's four-decimal rendering.
+
+The script fails, not skips, on any of: a missing artifact or SHA mismatch, a
+missing `source: none (artifact-only` header, a non-physical or non-matching
+device, any `[validation][ERROR]`, a coverage count other than the expected
+8/13 or 48/73, an argmax or top-five set that differs, or a per-element
+difference above the tolerance (0.01 for tiny, 0.85 for trained, 0.001 for
+CPU-vs-Vulkan INT8).
 
 | Artifact | Packed / total per step (CPU & Vulkan) | Max FP32 → INT8 abs (CPU / Vulkan) | Max CPU vs Vulkan INT8 abs |
 |---|---:|---:|---:|
@@ -90,37 +122,44 @@ projection and stays FP32 because its RHS is an instruction output, not a
 weight; supporting it would need a packed copy of the transposed embedding
 table rather than a transpose at run time.
 
-## Weight bytes: dense residency avoided
+## Weight bytes: exact reduction, and what stays dense
 
-Both arms print their counters; `shared-weight=0B` on both artifacts means no
-weight is both packed and dense, so the two numbers do not double-count.
+`shared-weight=0B` on both artifacts means no weight is both packed and dense,
+so the two figures describe disjoint weights. They do not together cover every
+model weight: `dense-weight + packed-source` is 4,104 B below `model-weight` on
+the trained artifact. That is why the reduction is computed as
+`packed-source - packed-payload` rather than as a complement that would absorb
+whatever is in neither set.
 
-| Artifact | Model weights | Dense under INT8 | Packed payload | INT8 weight bytes | Avoided |
+| Artifact | Model | FP32 kept (`dense-weight`) | Packed source | Packed payload | Reduction |
 |---|---:|---:|---:|---:|---:|
-| Tiny | 27,833,180 B | 26,260,132 B | 417,792 B | 26,677,924 B | 1,155,256 B (4.2%) |
-| Trained GPT-2 | 497,764,984 B | 158,022,256 B | 90,243,072 B | 248,265,328 B | 249,499,656 B (50.1%) |
+| Tiny | 27,833,180 B | 26,260,132 B | 1,572,864 B | 417,792 B | 1,155,072 B of packed source (73.4%) |
+| Trained GPT-2 | 497,764,984 B | 158,022,256 B | 339,738,624 B | 90,243,072 B | 249,495,552 B of packed source (73.4%) |
 
-On the trained artifact the dense remainder is the token embedding, the
-position table, every bias and every LayerNorm parameter, because none of those
-is a packed `MatMul` RHS. These are API-level bytes (`Storage::len` for dense
-weights, `PackedProjection::payload_bytes` for packed), not RSS, VRAM, allocator
-or file size; the `.fnn3` file is unchanged in both arms.
+On the trained artifact the FP32 remainder is the token embedding, the position
+table, every bias and every LayerNorm parameter, because none of those is a
+packed `MatMul` RHS. Against the whole model the trained reduction is 249.5 MB
+(50.1%); against the packed set it is 73.4%, which is the format's size ratio.
+
+Packed buffers are **per session**: N concurrent INT8 sessions hold N × packed
+payload on the device, while the host FP32 weights are shared `Arc` storage in
+the immutable model. Dense device buffers are per backend's persistent table.
 
 ## Timing (separate from correctness; validation off)
 
-Three cold processes per arm, medians quoted, same GPU, same prompt and decode
-tokens, `run --steps --top-k 1`, `FN3_VK_VALIDATION=0`, no `VK_INSTANCE_LAYERS`,
-serialized with `flock /tmp/opencode/fn3-measure.lock`. The FP32 arm prepares all
-dense weights during session setup; the INT8 arm packs and uploads inside the
-first step's `route/pack/upload` counter, and that time is part of its prefill
-wall.
+Three cold processes per arm, same GPU, same prompt and decode tokens,
+`run --steps --top-k 1`, `FN3_VK_VALIDATION=0`, no `VK_INSTANCE_LAYERS`,
+serialized with `flock /tmp/opencode/fn3-measure.lock`. Each cell is
+min / median / max over the three runs; the FP32 arm prepares all dense weights
+during session setup, while the INT8 arm packs and uploads inside the first
+step's `route/pack/upload` counter, which is part of its prefill wall.
 
 | Artifact / mode | Prefill | Decode 1 | Decode 2 | First pack+upload | Process wall |
 |---|---:|---:|---:|---:|---:|
-| Tiny FP32 | 9.15 ms | 5.81 ms | 5.56 ms | — | 0.370 s |
-| Tiny INT8 | 46.09 ms | 5.93 ms | 5.71 ms | 33.97 ms | 0.375 s |
-| Trained FP32 | 98.67 ms | 63.52 ms | 62.31 ms | — | 3.725 s |
-| Trained INT8 | 1.06 s | 67.42 ms | 66.93 ms | 899.89 ms | 4.387 s |
+| Tiny FP32 | 8.80 / 8.86 / 9.00 ms | 5.76 / 5.76 / 5.79 ms | 5.50 / 5.51 / 5.69 ms | — | 0.364 / 0.366 / 0.368 s |
+| Tiny INT8 | 44.11 / 44.37 / 44.95 ms | 5.87 / 5.88 / 6.07 ms | 5.68 / 5.69 / 5.80 ms | 32.71 / 32.94 / 33.70 ms | 0.372 / 0.373 / 0.374 s |
+| Trained FP32 | 96.40 / 98.22 / 103.07 ms | 62.68 / 63.42 / 63.52 ms | 61.82 / 61.91 / 62.61 ms | — | 3.621 / 3.678 / 3.710 s |
+| Trained INT8 | 1.06 / 1.06 / 1.06 s | 67.29 / 68.96 / 69.09 ms | 66.38 / 67.81 / 68.16 ms | 893.86 / 894.61 / 894.69 ms | 4.341 / 4.405 / 4.476 s |
 
 ```sh
 env -u VK_INSTANCE_LAYERS -u FN3_VK_STAGED FN3_VK_VALIDATION=0 \
@@ -130,12 +169,35 @@ env -u VK_INSTANCE_LAYERS -u FN3_VK_STAGED FN3_VK_VALIDATION=0 \
     --decode 4874,2402 --top-k 1 --steps [--weight-int8]
 ```
 
-No speedup is claimed. Steady-state decode is 2% slower on the tiny artifact and
-6–7% slower on the trained one (67.4/66.9 ms against 63.5/62.3 ms), so the packed
-path does not beat the FP32 matmul at this shape. The first call costs 0.90 s of
-packing on the trained model and 34 ms on the tiny one; a later artifact-embedded
-packed section would remove that cost without changing the dispatch path or the
-steady-state result.
+No speedup is claimed. Steady-state decode is 2–3% slower on the tiny artifact
+and 7–10% slower on the trained one (69.0/67.8 ms against 63.4/61.9 ms at the
+medians), so the packed path does not beat the FP32 matmul at these shapes. The
+first call costs about 0.89 s of packing on the trained model and 33 ms on the
+tiny one; a later artifact-embedded packed section would remove that cost
+without changing the dispatch path or the steady-state result.
+
+## Tests
+
+The behaviour is covered without the pinned model, so a missing fixture cannot
+hide a regression:
+
+- `src/fn3/model/weight_int8.rs`: a synthetic one-`MatMul` plan asserts the
+  packed route, the report fields (`packed-payload`, `packed-source`,
+  `dense-weight`, `shared-weight`), packed-vs-FP32 output within the format's
+  error bound, the cached re-pack on a second step, and the closed fallback
+  codes for a computed, graph-input and below-floor RHS.
+- `src/fn3/model/session.rs`: a stub backend that names a Vulkan device but has
+  no device allocator asserts that a staged Vulkan session is refused by the
+  typed predicate, and that the CPU reference is accepted.
+- `src/fn3/backend/vulkan/kernels/quant.rs`: `K = 70` exercises the compact-row
+  to aligned-row conversion (zero padding per row, scales and zero-points
+  copied).
+- `src/fn3/cli/infer.rs`: the flag-specific hint fires only for the typed
+  backend rejection.
+- `tests/fn3_cli.rs`: the tiny artifact-only run, when the pinned ONNX is
+  present, asserts the CPU report labels and route codes.
+- `tests/fn3_vulkan_quant.rs`: a resident quantized prepare moves exactly the
+  payload through `packed_prepare_bytes` and zero staged bytes.
 
 ## Limits
 

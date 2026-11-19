@@ -63,7 +63,7 @@ pub use plan::{
     BoundValue, Constant, ConstantData, FoldKind, FoldedNode, MaskConstant, MaskRole, Plan,
     PlanBound, PlanCache, PlanId, SlotPlan, SlotRole,
 };
-pub use session::{Session, SessionOptions, SessionPhase};
+pub use session::{Session, SessionOptions, SessionPhase, WEIGHT_INT8_BACKEND_REASON};
 pub use specialize::{PlanAttr, Planner};
 pub use weight_int8::{WeightInt8Report, WeightInt8Route};
 pub use weights::{WeightId, WeightSet, WeightSource, WeightTensor};
