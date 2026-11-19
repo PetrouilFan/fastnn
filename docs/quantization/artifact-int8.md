@@ -241,6 +241,34 @@ hide a regression:
 - `tests/fn3_vulkan_quant.rs`: a resident quantized prepare moves exactly the
   payload through `packed_prepare_bytes` and zero staged bytes.
 
+## Automated gate
+
+`tests/fn3_trained_int8.rs` is the opt-in automated gate for the trained
+artifact on the pinned physical GPU. It is `#[ignore]` and enabled by
+`FN3_TRAINED_INT8=1`; once enabled it fails, never skips, on a missing artifact,
+a missing committed ORT reference, a build without `--features vulkan`, or a
+non-physical/unmatched device. It reuses the ORT rows and length/SHA-256 checks
+from `fn3_trained_parity.rs`, runs prefill plus decode tokens 640 and 11 on
+Vulkan (resident, `weight_int8`) and CPU (`weight_int8`), asserts the 48/73
+coverage, the 90,243,072-byte packed prepare traffic, zero input readbacks and
+0 validation messages, and enforces the #68 logits bounds. Top-1 must match ORT
+exactly; top-5 follows #68 §6's margin rule (the trained decode boundaries are
+near-ties, so those two phases measure 4/5; the raw sets are printed). CPU INT8
+and Vulkan INT8 must agree within 1e-3 max abs.
+
+```sh
+env -u VK_INSTANCE_LAYERS -u FN3_VK_STAGED \
+  FN3_TRAINED_INT8=1 FN3_VK_REQUIRE_PHYSICAL=1 FN3_VK_VALIDATION=1 \
+  FN3_VK_DEVICE_UUID=471b2bda-51e1-6451-e692-ff5d1e146f1e \
+  flock /tmp/opencode/fn3-measure.lock \
+  cargo test --release --features vulkan --test fn3_trained_int8 \
+    -- trained_gpt2_int8_matches_ort_on_physical_vulkan --ignored --nocapture
+```
+
+`FN3_TRAINED_ARTIFACT` overrides the default
+`/tmp/opencode/fn3-68/trained-gpt2.fnn3`. The gate does not read
+`FN3_TRAINED_VULKAN`, so it can be run alone.
+
 ## Limits
 
 - Packing is per session and per weight, from the loaded FP32 artifact; the
