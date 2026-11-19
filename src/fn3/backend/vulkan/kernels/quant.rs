@@ -218,9 +218,10 @@ pub fn admit_projection(request: &ProjectionRequest) -> std::result::Result<(), 
     if request.weight_source == WeightSource::Dynamic {
         let dims = request.weight.dims();
         return Err(format!(
-            "the right-hand side is computed at run time ({}); v1 quantizes a weight known at \
-             prepare, and a dynamic RHS keeps the FP32 kernel ({KERNEL_OWNER})",
-            format_args!("rank {} {}", dims.len(), request.weight)
+            "the right-hand side is computed at run time (rank {} {}); v1 quantizes a weight \
+             known at prepare, and a dynamic RHS keeps the FP32 kernel ({KERNEL_OWNER})",
+            dims.len(),
+            request.weight
         ));
     }
     let (n, k) = weight_extents(request)?;

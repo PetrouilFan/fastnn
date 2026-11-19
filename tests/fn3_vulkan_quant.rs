@@ -735,15 +735,14 @@ fn coverage(
     import: &fastnn::fn3::import::ModelImport,
     model: &fastnn::fn3::PreparedModel,
     family: fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily,
-    seq: u64,
-    past: u64,
+    live: fastnn::fn3::LiveDims,
 ) -> Vec<CoverageRow> {
     let backend = fastnn::fn3::CpuBackend::new();
     let planner = Planner::new(import, &backend);
     let envelope = envelope(&planner, FIXTURE_CONTEXT);
     let plan = planner
-        .plan(&envelope, dims(seq, past))
-        .unwrap_or_else(|error| panic!("plan ({seq}, {past}): {error}"));
+        .plan(&envelope, live)
+        .unwrap_or_else(|error| panic!("plan {live:?}: {error}"));
     let kernels = QuantKernelSet::alpha();
     let weights = model.weights();
     let mut rows = Vec::new();
@@ -1095,11 +1094,11 @@ fn coverage_of_the_pinned_graphs() {
     let family = fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
     print_coverage(
         "tiny prefill(13,0)",
-        &coverage(&import, &model, family, 13, 0),
+        &coverage(&import, &model, family, dims(13, 0)),
     );
     print_coverage(
         "tiny decode(1,13)",
-        &coverage(&import, &model, family, 1, 13),
+        &coverage(&import, &model, family, dims(1, 13)),
     );
 }
 
@@ -1383,6 +1382,62 @@ fn a_declined_projection_falls_back_to_the_fp32_kernel() {
 // Tests: accuracy
 // ---------------------------------------------------------------------------
 
+/// Compare one arm's logits with the FP32 arm and apply the #68 gates.
+///
+/// The KL bound and the per-step top-5 overlap are hard. A top-1 that changes
+/// is only a failure when the FP32 margin was *decisive*: larger than twice the
+/// largest logit perturbation this arm produced, which is the same "decisive
+/// gap" rule `harness::compare_logits` applies to the fixtures. That keeps a
+/// tie on a random-weight model from being reported as an accuracy win or loss.
+fn compare_quantized_arm(label: &str, fp32: &ArmLogits, quantized: &ArmLogits) -> (f64, bool) {
+    let mut worst_kl = 0.0f64;
+    let mut all_top1 = true;
+    println!(
+        "[fn3-24][accuracy] {label} step kl top1_fp32 top1_quant top5_overlap margin_fp32 \
+         margin_quant perturbation"
+    );
+    for (step, (reference, candidate)) in std::iter::once((&fp32.prefill, &quantized.prefill))
+        .chain(fp32.decode.iter().zip(&quantized.decode))
+        .enumerate()
+    {
+        let kl = kl_divergence(reference, candidate);
+        worst_kl = worst_kl.max(kl);
+        let top1_reference = top_indices(reference, 1)[0];
+        let top1_candidate = top_indices(candidate, 1)[0];
+        let top5_reference = top_indices(reference, 5);
+        let top5_candidate = top_indices(candidate, 5);
+        let overlap = top5_reference
+            .iter()
+            .filter(|index| top5_candidate.contains(index))
+            .count();
+        let perturbation = max_abs(reference, candidate);
+        let margin = top1_margin(reference);
+        let same = top1_reference == top1_candidate;
+        all_top1 &= same;
+        println!(
+            "[fn3-24][accuracy] {label} {step} {kl:.6e} {top1_reference} {top1_candidate} \
+             {overlap}/5 {margin:.6e} {:.6e} {perturbation:.6e}",
+            top1_margin(candidate)
+        );
+        assert!(
+            overlap >= 4,
+            "{label} step {step}: top-5 overlap {overlap}/5"
+        );
+        if !same {
+            assert!(
+                margin <= 2.0 * perturbation,
+                "{label} step {step}: top-1 moved from {top1_reference} to {top1_candidate} with \
+                 a decisive FP32 margin of {margin:e} against a perturbation of {perturbation:e}"
+            );
+        }
+    }
+    assert!(
+        worst_kl <= 0.013,
+        "{label}: worst KL {worst_kl:e} above the #68 bound 0.013"
+    );
+    (worst_kl, all_top1)
+}
+
 /// One arm's logits for the 13-token prefill and four decode steps.
 struct ArmLogits {
     prefill: Vec<f32>,
@@ -1499,50 +1554,188 @@ fn end_to_end_accuracy_against_fp32() {
     );
 
     // ---- logits -----------------------------------------------------------
-    let mut worst_kl = 0.0f64;
-    let mut all_top1 = true;
-    println!(
-        "[fn3-24][accuracy] step kl top1_fp32 top1_quant top5_overlap margin_fp32 margin_quant"
-    );
-    for (step, (reference, candidate)) in std::iter::once((&fp32.prefill, &quantized.prefill))
-        .chain(fp32.decode.iter().zip(&quantized.decode))
-        .enumerate()
-    {
-        let kl = kl_divergence(reference, candidate);
-        worst_kl = worst_kl.max(kl);
-        let top1_reference = top_indices(reference, 1)[0];
-        let top1_candidate = top_indices(candidate, 1)[0];
-        let top5_reference = top_indices(reference, 5);
-        let top5_candidate = top_indices(candidate, 5);
-        let overlap = top5_reference
-            .iter()
-            .filter(|index| top5_candidate.contains(index))
-            .count();
-        let same = top1_reference == top1_candidate;
-        all_top1 &= same;
-        println!(
-            "[fn3-24][accuracy] {step} {kl:.6e} {top1_reference} {top1_candidate} {overlap}/5 \
-             {:.6e} {:.6e}",
-            top1_margin(reference),
-            top1_margin(candidate)
-        );
-        assert!(overlap >= 4, "step {step}: top-5 overlap {overlap}/5");
-    }
-    // #68's decode KL bound.
-    assert!(
-        worst_kl <= 0.013,
-        "worst KL {worst_kl:e} above the #68 bound 0.013"
-    );
-    if !all_top1 {
-        println!(
-            "[fn3-24][accuracy] WARNING: a top-1 changed on the tiny random-weight model; the \
-             margins above are the evidence, and the trained gate is the one #68 measured"
-        );
-    }
+    let (worst_kl, all_top1) = compare_quantized_arm("tiny", &fp32, &quantized);
 
     let stats = decorated.stats();
     println!(
         "[fn3-24][accuracy] quantized_calls={} captured={} worst_reference_max_abs={:.3e} \
+         worst_relative_frobenius={:.6e} worst_kl={:.6e} top1_all_equal={}",
+        stats.calls,
+        captured.len(),
+        worst_reference,
+        worst_relative,
+        worst_kl,
+        all_top1
+    );
+    let (errors, warnings) = fastnn::fn3::backend::vulkan::instance::validation_counts();
+    assert_eq!((errors, warnings), (0, 0), "validation counts");
+}
+
+// ---------------------------------------------------------------------------
+// Tests: the trained model
+// ---------------------------------------------------------------------------
+
+const TRAINED_BYTES: usize = 498_126_358;
+const TRAINED_SHA256: &str = "42c1e92a21c41ebd3c536d4c6f09732450a43db35977593236f696d3346c7c0d";
+
+/// Load and verify the pinned trained GPT-2 graph, or print why it is skipped.
+///
+/// The digest is the one in `fixtures/parity/trained-gpt2/model.lock.json`
+/// (`onnx/model.onnx`), checked against the file rather than quoted.
+fn trained() -> Option<fastnn::fn3::import::ModelImport> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(path) = std::env::var("FN3_QUANT_TRAINED_MODEL") {
+        candidates.push(std::path::PathBuf::from(path));
+    }
+    candidates.push(std::path::PathBuf::from(
+        "/tmp/opencode/parity-fresh/models/trained-gpt2/onnx/model.onnx",
+    ));
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        assert_eq!(
+            bytes.len(),
+            TRAINED_BYTES,
+            "the file at {} is not the pinned trained graph",
+            path.display()
+        );
+        assert_eq!(
+            sha256(&bytes),
+            TRAINED_SHA256,
+            "the file at {} has the right length but not the pinned bytes",
+            path.display()
+        );
+        println!(
+            "[fn3-24][trained] {} bytes, sha256 {TRAINED_SHA256}",
+            TRAINED_BYTES
+        );
+        return Some(
+            fastnn::fn3::import::import_onnx_model(&bytes)
+                .unwrap_or_else(|error| panic!("the trained model failed to import:\n{error}")),
+        );
+    }
+    if std::env::var("FN3_QUANT_TRAINED_REQUIRED").as_deref() == Ok("1") {
+        panic!(
+            "FN3_QUANT_TRAINED_REQUIRED=1 but the pinned 498,126,358-byte trained graph is not \
+             present; set FN3_QUANT_TRAINED_MODEL"
+        );
+    }
+    println!(
+        "[fn3-24][skip] the trained GPT-2 graph is not present; set FN3_QUANT_TRAINED_MODEL or \
+         run `python3 tools/parity/fetch_models.py --suite trained-gpt2`"
+    );
+    None
+}
+
+#[test]
+fn trained_accuracy_and_coverage() {
+    // Opt-in: the trained graph is 498 MB and the packer runs the reference
+    // encoder over 494 MB of weights, which is a release-build job. The tiny
+    // arm of the same code is part of the default suite.
+    if std::env::var("FN3_QUANT_TRAINED").as_deref() != Ok("1") {
+        println!(
+            "[fn3-24][skip] set FN3_QUANT_TRAINED=1 (and FN3_QUANT_TRAINED_MODEL) to run the \
+             trained arm; it is a release-build measurement"
+        );
+        return;
+    }
+    let Some(import) = trained() else {
+        return;
+    };
+    let Some(backend) = open_physical() else {
+        return;
+    };
+    let device = backend.device_id();
+    let (model, _) = prepared(&import, device, FIXTURE_CONTEXT);
+    let tokens = token_ids();
+
+    // ---- coverage ---------------------------------------------------------
+    let family = fastnn::fn3::backend::vulkan::kernels::quant::QuantFamily::GroupedW8A16;
+    let geometry = import.geometry();
+    let live = |seq: u64, past: u64| {
+        fastnn::fn3::LiveDims::new(
+            1,
+            seq,
+            past,
+            u64::from(geometry.query_heads),
+            u64::from(geometry.kv_heads),
+            u64::from(geometry.head_dim),
+        )
+        .expect("total fits")
+    };
+    let prefill_rows = coverage(&import, &model, family, live(PROMPT as u64, 0));
+    let decode_rows = coverage(&import, &model, family, live(1, PROMPT as u64));
+    print_coverage("trained prefill(13,0)", &prefill_rows);
+    print_coverage("trained decode(1,13)", &decode_rows);
+    let quantized_rows = prefill_rows
+        .iter()
+        .filter(|row| row.decision == "quantized")
+        .count();
+    assert_eq!(
+        quantized_rows,
+        12 * 4,
+        "every one of the 12 layers' four projections must be inside the W8A16 subset"
+    );
+    assert_eq!(
+        prefill_rows.len(),
+        12 * 6 + 1,
+        "12 layers x (4 projections + 2 attention products) + the head"
+    );
+
+    // ---- accuracy ---------------------------------------------------------
+    let fp32 = run_arm(
+        &*backend,
+        &import,
+        &model,
+        &tokens,
+        SessionOptions::default(),
+    );
+    backend.set_phase(ResidencyPhase::Prepare);
+    let packed = PackedSet::quantize(&backend, &model, HeadRoute::Packed, true).expect("pack");
+    println!(
+        "[fn3-24][trained] projections={} packed_payload_bytes={} packed_device_bytes={}",
+        packed.projections.len(),
+        packed.payload_bytes(),
+        packed.total_device_bytes()
+    );
+    let decorated = QuantBackend::new(&backend, &packed, true);
+    let quantized = run_arm(
+        &decorated,
+        &import,
+        &model,
+        &tokens,
+        SessionOptions::staged(),
+    );
+    let captured = decorated.captured();
+    let mut worst_reference = 0.0f32;
+    let mut worst_relative = 0.0f64;
+    let mut per_projection: BTreeMap<(String, u64), (f64, f32)> = BTreeMap::new();
+    for entry in &captured {
+        worst_reference = worst_reference.max(entry.reference_max_abs);
+        worst_relative = worst_relative.max(entry.fp32_relative_frobenius);
+        let key = (entry.name.clone(), entry.m);
+        let slot = per_projection.entry(key).or_insert((0.0, 0.0));
+        if entry.fp32_relative_frobenius >= slot.0 {
+            *slot = (entry.fp32_relative_frobenius, entry.fp32_max_abs);
+        }
+    }
+    println!("[fn3-24][accuracy] trained projection m fp32_relative_frobenius fp32_max_abs");
+    for ((name, m), (relative, maximum)) in &per_projection {
+        println!("[fn3-24][accuracy] trained {name} {m} {relative:.6e} {maximum:.3e}");
+    }
+    assert!(
+        worst_reference <= 1e-5,
+        "the kernel deviates from the format's reference arithmetic by {worst_reference:e}"
+    );
+    assert!(
+        worst_relative <= 0.0064,
+        "per-projection relative Frobenius {worst_relative:e} above the #68 bound 0.0064"
+    );
+    let (worst_kl, all_top1) = compare_quantized_arm("trained", &fp32, &quantized);
+    let stats = decorated.stats();
+    println!(
+        "[fn3-24][trained] quantized_calls={} captured={} worst_reference_max_abs={:.3e} \
          worst_relative_frobenius={:.6e} worst_kl={:.6e} top1_all_equal={}",
         stats.calls,
         captured.len(),
@@ -1656,11 +1849,11 @@ fn measure_arm(
         run(false, &mut a, &mut b, &mut c);
     }
     if let Some(decorated) = decorated {
-        decorated
+        // Count the measured iterations only: the warm-ups are not evidence.
+        *decorated
             .stats
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .calls = 0;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = QuantStats::default();
     }
     backend.residency().clear();
     let memory_before = backend.memory_stats();
