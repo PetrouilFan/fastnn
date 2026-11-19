@@ -282,6 +282,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.status_dir,
             )
         dist.mkdir(parents=True, exist_ok=True)
+        # A wheel left by an earlier run (possibly naming an older version)
+        # must not be installed or make the one-wheel check ambiguous.
+        for stale in dist.glob("fastnn-*.whl"):
+            stale.unlink()
         result = _run([maturin, "build", "--release", "--out", str(dist)], cwd=ROOT)
         if result.returncode != 0:
             return _fail(args.job, "maturin build failed", reproduce, checks, args.status_dir)
