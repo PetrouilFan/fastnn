@@ -131,7 +131,15 @@ fn lock_entry() -> (u64, String, String) {
 }
 
 fn requested_backends() -> Vec<&'static str> {
-    let raw = std::env::var("FN3_BENCH_BACKEND").unwrap_or_else(|_| "both".to_string());
+    // Without the `vulkan` feature the only buildable backend is the CPU, so
+    // `cargo test --test fn3_alpha_bench` is a complete run; an explicit
+    // `FN3_BENCH_BACKEND=vulkan` on such a build is an error, below.
+    let default = if cfg!(feature = "vulkan") {
+        "both"
+    } else {
+        "cpu"
+    };
+    let raw = std::env::var("FN3_BENCH_BACKEND").unwrap_or_else(|_| default.to_string());
     match raw.trim().to_ascii_lowercase().as_str() {
         "cpu" => vec!["cpu"],
         "vulkan" | "gpu" => vec!["vulkan"],
