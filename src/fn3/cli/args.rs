@@ -68,10 +68,10 @@ pub struct InspectArgs {
 /// Arguments shared by `run` and `generate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferArgs {
-    /// Prepared artifact.
+    /// Prepared artifact: graph, weights, geometry and envelope.
     pub model: PathBuf,
-    /// Source ONNX used by `prepare` for this artifact.
-    pub onnx: PathBuf,
+    /// Optional source ONNX, verified against the artifact when given.
+    pub onnx: Option<PathBuf>,
     /// Prompt token IDs: comma/whitespace separated, or `@file`.
     pub tokens: String,
     /// Device request string.
@@ -240,6 +240,7 @@ fn parse_inspect(args: &[String]) -> Result<Command, CliError> {
 fn parse_run(args: &[String]) -> Result<Command, CliError> {
     let mut model = None;
     let mut onnx = None;
+    let mut verify_source = false;
     let mut tokens = None;
     let mut decode = None;
     let mut device = None;
@@ -253,6 +254,10 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
             "--help" | "-h" => return Ok(Command::Help(HelpTopic::Run)),
             "--model" => set_path(&mut model, cursor.value(inline, flag)?, flag)?,
             "--onnx" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
+            "--verify-source" => {
+                no_inline(inline, flag)?;
+                verify_source = true;
+            }
             "--tokens" => set_string(&mut tokens, cursor.value(inline, flag)?, flag)?,
             "--decode" => set_string(&mut decode, cursor.value(inline, flag)?, flag)?,
             "--device" => set_device(&mut device, cursor.value(inline, flag)?, flag)?,
@@ -266,13 +271,24 @@ fn parse_run(args: &[String]) -> Result<Command, CliError> {
         }
     }
 
-    let infer = finish_infer("run", model, onnx, tokens, device, capacity, top_k, steps)?;
+    let infer = finish_infer(
+        "run",
+        model,
+        onnx,
+        verify_source,
+        tokens,
+        device,
+        capacity,
+        top_k,
+        steps,
+    )?;
     Ok(Command::Run(RunArgs { infer, decode }))
 }
 
 fn parse_generate(args: &[String]) -> Result<Command, CliError> {
     let mut model = None;
     let mut onnx = None;
+    let mut verify_source = false;
     let mut tokens = None;
     let mut device = None;
     let mut capacity = None;
@@ -286,6 +302,10 @@ fn parse_generate(args: &[String]) -> Result<Command, CliError> {
             "--help" | "-h" => return Ok(Command::Help(HelpTopic::Generate)),
             "--model" => set_path(&mut model, cursor.value(inline, flag)?, flag)?,
             "--onnx" => set_path(&mut onnx, cursor.value(inline, flag)?, flag)?,
+            "--verify-source" => {
+                no_inline(inline, flag)?;
+                verify_source = true;
+            }
             "--tokens" => set_string(&mut tokens, cursor.value(inline, flag)?, flag)?,
             "--device" => set_device(&mut device, cursor.value(inline, flag)?, flag)?,
             "--capacity" => set_u64(&mut capacity, cursor.value(inline, flag)?, flag)?,
@@ -300,7 +320,15 @@ fn parse_generate(args: &[String]) -> Result<Command, CliError> {
     }
 
     let infer = finish_infer(
-        "generate", model, onnx, tokens, device, capacity, top_k, steps,
+        "generate",
+        model,
+        onnx,
+        verify_source,
+        tokens,
+        device,
+        capacity,
+        top_k,
+        steps,
     )?;
     let max_new_tokens =
         max_new_tokens.ok_or_else(|| CliError::usage("`generate` needs `--max-new-tokens <n>`"))?;
@@ -318,6 +346,7 @@ fn finish_infer(
     command: &str,
     model: Option<PathBuf>,
     onnx: Option<PathBuf>,
+    verify_source: bool,
     tokens: Option<String>,
     device: Option<DeviceSpec>,
     capacity: Option<u64>,
@@ -331,9 +360,18 @@ fn finish_infer(
     if let Some(0) = capacity {
         return Err(CliError::usage("`--capacity` must be at least 1 token"));
     }
+    if verify_source && onnx.is_none() {
+        return Err(CliError::usage(
+            "`--verify-source` asks for a source check, but no source was given",
+        )
+        .with_next(
+            "pass the ONNX the artifact was prepared from with `--onnx <model.onnx>`, or drop \
+             `--verify-source` to run the artifact alone",
+        ));
+    }
     Ok(InferArgs {
         model: required_path(model, "--model", command)?,
-        onnx: required_path(onnx, "--onnx", command)?,
+        onnx,
         tokens: tokens.ok_or_else(|| {
             CliError::usage(format!(
                 "`{command}` needs `--tokens <id[,id...]>` (token IDs, not text)"
@@ -500,8 +538,11 @@ GLOBAL:
   -V, --version        print the tool version
 
 COMMON INFERENCE FLAGS:
-  --model <artifact>   prepared .fnn3 artifact (authoritative weights/geometry)
-  --onnx <model.onnx>  the ONNX the artifact was prepared from (planner input)
+  --model <artifact>   prepared .fnn3 artifact; carries graph, weights, geometry
+                       and envelope, so it runs with no ONNX file
+  --onnx <model.onnx>  optional: verify this source against the artifact before
+                       running (metadata, geometry and every weight byte)
+  --verify-source      state that source check explicitly (requires --onnx)
   --tokens <ids>       prompt token IDs, comma/whitespace separated, or @file
   --device <request>   auto | cpu | vulkan | vulkan:<index> | vulkan:<uuid>
   --capacity <n>       KV capacity in tokens (default: envelope total.max)
@@ -551,10 +592,13 @@ const HELP_RUN: &str = "\
 fn3-infer run — token-ID prefill and cached decode
 
 USAGE:
+  fn3-infer run --model <model.fnn3> --tokens <ids> [options]
   fn3-infer run --model <model.fnn3> --onnx <model.onnx> --tokens <ids> [options]
 
 OPTIONS:
   --decode <ids>    feed these token IDs one at a time after the prompt
+  --onnx <path>     verify this ONNX against the artifact before running
+                    (optional; the artifact alone carries everything that runs)
   --device ...      auto (default), cpu, vulkan, vulkan:<index>, vulkan:<uuid>
   --capacity <n>    KV capacity; must hold prompt + decoded tokens
   --top-k <n>       logits shown (default 5)
@@ -569,11 +613,15 @@ const HELP_GENERATE: &str = "\
 fn3-infer generate — greedy, deterministic generation
 
 USAGE:
+  fn3-infer generate --model <model.fnn3> --tokens <ids> \\
+      --max-new-tokens <n> [options]
   fn3-infer generate --model <model.fnn3> --onnx <model.onnx> --tokens <ids> \\
       --max-new-tokens <n> [options]
 
 OPTIONS:
   --max-new-tokens <n>  how many tokens to generate (at least 1)
+  --onnx <path>         verify this ONNX against the artifact before running
+                        (optional; the artifact alone carries everything that runs)
   --device ...          auto (default), cpu, vulkan, vulkan:<index>, vulkan:<uuid>
   --capacity <n>        KV capacity; must hold prompt + generated tokens
   --top-k <n>           logits shown (default 5)

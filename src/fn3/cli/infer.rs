@@ -1,17 +1,22 @@
 //! `run` and `generate`: token-ID inference on one explicit device.
 //!
-//! Both commands prepare a [`PreparedModel`] from the artifact and the ONNX the
-//! artifact was made from, open exactly the requested backend, run `prefill`,
-//! and then either feed explicit token IDs (`run --decode`) or pick the argmax
-//! greedily (`generate`). Decoding is deterministic: greedy argmax with ties
-//! broken by the lowest token ID, and no sampling path at all.
+//! Both commands prepare a [`PreparedModel`] from a `.fnn3` artifact alone: the
+//! file carries the graph, the weights, the geometry and the declared envelope,
+//! so a deployment never needs the ONNX it was prepared from. Passing `--onnx`
+//! (or `--verify-source`) additionally proves the artifact still matches that
+//! source before anything runs; it is a verification, not an input.
+//!
+//! The commands open exactly the requested backend, run `prefill`, and then
+//! either feed explicit token IDs (`run --decode`) or pick the argmax greedily
+//! (`generate`). Decoding is deterministic: greedy argmax with ties broken by
+//! the lowest token ID, and no sampling path at all.
 //!
 //! The bounds checks here are deliberate duplicates of the session's own: the
 //! CLI names the flag that fixes the problem before any step starts, instead of
 //! discovering it halfway through a prompt.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::fn3::import::{import_onnx_model, ModelImport};
@@ -24,16 +29,22 @@ use super::devices::OpenedBackend;
 use super::digest::sha256_hex;
 use super::{thousands, CliError};
 
+/// Where the graph a plan is built from came from.
+enum Source {
+    /// The artifact alone. This is the deployment path.
+    ArtifactOnly,
+    /// An ONNX that was verified against the artifact before any work.
+    Verified { path: PathBuf, sha256: String },
+}
+
 /// Everything a run needs, owned in one place. The session borrows `model`,
 /// `import` and the backend inside `backend`, so all three outlive it.
 struct Setup {
-    artifact: PreparedArtifact,
-    artifact_path: std::path::PathBuf,
+    artifact_path: PathBuf,
     artifact_bytes: u64,
     artifact_sha256: String,
     artifact_crc32: u32,
-    onnx_path: std::path::PathBuf,
-    onnx_sha256: String,
+    source: Source,
     import: ModelImport,
     backend: OpenedBackend,
     model: PreparedModel,
@@ -46,7 +57,7 @@ struct Setup {
 pub fn execute_run(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> {
     let setup = build_setup(&args.infer)?;
     let decode = match args.decode.as_deref() {
-        Some(spec) => parse_tokens(spec, setup.artifact.geometry().vocab_size)?,
+        Some(spec) => parse_tokens(spec, setup.import.geometry().vocab_size)?,
         None => Vec::new(),
     };
     check_sequence(&setup, decode.len() as u64, "decode tokens")?;
@@ -56,13 +67,13 @@ pub fn execute_run(args: &RunArgs, out: &mut dyn Write) -> Result<(), CliError> 
     print_counters(&setup, &session, args.infer.steps, out);
 
     let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
-    let mut summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+    let mut summary = summarize(&logits, setup.import.geometry().vocab_size)?;
     print_logits(&summary, &logits, args.infer.top_k, out);
 
     for (index, &token) in decode.iter().enumerate() {
         let step = index + 1;
         logits = decode_one(&mut session, token, step, &args.infer, out)?;
-        summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+        summary = summarize(&logits, setup.import.geometry().vocab_size)?;
         print_logits(&summary, &logits, args.infer.top_k, out);
     }
 
@@ -84,7 +95,7 @@ pub fn execute_generate(args: &GenerateArgs, out: &mut dyn Write) -> Result<(), 
     print_counters(&setup, &session, args.infer.steps, out);
 
     let mut logits = prefill(&setup, &mut session, &args.infer, out)?;
-    let mut summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+    let mut summary = summarize(&logits, setup.import.geometry().vocab_size)?;
     print_logits(&summary, &logits, args.infer.top_k, out);
 
     let mut generated = Vec::with_capacity(args.max_new_tokens as usize);
@@ -92,7 +103,7 @@ pub fn execute_generate(args: &GenerateArgs, out: &mut dyn Write) -> Result<(), 
         let token = summary.argmax as u32;
         generated.push(token);
         logits = decode_one(&mut session, token, step as usize, &args.infer, out)?;
-        summary = summarize(&logits, setup.artifact.geometry().vocab_size)?;
+        summary = summarize(&logits, setup.import.geometry().vocab_size)?;
     }
 
     let _ = writeln!(
@@ -118,10 +129,26 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
     let backend = OpenedBackend::open(&args.device)?;
 
     let (artifact, artifact_sha256, artifact_crc32, artifact_bytes) = read_artifact(&args.model)?;
-    let (import, onnx_sha256) = read_import(&args.onnx)?;
-    verify_pair(&artifact, &import, &args.model, &args.onnx)?;
-
     let envelope = artifact.envelope();
+
+    // The artifact is the input. `--onnx` only adds a source check: when it is
+    // given, the import that runs is the verified one, exactly as before; when
+    // it is absent, the artifact's own graph and weights are what run.
+    let (import, source) = match args.onnx.as_deref() {
+        Some(onnx_path) => {
+            let (import, sha256) = read_import(onnx_path)?;
+            verify_pair(&artifact, &import, &args.model, onnx_path)?;
+            (
+                import,
+                Source::Verified {
+                    path: onnx_path.to_path_buf(),
+                    sha256,
+                },
+            )
+        }
+        None => (artifact.into_model_import(), Source::ArtifactOnly),
+    };
+
     let capacity = args
         .capacity
         .unwrap_or_else(|| envelope.get(Symbol::Total).max());
@@ -136,7 +163,7 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
         ));
     }
 
-    let prompt = parse_tokens(&args.tokens, artifact.geometry().vocab_size)?;
+    let prompt = parse_tokens(&args.tokens, import.geometry().vocab_size)?;
     if prompt.is_empty() {
         return Err(CliError::usage(
             "`--tokens` needs at least one token ID; an empty prompt cannot be prefilled",
@@ -169,7 +196,7 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
         )));
     }
 
-    let geometry = artifact.geometry();
+    let geometry = import.geometry();
     let heads = u64::from(geometry.query_heads);
     let kv_heads = u64::from(geometry.kv_heads);
     let head_dim = u64::from(geometry.head_dim);
@@ -200,13 +227,11 @@ fn build_setup(args: &InferArgs) -> Result<Setup, CliError> {
     .map_err(|error| failure("PreparedModel::new", error, backend.device))?;
 
     Ok(Setup {
-        artifact,
         artifact_path: args.model.clone(),
         artifact_bytes,
         artifact_sha256,
         artifact_crc32,
-        onnx_path: args.onnx.clone(),
-        onnx_sha256,
+        source,
         import,
         backend,
         model,
@@ -256,8 +281,8 @@ fn read_import(path: &Path) -> Result<(ModelImport, String), CliError> {
             path.display()
         ))
         .with_next(
-            "the alpha planner consumes the importer's ModelImport; pass the same ONNX file the \
-             artifact was prepared from with `--onnx <model.onnx>`",
+            "`--onnx` is the optional source check; drop it to run the artifact alone, or pass the \
+             same ONNX file the artifact was prepared from",
         )
     })?;
     let sha256 = sha256_hex(&bytes);
@@ -323,7 +348,7 @@ fn mismatch(artifact: &Path, onnx: &Path, what: &str) -> CliError {
     ))
     .with_next(
         "pass the exact ONNX the artifact was prepared from, or re-run `fn3-infer prepare` with \
-         this ONNX",
+         this ONNX; without `--onnx` the artifact runs on its own",
     )
 }
 
@@ -735,7 +760,7 @@ fn print_logits(summary: &Summary, logits: &Tensor, top_k: usize, out: &mut dyn 
 }
 
 fn print_header(setup: &Setup, out: &mut dyn Write) {
-    let geometry = setup.artifact.geometry();
+    let geometry = setup.import.geometry();
     let envelope = setup.envelope;
     let _ = writeln!(out, "fn3-infer inference");
     let _ = writeln!(out, "  artifact: {}", setup.artifact_path.display());
@@ -746,13 +771,26 @@ fn print_header(setup: &Setup, out: &mut dyn Write) {
         setup.artifact_sha256
     );
     let _ = writeln!(out, "    payload crc32: {:#010x}", setup.artifact_crc32);
-    let _ = writeln!(
-        out,
-        "  onnx: {} (sha256 {}, verified: metadata, geometry and {} weight payloads match)",
-        setup.onnx_path.display(),
-        setup.onnx_sha256,
-        setup.artifact.weights().len()
-    );
+    match &setup.source {
+        Source::ArtifactOnly => {
+            let _ = writeln!(
+                out,
+                "  source: none (artifact-only: the artifact carries the graph, {} weight \
+                 payloads, the geometry and the envelope)",
+                setup.import.weights().len()
+            );
+        }
+        Source::Verified { path, sha256 } => {
+            let _ = writeln!(
+                out,
+                "  source: {} (sha256 {}, verified against the artifact: metadata, geometry and \
+                 {} weight payloads match)",
+                path.display(),
+                sha256,
+                setup.import.weights().len()
+            );
+        }
+    }
     let _ = writeln!(
         out,
         "  device: requested {}, resolved {}, backend {} ({})",
