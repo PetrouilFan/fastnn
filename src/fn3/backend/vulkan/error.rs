@@ -46,6 +46,20 @@ pub enum Error {
         /// Device name and any policy context.
         detail: String,
     },
+    /// The device is no longer usable: it was lost, a submission's completion
+    /// is unknown, or the driver failed a fence operation.
+    ///
+    /// This is the **terminal** platform error. Unlike [`Error::Vk`], it is
+    /// remembered by [`super::device::Device`], so every later operation on the
+    /// same device returns the same failure instead of reusing a fence or a
+    /// command buffer whose state is unknown. A caller must drop the backend
+    /// and open a new device; there is no in-place recovery.
+    Lost {
+        /// Adapter name and UUID, so the message names the device.
+        device: String,
+        /// Which call failed and the driver's report.
+        detail: String,
+    },
     /// A kernel declaration did not match its SPIR-V or the device limits.
     Registration {
         /// Declared kernel name.
@@ -95,14 +109,23 @@ impl Error {
         }
     }
 
+    /// A terminal device failure for `device` (adapter name and UUID).
+    pub fn lost(device: impl Into<String>, detail: impl Into<String>) -> Self {
+        Error::Lost {
+            device: device.into(),
+            detail: detail.into(),
+        }
+    }
+
     /// `true` when the GPU was lost and the device cannot be used again.
     pub fn is_device_lost(&self) -> bool {
         matches!(
             self,
-            Error::Vk {
-                code: vk::Result::ERROR_DEVICE_LOST,
-                ..
-            }
+            Error::Lost { .. }
+                | Error::Vk {
+                    code: vk::Result::ERROR_DEVICE_LOST,
+                    ..
+                }
         )
     }
 
@@ -135,7 +158,8 @@ impl Error {
             Error::Vk {
                 code: vk::Result::ERROR_DEVICE_LOST,
                 ..
-            } => Some(
+            }
+            | Error::Lost { .. } => Some(
                 "the GPU was lost (driver reset or hang); the device is poisoned and must be \
                  recreated. Check `dmesg` for the driver's report",
             ),
@@ -253,6 +277,16 @@ impl Error {
                 &crate::fn3::device::available_devices(),
                 format!("the device was lost and is unusable: {detail}"),
             )),
+            Error::Lost { device, detail } => {
+                Fn3Error::DeviceUnavailable(crate::fn3::device::DeviceResolveError::new(
+                    "the Vulkan device",
+                    &crate::fn3::device::available_devices(),
+                    format!(
+                        "adapter \"{device}\" is no longer usable: {detail}. The device is \
+                         poisoned; drop the backend and open a new one"
+                    ),
+                ))
+            }
             Error::Vk { call, code, detail } => Fn3Error::InvalidShape {
                 context: "vulkan runtime",
                 detail: format!("{call} failed: {code:?} ({}): {detail}", code.as_raw()),
@@ -300,6 +334,9 @@ impl fmt::Display for Error {
                 f,
                 "{what} of {requested} bytes exceeds the limit of {limit} bytes: {detail}"
             ),
+            Error::Lost { device, detail } => {
+                write!(f, "device {device} is no longer usable: {detail}")
+            }
             Error::Registration { kernel, detail } => {
                 write!(f, "kernel {kernel} registration failed: {detail}")
             }
@@ -341,6 +378,27 @@ mod tests {
         assert!(text.contains("ERROR_OUT_OF_DEVICE_MEMORY"), "{text}");
         assert!(text.contains("8 GiB"), "{text}");
         assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn a_lost_device_is_terminal_and_names_the_adapter() {
+        let error = Error::lost(
+            "NVIDIA GeForce GTX 1080 Ti (471b2bda-51e1-6451-e692-ff5d1e146f1e)",
+            "vkQueueSubmit: simulated loss",
+        );
+        assert!(error.is_device_lost(), "Lost is a terminal device failure");
+        let text = error.to_string();
+        assert!(text.contains("NVIDIA GeForce GTX 1080 Ti"), "{text}");
+        assert!(text.contains("vkQueueSubmit"), "{text}");
+        let converted = error.to_fn3();
+        assert!(
+            matches!(converted, Fn3Error::DeviceUnavailable(_)),
+            "{converted:?}"
+        );
+        let text = converted.to_string();
+        assert!(text.contains("NVIDIA GeForce GTX 1080 Ti"), "{text}");
+        assert!(text.contains("no longer usable"), "{text}");
+        assert!(text.contains("available devices:"), "{text}");
     }
 
     #[test]

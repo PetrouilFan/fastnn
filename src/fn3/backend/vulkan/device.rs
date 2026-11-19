@@ -86,7 +86,22 @@ pub struct Device {
     device_id: DeviceId,
     next_buffer_id: AtomicU64,
     fence_timeout_ns: u64,
+    /// The first terminal failure, if the device became unusable. Every later
+    /// operation returns it instead of touching a fence or command buffer whose
+    /// state is unknown.
+    fatal: Mutex<Option<DeviceFault>>,
+    /// Deterministic fault injection (FN3-27), compiled out unless the
+    /// `vulkan-fault-injection` feature is on.
+    #[cfg(feature = "vulkan-fault-injection")]
+    faults: super::fault::FaultInjector,
     destroyed: bool,
+}
+
+/// Why the device is terminal, kept for every later call.
+#[derive(Debug, Clone)]
+struct DeviceFault {
+    call: &'static str,
+    detail: String,
 }
 
 impl Device {
@@ -212,8 +227,71 @@ impl Device {
             device_id: DeviceId::Vulkan(PhysicalDeviceId::new(adapter_index)),
             next_buffer_id: AtomicU64::new(1),
             fence_timeout_ns: config.fence_timeout_ns,
+            fatal: Mutex::new(None),
+            #[cfg(feature = "vulkan-fault-injection")]
+            faults: super::fault::FaultInjector::new(),
             destroyed: false,
         }))
+    }
+
+    /// The injection seam for the FN3-27 failure matrix.
+    #[cfg(feature = "vulkan-fault-injection")]
+    pub fn faults(&self) -> &super::fault::FaultInjector {
+        &self.faults
+    }
+
+    /// `true` when the device is terminal and must be recreated.
+    pub fn is_lost(&self) -> bool {
+        self.fatal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// Remember the first terminal failure; later ones never overwrite it.
+    pub(crate) fn poison(&self, call: &'static str, detail: impl Into<String>) {
+        let mut fatal = self
+            .fatal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if fatal.is_none() {
+            *fatal = Some(DeviceFault {
+                call,
+                detail: detail.into(),
+            });
+        }
+    }
+
+    /// The typed terminal error, naming the adapter and the failing call.
+    pub fn terminal_error(&self) -> Option<Error> {
+        self.fatal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|fault| {
+                Error::lost(
+                    format!("{} ({})", self.adapter.name, self.adapter.uuid_string()),
+                    format!("{}: {}", fault.call, fault.detail),
+                )
+            })
+    }
+
+    /// Refuse to touch a device that is already terminal.
+    pub(crate) fn ensure_usable(&self) -> Result<()> {
+        match self.terminal_error() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Build the terminal error for a failure happening right now.
+    fn lost_now(&self, call: &'static str, detail: impl Into<String>) -> Error {
+        let detail = detail.into();
+        self.poison(call, detail.clone());
+        Error::lost(
+            format!("{} ({})", self.adapter.name, self.adapter.uuid_string()),
+            format!("{call}: {detail}"),
+        )
     }
 
     /// The instance this device belongs to.
@@ -263,6 +341,7 @@ impl Device {
 
     /// Allocate a device buffer and bind it to a suballocated range.
     pub fn create_buffer(self: &Arc<Self>, desc: &BufferDesc) -> Result<Buffer> {
+        self.ensure_usable()?;
         Buffer::new(self, desc)
     }
 
@@ -287,6 +366,18 @@ impl Device {
     /// Submit to the compute queue with the queue-level external
     /// synchronisation Vulkan requires.
     pub(crate) fn submit(&self, submits: &[vk::SubmitInfo<'_>], fence: vk::Fence) -> Result<()> {
+        self.ensure_usable()?;
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self.faults.take(super::fault::FaultPoint::Submit) {
+            // Nothing was submitted: the command buffer stays executable and
+            // the fence stays unsignalled, so the failure is clean at the
+            // driver boundary. It is still terminal because the matrix models
+            // a device lost at submit, which is not recoverable in place.
+            return Err(self.lost_now(
+                "vkQueueSubmit",
+                "injected device loss at submit (FN3-27; no command buffer was submitted)",
+            ));
+        }
         let _guard = self
             .queue_lock
             .lock()
@@ -297,11 +388,20 @@ impl Device {
         // owned by the caller's per-thread submitter; the fence belongs to the
         // same submission; the queue was created for this device and is
         // externally synchronised by `queue_lock`.
-        check(
+        let result = check(
             "vkQueueSubmit",
             unsafe { self.ash.queue_submit(self.queue, submits, fence) },
             "submitting a recorded command buffer",
-        )
+        );
+        match &result {
+            Err(error) if error.is_device_lost() => {
+                // Report the terminal form immediately, naming the adapter, and
+                // remember it so every later call returns the same failure.
+                let detail = error.to_string();
+                Err(self.lost_now("vkQueueSubmit", detail))
+            }
+            _ => result,
+        }
     }
 
     /// Wait for a fence. A timeout is a hang detector, not the normal path.
@@ -316,26 +416,54 @@ impl Device {
     }
 
     pub(crate) fn wait_fence(&self, fence: vk::Fence) -> Result<()> {
+        self.ensure_usable()?;
         // SAFETY: the fence was created by this device and submitted above; the
         // wait is for that exact fence.
-        check(
+        let waited = check(
             "vkWaitForFences",
             unsafe {
                 self.ash
                     .wait_for_fences(&[fence], true, self.fence_timeout_ns)
             },
             "waiting for a submitted command buffer to complete",
-        )
+        );
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self.faults.take(super::fault::FaultPoint::Fence) {
+            // The real wait above completed, so no work is still in flight.
+            // The matrix models a device lost while the fence was being
+            // observed: the outcome the caller would see is the same, and the
+            // device is terminal.
+            return Err(self.lost_now(
+                "vkWaitForFences",
+                "injected device loss at the fence wait (FN3-27; the submission had completed)",
+            ));
+        }
+        if let Err(error) = waited {
+            // A fence that cannot be waited on (device lost, timeout or a
+            // driver error) leaves the completion of the submission unknown.
+            // Reusing the command buffer or the fence would be undefined, so
+            // the device is terminal from here on.
+            return Err(self.lost_now("vkWaitForFences", error.to_string()));
+        }
+        Ok(())
     }
 
     pub(crate) fn reset_fence(&self, fence: vk::Fence) -> Result<()> {
+        self.ensure_usable()?;
         // SAFETY: the fence's submission completed (the caller waited), so it
         // is unsignalled-reset while no work is in flight.
-        check(
+        let result = check(
             "vkResetFences",
             unsafe { self.ash.reset_fences(&[fence]) },
             "reusing a submission fence after its wait",
-        )
+        );
+        if let Err(error) = &result {
+            // The fence's signal state is now unknown; the submitter cannot be
+            // reused. Report the terminal form immediately.
+            let detail = error.to_string();
+            return Err(self.lost_now("vkResetFences", detail));
+        }
+        result
     }
 
     pub(crate) fn allocate_range(
@@ -345,6 +473,21 @@ impl Device {
         min_alignment: u64,
         what: &str,
     ) -> Result<MemoryAllocation> {
+        self.ensure_usable()?;
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self.faults.take(super::fault::FaultPoint::Allocation) {
+            // The failure is reported at the same seam as a real
+            // `vkAllocateMemory` failure, before any range is handed out, so
+            // `Buffer::new` destroys the `VkBuffer` it had just created.
+            return Err(Error::vk(
+                "vkAllocateMemory",
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+                format!(
+                    "{what}: injected allocation failure (FN3-27) for {} bytes on \"{}\"",
+                    requirements.size, self.adapter.name
+                ),
+            ));
+        }
         self.lock_memory()
             .allocate(&self.ash, requirements, class, min_alignment, what)
     }

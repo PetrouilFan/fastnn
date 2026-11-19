@@ -128,6 +128,10 @@ struct BatchState {
     dispatches: u32,
     copies: u32,
     copied_bytes: u64,
+    /// A recording failed after this batch opened. The command buffer may hold
+    /// a partial plan, so it must be discarded without submitting rather than
+    /// closed and executed.
+    failed: bool,
     /// Staging blocks whose host bytes the recorded copies still reference.
     retained: Vec<Arc<super::context::Buffer>>,
 }
@@ -324,6 +328,7 @@ impl Submitter {
     /// Begin a step batch: reset and open one command buffer for every
     /// dispatch until [`Submitter::end_batch`].
     pub fn begin_batch(&mut self) -> Result<u64> {
+        self.device.ensure_usable()?;
         if self.in_flight {
             return Err(Error::internal(
                 "Submitter::begin_batch while its previous submission is in flight",
@@ -394,13 +399,37 @@ impl Submitter {
         let Some(batch) = self.batch.take() else {
             return Ok(BatchReport::default());
         };
+        if batch.failed {
+            // One `record` failed after this batch opened. The command buffer
+            // holds a prefix of the plan; submitting it would execute a step
+            // the caller was told had failed. Discard the recording instead
+            // (Vulkan allows resetting a recording command buffer that is not
+            // pending) and report that nothing was submitted. The retained
+            // staging blocks are released with `batch`.
+            self.device.ensure_usable()?;
+            check(
+                "vkResetCommandBuffer",
+                unsafe {
+                    self.device
+                        .ash()
+                        .reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())
+                },
+                "discarding a failed step batch instead of submitting a partial plan",
+            )?;
+            return Ok(BatchReport::default());
+        }
         // SAFETY: recording was begun on this buffer and no other thread uses
         // it.
-        check(
+        let ended = check(
             "vkEndCommandBuffer",
             unsafe { self.device.ash().end_command_buffer(self.cmd) },
             "finishing a step batch",
-        )?;
+        );
+        if let Err(error) = ended {
+            // The command buffer is in an unknown state; do not reuse it.
+            self.device.poison("vkEndCommandBuffer", error.to_string());
+            return Err(error);
+        }
         let command_buffers = [self.cmd];
         let submit = vk::SubmitInfo::default().command_buffers(&command_buffers);
         self.device.submit(&[submit], self.fence)?;
@@ -480,6 +509,7 @@ impl Submitter {
     where
         F: FnOnce(&mut Recorder) -> Result<()>,
     {
+        self.device.ensure_usable()?;
         if self.batch.is_some() {
             return self.record_batched(record);
         }
@@ -550,7 +580,23 @@ impl Submitter {
             copies: 0,
             copied_bytes: 0,
         };
-        record(&mut recorder)?;
+        if let Err(error) = record(&mut recorder) {
+            // Leave the command buffer reusable: the caller was told nothing
+            // was submitted, and the next `record` resets it anyway.
+            if let Err(reset) = check(
+                "vkResetCommandBuffer",
+                unsafe {
+                    self.device
+                        .ash()
+                        .reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())
+                },
+                "discarding a failed command recording",
+            ) {
+                self.device
+                    .poison("vkResetCommandBuffer", reset.to_string());
+            }
+            return Err(error);
+        }
 
         if let Some(query_pool) = self.query_pool {
             // SAFETY: same buffer, still recording; BOTTOM_OF_PIPE means "after
@@ -629,7 +675,14 @@ impl Submitter {
             copies: 0,
             copied_bytes: 0,
         };
-        record(&mut recorder)?;
+        if let Err(error) = record(&mut recorder) {
+            // Mark the batch so `end_step` discards it instead of submitting
+            // the prefix recorded so far.
+            if let Some(batch) = self.batch.as_mut() {
+                batch.failed = true;
+            }
+            return Err(error);
+        }
         if let Some(query_pool) = query_pool {
             // SAFETY: same buffer, still recording; the pair is unused.
             unsafe {
@@ -950,6 +1003,15 @@ impl Recorder {
     /// Allocate a transient descriptor set, write every declared binding, bind
     /// the pipeline and push constants, and dispatch.
     pub fn dispatch(&mut self, invocation: &KernelInvocation<'_>) -> Result<DispatchInfo> {
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self.device.faults().take(super::fault::FaultPoint::Record) {
+            // Fail inside the recording closure, exactly where a rejected
+            // binding or a descriptor-pool exhaustion would: the batch has a
+            // partial plan and must be discarded, not submitted.
+            return Err(Error::internal(
+                "injected recording failure (FN3-27): the step batch is partial",
+            ));
+        }
         let kernel = invocation.kernel;
         let spec = kernel.spec();
         let limits = self.device.limits();

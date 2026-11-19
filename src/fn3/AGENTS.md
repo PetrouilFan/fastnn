@@ -71,6 +71,22 @@ authority is `docs/roadmap/fn3-architecture.md`.
   returns a typed error instead of reading stale bytes. The staged path does
   not batch. `VulkanBackend::queue_submissions` is the authoritative
   `vkQueueSubmit` counter.
+- A failure while recording a step batch marks it partial; `end_step` discards
+  it without submitting a prefix of the plan. A failed step releases its value
+  slots and leaves the KV extent, `step`, `tokens_consumed`, phase and plan
+  cache unchanged. The multi-layer KV commit rolls every layer back to its
+  pre-step extent if a device copy fails partway; bytes past the live extent
+  are unobservable, so a retry cannot double-append.
+- A device-level failure (device lost at submit, or a fence whose completion
+  is unknown) is **terminal**: the platform device is poisoned and every later
+  operation returns `Fn3Error::DeviceUnavailable` naming the adapter.
+  `Session::recover` returns that error and never retries. Every other step
+  failure is recoverable in place; `Session::recover` is the explicit
+  acknowledgement (it drops the pooled outputs and returns `Ok`).
+- `vulkan-fault-injection` is a non-default, test-only feature. It adds one
+  `take()` check at the allocation, submit, fence, readback, recording and
+  resident-copy seams and is compiled out of every shipped configuration. Its
+  output is injected evidence, never physical-device evidence.
 - Immutable model data is uploaded once (`Backend::prepare_persistent`) and
   bound by handle afterwards. A prepared tensor that reaches a host upload is a
   hard error (`VulkanBackend::check_staged_input`), never a silent re-upload.
