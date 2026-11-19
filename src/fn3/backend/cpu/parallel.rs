@@ -100,6 +100,10 @@ impl ThreadBudget {
     }
 
     /// The effective thread count this budget resolves to on this host.
+    ///
+    /// `Auto` is the visible CPU count; `Fixed` is the request clamped to it.
+    /// The narrowing an `Auto` runtime may apply after observing a serial decode
+    /// is [`super::CpuBackend::threads`]'s business, not the budget's.
     pub fn threads(self) -> usize {
         match self {
             ThreadBudget::Auto => process_budget(),
@@ -256,6 +260,41 @@ where
         for (index, part) in slices.into_iter().enumerate() {
             body(index, part);
         }
+    }
+}
+
+/// Run `body` once per `0..tasks` index, in parallel up to `threads`, and
+/// collect the results in index order.
+///
+/// Used by the output-column tiling, where each task owns a scratch buffer and
+/// the parent scatters the bands afterwards: no two tasks ever write the same
+/// element, and no `unsafe` is involved.
+pub fn par_map<R, F>(threads: usize, tasks: usize, body: F) -> Vec<R>
+where
+    R: Send,
+    F: Fn(usize) -> R + Sync + Send,
+{
+    if threads <= 1 || tasks <= 1 || in_worker() {
+        SERIAL_OPS.fetch_add(1, Ordering::Relaxed);
+        return (0..tasks).map(body).collect();
+    }
+    PARALLEL_OPS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..tasks)
+            .into_par_iter()
+            .map(|index| {
+                enter();
+                let result = body(index);
+                leave();
+                result
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..tasks).map(body).collect()
     }
 }
 

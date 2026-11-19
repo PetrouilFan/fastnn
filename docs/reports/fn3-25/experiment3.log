@@ -1,0 +1,124 @@
+DecodeSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"p50_ms":8.1763,"p95_ms":16.1235}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.1959,"geometry":"concat [1, 2, 11, 64] [1, 2, 1, 64] -> [1, 2, 12, 64]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":1.8521,"geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0420,"geometry":"matmul [1, 128] [128, 384] -> [1, 384]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0483,"geometry":"matmul [1, 128] [128, 512] -> [1, 512]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0498,"geometry":"matmul [1, 512] [512, 128] -> [1, 128]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0208,"geometry":"split [1, 1, 384] [3] -> [3 outputs]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":5.4934,"geometry":"transpose [50257, 128] -> [128, 50257]"}
+DIST {"series":"decode_step_total_b1","n":12,"p50_ms":8.1741,"p95_ms":13.4401,"min_ms":7.1481,"max_ms":13.4401,"mean_ms":8.8950,"raw":[7.1481,7.2690,7.4017,7.5763,7.9754,8.1741,8.3302,8.5397,8.6753,10.0307,12.1793,13.4401]}
+DecodeStep {"variant":"exp","model":"tiny-gpt2","budget":1,"steps":12,"p50_ms":8.1741,"p95_ms":13.4401}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":5.4468,"geometry":"transpose [50257, 128] -> [128, 50257]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":1.7946,"geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.1786,"geometry":"concat [1, 2, 10, 64] [1, 2, 1, 64] -> [1, 2, 11, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0486,"geometry":"matmul [1, 512] [512, 128] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0462,"geometry":"matmul [1, 128] [128, 512] -> [1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0350,"geometry":"matmul [1, 128] [128, 384] -> [1, 384]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0254,"geometry":"reduce_mean [1, 1, 128] -> [1, 1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0244,"geometry":"transpose [1, 1, 2, 64] -> [1, 2, 1, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0207,"geometry":"split [1, 1, 384] [3] -> [3 outputs]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0190,"geometry":"add [1, 512] [512] -> [1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0141,"geometry":"add [1, 384] [384] -> [1, 384]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0121,"geometry":"matmul [1, 128] [128, 128] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0114,"geometry":"add [1, 128] [128] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0106,"geometry":"pow [1, 1, 512] [] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0084,"geometry":"pow [1, 1, 128] [] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0082,"geometry":"gather [50257, 128] [1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0080,"geometry":"transpose [1, 2, 1, 64] -> [1, 1, 2, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0065,"geometry":"gather [1024, 128] [1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0058,"geometry":"tanh [1, 1, 512] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0033,"geometry":"slice [1, 1, 1, 11] [1] [1] [1] [1] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0030,"geometry":"add [1, 1, 128] [1, 1, 128] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0026,"geometry":"transpose [1, 2, 11, 64] -> [1, 2, 64, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0026,"geometry":"reshape [1, 1, 128] [2] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0026,"geometry":"cast [1, 1, 1, 11] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0026,"geometry":"mul [1, 1, 512] [] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0026,"geometry":"softmax [1, 2, 1, 11] -> [1, 2, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0024,"geometry":"unsqueeze [1, 11] [2] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0022,"geometry":"where [1, 1, 1, 11] [] [1, 1, 1, 11] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0022,"geometry":"matmul [1, 2, 1, 64] [1, 2, 64, 11] -> [1, 2, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0019,"geometry":"add [1, 2, 1, 11] [1, 1, 1, 11] -> [1, 2, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0019,"geometry":"reshape [1, 1, 128] [4] -> [1, 1, 2, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0019,"geometry":"sub [1, 1, 128] [1, 1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0019,"geometry":"div [1, 1, 128] [1, 1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0019,"geometry":"expand [1, 1, 1, 11] [4] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0014,"geometry":"sqrt [1, 1, 1] -> [1, 1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0012,"geometry":"add [1, 1, 1] [] -> [1, 1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0012,"geometry":"mul [1, 2, 64, 11] [1] -> [1, 2, 64, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0011,"geometry":"matmul [1, 2, 1, 11] [1, 2, 11, 64] -> [1, 2, 1, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0011,"geometry":"mul [1, 2, 1, 64] [1] -> [1, 2, 1, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0011,"geometry":"concat [1, 10] [1, 1] -> [1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0011,"geometry":"reshape [1, 128] [3] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0009,"geometry":"reshape [1, 1, 512] [2] -> [1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0009,"geometry":"reshape [1, 1, 2, 64] [3] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0008,"geometry":"add [1, 1, 512] [] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0008,"geometry":"constant_of_shape [2] [1] -> [1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0008,"geometry":"mul [1, 1, 512] [1, 1, 512] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0008,"geometry":"reshape [1, 512] [3] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0007,"geometry":"reshape [1, 384] [3] -> [1, 1, 384]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0007,"geometry":"add [1, 1, 512] [1, 1, 512] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0006,"geometry":"sub [] [1, 1, 1, 11] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0006,"geometry":"where [1, 1] [] [1, 1] -> [1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":1,"op_p50_ms":0.0003,"geometry":"constant_of_shape [2] [1] -> [1, 10]"}
+DIST {"series":"decode_warm_pool_b16","n":12,"p50_ms":7.3381,"p95_ms":8.7863,"min_ms":7.1444,"max_ms":8.7863,"mean_ms":7.6387,"raw":[7.1444,7.2707,7.2949,7.2963,7.3066,7.3381,7.6070,7.7805,7.8721,7.9526,8.0144,8.7863]}
+DecodeSecond {"variant":"exp","model":"tiny-gpt2","budget":16,"p50_ms":7.3381,"p95_ms":8.7863}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.1944,"geometry":"concat [1, 2, 11, 64] [1, 2, 1, 64] -> [1, 2, 12, 64]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":1.8247,"geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0420,"geometry":"matmul [1, 128] [128, 512] -> [1, 512]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0414,"geometry":"matmul [1, 512] [512, 128] -> [1, 128]"}
+DecodeOpSecond {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":4.6863,"geometry":"transpose [50257, 128] -> [128, 50257]"}
+DIST {"series":"decode_step_total_b16","n":12,"p50_ms":8.0142,"p95_ms":11.6832,"min_ms":7.4042,"max_ms":11.6832,"mean_ms":8.3689,"raw":[7.4042,7.4761,7.7612,7.8964,7.9409,8.0142,8.0484,8.1319,8.4451,8.6785,8.9463,11.6832]}
+DecodeStep {"variant":"exp","model":"tiny-gpt2","budget":16,"steps":12,"p50_ms":8.0142,"p95_ms":11.6832}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":5.2771,"geometry":"transpose [50257, 128] -> [128, 50257]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":1.8009,"geometry":"matmul [1, 1, 128] [128, 50257] -> [1, 1, 50257]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.1783,"geometry":"concat [1, 2, 10, 64] [1, 2, 1, 64] -> [1, 2, 11, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0418,"geometry":"matmul [1, 128] [128, 512] -> [1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0403,"geometry":"matmul [1, 512] [512, 128] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0320,"geometry":"matmul [1, 128] [128, 384] -> [1, 384]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0241,"geometry":"transpose [1, 1, 2, 64] -> [1, 2, 1, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0234,"geometry":"reduce_mean [1, 1, 128] -> [1, 1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0206,"geometry":"split [1, 1, 384] [3] -> [3 outputs]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0186,"geometry":"add [1, 512] [512] -> [1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0140,"geometry":"add [1, 384] [384] -> [1, 384]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0103,"geometry":"matmul [1, 128] [128, 128] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0100,"geometry":"add [1, 128] [128] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0093,"geometry":"pow [1, 1, 512] [] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0079,"geometry":"pow [1, 1, 128] [] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0079,"geometry":"transpose [1, 2, 1, 64] -> [1, 1, 2, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0070,"geometry":"gather [50257, 128] [1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0066,"geometry":"gather [1024, 128] [1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0056,"geometry":"tanh [1, 1, 512] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0031,"geometry":"slice [1, 1, 1, 11] [1] [1] [1] [1] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0026,"geometry":"transpose [1, 2, 11, 64] -> [1, 2, 64, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0026,"geometry":"mul [1, 1, 512] [] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0025,"geometry":"softmax [1, 2, 1, 11] -> [1, 2, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0024,"geometry":"cast [1, 1, 1, 11] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0024,"geometry":"add [1, 1, 128] [1, 1, 128] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0023,"geometry":"reshape [1, 1, 128] [2] -> [1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0022,"geometry":"where [1, 1, 1, 11] [] [1, 1, 1, 11] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0021,"geometry":"unsqueeze [1, 11] [2] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0020,"geometry":"matmul [1, 2, 1, 64] [1, 2, 64, 11] -> [1, 2, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0019,"geometry":"expand [1, 1, 1, 11] [4] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0018,"geometry":"sub [1, 1, 128] [1, 1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0018,"geometry":"add [1, 2, 1, 11] [1, 1, 1, 11] -> [1, 2, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0016,"geometry":"reshape [1, 1, 128] [4] -> [1, 1, 2, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0016,"geometry":"div [1, 1, 128] [1, 1, 1] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0011,"geometry":"matmul [1, 2, 1, 11] [1, 2, 11, 64] -> [1, 2, 1, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0011,"geometry":"sqrt [1, 1, 1] -> [1, 1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0011,"geometry":"add [1, 1, 1] [] -> [1, 1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0010,"geometry":"mul [1, 2, 1, 64] [1] -> [1, 2, 1, 64]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0010,"geometry":"mul [1, 2, 64, 11] [1] -> [1, 2, 64, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0009,"geometry":"reshape [1, 128] [3] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0009,"geometry":"concat [1, 10] [1, 1] -> [1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0008,"geometry":"mul [1, 1, 512] [1, 1, 512] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0008,"geometry":"add [1, 1, 512] [] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0008,"geometry":"reshape [1, 512] [3] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0007,"geometry":"add [1, 1, 512] [1, 1, 512] -> [1, 1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0007,"geometry":"constant_of_shape [2] [1] -> [1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0007,"geometry":"reshape [1, 1, 512] [2] -> [1, 512]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0007,"geometry":"reshape [1, 1, 2, 64] [3] -> [1, 1, 128]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0007,"geometry":"reshape [1, 384] [3] -> [1, 1, 384]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0005,"geometry":"sub [] [1, 1, 1, 11] -> [1, 1, 1, 11]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0004,"geometry":"where [1, 1] [] [1, 1] -> [1, 1]"}
+DecodeOp {"variant":"exp","model":"tiny-gpt2","budget":16,"op_p50_ms":0.0003,"geometry":"constant_of_shape [2] [1] -> [1, 10]"}
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.03s

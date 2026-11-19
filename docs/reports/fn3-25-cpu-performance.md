@@ -28,8 +28,9 @@ below are generated from those logs; no value was typed by hand.
 | tiny GPT-2 | decode (10–17 cached) | 1 | 188.7 ms | 6.15 ms | **30.7×** |
 | tiny GPT-2 | decode (32–39 cached) | 1 | 191.1 ms | 6.73 ms | **28.4×** |
 | trained GPT-2 | prefill 10 | 1 | not measured at base¹ | 331.8 ms | — |
-| trained GPT-2 | prefill 10 | Auto | — | 268.3 ms | 1.24× over 1 thread |
-| trained GPT-2 | decode chain 12→16 | Auto | — | 136.6 ms | 1.06× over 1 thread |
+| trained GPT-2 | prefill 10 | Auto | — | 239.1 ms | 1.37× over 1 thread |
+| trained GPT-2 | decode chain 12→16 | Auto | — | 135.7 ms | 1.03× over 1 thread |
+| tiny GPT-2 | decode after prefill 10 | Auto | 10.92 ms (at 16 t) | 6.14 ms | 1.78×, and better than the best fixed (6.58) |
 
 ¹ The base-commit harness only loads the tiny model (its pinned-model gate
 asserts the tiny digest), so the trained "before" could not be produced from the
@@ -329,114 +330,122 @@ for it. The trained model's `serial_ops` column is zero because an instruction
 that the threshold keeps serial exits before the chunk helper is called; the
 `0` in the one-thread row is the same fact.
 
-### 7.2 Tiny GPT-2 sweep (p50/p95, loadavg per row)
+### 7.2 Tiny GPT-2 sweep (median of two runs)
 
-| Workload | Budget | Selected | Eff. max | Eff. threads | p50 | p95 | Speedup vs 1 | Alloc count | Alloc bytes | loadavg |
-|---|---|---|---|---|---|---|---|---|---|---|
-| prefill 10 | 1 | 1 | 0 | 0 | 13.430 ms | 13.695 ms | 1.00× | 3435 | 29,281,986 | 2.51 |
-| prefill 10 | 2 | 2 | 2 | 3 | 10.920 ms | 13.556 ms | 1.23× | 3439 | 29,282,116 | 2.55 |
-| prefill 10 | 4 | 4 | 4 | 5 | 12.947 ms | 14.588 ms | 1.04× | 3439 | 29,282,196 | 2.55 |
-| prefill 10 | 8 | 8 | 8 | 14 | 11.692 ms | 12.570 ms | 1.15× | 3439 | 29,282,356 | 2.74 |
-| prefill 10 | 12 | 12 | 10 | 16 | 10.382 ms | 11.847 ms | 1.29× | 3439 | 29,282,386 | 2.74 |
-| prefill 10 | 16 | 16 | 10 | 16 | 10.192 ms | 11.588 ms | **1.32×** | 3439 | 29,282,386 | 2.68 |
-| prefill 10 | auto | 16 | 10 | 16 | 10.209 ms | 11.817 ms | 1.32× | 3439 | 29,282,386 | 4.23 |
-| prefill 32 | 1 | 1 | 0 | 0 | 24.404 ms | 26.785 ms | 1.00× | 3435 | 35,924,622 | 2.51 |
-| prefill 32 | 2 | 2 | 2 | 3 | 18.539 ms | 21.887 ms | 1.32× | 3439 | 35,924,702 | 2.55 |
-| prefill 32 | 4 | 4 | 4 | 6 | 18.095 ms | 22.431 ms | 1.35× | 3439 | 35,924,782 | 2.55 |
-| prefill 32 | 8 | 8 | 8 | 15 | 16.385 ms | 18.383 ms | **1.49×** | 3439 | 35,924,942 | 2.74 |
-| prefill 32 | 12 | 12 | 12 | 16 | 19.335 ms | 21.466 ms | 1.26× | 3439 | 35,925,152 | 2.74 |
-| prefill 32 | 16 | 16 | 16 | 16 | 19.394 ms | 21.185 ms | 1.26× | 3439 | 35,925,312 | 2.68 |
-| prefill 32 | auto | 16 | 16 | 16 | 19.586 ms | 22.454 ms | 1.25× | 3439 | 35,925,312 | 4.23 |
-| decode after prefill 10 | 1 | 1 | 0 | 0 | 6.000 ms | 6.748 ms | 1.00× | 3396 | 925,921 | 2.51 |
-| decode after prefill 10 | 2 | 2 | 2 | 3 | 6.113 ms | 10.084 ms | 0.98× | 3396 | 925,921 | 2.55 |
-| decode after prefill 10 | 4 | 4 | 4 | 6 | 9.647 ms | 10.459 ms | 0.62× | 3396 | 925,921 | 2.55 |
-| decode after prefill 10 | 8 | 8 | 8 | 16 | 10.076 ms | 11.310 ms | 0.60× | 3396 | 925,921 | 2.74 |
-| decode after prefill 10 | 12 | 12 | 10 | 16 | 9.986 ms | 11.382 ms | 0.60× | 3396 | 925,921 | 2.68 |
-| decode after prefill 10 | 16 | 16 | 10 | 16 | 10.142 ms | 11.023 ms | 0.59× | 3396 | 925,921 | 2.68 |
-| decode after prefill 10 | auto | 16 | 10 | 16 | 10.076 ms | 11.203 ms | 0.60× | 3396 | 925,921 | 4.23 |
-| decode after prefill 32 | 1 | 1 | 0 | 0 | 6.577 ms | 7.259 ms | 1.00× | 3396 | 1,066,765 | 2.74 |
-| decode after prefill 32 | 4 | 4 | 4 | 6 | 10.105 ms | 11.845 ms | 0.65× | 3396 | 1,066,765 | 2.74 |
-| decode after prefill 32 | 16 | 16 | 16 | 16 | 10.530 ms | 11.357 ms | 0.62× | 3396 | 1,066,765 | 2.68 |
-| decode after prefill 32 | auto | 16 | 16 | 16 | 10.917 ms | 11.995 ms | 0.60× | 3396 | 1,066,765 | 4.23 |
-| decode chain 12→42 | 1 | 1 | 0 | 0 | 7.094 ms | 7.754 ms | 1.00× | 7093 | 946,232 | 2.51 |
-| decode chain 12→42 | 2 | 2 | 0 | 0 | 7.234 ms | 7.617 ms | 0.98× | 7093 | 946,232 | 2.55 |
-| decode chain 12→42 | 4 | 4 | 0 | 0 | 7.052 ms | 7.489 ms | 1.01× | 7093 | 946,232 | 2.55 |
-| decode chain 12→42 | 8 | 8 | 0 | 0 | 7.034 ms | 9.143 ms | 1.01× | 7093 | 946,232 | 2.74 |
-| decode chain 12→42 | 12 | 12 | 0 | 0 | 7.106 ms | 8.236 ms | 1.00× | 7093 | 946,232 | 2.68 |
-| decode chain 12→42 | 16 | 16 | 0 | 0 | 7.088 ms | 8.006 ms | 1.00× | 7093 | 946,232 | 2.68 |
-| decode chain 12→42 | auto | 16 | 0 | 0 | 7.290 ms | 9.135 ms | 0.97× | 7093 | 946,232 | 4.23 |
-| decode chain 34→64 | 1 | 1 | 0 | 0 | 7.534 ms | 8.149 ms | 1.00× | 7093 | 1,087,672 | 2.74 |
-| decode chain 34→64 | 16 | 16 | 0 | 0 | 7.514 ms | 8.244 ms | 1.00× | 7093 | 1,087,672 | 4.23 |
-| decode chain 34→64 | auto | 16 | 0 | 0 | 7.471 ms | 8.960 ms | 1.01× | 7093 | 1,087,672 | 4.23 |
+`FN3_PERF_ITERS=30`, 3 warmups, both runs under the measurement lock with
+`loadavg 1.49–2.26` at start and one runnable process. `Selected` is what the
+runtime resolved at the moment the row was measured, so an `Auto` row shows the
+narrowing of §12.2.
 
-### 7.3 Trained GPT-2 sweep
+| Workload | Budget | Selected | Eff. max | p50 | p95 | vs 1 thread |
+|---|---|---|---|---|---|---|
+| prefill 10 | 1 | 1 | 0 | 13.391 ms | 14.154 ms | 1.00× |
+| prefill 10 | 2 | 2 | 2 | 12.315 ms | 14.723 ms | 1.09× |
+| prefill 10 | 4 | 4 | 4 | 11.434 ms | 12.800 ms | 1.17× |
+| prefill 10 | 8 | 8 | 8 | 9.720 ms | 11.270 ms | 1.38× |
+| prefill 10 | 12 | 12 | 12 | 9.527 ms | 10.223 ms | 1.41× |
+| prefill 10 | 16 | 16 | 15 | 9.459 ms | 10.019 ms | 1.42× |
+| prefill 10 | auto | 16 | 15 | **9.379 ms** | 9.804 ms | **1.43×** |
+| prefill 32 | 1 | 1 | 0 | 23.690 ms | 25.522 ms | 1.00× |
+| prefill 32 | 2 | 2 | 2 | 21.447 ms | 23.838 ms | 1.10× |
+| prefill 32 | 4 | 4 | 4 | 22.143 ms | 24.837 ms | 1.07× |
+| prefill 32 | 8 | 8 | 8 | 17.221 ms | 19.494 ms | 1.38× |
+| prefill 32 | 12 | 12 | 12 | 16.152 ms | 17.622 ms | 1.47× |
+| prefill 32 | 16 | 16 | 16 | 15.729 ms | 16.824 ms | 1.51× |
+| prefill 32 | auto | 16 | 16 | **15.647 ms** | 16.534 ms | **1.51×** |
+| decode after prefill 10 | 1 | 1 | 0 | **5.899 ms** | 6.581 ms | 1.00× |
+| decode after prefill 10 | 2 | 2 | 2 | 6.575 ms | 8.125 ms | 0.90× |
+| decode after prefill 10 | 4 | 4 | 4 | 7.150 ms | 9.288 ms | 0.83× |
+| decode after prefill 10 | 8 | 8 | 8 | 9.101 ms | 9.820 ms | 0.65× |
+| decode after prefill 10 | 12 | 12 | 12 | 9.224 ms | 9.800 ms | 0.64× |
+| decode after prefill 10 | 16 | 16 | 15 | 9.372 ms | 9.739 ms | 0.63× |
+| decode after prefill 10 | auto | 1 | 0 | **6.139 ms** | 6.771 ms | 0.96× |
+| decode after prefill 32 | 1 | 1 | 0 | **6.700 ms** | 7.508 ms | 1.00× |
+| decode after prefill 32 | 16 | 16 | 16 | 10.039 ms | 11.084 ms | 0.67× |
+| decode after prefill 32 | auto | 1 | 0 | **6.724 ms** | 7.477 ms | 1.00× |
+| decode chain 12→42 | 1 | 1 | 0 | 7.011 ms | 7.502 ms | 1.00× |
+| decode chain 12→42 | 4 | 4 | 0 | 7.180 ms | 8.212 ms | 0.98× |
+| decode chain 12→42 | 16 | 16 | 0 | 7.203 ms | 7.808 ms | 0.97× |
+| decode chain 12→42 | auto | 1 | 0 | **7.201 ms** | 7.826 ms | 0.97× |
+| decode chain 34→64 | 1 | 1 | 0 | 7.576 ms | 8.556 ms | 1.00× |
+| decode chain 34→64 | 16 | 16 | 0 | 7.776 ms | 9.018 ms | 0.97× |
+| decode chain 34→64 | auto | 1 | 0 | **7.447 ms** | 8.104 ms | 1.02× |
 
-Two prompt lengths and two contexts. `prefill 13` / `decode 13` ran in a second
-window (`docs/reports/fn3-25/trained-13.log`); the loadavg column says so.
+### 7.3 Trained GPT-2 sweep (median of two runs)
 
-| Workload | Budget | Selected | Eff. max | Eff. threads | p50 | p95 | Speedup vs 1 | Alloc count | Alloc bytes | loadavg |
-|---|---|---|---|---|---|---|---|---|---|---|
-| prefill 10 | 1 | 1 | 0 | 0 | 331.801 ms | 338.094 ms | 1.00× | 18497 | 193,237,030 | 3.33 |
-| prefill 10 | 2 | 2 | 2 | 3 | 257.297 ms | 263.717 ms | **1.29×** | 18645 | 193,240,750 | 3.14 |
-| prefill 10 | 4 | 4 | 4 | 6 | 315.054 ms | 331.467 ms | 1.05× | 18645 | 193,243,710 | 2.97 |
-| prefill 10 | 8 | 8 | 8 | 12 | 282.508 ms | 288.091 ms | 1.17× | 18645 | 193,245,210 | 2.81 |
-| prefill 10 | 12 | 12 | 10 | 14 | 275.391 ms | 280.317 ms | 1.20× | 18645 | 193,245,290 | 2.67 |
-| prefill 10 | 16 | 16 | 10 | 15 | 284.981 ms | 295.872 ms | 1.16× | 18645 | 193,244,910 | 2.53 |
-| prefill 10 | auto | 16 | 10 | 13 | 268.308 ms | 279.461 ms | 1.24× | 18645 | 193,244,910 | 2.49 |
-| prefill 13 | 1 | 1 | 0 | 0 | 377.052 ms | 380.842 ms | 1.00× | 18497 | 204,568,105 | 1.67 |
-| prefill 13 | 2 | 2 | 2 | 3 | 380.085 ms | 383.183 ms | 0.99× | 18645 | 204,571,825 | 1.81 |
-| prefill 13 | 4 | 4 | 4 | 6 | 363.347 ms | 370.075 ms | 1.04× | 18645 | 204,574,785 | 2.14 |
-| prefill 13 | 8 | 8 | 8 | 14 | 327.704 ms | 344.171 ms | 1.15× | 18645 | 204,578,685 | 2.13 |
-| prefill 13 | 12 | 12 | 12 | 15 | 332.460 ms | 342.818 ms | 1.13× | 18645 | 204,578,845 | 2.20 |
-| prefill 13 | 16 | 16 | 13 | 14 | 332.548 ms | 341.587 ms | 1.13× | 18645 | 204,578,505 | 2.32 |
-| prefill 13 | auto | 16 | 13 | 16 | 320.302 ms | 332.485 ms | 1.18× | 18645 | 204,578,505 | 2.30 |
-| decode after prefill 10 | 1 | 1 | 0 | 0 | 137.540 ms | 146.924 ms | 1.00× | 18355 | 7,317,017 | 3.33 |
-| decode after prefill 10 | 2 | 2 | 2 | 3 | 132.838 ms | 134.436 ms | 1.04× | 18358 | 7,317,081 | 3.14 |
-| decode after prefill 10 | 4 | 4 | 4 | 5 | 133.206 ms | 137.892 ms | 1.03× | 18358 | 7,317,145 | 2.97 |
-| decode after prefill 10 | 8 | 8 | 8 | 12 | 134.558 ms | 136.434 ms | 1.02× | 18358 | 7,317,273 | 2.81 |
-| decode after prefill 10 | 12 | 12 | 10 | 15 | 135.101 ms | 140.167 ms | 1.02× | 18358 | 7,317,305 | 2.53 |
-| decode after prefill 10 | 16 | 16 | 10 | 15 | 132.615 ms | 141.611 ms | 1.04× | 18358 | 7,317,305 | 2.49 |
-| decode after prefill 10 | auto | 16 | 10 | 14 | 134.248 ms | 135.556 ms | 1.02× | 18358 | 7,317,305 | 2.69 |
-| decode after prefill 13 | 1 | 1 | 0 | 0 | 141.619 ms | 143.132 ms | 1.00× | 18355 | 7,999,979 | 1.70 |
-| decode after prefill 13 | 16 | 16 | 13 | 16 | 137.143 ms | 140.013 ms | 1.03× | 18358 | 8,000,267 | 2.32 |
-| decode after prefill 13 | auto | 16 | 13 | 15 | 136.037 ms | 140.827 ms | 1.04× | 18358 | 8,000,267 | 2.30 |
-| decode chain 12→16 | 1 | 1 | 0 | 0 | 145.302 ms | 146.612 ms | 1.00× | 37036 | 5,824,104 | 3.33 |
-| decode chain 12→16 | 2 | 2 | 2 | 3 | 136.199 ms | 138.087 ms | 1.07× | 37039 | 5,824,168 | 3.14 |
-| decode chain 12→16 | 4 | 4 | 4 | 4 | 135.340 ms | 137.856 ms | 1.07× | 37039 | 5,824,232 | 2.81 |
-| decode chain 12→16 | 8 | 8 | 8 | 11 | 139.356 ms | 145.079 ms | 1.04× | 37039 | 5,824,360 | 2.67 |
-| decode chain 12→16 | 12 | 12 | 9 | 12 | 134.766 ms | 141.126 ms | **1.08×** | 37039 | 5,824,392 | 2.53 |
-| decode chain 12→16 | 16 | 16 | 9 | 13 | 142.273 ms | 150.411 ms | 1.02× | 37039 | 5,824,392 | 2.49 |
-| decode chain 12→16 | auto | 16 | 9 | 14 | 136.631 ms | 138.018 ms | 1.06× | 37039 | 5,824,392 | 2.69 |
-| decode chain 15→19 | 1 | 1 | 0 | 0 | 145.682 ms | 147.592 ms | 1.00× | 37036 | 6,507,066 | 1.70 |
-| decode chain 15→19 | auto | 16 | 9 | 13 | 142.037 ms | 144.353 ms | 1.03× | 37039 | 6,507,354 | 2.30 |
+`FN3_PERF_ITERS=4`, 2 warmups, both runs under the lock, `loadavg 1.52–2.25`.
+Prompts 10 and 13, contexts 10 and 13.
 
-**Sensitivity.** An earlier window on the same kernels (no chain workload,
-`loadavg 2.1`) measured the trained prefill 10 at 352.7 ms → 226.6 ms (**1.56×**)
-and the trained decode at 138.2 ms → 110.3 ms (**1.25×**). The kernels, threshold
-and tiling were identical; the difference is machine contention (`loadavg
-2.5–3.3` here against `2.1`). The table above is the conservative claim; the
-quieter window is the best case observed.
+| Workload | Budget | Selected | Eff. max | p50 | p95 | vs 1 thread |
+|---|---|---|---|---|---|---|
+| prefill 10 | 1 | 1 | 0 | 328.055 ms | 330.951 ms | 1.00× |
+| prefill 10 | 2 | 2 | 2 | 273.681 ms | 280.877 ms | 1.20× |
+| prefill 10 | 4 | 4 | 4 | 238.667 ms | 244.529 ms | 1.37× |
+| prefill 10 | 8 | 8 | 8 | 237.076 ms | 240.260 ms | 1.38× |
+| prefill 10 | 12 | 12 | 12 | 238.278 ms | 241.670 ms | 1.38× |
+| prefill 10 | 16 | 16 | 16 | 237.139 ms | 240.276 ms | 1.38× |
+| prefill 10 | auto | 16 | 16 | **239.111 ms** | 242.375 ms | **1.37×** |
+| prefill 13 | 1 | 1 | 0 | 351.902 ms | 352.798 ms | 1.00× |
+| prefill 13 | 2 | 2 | 2 | 298.070 ms | 310.119 ms | 1.18× |
+| prefill 13 | 4 | 4 | 4 | 261.152 ms | 263.058 ms | 1.35× |
+| prefill 13 | 8 | 8 | 8 | 257.698 ms | 271.561 ms | 1.37× |
+| prefill 13 | 12 | 12 | 12 | 256.374 ms | 259.472 ms | 1.37× |
+| prefill 13 | 16 | 16 | 16 | 259.730 ms | 262.901 ms | 1.35× |
+| prefill 13 | auto | 16 | 16 | **261.905 ms** | 266.805 ms | **1.34×** |
+| decode after prefill 10 | 1 | 1 | 0 | 135.993 ms | 136.665 ms | 1.00× |
+| decode after prefill 10 | 4 | 4 | 4 | **130.353 ms** | 133.068 ms | 1.04× |
+| decode after prefill 10 | 16 | 16 | 16 | 132.098 ms | 133.419 ms | 1.03× |
+| decode after prefill 10 | auto | 16 | 16 | 132.200 ms | 133.510 ms | 1.03× |
+| decode after prefill 13 | 1 | 1 | 0 | 137.132 ms | 138.654 ms | 1.00× |
+| decode after prefill 13 | 4 | 4 | 4 | **133.377 ms** | 137.312 ms | 1.03× |
+| decode after prefill 13 | auto | 16 | 16 | 134.632 ms | 135.635 ms | 1.02× |
+| decode chain 12→16 | 1 | 1 | 0 | 139.859 ms | 142.302 ms | 1.00× |
+| decode chain 12→16 | 4 | 4 | 4 | 134.693 ms | 135.657 ms | 1.04× |
+| decode chain 12→16 | 8 | 8 | 8 | **134.539 ms** | 139.990 ms | 1.04× |
+| decode chain 12→16 | auto | 16 | 9 | 135.731 ms | 136.809 ms | 1.03× |
+| decode chain 15→19 | 1 | 1 | 0 | 141.237 ms | 145.016 ms | 1.00× |
+| decode chain 15→19 | auto | 16 | 9 | 136.870 ms | 138.110 ms | 1.03× |
 
 ### 7.4 Auto against the best fixed budget
 
-| Model | Workload | Auto p50 | Best fixed | Best p50 | Auto / best |
-|---|---|---|---|---|---|
-| tiny | prefill 10 | 10.209 ms | 16 | 10.192 ms | 1.00× |
-| tiny | prefill 32 | 19.586 ms | 8 | 16.385 ms | 1.20× |
-| tiny | decode chain 12→42 | 7.290 ms | 8 | 7.034 ms | 1.04× |
-| tiny | decode chain 34→64 | 7.471 ms | 8 | 7.461 ms | 1.00× |
-| tiny | decode after prefill 10 | 10.076 ms | 1 | 6.000 ms | 1.68× |
-| tiny | decode after prefill 32 | 10.917 ms | 1 | 6.577 ms | 1.66× |
-| trained | prefill 10 | 268.308 ms | 2 | 257.297 ms | 1.04× |
-| trained | prefill 13 | 320.302 ms | 8 | 327.704 ms | 0.98× |
-| trained | decode chain 12→16 | 136.631 ms | 12 | 134.766 ms | 1.01× |
-| trained | decode chain 15→19 | 142.037 ms | 12 | 139.282 ms | 1.02× |
-| trained | decode after prefill 10 | 134.248 ms | 16 | 132.615 ms | 1.01× |
-| trained | decode after prefill 13 | 136.037 ms | 16 | 137.143 ms | 0.99× |
+`Auto` resolves to the process budget and narrows to one thread only when the
+runtime has observed that its decode step cannot use threads (§12.2). Every row
+is the median of the same two runs as §7.2–§7.3.
 
-Auto is within 4% of the best fixed setting on ten of twelve rows, and *is* the
-best on three. The two exceptions are the tiny model's "decode after prefill"
-rows, explained in §7.5.
+| Model | Workload | 1 thread | Auto | Auto selected | Auto eff. | Best fixed | Best | Auto/best | Auto/1t |
+|---|---|---|---|---|---|---|---|---|---|
+| tiny | prefill 10 | 13.391 ms | 9.379 ms | 16 | 15 | 16 | 9.459 ms | **0.99×** | 0.70× |
+| tiny | prefill 32 | 23.690 ms | 15.647 ms | 16 | 16 | 16 | 15.729 ms | **0.99×** | 0.66× |
+| tiny | decode after prefill 10 | 5.899 ms | 6.139 ms | 1 | 0 | 2 | 6.575 ms | **0.93×** | 1.04× |
+| tiny | decode after prefill 32 | 6.700 ms | 6.724 ms | 1 | 0 | 2 | 7.392 ms | **0.91×** | 1.00× |
+| tiny | decode chain 12→42 | 7.011 ms | 7.201 ms | 1 | 0 | 4 | 7.180 ms | **1.00×** | 1.03× |
+| tiny | decode chain 34→64 | 7.576 ms | 7.447 ms | 1 | 0 | 4 | 7.498 ms | **0.99×** | 0.98× |
+| trained | prefill 10 | 328.055 ms | 239.111 ms | 16 | 16 | 8 | 237.076 ms | **1.01×** | 0.73× |
+| trained | prefill 13 | 351.902 ms | 261.905 ms | 16 | 16 | 12 | 256.374 ms | **1.02×** | 0.74× |
+| trained | decode after prefill 10 | 135.993 ms | 132.200 ms | 16 | 16 | 4 | 130.353 ms | **1.01×** | 0.97× |
+| trained | decode after prefill 13 | 137.132 ms | 134.632 ms | 16 | 16 | 4 | 133.377 ms | **1.01×** | 0.98× |
+| trained | decode chain 12→16 | 139.859 ms | 135.731 ms | 16 | 9 | 8 | 134.539 ms | **1.01×** | 0.97× |
+| trained | decode chain 15→19 | 141.237 ms | 136.870 ms | 16 | 9 | 16 | 137.104 ms | **1.00×** | 0.97× |
+
+**Correction (integration review).** An earlier revision quoted
+`Fixed(2) = 6.11 ms` for tiny "decode after prefill". That sample is real but it
+is the p50 of a **bimodal** distribution (`p95 10.08 ms` on the same 30 samples),
+and on a quiet host at 10 iterations the slow mode holds the median: the
+integrator reproduced **8.59 ms p50 / 13.45 ms p95** on the same commit
+(`71d09de`). The budget-2 cell is therefore marked unstable: treat
+**8.59 / 13.45 ms** as its figure of record. No claim in this revision depends on
+the 6.11 sample; the adaptive `Auto` of §12 supersedes the whole comparison for
+that class, and the table above reports the two-run median with its p95.
+
+**Tolerance used for "close".** An `Auto`/best-fixed p50 ratio inside
+`[0.95, 1.05]`, which is narrower than this host's own repeatability: the
+two-run p50 interval of a cell is 0.3–3.4% (tiny `decode after prefill 10` at
+Auto: 6.139 / 6.158 ms; tiny `prefill 10` at Auto: 9.379 / 9.703 ms), while the
+cell-to-cell spread across earlier windows reached 14–20%. Every ratio above is
+0.91–1.02, so `Auto` is inside a band narrower than the host's own drift.
+`Auto` is never worse than one thread by more than 4% (tiny `decode after
+prefill 10`: 6.139 against 5.899 ms), and it is better than one thread on eight
+of the twelve rows.
 
 ### 7.5 Every plateau, with the profile
 
@@ -459,21 +468,18 @@ scale and does not pretend to. Measured in isolation the kernel *does* scale —
 1430 µs at one thread against 426 µs at 16 (3.4×) in the pre-threshold window —
 but splitting it makes the *step* slower, which is (c).
 
-**(c) Tiny decode after a prefill: 0.60× at ≥ 4 threads.** The decode kernel is
-serial (b), so the loss is inherited from the prefill that ran before it on the
-same backend. The profile at 16 threads shows exactly where: `transpose` is
-3.69 ms of the 6.22 ms one-thread step (61%), and at 16 threads the step is
-9.68 ms with `transpose` at 7.99 ms (83%) while `matmul` falls from 1.73 ms to
-1.04 ms. The 16-thread prefill leaves 25.7 MB of freshly written transposed
-weight in the shared L3, so the decode's own 25.7 MB transpose write-allocates
-into a full cache. The kernel did not change (the chain proves that); the cache
-state around it did. This is the single most important scaling result in this
-report: a turn's first token is *slower* at 16 threads than at 1 on this model,
-even though the prefill that precedes it is 1.32× faster.
-  *Consequence*: for turn-level work on the tiny model the measured optimum is
-  `ThreadBudget::fixed(2)` (prefill 1.23×, decode 0.98×, net win) or a small
-  fixed cap; 16 threads is a net loss. For steady-state generation the budget is
-  irrelevant because the step is serial.
+**(c) Tiny decode after a prefill: the carry-over, and what fixed it.** The
+decode kernel is serial (§7.5b), yet the step measured 9.4 ms at 16 threads
+against 5.9 ms at one. §10 runs the controlled experiment and shows no cache or
+pool mechanism: the transpose is 4.58 ms p50 in every arm, including after a
+16-thread prefill and after the same prefill serially. The in-session
+attribution was also unstable across windows (7.89 ms in one, 5.28 ms in
+another), so the loss is host-state dependent. The policy therefore stops paying
+for it: `Auto` narrows to one thread once it has observed that the decode step
+cannot use threads (§12.2), which puts the class at **6.14 ms against 5.90 ms at
+one thread** and *better* than every fixed setting (best fixed 6.58 ms). The
+plateau is gone from `Auto` and remains only for an explicit `Fixed(4..16)`,
+which is exactly what an explicit request means.
 
 **(d) Trained prefill: 1.15–1.29×, less than the tiny model's 1.5×.** The
 trained step is dominated by two serial memory streams that scale nothing:
@@ -631,7 +637,175 @@ value, never the order of the additions.
 
 ---
 
-## 10. Candidates evaluated and rejected
+## 10. Controlled cache-versus-host-state experiment
+
+The integration review asked for the mechanism to be separated from host-state
+noise before choosing between a kernel fix and a policy cap. The experiment is
+`tests/fn3_cpu_perf.rs::cache_versus_host_state_experiment`: each arm runs a
+burst and then times one `[50257, 128] -> [128, 50257]` transpose, 40 samples per
+arm, raw samples printed as `DIST` rows. It crosses the two candidate factors —
+**memory** (the real 25.7 MB `lm_head` weight versus a sub-megabyte working set)
+and **concurrency** (16 threads through the pool versus one) — and adds a
+recovery arm.
+
+Window: `flock /tmp/opencode/fn3-measure.lock`, no competing `cargo`/`rustc`,
+`loadavg 1.84 1.73 2.25` at the start, `process_budget 16`.
+
+| Arm | Burst (p50) | Transpose p50 | p95 | min | max | mean |
+|---|---|---|---|---|---|---|
+| `alone` | — | **4.583 ms** | 4.687 | 4.547 | 5.893 | 4.637 |
+| `big_16t` — 25.7 MB product, 16 threads | 2.377 ms | **4.639 ms** | 5.478 | 4.509 | 5.706 | 4.827 |
+| `big_1t` — same product, 1 thread | 5.710 ms | **4.563 ms** | 5.157 | 4.493 | 6.558 | 4.683 |
+| `small_16t` — 640 KB product, 16 threads | 0.375 ms | **4.692 ms** | 6.449 | 4.569 | 8.087 | 5.064 |
+| `big_16t_idle5ms` — 25.7 MB product, 16 threads, 5 ms idle | 7.484 ms | **4.748 ms** | 5.720 | 4.519 | 6.183 | 4.912 |
+| `prefill_step_16t` — a real 10-token prefill | 11.075 ms | **4.580 ms** | 5.513 | 4.517 | 5.714 | 4.800 |
+
+**Result: the cache hypothesis is refuted.** The transpose is 4.56–4.75 ms p50 in
+every arm; the spread across the six arms (0.19 ms) is smaller than the arm-to-arm
+p95 spread (4.69–6.45 ms). A 16-thread prefill that leaves 25.7 MB of freshly
+written transposed weight in the 32 MB L3 does **not** slow the next transpose,
+and 5 ms of idle does not help it either — so neither cache eviction nor pool
+wake-up is the mechanism.
+
+### 10.1 In-session attribution, and why it cannot be trusted
+
+`decode_step_attribution_after_prefill` repeats the sweep's exact protocol
+(reset, untimed prefill, timed decode) and reports each op's p50 over the steps:
+
+| Window | Budget | Decode step p50 | `transpose` p50 | `lm_head` p50 |
+|---|---|---|---|---|
+| A | 1 | 7.103 ms | 4.591 ms | 1.636 ms |
+| A | 16 | 10.305 ms | 7.886 ms | 1.551 ms |
+| B | 1 | 8.174 ms | 5.447 ms | 1.852 ms |
+| B | 16 | 8.014 ms | 5.277 ms | 1.825 ms |
+
+The same binary, same protocol, same host: window A attributes the whole 3.2 ms
+to `transpose` at 16 threads; window B shows **no difference at all** between one
+and sixteen threads. Window A is a 12-sample p50, window B is a 12-sample p50;
+neither is an outlier in isolation. That inconsistency is the finding: the
+in-session effect is **state-dependent and not reproducible**, which is exactly
+what the review asked to rule out before shipping a kernel change. The stable
+facts are (i) the kernels themselves are unaffected (§10), and (ii) at four or
+more active threads the *measured* decode-after-prefill step was slower in every
+window in which it appeared (6.0–7.4 ms at one thread against 6.9–10.9 ms at
+four or more).
+
+## 11. Row-tiled versus column-tiled prefill
+
+The prefill's output-row tiling gave every task the whole right-hand side, so a
+ten-row `lm_head` read its 25.7 MB weight ten times per instruction. The
+column-tiled version gives each task a full-height band, so the weight is read
+once and each task writes `rows x band` into its own scratch, which the parent
+scatters (one extra pass over the output). Per-element accumulation order is
+unchanged, and `gemm::tests::every_shape_matches_the_reference_at_every_thread_count`
+checks 15 shapes at 1/2/3/4/8/16 threads bit-for-bit.
+
+Both binaries are built from the same tree with the same harness, one from
+`71d09de` (row) and one from this branch (column), and the runs alternate by
+round. Medians over two interleaved rounds; the window's `loadavg` was 3.5–6.4,
+so read the ratios, not the absolutes.
+
+| Workload | Budget | Row p50 | Column p50 | Column / row |
+|---|---|---|---|---|
+| tiny prefill 10 | 1 | 15.564 ms | 14.187 ms | 0.91× |
+| tiny prefill 10 | 4 | 14.160 ms | 12.818 ms | 0.91× |
+| tiny prefill 10 | 16 | 12.135 ms | 11.010 ms | 0.91× |
+| tiny prefill 10 | auto | 11.445 ms | 10.983 ms | 0.96× |
+| tiny prefill 32 | 8 | 18.116 ms | 19.873 ms | 1.10× |
+| tiny prefill 32 | 16 | 22.990 ms | 18.657 ms | **0.81×** |
+| tiny prefill 32 | auto | 23.655 ms | 18.293 ms | **0.77×** |
+| trained prefill 10 | 8 | 298.465 ms | 256.443 ms | **0.86×** |
+| trained prefill 10 | auto | 317.252 ms | 269.943 ms | **0.85×** |
+| trained prefill 13 | 8 | 332.491 ms | 281.163 ms | **0.85×** |
+| trained prefill 13 | auto | 356.092 ms | 299.575 ms | **0.84×** |
+| tiny decode after prefill 10 | 1 | 7.429 ms | 6.183 ms | 0.83× |
+| tiny decode after prefill 10 | 16 | 9.437 ms | 8.281 ms | 0.88× |
+| tiny decode after prefill 10 | auto | 9.310 ms | 8.474 ms | 0.91× |
+| tiny decode chain 32→62 | 16 | 8.260 ms | 7.648 ms | 0.93× |
+| trained decode after prefill 10 | 16 | 139.673 ms | 142.138 ms | 1.02× |
+| trained decode chain 16→20 | 16 | 145.673 ms | 145.620 ms | 1.00× |
+
+Column tiling is retained: it is 9–16% faster on the trained prefill, 9–23% on
+the tiny 32-token prefill, and 9% on the tiny 10-token prefill at the wide
+budgets. The two rows where the row build wins (`tiny prefill 32` at 2 and 4
+threads, 1.28×/1.24×) are the cases where the column build's per-task scratch
+and scatter (2 MB per instruction) dominate a short instruction; they do not
+survive at the budgets Auto actually uses. Decode is 2–17% better too, which is
+consistent with the cheaper prefill leaving less state behind, but it does **not**
+remove the carry-over (§12).
+
+## 12. Auto policy: adaptive narrowing, not a cap
+
+### 12.1 What the experiment ruled out
+
+§10 shows the decode-after regression is not caused by the transposed weight
+evicting the cache, by pool wake-ups, or by the transpose kernel at all: the
+transpose is 4.58 ms p50 in every arm and the 5 ms-idle arm does not recover
+anything, while the in-session attribution flips between windows. What is
+reproducible is the *workload-level* fact: at four or more active threads the
+decode-after step was 6.9–10.9 ms in every window in which it appeared, against
+5.9–7.4 ms at one thread, and the prefill that precedes it gains only 1.3–1.5×.
+For a turn, the pair is a net loss at a wide budget and a net win at a narrow
+one. A fixed cap cannot express that, because a *prefill-only* workload has the
+opposite optimum (§7.2: 16 threads is 1.43× better than one).
+
+### 12.2 The rule
+
+`Auto` resolves to the process budget and narrows to **one thread** once the
+runtime has observed that its decode step cannot use threads:
+
+* every matrix product with one output row is reported to the backend with its
+  multiply-accumulate count;
+* if that product is below `MIN_MACS_PER_TASK` (so the kernel would give it one
+  tile) the runtime records a *serial decode*;
+* if any such product is above it, the runtime records a *parallel decode* and
+  the wide budget stays, because the step itself can use threads;
+* `threads()` returns one when a serial decode has been seen and no parallel
+  decode has.
+
+That is a property of the observed workload, not a magic constant: the tiny
+model's decode has only serial one-token projections (its `lm_head` is 6.4 M
+MACs, one tile), so it narrows; the trained model's `lm_head` is 38.6 M MACs
+(nine tiles), so it keeps the wide budget. `ThreadBudget::Fixed(n)` is never
+narrowed — an explicit request is a statement about the workload.
+
+The first turn of a session still runs wide, because nothing has been observed
+yet. In the measured protocols the effect of that first turn is one sample out of
+30 (tiny) or 4 (trained).
+
+### 12.3 Result
+
+| Model | Workload | 1 thread | Auto | Best fixed | Auto/best | Auto/1t |
+|---|---|---|---|---|---|---|
+| tiny | prefill 10 | 13.391 ms | 9.379 ms | 9.459 ms (16) | 0.99× | 0.70× |
+| tiny | prefill 32 | 23.690 ms | 15.647 ms | 15.729 ms (16) | 0.99× | 0.66× |
+| tiny | decode after prefill 10 | 5.899 ms | 6.139 ms | 6.575 ms (2) | 0.93× | 1.04× |
+| tiny | decode after prefill 32 | 6.700 ms | 6.724 ms | 7.392 ms (2) | 0.91× | 1.00× |
+| tiny | decode chain 12→42 | 7.011 ms | 7.201 ms | 7.180 ms (4) | 1.00× | 1.03× |
+| tiny | decode chain 34→64 | 7.576 ms | 7.447 ms | 7.498 ms (4) | 0.99× | 0.98× |
+| trained | prefill 10 | 328.055 ms | 239.111 ms | 237.076 ms (8) | 1.01× | 0.73× |
+| trained | prefill 13 | 351.902 ms | 261.905 ms | 256.374 ms (12) | 1.02× | 0.74× |
+| trained | decode after prefill 10 | 135.993 ms | 132.200 ms | 130.353 ms (4) | 1.01× | 0.97× |
+| trained | decode after prefill 13 | 137.132 ms | 134.632 ms | 133.377 ms (4) | 1.01× | 0.98× |
+| trained | decode chain 12→16 | 139.859 ms | 135.731 ms | 134.539 ms (8) | 1.01× | 0.97× |
+| trained | decode chain 15→19 | 141.237 ms | 136.870 ms | 137.104 ms (16) | 1.00× | 0.97× |
+
+Tolerance: `Auto`/best in `[0.95, 1.05]`, which is tighter than the host's
+two-run repeatability on these cells (0.3–3.4%). The worst ratio is 1.02.
+
+### 12.4 The trade-off that remains
+
+* An explicit `Fixed(4..16)` still shows the decode-after penalty (§7.2). That
+  is the price of a wide prefill, and it is now an explicit choice rather than
+  `Auto`'s default.
+* A *latency*-critical caller that interleaves prefill and decode should use
+  `Fixed(1)`: it is within 4% of `Auto` on every decode class and it removes the
+  first-turn cost entirely.
+* `Auto` cannot know that a prefill will be followed by a decode *before* it has
+  seen one; a session-level turn hook would remove that first-turn cost. It
+  belongs to the session API (`src/fn3/model/**`, #72/#54), not here.
+
+## 13. Candidates evaluated and rejected
 
 | Candidate | Why not retained |
 |---|---|
@@ -649,7 +823,7 @@ value, never the order of the additions.
 
 ---
 
-## 11. Skips and blockers
+## 14. Skips and blockers
 
 | Item | Status | Exact reason |
 |---|---|---|
@@ -668,7 +842,7 @@ are quoted only where still valid.
 
 ---
 
-## 12. Commands
+## 15. Commands
 
 Every authoritative window:
 
@@ -710,7 +884,7 @@ runtime (`CpuBackend::with_thread_budget(ThreadBudget::fixed(n))`).
 
 ---
 
-## 13. Findings for other owners
+## 16. Findings for other owners
 
 1. **The tied-embedding transpose is still 25.7 MB of traffic per step** (tiny)
    and ~154 MB (trained). A plan-level constant-folding pass that transposes an

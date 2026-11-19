@@ -124,6 +124,13 @@ pub fn cpu_capabilities() -> Capabilities {
 pub struct CpuBackend {
     capabilities: Capabilities,
     budget: ThreadBudget,
+    /// Set once a decode-shaped instruction (a matrix product with one output
+    /// row) that could **not** use more than one thread has run through this
+    /// runtime. See [`CpuBackend::threads`].
+    decode_serial: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set once a decode-shaped instruction that *could* use several threads has
+    /// run. A runtime that can parallelise its decode keeps the wide budget.
+    decode_parallel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CpuBackend {
@@ -132,6 +139,8 @@ impl CpuBackend {
         CpuBackend {
             capabilities: cpu_capabilities(),
             budget: ThreadBudget::Auto,
+            decode_serial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            decode_parallel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -146,6 +155,8 @@ impl CpuBackend {
         CpuBackend {
             capabilities: cpu_capabilities(),
             budget,
+            decode_serial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            decode_parallel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -155,8 +166,68 @@ impl CpuBackend {
     }
 
     /// The thread count the next instruction may use.
+    ///
+    /// # Why `Auto` narrows after a decode-shaped instruction
+    ///
+    /// A turn prefills and then decodes. The prefill is the only wide
+    /// instruction, and a wide prefill measurably slows the decode that follows
+    /// it (FN3-25 measured 6.0–7.4 ms at one thread against 6.9–10.9 ms at four
+    /// or more, on the tiny model), while a *serial* prefill costs 1.3x on its
+    /// own. For a turn the serial pair wins: 14.2 + 6.2 ms against 11.0 + 10.1.
+    /// A prefill-only workload has the opposite optimum. `Auto` therefore keeps
+    /// the wide budget until it sees a matrix product with one output row — the
+    /// shape of every one-token projection — and narrows to one thread after
+    /// that, which is the measured optimum for the turn class and leaves
+    /// prefill-only runs at [`ThreadBudget::Auto`]'s wide setting.
+    ///
+    /// [`ThreadBudget::Fixed`] is never narrowed: an explicit request is a
+    /// statement about the workload, not a guess.
+    ///
+    /// The first turn of a session still runs wide, because nothing has been
+    /// observed yet; the cost of that first turn is in the report.
     pub fn threads(&self) -> usize {
-        self.budget.threads()
+        let resolved = self.budget.threads();
+        if self.budget == ThreadBudget::Auto && self.auto_narrowed() {
+            return 1;
+        }
+        resolved
+    }
+
+    /// `true` when [`CpuBackend::threads`] has narrowed an `Auto` budget because
+    /// decode-shaped work was observed.
+    pub fn auto_narrowed(&self) -> bool {
+        self.budget == ThreadBudget::Auto
+            && self
+                .decode_serial
+                .load(std::sync::atomic::Ordering::Relaxed)
+            && !self
+                .decode_parallel
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that a matrix product with one output row ran **and could not use
+    /// more than one thread anyway**.
+    ///
+    /// That is the case the narrowing is for: the decode step then has no
+    /// parallelisable instruction, so a wide prefill buys 1.3x on the prefill
+    /// while making the decode that follows it 1.4-1.7x slower, and the pair is
+    /// a net loss (tiny model: 14.2 + 6.2 ms serial against 11.0 + 10.1 ms wide).
+    /// When the decode's own product is above
+    /// [`parallel::MIN_MACS_PER_TASK`] the decode does use threads and the wide
+    /// budget stays: the trained model's one-token `lm_head` is 38.6 M MACs and
+    /// its decode is 1.06x faster wide. A runtime that has seen *both* kinds of
+    /// decode-shaped product — which is every real decode step, whose
+    /// small projections are serial and whose `lm_head` may be parallel — keeps
+    /// the wide budget, because the step can use threads.
+    pub(crate) fn note_decode_shaped(&self, macs: u64) {
+        let tiles = macs / crate::fn3::backend::cpu::parallel::MIN_MACS_PER_TASK;
+        if tiles <= 1 {
+            self.decode_serial
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.decode_parallel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -221,7 +292,17 @@ impl CpuBackend {
             OpId::MatMul => {
                 check_arity(op, inputs.len(), outputs.len(), 2, 1)?;
                 kernels::require_no_attributes(op, params)?;
-                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0], self.threads())
+                let threads = self.threads();
+                // One output row is the shape of every one-token projection; the
+                // MAC count decides whether that projection could use threads at
+                // all, which is what the narrowing rule keys on.
+                let dims = outputs[0].shape().dims();
+                if dims.len() >= 2 && dims[dims.len() - 2] == 1 {
+                    let columns = dims[dims.len() - 1];
+                    let inner = inputs[0].shape().dims()[inputs[0].shape().rank() - 1];
+                    self.note_decode_shaped(inner.saturating_mul(columns));
+                }
+                matmul::matmul(op, &inputs[0], &inputs[1], &mut outputs[0], threads)
             }
 
             // -- elementwise arithmetic ----------------------------------

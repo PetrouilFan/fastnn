@@ -19,6 +19,11 @@ below, with only the harness's banner lines kept and no numeric value changed.
 | `build.log` | `cargo test --release --test fn3_cpu_perf --no-run` | build transcript for the measured binary |
 | `transpose-shapes.log` | `transpose-shapes.rs` | the access-pattern study that chose the transpose loop |
 | `transpose-threads.log` | `transpose-threads.rs` | the threading ceiling for the safe transpose partition |
+| `review-tiny-run{1,2}.log` | this branch after the integration review (adaptive `Auto` + column tiled prefill) | the tiny sweep, twice, medians in report §7.2 |
+| `review-trained-run{1,2}.log` | the same | the trained sweep at prompts 10/13 and contexts 10/13, twice, §7.3 |
+| `experiment1.log` | `cache_versus_host_state_experiment` | the controlled six-arm experiment with raw `DIST` samples, §10 |
+| `experiment2.log`, `experiment3.log` | `decode_step_attribution_after_prefill` | the same protocol in two windows, showing the in-session attribution is unstable, §10.1 |
+| `rowcol-*.log` | row build (`71d09de` kernels) versus column build, same harness | the interleaved row-vs-column comparison, §11 |
 | `transpose-shapes.rs` | source | standalone `rustc -O` program, not part of the crate |
 | `transpose-threads.rs` | source | standalone `rustc -O` program, not part of the crate |
 

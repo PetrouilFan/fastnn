@@ -773,7 +773,8 @@ fn thread_budget_reaches_the_kernels_and_preserves_logits() {
         println!(
             "Budget {{\"variant\":\"{}\",\"model\":\"{}\",\"budget\":\"{}\",\"selected\":{},\
              \"observed_max_active\":{},\"observed_threads\":{},\"tasks\":{},\
-             \"parallel_ops\":{},\"serial_ops\":{},\"checksum\":\"{checksum:#018x}\"}}",
+             \"parallel_ops\":{},\"serial_ops\":{},\"checksum\":\"{checksum:#018x}\",\
+             \"narrowed\":{},\"selected_live\":{}}}",
             variant(),
             model.label,
             ModelUnderTest::budget_label(budget),
@@ -783,21 +784,40 @@ fn thread_budget_reaches_the_kernels_and_preserves_logits() {
             observed.tasks,
             observed.parallel_ops,
             observed.serial_ops,
+            backend.auto_narrowed(),
+            backend.threads(),
         );
         if selected > 1 {
-            assert!(
-                observed.max_active > 1,
-                "budget {selected} never ran two chunks at once: the budget did not reach the \
-                 kernels (max_active {}, parallel_ops {}, serial_ops {})",
-                observed.max_active,
-                observed.parallel_ops,
-                observed.serial_ops
-            );
-            assert!(
-                observed.max_active <= selected,
-                "observed {} concurrent chunks exceeds the budget {selected}",
-                observed.max_active
-            );
+            if backend.auto_narrowed() {
+                // `Auto` narrowed because decode-shaped work was observed: the
+                // policy's job is to stop submitting chunks, so the window as a
+                // whole may contain none. What must hold is that the narrowing
+                // is the only reason and that it really is serial now.
+                assert_eq!(
+                    backend.threads(),
+                    1,
+                    "an Auto budget that narrowed must resolve to one thread"
+                );
+                assert!(
+                    observed.parallel_ops == 0 || observed.max_active <= selected,
+                    "observed {} concurrent chunks exceeds the budget {selected}",
+                    observed.max_active
+                );
+            } else {
+                assert!(
+                    observed.max_active > 1,
+                    "budget {selected} never ran two chunks at once: the budget did not reach \
+                     the kernels (max_active {}, parallel_ops {}, serial_ops {})",
+                    observed.max_active,
+                    observed.parallel_ops,
+                    observed.serial_ops
+                );
+                assert!(
+                    observed.max_active <= selected,
+                    "observed {} concurrent chunks exceeds the budget {selected}",
+                    observed.max_active
+                );
+            }
         } else {
             assert_eq!(
                 observed.parallel_ops, 0,
@@ -825,7 +845,6 @@ fn thread_scaling_sweep() {
     let warmups = model.warmups();
 
     for budget in model.budgets() {
-        let selected = ModelUnderTest::budget_value(budget).threads();
         let backend = CpuBackend::with_thread_budget(ModelUnderTest::budget_value(budget));
         let mut session = Session::with_runtime(&prepared, &model.import, &backend)
             .unwrap_or_else(|error| panic!("session: {error}"));
@@ -854,7 +873,7 @@ fn thread_scaling_sweep() {
                 prompt as u64,
                 0,
                 budget,
-                selected,
+                backend.threads(),
                 &observed,
                 recorder.finish(),
                 checksum(&last),
@@ -905,7 +924,7 @@ fn thread_scaling_sweep() {
                 past,
                 past,
                 budget,
-                selected,
+                backend.threads(),
                 &observed,
                 recorder.finish(),
                 checksum(&last),
@@ -943,7 +962,7 @@ fn thread_scaling_sweep() {
                 start_context,
                 session.cache_len(),
                 budget,
-                selected,
+                backend.threads(),
                 &observed,
                 recorder.finish(),
                 checksum(&last),
@@ -1638,6 +1657,354 @@ fn planner_shape_census_matches_the_profile() {
             model.label,
             plan.instructions().len()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Controlled cache-versus-host-state experiment
+// ---------------------------------------------------------------------------
+
+/// What runs immediately before the timed transpose in each arm.
+///
+/// The question is whether the decode-after-prefill regression (transpose
+/// 3.69 ms -> 7.99 ms) is caused by the *cache* state a multi-threaded prefill
+/// leaves behind, or by *host* state (boost clocks, SMT contention, pool
+/// wake-ups). The arms cross the two factors: memory (25.7 MB weight versus a
+/// sub-megabyte working set) and concurrency (16 threads through the pool versus
+/// one thread).
+///
+/// - `Alone`   — the transpose with nothing before it.
+/// - `BigMany` — the real prefill `lm_head` product (10x128x50257, 64 M MACs,
+///   25.7 MB weight) at the widest fixed budget: memory **and** pool.
+/// - `BigOne`  — the same product at one thread: memory, **no** pool.
+/// - `SmallMany` — a 16-thread product over ~640 KB (nothing large enters the
+///   cache), same pool, similar duration: **no** memory, pool.
+/// - `BigManyIdle` — `BigMany` then a 5 ms sleep: does host state recover while
+///   the cache does not?
+/// - `PrefillStep` — a real 10-token prefill of the pinned model on a widest-
+///   budget backend, i.e. the exact plan-level scenario the sweep reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Burst {
+    Alone,
+    BigMany,
+    BigOne,
+    SmallMany,
+    BigManyIdle,
+    PrefillStep,
+}
+
+impl Burst {
+    fn label(self) -> &'static str {
+        match self {
+            Burst::Alone => "alone",
+            Burst::BigMany => "big_16t",
+            Burst::BigOne => "big_1t",
+            Burst::SmallMany => "small_16t",
+            Burst::BigManyIdle => "big_16t_idle5ms",
+            Burst::PrefillStep => "prefill_step_16t",
+        }
+    }
+}
+
+fn percentile_f64(sorted: &[f64], fraction: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = ((sorted.len() as f64) * fraction).ceil() as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+fn describe(label: &str, samples: &[f64]) -> (f64, f64) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p50 = percentile_f64(&sorted, 0.50);
+    let p95 = percentile_f64(&sorted, 0.95);
+    let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+    println!(
+        "DIST {{\"series\":\"{label}\",\"n\":{},\"p50_ms\":{:.4},\"p95_ms\":{:.4},\
+         \"min_ms\":{:.4},\"max_ms\":{:.4},\"mean_ms\":{:.4},\"raw\":[{}]}}",
+        sorted.len(),
+        p50,
+        p95,
+        sorted.first().copied().unwrap_or(0.0),
+        sorted.last().copied().unwrap_or(0.0),
+        mean,
+        sorted
+            .iter()
+            .map(|value| format!("{value:.4}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    (p50, p95)
+}
+
+/// The experiment the integration review asked for: separate cache carry-over
+/// from host state before choosing between a kernel fix and a policy cap.
+///
+/// Each arm is a loop of `burst(); time one transpose`, so the transpose always
+/// starts with whatever the burst left behind. Raw samples are printed, not only
+/// medians, because the budget-2 rows in the sweep turned out to be bimodal and
+/// a median alone hid that.
+#[test]
+fn cache_versus_host_state_experiment() {
+    let Some(model) = ModelUnderTest::load() else {
+        return;
+    };
+    let iterations = env_usize("FN3_PERF_EXPERIMENT_ITERS", 30);
+    let widest = cpu_process_budget();
+    let many = CpuBackend::with_thread_budget(ThreadBudget::fixed(widest));
+    let one = CpuBackend::with_thread_budget(ThreadBudget::fixed(1));
+    let (prepared, _) = model.prepared();
+    let tokens = long_tokens();
+    // One backend for the plan-level arm; `Session` borrows it for the whole
+    // experiment, so it outlives the loop.
+    let prefill_backend = CpuBackend::with_thread_budget(ThreadBudget::fixed(widest));
+
+    // The transpose under test: the real tied-embedding table and its output.
+    let source = filled(&[50_257, 128], 0.25);
+    let mut destination = Tensor::zeros(
+        fastnn::fn3::Shape::from_dims([128, 50_257]),
+        fastnn::fn3::DType::F32,
+        DeviceId::Cpu,
+    )
+    .expect("transpose output");
+    let transpose_params = OpParams::default().with_axes([1, 0]);
+
+    let time_transpose = |destination: &mut Tensor| {
+        let inputs = [source.as_view().expect("source")];
+        let mut out = destination.as_mut_view().expect("out");
+        let start = Instant::now();
+        many.execute_op(
+            OpId::Transpose,
+            &inputs,
+            std::slice::from_mut(&mut out),
+            &transpose_params,
+        )
+        .expect("transpose");
+        start.elapsed().as_secs_f64() * 1e3
+    };
+
+    // The big burst: the prefill's own lm_head product, 25.7 MB weight.
+    let big_lhs = filled(&[1, 10, 128], 0.5);
+    let big_rhs = filled(&[128, 50_257], 1.5);
+    let mut big_out = Tensor::zeros(
+        fastnn::fn3::Shape::from_dims([1, 10, 50_257]),
+        fastnn::fn3::DType::F32,
+        DeviceId::Cpu,
+    )
+    .expect("big out");
+    let big_run = |backend: &CpuBackend, out: &mut Tensor| {
+        let inputs = [
+            big_lhs.as_view().expect("lhs"),
+            big_rhs.as_view().expect("rhs"),
+        ];
+        let mut view = out.as_mut_view().expect("out");
+        backend
+            .execute_op(
+                OpId::MatMul,
+                &inputs,
+                std::slice::from_mut(&mut view),
+                &OpParams::default(),
+            )
+            .expect("big matmul");
+    };
+
+    // The small burst: same pool, ~640 KB of operands, comparable duration.
+    let small_lhs = filled(&[128, 256], 0.75);
+    let small_rhs = filled(&[256, 512], 1.25);
+    let mut small_out = Tensor::zeros(
+        fastnn::fn3::Shape::from_dims([128, 512]),
+        fastnn::fn3::DType::F32,
+        DeviceId::Cpu,
+    )
+    .expect("small out");
+    let small_run = |out: &mut Tensor| {
+        let inputs = [
+            small_lhs.as_view().expect("lhs"),
+            small_rhs.as_view().expect("rhs"),
+        ];
+        let mut view = out.as_mut_view().expect("out");
+        many.execute_op(
+            OpId::MatMul,
+            &inputs,
+            std::slice::from_mut(&mut view),
+            &OpParams::default(),
+        )
+        .expect("small matmul");
+    };
+
+    println!(
+        "Experiment {{\"variant\":\"{}\",\"model\":\"{}\",\"iters\":{iterations},\
+         \"process_budget\":{widest},\"loadavg\":\"{}\"}}",
+        variant(),
+        model.label,
+        loadavg()
+    );
+
+    for arm in [
+        Burst::Alone,
+        Burst::BigMany,
+        Burst::BigOne,
+        Burst::SmallMany,
+        Burst::BigManyIdle,
+        Burst::PrefillStep,
+    ] {
+        // A session for the plan-level arm; created once so the plan is warm.
+        let mut session = if arm == Burst::PrefillStep {
+            let mut session =
+                Session::with_runtime(&prepared, &model.import, &prefill_backend).expect("session");
+            step(session.prefill(&tokens[..10]), "experiment prefill warmup");
+            Some(session)
+        } else {
+            None
+        };
+        let mut burst_times = Vec::with_capacity(iterations);
+        let mut transpose_times = Vec::with_capacity(iterations);
+        // Two warmups outside the recorded window, so the first sample is not
+        // paying page faults on freshly allocated buffers.
+        for _ in 0..2 {
+            let _ = time_transpose(&mut destination);
+        }
+        for _ in 0..iterations {
+            let burst_start = Instant::now();
+            match arm {
+                Burst::Alone => {}
+                Burst::BigMany => big_run(&many, &mut big_out),
+                Burst::BigOne => big_run(&one, &mut big_out),
+                Burst::SmallMany => small_run(&mut small_out),
+                Burst::BigManyIdle => {
+                    big_run(&many, &mut big_out);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Burst::PrefillStep => {
+                    if let Some(session) = session.as_mut() {
+                        session.reset();
+                        step(session.prefill(&tokens[..10]), "experiment prefill");
+                    }
+                }
+            }
+            burst_times.push(burst_start.elapsed().as_secs_f64() * 1e3);
+            transpose_times.push(time_transpose(&mut destination));
+        }
+        let (burst_p50, _) = describe(&format!("burst_{}", arm.label()), &burst_times);
+        let (p50, p95) = describe(
+            &format!("transpose_after_{}", arm.label()),
+            &transpose_times,
+        );
+        println!(
+            "ExperimentArm {{\"variant\":\"{}\",\"arm\":\"{}\",\"burst_p50_ms\":{burst_p50:.4},\
+             \"transpose_p50_ms\":{p50:.4},\"transpose_p95_ms\":{p95:.4},\"loadavg\":\"{}\"}}",
+            variant(),
+            arm.label(),
+            loadavg()
+        );
+        drop(session);
+    }
+}
+
+/// Which op in a decode step absorbs the decode-after-prefill slowdown?
+///
+/// The controlled experiment shows the transpose is *not* affected by a
+/// preceding 16-thread prefill (4.58 ms in every arm). The sweep nevertheless
+/// reports 6.0 ms -> 10.1 ms for the decode step at four or more threads, so the
+/// loss has to be somewhere else in the step. This repeats the exact sweep
+/// protocol (reset, untimed prefill, timed decode) and reports each op's p50
+/// over the steps at one thread and at the widest budget, so the difference has
+/// a name instead of a hypothesis.
+#[test]
+fn decode_step_attribution_after_prefill() {
+    let Some(model) = ModelUnderTest::load() else {
+        return;
+    };
+    let (prepared, _) = model.prepared();
+    let tokens = long_tokens();
+    let prompt = *model.prompts().first().unwrap_or(&10) as usize;
+    let steps = env_usize("FN3_PERF_EXPERIMENT_ITERS", 12);
+    for budget in [1usize, cpu_process_budget()] {
+        let backend = TimingBackend::with_budget(ThreadBudget::fixed(budget));
+        let mut session = Session::with_runtime(&prepared, &model.import, &backend)
+            .unwrap_or_else(|error| panic!("session: {error}"));
+        step(session.prefill(&tokens[..prompt]), "warm prefill");
+        step(session.decode(&tokens[prompt..prompt + 1]), "warm decode");
+        let mut totals = Vec::with_capacity(steps);
+        let mut seconds = Vec::with_capacity(steps);
+        let mut per_op: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut per_op_second: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for _ in 0..steps {
+            session.reset();
+            step(
+                session.prefill(&tokens[..prompt]),
+                "decode prefill (untimed)",
+            );
+            backend.reset();
+            let start = Instant::now();
+            let logits = step(session.decode(&tokens[prompt..prompt + 1]), "decode");
+            totals.push(start.elapsed().as_secs_f64() * 1e3);
+            let _ = logits;
+            for (_op, geometry, _calls, nanos) in backend.ranked() {
+                per_op.entry(geometry).or_default().push(nanos as f64 / 1e6);
+            }
+            // A second decode with no reset in between: the slot pool is warm
+            // and nothing was reallocated. If this one is fast, the slowdown
+            // belongs to what the reset forces, not to the budget.
+            backend.reset();
+            let start = Instant::now();
+            let logits = step(
+                session.decode(&tokens[prompt + 1..prompt + 2]),
+                "decode (warm pool)",
+            );
+            seconds.push(start.elapsed().as_secs_f64() * 1e3);
+            let _ = logits;
+            for (_op, geometry, _calls, nanos) in backend.ranked() {
+                per_op_second
+                    .entry(geometry)
+                    .or_default()
+                    .push(nanos as f64 / 1e6);
+            }
+        }
+        let (second_p50, second_p95) = describe(&format!("decode_warm_pool_b{budget}"), &seconds);
+        println!(
+            "DecodeSecond {{\"variant\":\"{}\",\"model\":\"{}\",\"budget\":{budget},\
+             \"p50_ms\":{second_p50:.4},\"p95_ms\":{second_p95:.4}}}",
+            variant(),
+            model.label
+        );
+        for (geometry, samples) in &per_op_second {
+            let mut sorted = samples.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if sorted.last().copied().unwrap_or(0.0) > 0.05 {
+                println!(
+                    "DecodeOpSecond {{\"variant\":\"{}\",\"model\":\"{}\",\"budget\":{budget},\
+                     \"op_p50_ms\":{:.4},\"geometry\":\"{geometry}\"}}",
+                    variant(),
+                    model.label,
+                    percentile_f64(&sorted, 0.50)
+                );
+            }
+        }
+        let (total_p50, total_p95) = describe(&format!("decode_step_total_b{budget}"), &totals);
+        println!(
+            "DecodeStep {{\"variant\":\"{}\",\"model\":\"{}\",\"budget\":{budget},\
+             \"steps\":{steps},\"p50_ms\":{total_p50:.4},\"p95_ms\":{total_p95:.4}}}",
+            variant(),
+            model.label
+        );
+        let mut rows: Vec<(f64, String)> = per_op
+            .into_iter()
+            .map(|(geometry, mut samples)| {
+                samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                (percentile_f64(&samples, 0.50), geometry)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        for (p50, geometry) in rows {
+            println!(
+                "DecodeOp {{\"variant\":\"{}\",\"model\":\"{}\",\"budget\":{budget},\
+                 \"op_p50_ms\":{p50:.4},\"geometry\":\"{geometry}\"}}",
+                variant(),
+                model.label
+            );
+        }
     }
 }
 

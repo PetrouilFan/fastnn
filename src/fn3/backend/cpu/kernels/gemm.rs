@@ -150,32 +150,48 @@ pub(crate) fn row_major_slab(
     }
 
     if rows >= 2 {
-        // Prefill: whole output rows per task, balanced so every task gets the
-        // same number of rows (plus one for the first few). Both the lhs and the
-        // out window a task receives stay contiguous.
-        let tasks = threads.min(rows);
-        let row_counts = parallel::balanced_lengths(rows, tasks);
-        let lengths: Vec<usize> = row_counts.iter().map(|count| count * columns).collect();
-        let mut first_row = 0usize;
-        let mut row_starts = Vec::with_capacity(tasks);
-        for &count in &row_counts {
-            row_starts.push(first_row);
-            first_row += count;
+        // Prefill: output *columns* per task. A row split gives every task a
+        // contiguous slice, but each task then reads the whole right-hand side,
+        // so a ten-row `lm_head` reads its 25.7 MB weight ten times (257 MB of
+        // traffic through a 32 MB L3 per instruction). A column band reads each
+        // weight element once; the task writes `rows x band` into its own scratch
+        // and the parent scatters the bands, which costs one extra pass over the
+        // output (2 MB for `lm_head`) instead of nine extra passes over the
+        // weight. Each output element is still one accumulator fed in ascending
+        // `k`, so the result is unchanged bit for bit.
+        let tasks = threads.min(columns).min(rows * columns);
+        let band_lengths = parallel::balanced_lengths(columns, tasks);
+        let mut band_starts = Vec::with_capacity(tasks);
+        let mut first_column = 0usize;
+        for &length in &band_lengths {
+            band_starts.push(first_column);
+            first_column += length;
         }
-        parallel::par_slices_mut(threads, out_window, &lengths, |index, part| {
-            let first = row_starts[index];
-            let height = row_counts[index];
+        let bands: Vec<Vec<f32>> = parallel::par_map(threads, tasks, |index| {
+            let first = band_starts[index];
+            let width = band_lengths[index];
+            let mut scratch = vec![0.0f32; rows * width];
             slab(
-                &lhs_window[first * inner..],
-                rhs_window,
-                part,
-                height,
+                lhs_window,
+                &rhs_window[first..],
+                &mut scratch,
+                rows,
                 inner,
+                width,
                 columns,
-                columns,
-                columns,
+                width,
             );
+            scratch
         });
+        for (index, band) in bands.iter().enumerate() {
+            let first = band_starts[index];
+            let width = band_lengths[index];
+            for row in 0..rows {
+                let destination = row * columns + first;
+                out_window[destination..destination + width]
+                    .copy_from_slice(&band[row * width..(row + 1) * width]);
+            }
+        }
         return Ok(());
     }
 
