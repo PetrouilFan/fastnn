@@ -6,14 +6,28 @@ copy drifts, so "the versions agree" cannot silently become false again.
 """
 
 import pathlib
+import re
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts" / "ci" / "check-versions.py"
 
-CARGO = "3.0.0-alpha.1"
-PEP440 = "3.0.0a1"
+def cargo_version() -> str:
+    """Read the one authoritative version, so this test follows the release."""
+    text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+    assert match is not None, "Cargo.toml has no [package] version"
+    return match.group(1)
+
+
+def pep440(cargo: str) -> str:
+    """The Cargo spelling of a prerelease, normalised the way the checker does."""
+    return re.sub(r"-(alpha|beta|rc)\.", lambda m: {"alpha": "a", "beta": "b", "rc": "rc"}[m.group(1)], cargo)
+
+
+CARGO = cargo_version()
+PEP440 = pep440(CARGO)
 
 
 def run_checker(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -46,7 +60,7 @@ def test_this_checkout_has_one_normalised_version_everywhere():
     assert PEP440 in result.stdout
 
 
-def test_prerelease_tag_is_accepted_and_a_wrong_tag_is_rejected():
+def test_the_tag_must_use_the_cargo_spelling():
     accepted = run_checker("--tag", f"v{CARGO}")
     assert accepted.returncode == 0, accepted.stderr
 
@@ -60,7 +74,7 @@ def test_a_drifted_python_version_fails_the_checker(tmp_path):
     assert run_checker("--root", str(tmp_path)).returncode == 0
 
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "fastnn"\nversion = "3.0.0b1"\n'
+        '[project]\nname = "fastnn"\nversion = "2.5.0"\n'
     )
     result = run_checker("--root", str(tmp_path))
     assert result.returncode != 0
