@@ -18,10 +18,13 @@ compare against the committed ORT fixtures in ``fixtures/parity/tiny-gpt2``.
 
 import gc
 import hashlib
+import json
 import os
 import pathlib
 import shutil
 import struct
+import subprocess
+import sys
 import threading
 import time
 
@@ -80,8 +83,12 @@ def artifact_path(tmp_path_factory) -> pathlib.Path:
 
 @pytest.fixture(scope="module")
 def model(artifact_path) -> fn3.Model:
-    """The loaded model shared by tests that never mutate it."""
-    return fn3.load(artifact_path, pinned_onnx(), device="cpu")
+    """The loaded model shared by tests that never mutate it.
+
+    Loaded from the artifact alone: no ONNX path, no environment variable. The
+    ``source=`` verification has its own tests below.
+    """
+    return fn3.load(artifact_path, device="cpu")
 
 
 @pytest.fixture()
@@ -350,13 +357,61 @@ def test_bad_magic_future_version_and_corruption_are_distinct(artifact_path, tmp
         fn3.load(path, pinned_onnx())
 
 
-def test_load_requires_a_source_and_says_why(artifact_path):
-    with pytest.raises(fn3.Fn3ModelError) as info:
-        fn3.load(artifact_path)
-    message = str(info.value)
-    assert "source=" in message
-    assert "#62" in message
-    assert "artifact" in message
+def test_load_needs_no_source_and_runs_the_artifact_alone(artifact_path):
+    """One file is enough: no ONNX path, no environment variable."""
+    model = fn3.load(artifact_path, device="cpu")
+    assert model.source is None
+    session = model.session()
+    logits = np.asarray(session.prefill(TOKENS[:10])).reshape(-1)
+    top = np.argsort(-logits, kind="stable")[:5]
+    assert top.tolist() == [46737, 28597, 16571, 7868, 13]
+
+
+def test_artifact_only_load_works_in_a_clean_process(artifact_path, tmp_path):
+    """A fresh interpreter, an empty cwd and no model env var: still runs.
+
+    This is the deployment claim. The child process is given the artifact path
+    and nothing else; ``FASTNN_FN3_ONNX_MODEL`` is cleared, and its working
+    directory holds no ONNX file.
+    """
+    script = (
+        "import json, pathlib, sys\n"
+        "import numpy as np\n"
+        "import fastnn.fn3 as fn3\n"
+        "model = fn3.load(sys.argv[1], device='cpu')\n"
+        "session = model.session()\n"
+        "logits = np.asarray(session.prefill([464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13])).reshape(-1)\n"
+        "top = np.argsort(-logits, kind='stable')[:5]\n"
+        "print(json.dumps({'top': top.tolist(), 'source': model.source,\n"
+        "                  'cwd_onnx': sorted(p.name for p in pathlib.Path('.').glob('*.onnx'))}))\n"
+    )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "FASTNN_FN3_ONNX_MODEL"
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(artifact_path)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert report["top"] == [46737, 28597, 16571, 7868, 13]
+    assert report["source"] is None
+    assert report["cwd_onnx"] == []
+
+
+def test_a_matching_source_is_accepted_and_reported(artifact_path):
+    """The optional source check still passes and says what was checked."""
+    model = fn3.load(artifact_path, pinned_onnx(), device="cpu")
+    assert model.source == str(pinned_onnx())
+    logits = np.asarray(model.session().prefill(TOKENS[:10])).reshape(-1)
+    top = np.argsort(-logits, kind="stable")[:5]
+    assert top.tolist() == [46737, 28597, 16571, 7868, 13]
 
 
 def test_a_source_that_disagrees_is_refused(artifact_path, tmp_path):
