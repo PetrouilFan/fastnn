@@ -3,6 +3,29 @@ name = "fastnn"
 version = "3.0.0-alpha.1"
 edition = "2021"
 autobenches = false
+description = "Inference-only neural networks in Rust: ONNX decoder import, prepared-model artifacts, and CPU or Vulkan prefill/decode."
+license = "MIT"
+repository = "https://github.com/PetrouilFan/fastnn"
+readme = "README.md"
+keywords = ["neural-network", "inference", "onnx", "vulkan", "python-bindings"]
+categories = ["science", "hardware-support"]
+# Verified floor: cargo check passes with 1.89.0 for the default features,
+# --no-default-features, --features cli,vulkan and the fn3-bench feature set;
+# 1.88.0 rejects the AVX-512 intrinsics in the retained 2.x CPU kernels.
+rust-version = "1.89"
+# Ship the crate's own sources and the Rust targets declared below. Fixtures,
+# models, docs, tests and the Python package are not part of the crate: the
+# fixture trees alone are 2.1 MiB of numeric test data.
+include = [
+  "/src/**",
+  "/benches/**",
+  "/examples/**",
+  "/tools/bench/**",
+  "/Cargo.toml",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+]
 
 [lib]
 name = "fastnn"

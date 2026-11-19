@@ -15,6 +15,12 @@ real inference from the installed wheel: `prepare` -> `load` -> `prefill` ->
 `46737, 28597, 16571, 7868, 13`. Without the model the inference step prints
 and records a SKIP with the reason; a skip is never reported as a pass.
 
+`--require-inference` makes a missing model a **failure** (exit 2) instead of a
+skip. The release workflow uses it so a release wheel is never accepted on the
+strength of an import alone. `--expect-model-sha256` additionally pins the
+model bytes; the packaging lane passes the value from
+`fixtures/parity/tiny-gpt2/model.lock.json`.
+
 `--report <path>` writes a small JSON record (`passed`, `skipped` or `failed`
 plus the observed top-5) so the packaging lane can record a truthful check.
 """
@@ -49,7 +55,7 @@ def write_report(path: str | None, record: dict) -> None:
     pathlib.Path(path).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
-def run_inference(model: pathlib.Path) -> dict:
+def run_inference(model: pathlib.Path, expect_sha256: str = "") -> dict:
     import numpy as np
 
     import fastnn.fn3 as fn3
@@ -59,6 +65,11 @@ def run_inference(model: pathlib.Path) -> dict:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     sha256 = digest.hexdigest()
+    if expect_sha256 and sha256 != expect_sha256:
+        raise AssertionError(
+            f"model sha256 is {sha256}, expected {expect_sha256} "
+            "(fixtures/parity/tiny-gpt2/model.lock.json)"
+        )
     print(f"inference model: {model} ({model.stat().st_size} bytes, sha256 {sha256})")
 
     with tempfile.TemporaryDirectory(prefix="fastnn-wheel-inference-") as directory:
@@ -140,6 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="write a JSON record of the inference step (passed/skipped/failed)",
     )
+    parser.add_argument(
+        "--require-inference",
+        action="store_true",
+        help="fail with exit 2 when the pinned model is absent instead of recording a skip",
+    )
+    parser.add_argument(
+        "--expect-model-sha256",
+        default="",
+        help="require the model to hash to this value (from the committed model lock)",
+    )
     args = parser.parse_args(argv)
 
     import fastnn
@@ -190,17 +211,34 @@ def main(argv: list[str] | None = None) -> int:
             f"pinned tiny-GPT-2 ONNX not present at {model}; set FASTNN_FN3_ONNX_MODEL "
             "or pass --model to run the installed-wheel prepare/load/prefill/decode smoke"
         )
+        if args.require_inference:
+            print(f"WHEEL INFERENCE: FAILED — {reason}", file=sys.stderr)
+            print(
+                "STRICT MODE: --require-inference was given, so a missing pinned model is a "
+                "failure, not a skip. Fetch it from the documented URL in "
+                "fixtures/parity/tiny-gpt2/model.lock.json and verify its sha256.",
+                file=sys.stderr,
+            )
+            write_report(
+                args.report,
+                {"status": "failed", "reason": reason, "strict": True},
+            )
+            return 2
         print(f"WHEEL INFERENCE: SKIPPED — {reason}")
-        write_report(args.report, {"status": "skipped", "reason": reason})
+        write_report(args.report, {"status": "skipped", "reason": reason, "strict": False})
         print("WHEEL SMOKE: PASSED (without the pinned-model inference step)")
         return 0
 
     try:
-        record = run_inference(model)
+        record = run_inference(model, args.expect_model_sha256)
     except Exception as error:  # noqa: BLE001 - the report needs the real message
-        write_report(args.report, {"status": "failed", "reason": str(error)})
+        write_report(
+            args.report,
+            {"status": "failed", "reason": str(error), "strict": args.require_inference},
+        )
         raise
 
+    record["strict"] = args.require_inference
     write_report(args.report, record)
     print(f"WHEEL INFERENCE: PASSED — top-5 {record['top5']}")
     print("WHEEL SMOKE: PASSED")

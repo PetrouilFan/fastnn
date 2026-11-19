@@ -5,9 +5,12 @@ Release workflow, checklist, and version management for fastnn.
 ## Current Release Status
 
 The published release is **v2.6.0**. The 3.0 alpha candidate is
-**`3.0.0-alpha.1`** on branch `fn3/67-alpha-release`; it is prepared and
-verified locally, not merged, tagged or published. Release tags are created only
-from a reviewed, green `main`.
+**`3.0.0-alpha.1`**, verified at
+`672cec9faf089ef0840179f6edfdf33779b576a1` on `rewrite/fastnn-3`. The
+follow-up branch `fn3/alpha-followup` carries the matched release-build timing
+baseline and the strict release wheel smoke. It is prepared and verified
+locally, not merged, tagged or published. Release tags are created only from a
+reviewed, green `main`.
 
 ### Prereleases
 
@@ -49,11 +52,37 @@ Releases are triggered by pushing a `v*` tag. The workflow in
    integration tests, and release-mode malformed-input coverage on Ubuntu.
 3. **Portable build job** -- release builds on Ubuntu, Windows, and macOS.
 4. **Build wheels job** -- Python wheels via maturin on Ubuntu, Windows, and
-   macOS, followed by a clean-directory install/import/version smoke test.
+   macOS, followed by the pinned-model fetch, a strict clean-directory
+   install/import/inference smoke test, and the wheel artifacts.
 5. **Create release job** -- publish all wheel artifacts to a GitHub Release.
 
 The workflow publishes wheels to GitHub Releases only. It does not publish to
 PyPI or crates.io.
+
+### Pinned-model inference in the release wheel
+
+The release wheel is never accepted on an import alone. In every wheel job the
+workflow first fetches `onnx/model.onnx` from the revision recorded in
+`fixtures/parity/tiny-gpt2/model.lock.json`:
+
+- the URL is derived from that file's `model_id` and `revision`, never typed by
+  hand;
+- the downloaded size and SHA-256 are compared with the same lock entry;
+- a fetch, size or digest failure ends the job with a named
+  `::error::pinned-model ...`; it is never recorded as `not_run`.
+
+The lane then runs
+`python tools/ci/packaging_lane.py --skip-build --require-inference`. With that
+flag a missing model is a failure: `wheel_smoke.py` exits 2, the lane exits 1,
+and the built-in smoke requires the installed wheel to prepare, load, prefill
+and decode the pinned graph and reproduce top-5
+`[46737, 28597, 16571, 7868, 13]`.
+
+Local runs keep the non-strict default. `python3 tools/ci/packaging_lane.py`
+with no model prints a skip reason, writes `status: skipped` with
+`strict: false`, records the `wheel_inference` check as `not_run`, and exits 0.
+That is a packaging check, not a release gate, and the distinction is recorded
+in `tools/ci/lanes.json`.
 
 ## How to Run a Release
 
@@ -124,6 +153,7 @@ Date: YYYY-MM-DD
 [ ] Release PR merged and main CI green
 [ ] Tag pushed, workflow started
 [ ] All 3 platform wheels built successfully
+[ ] Release wheel job reports strict pinned-model inference PASSED (never not_run)
 [ ] GitHub Release created with artifacts
 [ ] Downloaded release wheel passes clean-environment smoke tests
 ```

@@ -504,3 +504,55 @@ owner, not activated).
 Owner actions deliberately not taken: no tag, no GitHub release, no PyPI or
 crates.io publication, no PR to `main`, `main` untouched. Model weights are not
 redistributed (no license is declared upstream).
+
+## Alpha follow-up (#67): matched baseline and strict release smoke
+
+Branch `fn3/alpha-followup`, base and verified candidate
+`672cec9faf089ef0840179f6edfdf33779b576a1` on `rewrite/fastnn-3`. Evidence
+in `docs/reports/fn3-21-alpha-followup/`; the handoff's timing section is
+corrected in place with the old figures kept and labelled.
+
+- **Timing is a matched release-build measurement.** `tests/fn3_alpha_bench.rs`
+  runs one concrete backend per process: 3 warmups and 20 measured iterations
+  of the pinned 10-token prompt plus decode `640,11,612` (contexts 11/12/13),
+  resetting between iterations so every prefill is `(10,0)`. CPU p50 240.31 ms
+  prefill / 158.33 ms per decode token; GTX 1080 Ti p50 204.76 ms / 190.64 ms,
+  with every phase proven on the device (11,500/11,500 executions, 0 input
+  readbacks, validation 0/0). Percentiles are nearest-rank and all samples are
+  committed. The superseded `--quick` table (271.77 / 179.74, peak RSS
+  165.67 MiB, device peak unavailable) is kept as a labelled correction: it
+  recorded no profile, used `--quick`, compared `fn3-bench` CPU against CLI
+  Vulkan on a 13-token prompt, and read an unpopulated adapter field.
+- **`memory.device_peak` is now measured, and its limit named.**
+  `MemoryStats::peak_live_bytes` reports 120,669,184 B. A device-local-only
+  high-water mark is not exposed; that row is `unavailable` and names the
+  missing `MemoryStats::peak_live_device_local_bytes`, never zero. Live
+  device-local is 0 B at rest because alpha tensor storage is host-staged.
+- **Vulkan device time is not yet a stable number.** Its p50 spans
+  12.93-28.55 ms per step across runs and even within one run, because the GPU
+  clock is unpinned (139 MHz idle against a 1911 MHz maximum) and the fenced
+  per-instruction kernels are too short to hold a boost state. Host wall time is
+  the comparable metric. Pinning the clock needs root: owner decision.
+- **A release wheel cannot pass on an import alone.** `--require-inference`
+  makes a missing pinned model a failure in `wheel_smoke.py` (exit 2, named
+  path) and `packaging_lane.py` (exit 1 before the build, with the pinned URL
+  and sha256). The release workflow fetches the model from the URL derived from
+  `fixtures/parity/tiny-gpt2/model.lock.json` and verifies size and sha256; a
+  fetch failure is a named `::error::pinned-model` failure. The local default
+  stays non-strict and records `not_run` with its reason.
+- **The crate package is trimmed and described.** `cargo package` ships 306
+  files / 1.0 MiB (was 672 / 3.1 MiB) with no fixtures, models, docs, tests or
+  artifacts; `cargo publish --dry-run` stops at upload with no manifest
+  warnings. `rust-version = "1.89"` is measured (1.88 rejects the retained
+  AVX-512 kernels, 1.89 passes four feature configurations). The wheel carries
+  the same metadata, the MIT licence read from the committed `LICENSE`, and no
+  tests or fixtures.
+- **Hosted CI found one real gap.** The first dispatch on `rewrite/fastnn-3`
+  failed `vulkan-software` because the runner ships lavapipe but not
+  `VK_LAYER_KHRONOS_validation`; installing `vulkan-validationlayers` made the
+  lane green on the follow-up branch. The review candidate was not modified.
+  `pinned-model` remains NOT VERIFIED by design and `gpu-physical` validates
+  the committed record without running a GPU.
+
+Owner actions deliberately not taken here: no merge, tag, release, package
+upload, PR, issue comment, clock pinning or change to `rewrite/fastnn-3`.

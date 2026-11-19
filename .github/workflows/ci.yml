@@ -118,7 +118,12 @@ jobs:
       - name: Install lavapipe and Vulkan tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools libvulkan1
+          # vulkan-validationlayers is required: the smoke opens the instance
+          # with the validation layer enabled in code, and the runner image does
+          # not ship VK_LAYER_KHRONOS_validation by default. Without it the
+          # lane fails with "validation was requested but
+          # VK_LAYER_KHRONOS_validation is not installed".
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools libvulkan1 vulkan-validationlayers
       - name: Run the CI-ONLY software Vulkan lane
         env:
           FN3_SOFTWARE_ICD: /usr/share/vulkan/icd.d/lvp_icd.json
