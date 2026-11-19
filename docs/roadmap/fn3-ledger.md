@@ -201,12 +201,12 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #66 | CI | ready | — | — | — | after #48 |
 | #67 | Alpha release | review (local candidate) | `fn3/67-alpha-release` | `fastnn-wt-67-release` | `854afb6` | owner actions only |
 | #67 | Alpha release | verified (integrated `c4c2401`) | `fn3/67-alpha-release` | `fastnn-wt-67-release` | `854afb6` | done; versions agree, clippy 0, wheel smoke passed |
-| #68 | Quant format | deferred (stable) | — | — | — | after #62 |
+| #68 | Quant format | verified (integrated `24aee9e`) | `fn3/68-quant-format` | `fastnn-wt-68-quant` | `672cec9` | done; W8A16 locked, trained fixture pinned |
 | #69 | CPU quant | deferred (stable) | — | — | — | after #68 |
 | #70 | GPU quant | deferred (stable) | — | — | — | after #68 |
-| #71 | CPU perf | deferred (stable) | — | — | — | after #62 |
-| #72 | GPU perf | deferred (stable) | — | — | — | after #62 |
-| #73 | Hardening | deferred (stable) | — | — | — | after #62 |
+| #71 | CPU perf | active (expanded scope) | `fn3/71-cpu-perf` | `fastnn-wt-71-cpu` | `672cec9` | thread sweep 1-16 + Auto, tiny and trained model |
+| #72 | GPU perf | verified (integrated `dd1dd7f`) | `fn3/72-residency` | `fastnn-wt-72-resident` | `672cec9` | done; 9.14 ms prefill, 9.31 ms/token, 4 submissions/chain |
+| #73 | Hardening | wave 1 verified (integrated `653cdda`) | `fn3/73-hardening` | `fastnn-wt-73-hardening` | `672cec9` | loaders done; runtime half after #72 |
 | #74 | Hardware QA | deferred (stable) | — | — | — | after alpha |
 | #75 | Docs/evaluation | deferred (stable) | — | — | — | after alpha |
 | #76 | Stable gate | deferred (stable) | — | — | — | after stable work |
@@ -559,7 +559,8 @@ upload, PR, issue comment, clock pinning or change to `rewrite/fastnn-3`.
 
 ## Wave 1: stable workstreams (post-alpha)
 
-Four of six wave-1 branches are integrated on `rewrite/fastnn-3`. The alpha
+Five of six wave-1 branches are integrated on `rewrite/fastnn-3`; #71 alone
+remains active. The alpha
 review commit `672cec9` remains an ancestor and is still the named review
 candidate; `main` is untouched.
 
@@ -569,6 +570,7 @@ candidate; `main` is untouched.
 | `653cdda` | `fn3/73-hardening` | `06a4208` | loader/parser budgets, 38 malformed cases, fuzz campaigns, unsafe audit |
 | `24aee9e` | `fn3/68-quant-format` | `ba7266e` | trained GPT-2 pin, W4A8 evaluation, `fn3-quant-format-v1` |
 | `3d2870c` | `fn3/alpha-followup` | `792d063` | matched release baseline, strict wheel inference, hosted CI fix |
+| `dd1dd7f` | `fn3/72-residency` | `7d4e6e5` | persistent weights, resident slots/KV, one submission per step |
 
 Decisions taken with the evidence:
 
@@ -594,12 +596,27 @@ Decisions taken with the evidence:
 - **Artifact-only is now the normal path.** `--onnx` is optional verification,
   and the Rust, CLI and Python paths all run from a `.fnn3` alone with the
   ONNX renamed away, producing identical plan ids and top-5.
+- **Vulkan is resident by default and the gap was staging, not arithmetic.**
+  At `672cec9` one chain uploaded 318,880,260 B and made 575 submissions; after
+  #72 it uploads 5,328 B and makes 4 plan submissions. Prefill TTFT p50 goes
+  142.36 -> 9.14 ms and decode 130.44 -> 9.31 ms per token on the GTX 1080 Ti,
+  with the base arm reproducing the alpha traffic byte for byte. Weight
+  re-upload is a hard error, not an observation: a second session moves 0 B.
+  Two limits are recorded: a decode step is still 10 `vkQueueSubmit` calls
+  because four KV appends and the logits download sit outside the plan batch,
+  and peak device memory rises 62 -> 116 MB because a step's staging blocks are
+  held until its fence (an arena is the follow-up).
+- **The hosted CI fix is proven at the integration commit.** Run 44491089648
+  on `3d2870c` completed green across cpu, cpu-python, vulkan-build,
+  vulkan-software-smoke, gpu-physical evidence and the packaging matrix.
 
 #73's **runtime half** (device loss, unavailable features, repeated reset,
 session error recovery, release-build behaviour) is deliberately not in this
 wave and is scheduled after #72, whose storage and submission rewrite changes
 the failure surface it must test.
 
-Still running at the time of this entry: **#71** (CPU profiling) and **#72**
-(Vulkan residency). #72 merges last because it is the largest shared-contract
-change.
+Still running at the time of this entry: **#71**, now under the owner's
+expanded automatic-thread-scaling requirements (1/2/4/8/12/16/Auto on the
+Ryzen 7 3700X, prefill and batch-1 decode, tiny and trained model, Auto
+default with a shared budget and a #69 interface). #72 integrated at `dd1dd7f`;
+the merged tree's `cargo test --lib` is 682 and every `fn3_*` binary passes.
