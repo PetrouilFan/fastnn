@@ -56,6 +56,7 @@ use crate::fn3::tensor::{TensorMut, TensorView};
 
 pub(crate) mod kernels;
 pub(crate) mod parallel;
+pub mod quant;
 pub(crate) mod simd;
 pub(crate) mod support;
 
