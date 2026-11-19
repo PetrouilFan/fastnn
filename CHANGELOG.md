@@ -2,19 +2,158 @@
 
 ## [Unreleased]
 
-### Removed
-- Retire the standalone `fastnn-runtime` binary. Prepare supported decoders
-  from the original ONNX with `fastnn-infer`; legacy `.fnnc` plans are not
-  accepted by the 3.0 CLI. `fastnn-convert` and the secondary eager/AOT APIs
-  remain. See the [migration guide](docs/guides/migrate-from-2x.md).
+## [3.0.0] - 2026-11-19
 
-## [3.0.0]
+The stable 3.0 release. Inference only: FP32 and quantized-weight execution on
+a portable CPU backend and a Vulkan backend, both driven from one `.fnn3`
+artifact. The crate is `3.0.0` and the Python wheel is `3.0.0`.
+
+### Added
+- **Resident Vulkan execution**: weights are uploaded once when a model is
+  prepared, and intermediate tensors, the KV cache and the logits stay on the
+  device for the life of a session. One batched submission covers a step
+  instead of one submission per operator. Measured on the pinned GPT-2 with a
+  10-token prefill: 142.36 → 9.14 ms prefill, 130.44 → 9.31 ms per decode
+  token, per-chain upload 318.9 MB → 5.3 KB. `FN3_VK_STAGED=1` retains the
+  previous per-operator staging path as a diagnostic control.
+- **Automatic CPU thread budget**: `Threading::Auto` is the default and starts
+  at the visible CPU count, narrowing to one thread once the runtime observes a
+  product whose output has a single row. `Fixed(n)` is never narrowed. On the
+  pinned GPT-2, Auto is within 1.5–3.4% of the best fixed budget measured over
+  1/2/4/8/12/16 threads.
+- **Quantized-weight execution (`fn3-quant-format-v1`)**: signed INT8 weights
+  with one binary16 scale and one int16 zero point per 64-element group along
+  K, FP32 activations and one FP32 accumulator per group. The format has a
+  normative byte layout, an independent Python encoder/decoder, and valid and
+  malformed fixtures. Implemented on CPU (`matmul_quantized`) and on Vulkan
+  (`launch_projection`), with no dequantized weight buffer and no Q/DQ pairs.
+- **Opt-in artifact INT8**: `fastnn-infer run|generate --weight-int8` and
+  `fastnn.inference.load(..., weight_int8=True)`. Eligible static MatMul
+  weights are packed and dispatched per instruction; every ineligible
+  instruction stays FP32 and is reported. Both the route report and the byte
+  report are observable through the CLI and `Session::weight_int8_report`.
+  Coverage on the pinned GPT-2 is 48 of 73 MatMuls: the 24 attention products
+  (dynamic right-hand side) and the tied LM head remain FP32.
+- **Artifact-only execution**: `prepare` once, then `run` and `generate`
+  accept the `.fnn3` alone; `--onnx` becomes an optional source check and
+  `--verify-source` makes that explicit. The Python `load(artifact)` needs no
+  source file.
+- **Loader budgets**: model size, node/value/weight counts, rank, attribute
+  axes, string length and typed element counts are bounded before allocation
+  in the protobuf, graph and artifact readers.
+- **Runtime failure contract**: a recoverable failure releases its slots,
+  rolls every KV layer back to the pre-step extent, and leaves extent, step,
+  tokens, phase and plan cache unchanged so `Session::recover()` can retry. A
+  terminal device loss poisons the device and returns `DeviceUnavailable`
+  naming adapter, UUID and the failing call. Unavailable Vulkan features are
+  named instead of silently falling back.
+- **`fn3_vulkan_identity_reshape` and `fn3_vulkan_reset`** gates, plus the
+  trained-model parity, resident-vs-staged, probe, quantized and long-context
+  measurement harnesses.
 
 ### Changed
-- Migrate Rust imports from `fastnn::fn3` to `fastnn::inference`, Python
-  imports from `fastnn.fn3` to `fastnn.inference`, and CLI invocations from
-  `fn3-infer` to `fastnn-infer`. The old names are not aliases. Existing
-  `.fnn3` artifacts and plan fingerprints are unchanged.
+- **Canonical names**: Rust `fastnn::inference`, Python `fastnn.inference`,
+  CLI `fastnn-infer`. The alpha names `fastnn::fn3`, `fastnn.fn3` and
+  `fn3-infer` are gone, not aliased. `.fnn3` artifacts and plan fingerprints
+  are unchanged.
+- **Vulkan residency is the default**; explicit `--device vulkan:<uuid>`
+  selection is by device UUID, never by index.
+- **Trained FP32 logits use two aggregate bounds** instead of a fixed mean
+  absolute error: `mean(|delta|) <= 5e-5 + 5e-6 * mean(|ref|)` and
+  `rms(delta - mean(delta)) <= 5e-5 * rms(ref - mean(ref))`. Elementwise,
+  top-1/top-5, KL, finite-value and KV checks are unchanged, and the previous
+  fixed `5e-5` figure is still reported as a diagnostic. The bound changed
+  because an independent float64 evaluation of the same graph differs from the
+  reference runner by 6.25e-5 at the same position, so the fixed bound was
+  below the reference's own rounding error. Tiny-model tolerances are
+  untouched.
+- CPU MatMul is blocked over output rows, the last-two-axes transpose is
+  cache-friendly, and prefill tiles the weight columns so each weight is read
+  once. Accumulation order is unchanged, so results stay bit-exact.
+- `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock`, `pyproject.toml`, `uv.lock`
+  and `fastnn.__version__` are `3.0.0`; `scripts/ci/check-versions.py
+  --tag v3.0.0` enforces agreement.
+
+### Fixed
+- A trained GPT-2 prefill crashed the resident Vulkan path: `Reshape(input_ids)`
+  was emitted as an instruction, so `Gather` received a device-resident index
+  tensor and failed host validation. The planner now folds a provably identity
+  `Reshape` into its input slot, keeping declared-shape validation, host bounds
+  checking, and the separate slot for a graph-output reshape.
+- A failed mid-commit KV append left half-appended layers; extents now roll
+  back with the cache contents.
+- A partial Vulkan allocation failure reported `Allocation { bytes: 0 }`; it
+  now reports the request size, or names the size as unknown.
+- Five loader defects: a short `Slice` `steps` list panicked, `tensor_bytes`
+  allocated before validating length, a non-permutation `Transpose` reached the
+  planner, a NaN LayerNorm epsilon was silently ignored, and the artifact
+  accepted `vocab_size = 0`.
+- Pinned reference payloads are length- and digest-checked before decoding, and
+  a malformed device opt-in fails instead of silently running on CPU.
+
+### Removed
+- **The standalone `fastnn-runtime` binary** and its direct `clap` dependency.
+  It had no active caller and its `.fnnc` plans are not accepted by the 3.0 CLI.
+  Prepare supported decoders from ONNX with `fastnn-infer`;
+  `fastnn-convert` and the retained 2.x eager/AOT APIs are unchanged. See the
+  [migration guide](docs/guides/migrate-from-2x.md).
+- **Training, autograd and optimizer paths** (alpha.1).
+- **The wgpu backend**, together with its dependencies (alpha.1).
+
+### Performance and validation
+- CPU, pinned GPT-2, one thread: 19.4× prefill and 30.7× decode versus the
+  serial alpha base, from the transpose and MatMul work alone. With threading,
+  trained prefill is 1.38× and decode 1.04× from 1 to 16 threads.
+- Quantized weights reduce the packed set from 339.7 MB to 90.2 MB (26.6%) and
+  whole-model storage from 497.8 MB to 248.3 MB (50.1%) for the pinned GPT-2,
+  counted at the API, not in RSS or VRAM. Quantized projection FLOPs run at
+  1.48× (prefill) and 1.10× (decode) on CPU.
+- Resident Vulkan decode is 26.8× faster than the staged path at 256 tokens
+  and 8.1× faster per token; the staged path submits 775 queue operations per
+  step against one batch.
+- Quantized parity on the pinned GPT-2: worst per-projection relative
+  Frobenius error 6.4e-3 against a 8e-3 gate, prefill KL 6.7e-6, decode KL
+  below 1.3e-2, top-1 preserved on every measured step, CPU against Vulkan
+  within 2e-4.
+- Trained FP32 on CPU and resident Vulkan: both aggregate bounds pass at
+  prefill and two decode steps, with 0 elementwise violations, exact top-1 and
+  5/5 top-5 overlap against digest-pinned reference tensors.
+- Loader fuzzing: 14,072,087 executions with zero crashes; 38 malformed cases
+  mapped to typed errors; a 4 GiB claim refused after 136 bytes.
+
+### Known limitations
+- **Vulkan is verified on one device**: the NVIDIA GTX 1080 Ti
+  (`471b2bda-51e1-6451-e692-ff5d1e146f1e`, driver 580.196.07) with validation
+  0 errors / 0 warnings. Other GPUs, vendors and drivers are not claimed. An
+  explicit `--device vulkan` never falls back to CPU.
+- **Linux x86_64 is the only claimed platform.** macOS and Windows are
+  exercised for import and packaging only; there is no arm64 build or claim.
+- **Quantized execution is not faster.** Packing costs 0.85–1.1 s per session
+  on the pinned GPT-2, decode is 2–3% slower on tiny and 7–10% slower on the
+  trained model, and long-context prefill is 2.36× slower on Vulkan at 1024
+  tokens. The benefit is storage, not latency; no speedup is claimed.
+- **A decode step is still 50 `vkQueueSubmit`** (48 KV copies, the token, and
+  the logits download) even though the operators are batched, and the
+  live-prefix refresh copies up to 75.5 MB per step at 1023 tokens as separate
+  256-byte copies. An FP32 and an INT8 session together exceed the device at
+  1023 tokens.
+- **The resident step batch is capped at 1024 records**; a larger plan fails
+  explicitly and splitting a step is not implemented.
+- **`lm_head` remains FP32** with tied embeddings, and quantized CPU weights are
+  additional host memory rather than a replacement until the planner owns the
+  slots.
+- **A fence wait whose completion is unknown** can release staging and
+  destination buffers that the device may still be using, and a concurrent
+  `prepare` can race a staged-input check. Neither is reachable in the
+  single-session flows this release claims, and both are recorded for the next
+  wave.
+- **No tokenizer.** Token IDs are the only text input.
+- **The pinned conformance model is not redistributed** (upstream declares no
+  licence); model-dependent tests skip with a printed reason when it is absent,
+  and required lanes fail instead.
+- **The Vulkan persistent table is never evicted**, and the device timestamp
+  counter is unstable because the GPU clock is not pinned; host wall clock is
+  the comparable metric.
 
 ## [3.0.0-alpha.1] - 2026-11-19
 
