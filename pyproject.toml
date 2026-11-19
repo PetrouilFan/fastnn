@@ -5,10 +5,27 @@ build-backend = "maturin"
 [project]
 name = "fastnn"
 version = "3.0.0a1"
+description = "Inference-only neural networks in Rust: ONNX decoder import, prepared-model artifacts, and CPU or Vulkan prefill/decode."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [{ name = "Petros Fanioudakis" }]
+keywords = ["neural-network", "inference", "onnx", "vulkan", "machine-learning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "numpy>=1.24",
 ]
+
+[project.urls]
+Homepage = "https://github.com/PetrouilFan/fastnn"
+Repository = "https://github.com/PetrouilFan/fastnn"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-benchmark"]
