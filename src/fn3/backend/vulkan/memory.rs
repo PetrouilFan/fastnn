@@ -868,8 +868,10 @@ mod tests {
                 vk::Device::null(),
             )
         };
-        let mut properties = vk::PhysicalDeviceMemoryProperties::default();
-        properties.memory_type_count = 1;
+        let mut properties = vk::PhysicalDeviceMemoryProperties {
+            memory_type_count: 1,
+            ..Default::default()
+        };
         properties.memory_types[0].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         const CHUNK_BYTES: u64 = 64 * 1024 * 1024;
         let mut allocator = MemoryAllocator::new(properties, CHUNK_BYTES, 1, 1, CHUNK_BYTES);
