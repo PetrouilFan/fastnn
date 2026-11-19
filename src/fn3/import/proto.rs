@@ -41,6 +41,10 @@
 //! validated as UTF-8 once, at decode time. Tensor payloads borrow too, so
 //! decoding a 28 MB model copies no weight bytes.
 
+use super::budget::{
+    MAX_ATTRIBUTES, MAX_NODES, MAX_OPERANDS, MAX_OPSET_IMPORTS, MAX_PARAM_AXES, MAX_RANK,
+    MAX_STRING_BYTES, MAX_TYPED_ELEMENTS, MAX_VALUES, MAX_WEIGHTS,
+};
 use super::error::ProtoError;
 
 /// Maximum nesting depth the decoder descends.
@@ -236,16 +240,56 @@ impl<'a> Reader<'a> {
     }
 
     /// Read a `string` field and validate UTF-8.
+    ///
+    /// The declared length is checked against [`MAX_STRING_BYTES`] *before* the
+    /// slice is taken, so a five-byte field claiming four gigabytes fails on one
+    /// comparison rather than after the name is copied.
     fn text(&mut self, what: &'static str) -> Result<&'a str, ProtoError> {
         let offset = self.offset();
-        let bytes = self.bytes()?;
+        let len = self.varint()?;
+        let len = usize::try_from(len).map_err(|_| ProtoError::Truncated {
+            offset,
+            needed: usize::MAX,
+            available: self.remaining(),
+        })?;
+        if len > MAX_STRING_BYTES {
+            return Err(ProtoError::LimitExceeded {
+                what,
+                limit: MAX_STRING_BYTES,
+                offset,
+            });
+        }
+        let bytes = self.take(len)?;
         std::str::from_utf8(bytes).map_err(|_| ProtoError::InvalidUtf8 { what, offset })
     }
 
+    /// Refuse a repeated field that has reached its budget.
+    fn room_for(&self, what: &'static str, len: usize, limit: usize) -> Result<(), ProtoError> {
+        if len >= limit {
+            Err(ProtoError::LimitExceeded {
+                what,
+                limit,
+                offset: self.offset(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Read a repeated `int64` field, packed or unpacked.
-    fn repeated_i64(&mut self, field: u32, wire: u8, out: &mut Vec<i64>) -> Result<(), ProtoError> {
+    fn repeated_i64(
+        &mut self,
+        field: u32,
+        wire: u8,
+        what: &'static str,
+        limit: usize,
+        out: &mut Vec<i64>,
+    ) -> Result<(), ProtoError> {
         match wire {
-            0 => out.push(self.varint()? as i64),
+            0 => {
+                self.room_for(what, out.len(), limit)?;
+                out.push(self.varint()? as i64)
+            }
             2 => {
                 let payload = self.bytes()?;
                 let mut inner = Reader {
@@ -255,6 +299,7 @@ impl<'a> Reader<'a> {
                     depth: self.depth,
                 };
                 while !inner.is_empty() {
+                    inner.room_for(what, out.len(), limit)?;
                     out.push(inner.varint()? as i64);
                 }
             }
@@ -271,9 +316,19 @@ impl<'a> Reader<'a> {
     }
 
     /// Read a repeated `uint64` field, packed or unpacked.
-    fn repeated_u64(&mut self, field: u32, wire: u8, out: &mut Vec<u64>) -> Result<(), ProtoError> {
+    fn repeated_u64(
+        &mut self,
+        field: u32,
+        wire: u8,
+        what: &'static str,
+        limit: usize,
+        out: &mut Vec<u64>,
+    ) -> Result<(), ProtoError> {
         match wire {
-            0 => out.push(self.varint()?),
+            0 => {
+                self.room_for(what, out.len(), limit)?;
+                out.push(self.varint()?)
+            }
             2 => {
                 let payload = self.bytes()?;
                 let mut inner = Reader {
@@ -283,6 +338,7 @@ impl<'a> Reader<'a> {
                     depth: self.depth,
                 };
                 while !inner.is_empty() {
+                    inner.room_for(what, out.len(), limit)?;
                     out.push(inner.varint()?);
                 }
             }
@@ -299,9 +355,19 @@ impl<'a> Reader<'a> {
     }
 
     /// Read a repeated `int32` field, packed or unpacked.
-    fn repeated_i32(&mut self, field: u32, wire: u8, out: &mut Vec<i32>) -> Result<(), ProtoError> {
+    fn repeated_i32(
+        &mut self,
+        field: u32,
+        wire: u8,
+        what: &'static str,
+        limit: usize,
+        out: &mut Vec<i32>,
+    ) -> Result<(), ProtoError> {
         match wire {
-            0 => out.push(self.varint()? as i32),
+            0 => {
+                self.room_for(what, out.len(), limit)?;
+                out.push(self.varint()? as i32)
+            }
             2 => {
                 let payload = self.bytes()?;
                 let mut inner = Reader {
@@ -311,6 +377,7 @@ impl<'a> Reader<'a> {
                     depth: self.depth,
                 };
                 while !inner.is_empty() {
+                    inner.room_for(what, out.len(), limit)?;
                     out.push(inner.varint()? as i32);
                 }
             }
@@ -327,9 +394,19 @@ impl<'a> Reader<'a> {
     }
 
     /// Read a repeated `float` field, packed or unpacked.
-    fn repeated_f32(&mut self, field: u32, wire: u8, out: &mut Vec<f32>) -> Result<(), ProtoError> {
+    fn repeated_f32(
+        &mut self,
+        field: u32,
+        wire: u8,
+        what: &'static str,
+        limit: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<(), ProtoError> {
         match wire {
-            5 => out.push(self.float()?),
+            5 => {
+                self.room_for(what, out.len(), limit)?;
+                out.push(self.float()?)
+            }
             2 => {
                 let payload = self.bytes()?;
                 if payload.len() % 4 != 0 {
@@ -340,6 +417,7 @@ impl<'a> Reader<'a> {
                     });
                 }
                 for chunk in payload.chunks_exact(4) {
+                    self.room_for(what, out.len(), limit)?;
                     let mut word = [0u8; 4];
                     word.copy_from_slice(chunk);
                     out.push(f32::from_bits(u32::from_le_bytes(word)));
@@ -358,9 +436,19 @@ impl<'a> Reader<'a> {
     }
 
     /// Read a repeated `double` field, packed or unpacked.
-    fn repeated_f64(&mut self, field: u32, wire: u8, out: &mut Vec<f64>) -> Result<(), ProtoError> {
+    fn repeated_f64(
+        &mut self,
+        field: u32,
+        wire: u8,
+        what: &'static str,
+        limit: usize,
+        out: &mut Vec<f64>,
+    ) -> Result<(), ProtoError> {
         match wire {
-            1 => out.push(self.double()?),
+            1 => {
+                self.room_for(what, out.len(), limit)?;
+                out.push(self.double()?)
+            }
             2 => {
                 let payload = self.bytes()?;
                 if payload.len() % 8 != 0 {
@@ -371,6 +459,7 @@ impl<'a> Reader<'a> {
                     });
                 }
                 for chunk in payload.chunks_exact(8) {
+                    self.room_for(what, out.len(), limit)?;
                     let mut word = [0u8; 8];
                     word.copy_from_slice(chunk);
                     out.push(f64::from_bits(u64::from_le_bytes(word)));
@@ -621,6 +710,11 @@ pub(crate) fn decode_model(bytes: &[u8]) -> Result<Model<'_>, ProtoError> {
             8 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut opset = reader.sub()?;
+                reader.room_for(
+                    "opset imports",
+                    model.opset_imports.len(),
+                    MAX_OPSET_IMPORTS,
+                )?;
                 model.opset_imports.push(decode_opset(&mut opset)?);
             }
             20 => {
@@ -686,6 +780,7 @@ fn decode_graph<'a>(reader: &mut Reader<'a>) -> Result<Graph<'a>, ProtoError> {
             1 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut node = reader.sub()?;
+                reader.room_for("graph nodes", graph.nodes.len(), MAX_NODES)?;
                 graph.nodes.push(decode_node(&mut node)?);
             }
             2 => {
@@ -695,21 +790,25 @@ fn decode_graph<'a>(reader: &mut Reader<'a>) -> Result<Graph<'a>, ProtoError> {
             5 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut tensor = reader.sub()?;
+                reader.room_for("graph initializers", graph.initializers.len(), MAX_WEIGHTS)?;
                 graph.initializers.push(decode_tensor(&mut tensor)?);
             }
             11 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut value = reader.sub()?;
+                reader.room_for("graph inputs", graph.inputs.len(), MAX_VALUES)?;
                 graph.inputs.push(decode_value_info(&mut value)?);
             }
             12 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut value = reader.sub()?;
+                reader.room_for("graph outputs", graph.outputs.len(), MAX_VALUES)?;
                 graph.outputs.push(decode_value_info(&mut value)?);
             }
             13 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut value = reader.sub()?;
+                reader.room_for("graph value_info", graph.value_info.len(), MAX_VALUES)?;
                 graph.value_info.push(decode_value_info(&mut value)?);
             }
             14 => {
@@ -741,10 +840,12 @@ fn decode_node<'a>(reader: &mut Reader<'a>) -> Result<Node<'a>, ProtoError> {
         match field {
             1 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
+                reader.room_for("node inputs", inputs.len(), MAX_OPERANDS)?;
                 inputs.push(reader.text("NodeProto.input")?);
             }
             2 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
+                reader.room_for("node outputs", outputs.len(), MAX_OPERANDS)?;
                 outputs.push(reader.text("NodeProto.output")?);
             }
             3 => {
@@ -758,6 +859,7 @@ fn decode_node<'a>(reader: &mut Reader<'a>) -> Result<Node<'a>, ProtoError> {
             5 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut attribute = reader.sub()?;
+                reader.room_for("node attributes", attributes.len(), MAX_ATTRIBUTES)?;
                 attributes.push(decode_attribute(&mut attribute)?);
             }
             7 => {
@@ -818,18 +920,25 @@ fn decode_attribute<'a>(reader: &mut Reader<'a>) -> Result<Attribute<'a>, ProtoE
             }
             7 => {
                 let mut floats = take_list(value, "AttributeProto", "FLOATS")?;
-                reader.repeated_f32(field, wire, &mut floats)?;
+                reader.repeated_f32(
+                    field,
+                    wire,
+                    "attribute floats",
+                    MAX_PARAM_AXES,
+                    &mut floats,
+                )?;
                 value = Some(AttributeValue::Floats(floats));
             }
             8 => {
                 let mut ints = take_list(value, "AttributeProto", "INTS")?;
-                reader.repeated_i64(field, wire, &mut ints)?;
+                reader.repeated_i64(field, wire, "attribute ints", MAX_PARAM_AXES, &mut ints)?;
                 value = Some(AttributeValue::Ints(ints));
             }
             9 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let bytes = reader.bytes()?;
                 let mut strings = take_list(value, "AttributeProto", "STRINGS")?;
+                reader.room_for("attribute strings", strings.len(), MAX_PARAM_AXES)?;
                 strings.push(bytes);
                 value = Some(AttributeValue::Strings(strings));
             }
@@ -838,6 +947,7 @@ fn decode_attribute<'a>(reader: &mut Reader<'a>) -> Result<Attribute<'a>, ProtoE
                 let mut tensor = reader.sub()?;
                 let tensor = decode_tensor(&mut tensor)?;
                 let mut tensors = take_list(value, "AttributeProto", "TENSORS")?;
+                reader.room_for("attribute tensors", tensors.len(), MAX_PARAM_AXES)?;
                 tensors.push(tensor);
                 value = Some(AttributeValue::Tensors(tensors));
             }
@@ -975,7 +1085,7 @@ fn decode_tensor<'a>(reader: &mut Reader<'a>) -> Result<Tensor<'a>, ProtoError> 
     while !reader.is_empty() {
         let (field, wire) = reader.tag()?;
         match field {
-            1 => reader.repeated_i64(field, wire, &mut tensor.dims)?,
+            1 => reader.repeated_i64(field, wire, "tensor rank", MAX_RANK, &mut tensor.dims)?,
             2 => {
                 reader.expect(field, wire, 0, "varint")?;
                 tensor.data_type = reader.varint()? as i32;
@@ -985,14 +1095,32 @@ fn decode_tensor<'a>(reader: &mut Reader<'a>) -> Result<Tensor<'a>, ProtoError> 
                 reader.bytes()?;
                 tensor.has_segment = true;
             }
-            4 => reader.repeated_f32(field, wire, &mut tensor.float_data)?,
-            5 => reader.repeated_i32(field, wire, &mut tensor.int32_data)?,
+            4 => reader.repeated_f32(
+                field,
+                wire,
+                "typed tensor payload",
+                MAX_TYPED_ELEMENTS,
+                &mut tensor.float_data,
+            )?,
+            5 => reader.repeated_i32(
+                field,
+                wire,
+                "typed tensor payload",
+                MAX_TYPED_ELEMENTS,
+                &mut tensor.int32_data,
+            )?,
             6 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 reader.bytes()?;
                 tensor.string_data_count += 1;
             }
-            7 => reader.repeated_i64(field, wire, &mut tensor.int64_data)?,
+            7 => reader.repeated_i64(
+                field,
+                wire,
+                "typed tensor payload",
+                MAX_TYPED_ELEMENTS,
+                &mut tensor.int64_data,
+            )?,
             8 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 tensor.name = reader.text("TensorProto.name")?;
@@ -1001,8 +1129,20 @@ fn decode_tensor<'a>(reader: &mut Reader<'a>) -> Result<Tensor<'a>, ProtoError> 
                 reader.expect(field, wire, 2, "length-delimited")?;
                 tensor.raw_data = Some(reader.bytes()?);
             }
-            10 => reader.repeated_f64(field, wire, &mut tensor.double_data)?,
-            11 => reader.repeated_u64(field, wire, &mut tensor.uint64_data)?,
+            10 => reader.repeated_f64(
+                field,
+                wire,
+                "typed tensor payload",
+                MAX_TYPED_ELEMENTS,
+                &mut tensor.double_data,
+            )?,
+            11 => reader.repeated_u64(
+                field,
+                wire,
+                "typed tensor payload",
+                MAX_TYPED_ELEMENTS,
+                &mut tensor.uint64_data,
+            )?,
             13 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 reader.bytes()?;
@@ -1109,6 +1249,7 @@ fn decode_shape(reader: &mut Reader<'_>) -> Result<Vec<Dim>, ProtoError> {
             1 => {
                 reader.expect(field, wire, 2, "length-delimited")?;
                 let mut dimension = reader.sub()?;
+                reader.room_for("shape dimensions", dims.len(), MAX_RANK)?;
                 dims.push(decode_dimension(&mut dimension)?);
             }
             _ => reader.skip(field, wire)?,

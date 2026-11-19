@@ -55,6 +55,9 @@ use crate::fn3::model::{KvCacheConfig, KvCacheLayout};
 use crate::fn3::ops::OpId;
 use crate::fn3::shape::{Shape, Symbol};
 
+use super::budget::{
+    model_bytes_within_cap, MAX_MODEL_BYTES, MAX_NODES, MAX_RANK, MAX_VALUES, MAX_WEIGHTS,
+};
 use super::error::{Diagnostics, ImportProblemKind, NodeRef};
 use super::proto;
 use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
@@ -959,7 +962,10 @@ fn broadcast_series(
 }
 
 /// Largest element sequence the importer materialises.
-const MAX_TRACKED_ELEMENTS: usize = 4096;
+///
+/// The constant lives in [`super::budget`] with every other parser budget; it is
+/// re-exported under the old name so the plan helpers below read the same.
+const MAX_TRACKED_ELEMENTS: usize = super::budget::MAX_TRACKED_ELEMENTS;
 
 /// Repeat a single-element sequence to `len`, when that is small enough to be
 /// worth tracking.
@@ -1719,6 +1725,16 @@ fn int_list(series: &AtomSeries, what: &str) -> Result<Vec<i64>, PlanError> {
 
 /// A tensor's declared shape, rejecting negative extents.
 fn tensor_shape(tensor: &proto::Tensor<'_>, carrier: &str) -> Result<Shape, PlanError> {
+    // The protobuf reader already caps `dims`; this is the second reader on the
+    // path (a `Tensor` can also be built by hand in a test), so the budget is
+    // enforced where the `Shape` is created as well.
+    if tensor.dims.len() > MAX_RANK {
+        return Err(ImportProblemKind::LimitExceeded {
+            what: "tensor rank",
+            requested: tensor.dims.len() as u64,
+            limit: MAX_RANK as u64,
+        });
+    }
     let mut dims = Vec::with_capacity(tensor.dims.len());
     for extent in &tensor.dims {
         match u64::try_from(*extent) {
@@ -1800,6 +1816,38 @@ fn tensor_bytes(
             fields: typed.join(" + "),
         });
     }
+    // Pair the one populated field with the dtype *before* converting it. A
+    // payload that the dtype does not use is a statement about the file, not a
+    // buffer to materialise: converting first would allocate `elements ×
+    // size_bytes` for a tensor that is about to be rejected.
+    let (field, count, element_bytes) = match dtype {
+        DType::F32 => ("float_data", tensor.float_data.len(), 4u64),
+        DType::I64 => ("int64_data", tensor.int64_data.len(), 8),
+        DType::I32 => ("int32_data", tensor.int32_data.len(), 4),
+        DType::Bool => ("int32_data", tensor.int32_data.len(), 1),
+    };
+    if let Some(found) = typed.first() {
+        if *found != field {
+            return Err(ImportProblemKind::TensorDataKind {
+                tensor: carrier.to_string(),
+                dtype,
+                found,
+            });
+        }
+    } else if expected > 0 {
+        return Err(ImportProblemKind::MissingTensorData {
+            tensor: carrier.to_string(),
+        });
+    }
+    if count as u64 != elements {
+        return Err(ImportProblemKind::TensorLength {
+            tensor: carrier.to_string(),
+            dtype,
+            shape: shape.to_string(),
+            expected,
+            actual: (count as u64).saturating_mul(element_bytes),
+        });
+    }
     let bytes: Vec<u8> = match dtype {
         DType::F32 => tensor
             .float_data
@@ -1822,20 +1870,6 @@ fn tensor_bytes(
             .map(|value| u8::from(*value != 0))
             .collect(),
     };
-    if bytes.len() as u64 != expected {
-        if bytes.is_empty() && expected > 0 {
-            return Err(ImportProblemKind::MissingTensorData {
-                tensor: carrier.to_string(),
-            });
-        }
-        return Err(ImportProblemKind::TensorLength {
-            tensor: carrier.to_string(),
-            dtype,
-            shape: shape.to_string(),
-            expected,
-            actual: bytes.len() as u64,
-        });
-    }
     Ok(bytes)
 }
 
@@ -1982,6 +2016,12 @@ fn plan_transpose(
     for axis in &perm {
         normalized.push(normalize_axis(*axis, rank, "Transpose perm")?);
     }
+    // `normalize_axis` bounds each entry but does not notice a repeat. A
+    // permutation that names an axis twice would reach the kernel as
+    // `OpParams.axes = [0, 0]`, which is not a transpose; refuse it here where
+    // the node can be named.
+    Shape::validate_permutation(&normalized, rank)
+        .map_err(|error| shape_problem(format!("Transpose perm {perm:?}: {error}")))?;
     let ValueShape::Dims(dims) = &shape else {
         return Ok(PlannedOp::single(
             OpId::Transpose,
@@ -2345,6 +2385,17 @@ fn plan_slice(
     if ins.len() == 5 {
         let (_, _, series) = input_series(ins, 4, "Slice steps")?;
         steps = int_list(&series, "Slice steps")?;
+        // `starts`, `ends` and `axes` are length-checked against each other
+        // above; `steps` is a separate operand and must be too. Without this
+        // check a five-operand Slice with one step and two axes indexes past the
+        // end of this vector.
+        if steps.len() != starts.len() {
+            return Err(shape_problem(format!(
+                "Slice has {} starts and {} steps",
+                starts.len(),
+                steps.len()
+            )));
+        }
     }
     let mut dims = shape.dims().to_vec();
     for (position, axis) in axes.iter().enumerate() {
@@ -3321,6 +3372,17 @@ fn dispatch(
 
 /// Decode and import a complete ONNX model.
 pub(crate) fn build_model(bytes: &[u8]) -> Result<ModelImport, super::error::ImportError> {
+    // One comparison before a single byte is decoded: the model size is the
+    // budget the format and the importer share, and a refusal names it.
+    if !model_bytes_within_cap(bytes.len() as u64) {
+        return Err(super::error::ImportError::single(
+            ImportProblemKind::LimitExceeded {
+                what: "model size in bytes",
+                requested: bytes.len() as u64,
+                limit: MAX_MODEL_BYTES,
+            },
+        ));
+    }
     let model = match proto::decode_model(bytes) {
         Ok(model) => model,
         Err(error) => {
@@ -3353,6 +3415,9 @@ struct Builder<'a> {
     declared: BTreeMap<String, DeclaredValue>,
     inputs: Vec<ValueId>,
     outputs: Vec<ValueId>,
+    /// Set when a parser budget was reached, so `run` can stop before geometry
+    /// detection instead of reporting a cascade of architecture problems.
+    over_budget: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -3370,6 +3435,7 @@ impl<'a> Builder<'a> {
             declared: BTreeMap::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            over_budget: false,
         }
     }
 
@@ -3393,6 +3459,16 @@ impl<'a> Builder<'a> {
         self.register_inputs(&graph);
         self.register_initializers(&graph);
         self.register_nodes(&graph);
+        if self.over_budget {
+            // The value/node/weight table is already beyond what this build (and
+            // the artifact format) accepts. Running architecture detection over a
+            // truncated graph would produce a page of misleading "missing
+            // operand" problems after the one that matters.
+            return Err(self
+                .diagnostics
+                .finish()
+                .expect("reaching a parser budget is a problem"));
+        }
         self.resolve_outputs(&graph);
 
         let graph_ir = GraphIr {
@@ -3697,6 +3773,36 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Which parser budget the working tables have reached, if any.
+    ///
+    /// Returns `(what, requested, limit)` for the first table at its cap, so the
+    /// caller records one problem naming the budget rather than continuing to
+    /// grow past it.
+    fn budget_headroom(&self) -> Option<(&'static str, u64, u64)> {
+        if self.values.len() >= MAX_VALUES {
+            return Some((
+                "graph value table",
+                self.values.len() as u64,
+                MAX_VALUES as u64,
+            ));
+        }
+        if self.nodes.len() >= MAX_NODES {
+            return Some((
+                "graph node table",
+                self.nodes.len() as u64,
+                MAX_NODES as u64,
+            ));
+        }
+        if self.weights.len() >= MAX_WEIGHTS {
+            return Some((
+                "graph weight table",
+                self.weights.len() as u64,
+                MAX_WEIGHTS as u64,
+            ));
+        }
+        None
+    }
+
     fn register_nodes(&mut self, graph: &proto::Graph<'_>) {
         // Every node output name and its producer, so a use-before-define can
         // say whether the value exists later in the file (a topological-order
@@ -3710,6 +3816,21 @@ impl<'a> Builder<'a> {
             }
         }
         for (index, node) in graph.nodes.iter().enumerate() {
+            // A composition writes two ops for one node (`Gemm` → `MatMul` +
+            // `Add`) and `Split` writes many values for one node, so the decoded
+            // node count is not an upper bound on the tables this loop grows.
+            // The budget is checked before each node, which bounds the overshoot
+            // to one node's operands and outputs.
+            if let Some((what, requested, limit)) = self.budget_headroom() {
+                self.diagnostics
+                    .push_global(ImportProblemKind::LimitExceeded {
+                        what,
+                        requested,
+                        limit,
+                    });
+                self.over_budget = true;
+                return;
+            }
             let ctx = NodeRef::new(index as u32, node.name, node.op_type);
             if !node.domain.is_empty() {
                 self.diagnostics.push(
@@ -4383,6 +4504,20 @@ fn detect_layer_norm_epsilon(
         let mut word = [0u8; 4];
         word.copy_from_slice(weight.bytes());
         let value = f32::from_le_bytes(word);
+        // `NaN > 0.0` is false, so a NaN scale would silently be read as "this
+        // node is not a LayerNorm" and the geometry would carry no epsilon. A
+        // non-finite scalar in the epsilon slot is corrupt input, not a shape
+        // the detector should decline.
+        if !value.is_finite() {
+            problems.push(ImportProblemKind::Architecture {
+                detail: format!(
+                    "node {} carries the non-finite LayerNorm scale {value}; a decoder epsilon \
+                     must be a positive finite float",
+                    node.onnx_index
+                ),
+            });
+            continue;
+        }
         if value > 0.0 && value <= 0.01 {
             found.push(value);
         }

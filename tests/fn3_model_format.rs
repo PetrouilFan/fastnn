@@ -925,10 +925,16 @@ fn a_hostile_count_fails_before_it_is_allocated() {
         }
         other => panic!("unexpected {other:?}"),
     }
-    assert!(
-        elapsed.as_millis() < 100,
-        "a hostile count must not be attempted: {elapsed:?}"
-    );
+    // A wall-clock bound is meaningless under Miri, where every instruction is
+    // interpreted (this call takes ~0.5 s there). The variant and value checks
+    // above already prove the count was refused by the policy cap rather than
+    // attempted; the timing guard stays for real hardware.
+    if !cfg!(miri) {
+        assert!(
+            elapsed.as_millis() < 100,
+            "a hostile count must not be attempted: {elapsed:?}"
+        );
+    }
     assert!(error.to_string().contains("limit of 1048576"), "{error}");
 }
 
@@ -1399,4 +1405,244 @@ fn the_public_surface_names_its_seams() {
     _weights_host(artifact.to_model_weights().unwrap());
     assert_eq!(artifact.metadata().producer, "pytorch");
     assert_eq!(artifact.graph().lookup("logits"), Some(ValueId::new(4)));
+}
+
+// ---------------------------------------------------------------------------
+// FN3-27 (#73): malformed-input regressions and allocation bounds
+// ---------------------------------------------------------------------------
+
+/// The set of errors a truncated artifact may produce. Any of these is a typed
+/// refusal; the test's real subject is that the call returns at all.
+fn assert_typed_refusal(error: &FormatError, context: &str) {
+    assert!(
+        matches!(
+            error.kind(),
+            FormatErrorKind::Truncated { .. }
+                | FormatErrorKind::LengthMismatch { .. }
+                | FormatErrorKind::ChecksumMismatch { .. }
+                | FormatErrorKind::Malformed { .. }
+                | FormatErrorKind::LimitExceeded { .. }
+                | FormatErrorKind::Inconsistent { .. }
+                | FormatErrorKind::ReservedField { .. }
+                | FormatErrorKind::UnsupportedVersion { .. }
+                | FormatErrorKind::UnsupportedDtypeEncoding { .. }
+                | FormatErrorKind::BadMagic { .. }
+                | FormatErrorKind::UnknownDType(_)
+                | FormatErrorKind::UnknownOpCode { .. }
+                | FormatErrorKind::Contract { .. }
+        ),
+        "{context}: {error}"
+    );
+}
+
+#[test]
+fn every_section_boundary_truncation_is_a_typed_error() {
+    let bytes = tiny_artifact().to_bytes().unwrap();
+    let mut boundaries = vec![0usize, 1, 7, 8, 15, 16, 24, 32, 40, 44, 63, 64, 72];
+    for (_, offset, length) in directory(&bytes) {
+        boundaries.push(offset);
+        boundaries.push(offset + length as usize);
+        boundaries.push(offset + length as usize + 4);
+    }
+    boundaries.push(bytes.len() - 1);
+    for boundary in boundaries {
+        if boundary >= bytes.len() {
+            continue;
+        }
+        // (a) Verbatim truncation: the frame no longer matches its header.
+        let error = expect_error(&bytes[..boundary]);
+        assert_typed_refusal(&error, &format!("verbatim cut at {boundary}"));
+
+        // (b) Truncation with the header repaired, so the section or padding
+        // check is what fails rather than the file-length check.
+        if boundary >= HEADER_BYTES {
+            let mut cut = bytes[..boundary].to_vec();
+            let file_bytes = cut.len() as u64;
+            cut[24..32].copy_from_slice(&file_bytes.to_le_bytes());
+            cut[32..40].copy_from_slice(&(file_bytes - HEADER_BYTES as u64).to_le_bytes());
+            repair_checksum(&mut cut);
+            let error = expect_error(&cut);
+            assert_typed_refusal(&error, &format!("repaired cut at {boundary}"));
+        }
+    }
+}
+
+#[test]
+fn a_section_directory_in_the_wrong_order_is_rejected() {
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    // Swap the META and GEOM tags; the lengths stay where they are, so a reader
+    // that trusted the tags would decode GEOM's bytes as META.
+    let first = HEADER_BYTES + 8;
+    let second = HEADER_BYTES + 8 + 16;
+    bytes[first..first + 4].copy_from_slice(&TAG_GEOM.to_le_bytes());
+    bytes[second..second + 4].copy_from_slice(&TAG_META.to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert!(
+        matches!(error.kind(), FormatErrorKind::Malformed { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("section 0"), "{error}");
+    assert!(error.to_string().contains("GEOM"), "{error}");
+}
+
+#[test]
+fn a_section_length_that_swallows_the_next_section_is_rejected() {
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    let entries = directory(&bytes);
+    let (_, _, meta_len) = entries[0];
+    let (_, _, geom_len) = entries[1];
+    // META now claims its own bytes plus GEOM's, so the two overlap. The
+    // directory lengths are still consistent with "some bytes", which is what
+    // makes this a section-level rather than a framing-level error.
+    bytes[HEADER_BYTES + 16..HEADER_BYTES + 24]
+        .copy_from_slice(&(meta_len + geom_len).to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert_typed_refusal(&error, "overlapping META/GEOM");
+    assert!(
+        matches!(
+            error.kind(),
+            FormatErrorKind::Malformed { .. } | FormatErrorKind::Truncated { .. }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_value_count_at_the_policy_cap_with_a_tiny_payload_is_refused_before_allocating() {
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    let vals = section_offset(&bytes, TAG_VALS);
+    // At the cap: only the "can these entries fit in the bytes that remain"
+    // proof can reject it, and it must run before `Vec::with_capacity`.
+    bytes[vals..vals + 4].copy_from_slice(&(MAX_VALUES as u32).to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert!(
+        matches!(error.kind(), FormatErrorKind::Truncated { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("value table"), "{error}");
+
+    // Above the cap: the policy refusal, not the fit proof.
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    bytes[vals..vals + 4].copy_from_slice(&((MAX_VALUES + 1) as u32).to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert!(
+        matches!(error.kind(), FormatErrorKind::LimitExceeded { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("value table"), "{error}");
+}
+
+#[test]
+fn a_non_finite_layer_norm_epsilon_is_rejected() {
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    let geom = section_offset(&bytes, TAG_GEOM);
+    // GEOM: seven u32 fields, position kind (1) + weight (4) + max_positions (4),
+    // then the epsilon flag (1) and its bits (4).
+    let epsilon = geom + 7 * 4 + 1 + 4 + 4;
+    bytes[epsilon] = 1; // flag: present
+    bytes[epsilon + 1..epsilon + 5].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert!(
+        matches!(error.kind(), FormatErrorKind::Inconsistent { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("epsilon"), "{error}");
+
+    // Infinity is treated the same way as NaN: both are excluded by
+    // `!epsilon.is_finite()`.
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    bytes[epsilon + 1..epsilon + 5].copy_from_slice(&f32::INFINITY.to_bits().to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert!(error.to_string().contains("epsilon"), "{error}");
+}
+
+#[test]
+fn a_zero_vocabulary_is_rejected() {
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    let geom = section_offset(&bytes, TAG_GEOM);
+    // vocab_size is the seventh u32.
+    bytes[geom + 24..geom + 28].copy_from_slice(&0u32.to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    assert!(
+        matches!(error.kind(), FormatErrorKind::Inconsistent { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("vocabulary size is 0"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_zero_extent_weight_round_trips() {
+    // A zero-element tensor is legal in both formats; it must neither be
+    // rejected nor silently dropped, and it must survive a byte round trip.
+    let weights = WeightSet::new(vec![
+        WeightTensor::new(
+            "wte",
+            DType::F32,
+            Shape::from_dims([6, 4]),
+            vec![0x11; 6 * 4 * 4],
+            WeightSource::Initializer,
+        )
+        .expect("payload matches shape"),
+        WeightTensor::new(
+            "wpe",
+            DType::F32,
+            Shape::from_dims([3, 4]),
+            vec![0x22; 3 * 4 * 4],
+            WeightSource::AttributeConstant,
+        )
+        .expect("payload matches shape"),
+        WeightTensor::new(
+            "empty",
+            DType::F32,
+            Shape::from_dims([0, 4]),
+            Vec::new(),
+            WeightSource::Initializer,
+        )
+        .expect("a zero-element weight needs no payload"),
+    ])
+    .expect("names are unique");
+    let artifact = PreparedArtifact::from_parts(
+        tiny_metadata(),
+        tiny_graph(),
+        weights,
+        tiny_geometry(),
+        ShapeEnvelope::uniform(8).unwrap(),
+    )
+    .expect("the artifact is consistent");
+    let bytes = artifact.to_bytes().expect("it encodes");
+    let loaded = PreparedArtifact::from_bytes(&bytes).expect("it decodes");
+    assert_eq!(loaded, artifact);
+    assert_eq!(loaded.to_bytes().unwrap(), bytes);
+    let empty = loaded.weights().find("empty").expect("the empty weight");
+    assert_eq!(empty.byte_len(), 0);
+    assert_eq!(empty.shape().dims(), &[0, 4]);
+}
+
+#[test]
+fn a_maximum_weight_extent_is_refused_by_the_byte_count() {
+    let mut bytes = tiny_artifact().to_bytes().unwrap();
+    // WGHT entry 0 ("wte", [6, 4]): count (4), name (4 + 3), dtype (1),
+    // rank (4), then the first extent.
+    let wght = section_offset(&bytes, TAG_WEIGHTS);
+    let first_extent = wght + 4 + 4 + 3 + 1 + 4;
+    bytes[first_extent..first_extent + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    repair_checksum(&mut bytes);
+    let error = expect_error(&bytes);
+    // `WeightTensor::new` derives the payload length from the shape and reports
+    // the core's checked overflow rather than allocating.
+    assert!(
+        matches!(error.kind(), FormatErrorKind::Contract { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("overflow"), "{error}");
 }

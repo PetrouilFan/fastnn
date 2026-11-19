@@ -47,3 +47,21 @@ path = "fuzz_targets/quantization_metadata.rs"
 test = false
 doc = false
 bench = false
+
+# FN3-27 (#73): the 3.0 untrusted-load surfaces. The 2.x targets above cover
+# `.fnn` graph/plan deserialization, attributes and quantization metadata; the
+# 3.0 tree adds a real ONNX protobuf reader and a versioned artifact reader, and
+# both are new attack surface with no 2.x predecessor to port.
+[[bin]]
+name = "fn3_onnx_import"
+path = "fuzz_targets/fn3_onnx_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fn3_artifact"
+path = "fuzz_targets/fn3_artifact.rs"
+test = false
+doc = false
+bench = false

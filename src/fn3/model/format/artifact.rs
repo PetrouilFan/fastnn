@@ -172,9 +172,19 @@ pub const MAX_PARAM_AXES: u64 = 1024;
 pub const MAX_VOCAB_SIZE: u32 = 1 << 24;
 
 // Smallest possible encoded size of one entry, used to prove that a declared
-// count can fit in the bytes that remain before anything is allocated.
+// count can fit in the bytes that remain before anything is allocated. Each is a
+// lower bound on the encoding the reader below actually consumes, so a count
+// that fails the proof cannot fit.
+//
+// A value entry is a name (4-byte length + at least one byte, because
+// `PreparedGraph::check` rejects an empty name), a dtype, a shape kind and an
+// origin. A weight or node origin carries a 4-byte handle; a graph-input origin
+// carries no handle but every such value needs a 4-byte slot in the graph-input
+// table that follows, so 11 is the floor for all three.
 const MIN_VALUE_ENTRY: u64 = 4 + 1 + 1 + 1 + 4;
-const MIN_NODE_ENTRY: u64 = 4 + 4 + 4 + 2 + 4 + 4 + 4 + 1 + 4;
+// A node always has at least one output, so the output count's 4 bytes are
+// followed by at least one 4-byte value handle.
+const MIN_NODE_ENTRY: u64 = 4 + 4 + 4 + 2 + 4 + 4 + 4 + 1 + 4 + 4;
 const MIN_WEIGHT_ENTRY: u64 = 4 + 1 + 4 + 1 + 8;
 const MIN_DIRECTORY_ENTRY: u64 = 16;
 
@@ -622,6 +632,12 @@ impl PreparedArtifact {
                 "vocabulary size",
                 u64::from(geometry.vocab_size),
                 u64::from(MAX_VOCAB_SIZE),
+            ));
+        }
+        if geometry.vocab_size == 0 {
+            return Err(FormatError::inconsistent(
+                "geometry",
+                "the vocabulary size is 0; a model with no tokens cannot produce logits",
             ));
         }
         for (name, value) in [

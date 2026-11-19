@@ -90,6 +90,7 @@
 //! to `f32` would be a silent numerical change. The mapping keeps `i64` intact
 //! and `tests/fn3_import.rs` pins the exact four nodes that need it.
 
+pub mod budget;
 pub mod error;
 mod graph;
 mod proto;
@@ -98,6 +99,10 @@ mod proto;
 /// `model/` (ADR §5 reserves `src/fn3/model/weights.rs` for this issue) and is
 /// re-exported here for import callers.
 pub use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
+pub use budget::{
+    MAX_ATTRIBUTES, MAX_MODEL_BYTES, MAX_NODES, MAX_OPERANDS, MAX_OPSET_IMPORTS, MAX_PARAM_AXES,
+    MAX_RANK, MAX_STRING_BYTES, MAX_TRACKED_ELEMENTS, MAX_TYPED_ELEMENTS, MAX_VALUES, MAX_WEIGHTS,
+};
 pub use error::{ImportError, ImportProblem, ImportProblemKind, NodeRef, ProtoError, MAX_PROBLEMS};
 pub use graph::{
     DecoderGeometry, Dim, GraphIr, GraphNode, ImportSummary, ImportWarning, ImportWarningKind,
