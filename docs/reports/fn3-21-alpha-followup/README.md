@@ -141,6 +141,10 @@ lock's `model_id` and `revision`, checks `bytes` and `sha256` against the same
 entry, and runs the lane with `--require-inference`. A fetch or digest failure
 is a named `::error::pinned-model …` failure; it can never be `not_run`.
 
+The URL was exercised from this machine with the workflow's own logic: HTTP 200,
+27,897,974 bytes, sha256 `e18370ba6247c564a4aef7b6a83aa86d5d036f47a73c0935e51bbcfe178141a1`
+— exactly the lock entry.
+
 ## 3. Crate metadata and package contents
 
 `Cargo.toml` had no description, license, repository, homepage, readme,
@@ -193,6 +197,10 @@ before dispatch and was not modified.
 | [44486993070](https://github.com/PetrouilFan/fastnn/actions/runs/44486993070) | `fn3/alpha-followup` / `476dbb5` | **failed**: same `vulkan-software` failure |
 | [44488019087](https://github.com/PetrouilFan/fastnn/actions/runs/44488019087) | `fn3/alpha-followup` / `cc3c50b` | **success**: all jobs and the lane summary |
 | [44488737026](https://github.com/PetrouilFan/fastnn/actions/runs/44488737026) | `fn3/alpha-followup` / `49ae595` | **success**: all jobs and the lane summary |
+| [44489825235](https://github.com/PetrouilFan/fastnn/actions/runs/44489825235) | `fn3/alpha-followup` / `d8f101d` (this folder's first commit) | **success**: all jobs and the lane summary |
+
+The final commit that adds this row is documentation-only; every code, test,
+workflow and packaging change is covered by the `d8f101d` run.
 
 The failure was a hosted-environment gap, not a code regression:
 `tests/fn3_vulkan_smoke.rs::software_icd_lane_is_labelled_and_matches_cpu`
