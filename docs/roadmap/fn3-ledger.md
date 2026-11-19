@@ -200,6 +200,7 @@ Per-dispatch fences and per-tensor allocations do not scale; design note for
 | #65 | Remove training/wgpu | verified (integrated `f772f10`) | `fn3/65-remove-training-wgpu` | `fastnn-wt-65-remove` | `0becaca` | done; 171 files, -27,921 lines, 81 lock entries gone |
 | #66 | CI | ready | — | — | — | after #48 |
 | #67 | Alpha release | review (local candidate) | `fn3/67-alpha-release` | `fastnn-wt-67-release` | `854afb6` | owner actions only |
+| #67 | Alpha release | verified (integrated `c4c2401`) | `fn3/67-alpha-release` | `fastnn-wt-67-release` | `854afb6` | done; versions agree, clippy 0, wheel smoke passed |
 | #68 | Quant format | deferred (stable) | — | — | — | after #62 |
 | #69 | CPU quant | deferred (stable) | — | — | — | after #68 |
 | #70 | GPU quant | deferred (stable) | — | — | — | after #68 |
@@ -476,3 +477,30 @@ The 2.x forward tree is deliberately retained: it is inference-only now and
 still exercises surviving CPU kernels through 348 passing tests. Deleting it
 would have removed tests whose subject still exists, which the #65 brief
 forbade.
+
+## Alpha complete
+
+Candidate **`c4c2401`**, baseline `a2c0759`, on `rewrite/fastnn-3` (pushed).
+Versions `3.0.0-alpha.1` / `3.0.0a1`, enforced in seven stores by
+`scripts/ci/check-versions.py`.
+
+Gate results, all reproduced by the integrator from the integration checkout:
+`cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings` clean in
+six configurations; `cargo test --lib` 673; ten `fn3_*` binaries 222 passed;
+four Vulkan binaries 68 passed with 0 errors / 0 warnings on the GTX 1080 Ti;
+`fn3_e2e` 5 CPU / 10 Vulkan with 719/719 proven executions and 0 input
+readbacks; `pytest -m "not slow"` 378 passed; packaging lane PASSED with a
+wheel installed in a clean venv outside the checkout running real inference;
+six CI lanes render with four PASSED and two deliberately NOT VERIFIED.
+
+Parity, FP32, against the independent ORT/PyTorch fixtures: `prefill.p1`
+5.96e-7 CPU / 6.56e-7 Vulkan, cached decode steps 2-4 argmax matching, extents
+exactly 14-17, and cached-vs-full **bit-identical** for all four steps.
+
+Issues #46-#67 and #66 are closed with evidence comments. Open: #68-#76
+(stable wave, each naming its real prerequisite), #77 and #78 (deferred by the
+owner, not activated).
+
+Owner actions deliberately not taken: no tag, no GitHub release, no PyPI or
+crates.io publication, no PR to `main`, `main` untouched. Model weights are not
+redistributed (no license is declared upstream).
