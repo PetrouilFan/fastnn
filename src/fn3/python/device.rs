@@ -5,7 +5,7 @@
 //! A caller who names a device gets exactly that device or an exception. Only
 //! `"auto"` (or `None`) may choose, and it chooses what
 //! [`crate::inference::device::available_devices`] lists first, which is always the
-//! CPU in this alpha. There is no "Vulkan was requested, CPU will do" path:
+//! CPU. There is no "Vulkan was requested, CPU will do" path:
 //! [`super::errors::from_device`] renders the request, the reason and the list
 //! of devices this process can actually execute on.
 //!

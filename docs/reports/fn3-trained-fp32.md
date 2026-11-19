@@ -458,7 +458,18 @@ translation is **different and larger** (1.006e-4 vs 7.273e-5 prefill,
 
 ### 6.2 Real defect: resident Vulkan cannot run the trained graph
 
-The default (resident) Vulkan path fails in `Session::prefill`:
+> **Resolved.** This section is the finding as recorded at the time. The defect
+> is fixed in `14adee3` and narrowed in `95a44e9` (the planner folds a provably
+> identity `Reshape` into its input slot only when the session owns a
+> contiguous host i64 `input_ids`, so `Gather` validates the host tensor), the resident path is
+> the default, and the trained resident and staged arms are byte-identical.
+> See `docs/reports/fn3-3.0.0-release.md` §4 for the verification and
+> `src/fn3/model/specialize.rs` for the fold. What follows is the historical
+> diagnosis, kept because it names the exact mechanism and the rejected
+> alternatives.
+
+At the time of this investigation the default (resident) Vulkan path failed in
+`Session::prefill`:
 
 ```text
 NotImplemented { what: "reading a device-resident tensor through the host slice API;
@@ -528,8 +539,10 @@ FAILED op gather params OpParams { axes: [0], keep_dims: false, epsilon: 0.0 }:
   (or a host-designated slot), not an `InstructionOutput`, for the trained
   envelope.
 
-Until the fix lands, the honest Vulkan arm is `FN3_VK_STAGED=1`; the resident
-default is a stable-gate failure, not a skip.
+Until the fix landed, the honest Vulkan arm was `FN3_VK_STAGED=1`; the resident
+default was a stable-gate failure, not a skip. `14adee3` implements option 1
+with the declared-shape and layout conditions described there, and keeps the
+`Gather` bounds check.
 
 ## 7. Commands, invocations and outcomes
 
@@ -553,7 +566,7 @@ logs; no result here is a timing measurement.
 | `python3 tools/diagnostics/.../summarize.py ...` | `summary.json`, `layer-table.md` |
 | `FASTNN_FN3_ONNX_MODEL=tiny ... cargo test --release --test fn3_e2e` | tiny control `5.364e-7 / 1.001e-7`, all steps pass |
 | `FN3_TRAINED_VULKAN=1 FN3_VK_STAGED=1 FN3_VK_DEVICE_UUID=... cargo test --release --features vulkan --test fn3_trained_parity` | staged Vulkan pass; `parity-vulkan-staged.json` |
-| `FN3_TRAINED_VULKAN=1` (resident, no `FN3_VK_STAGED`) | **fails** with the `Gather` resident-index error above |
+| `FN3_TRAINED_VULKAN=1` (resident, no `FN3_VK_STAGED`) | **fails** with the `Gather` resident-index error above; fixed in `14adee3` |
 | `cargo test --release --features vulkan --test fn3_vulkan_trained_probe -- --ignored --nocapture` | names `gather` and the resident `[1,13]` i64 index |
 | `cargo fmt --check` | clean |
 | `cargo clippy --release --no-default-features --test fn3_trained_parity --test fn3_trained_layers -- -D warnings` | clean |
@@ -589,9 +602,12 @@ Reduced outputs, committed:
 | [`accumulation.json`](fn3-trained-fp32/accumulation.json) | bit-equality and f64 comparisons for three projections |
 | [`parity-cpu.json`](fn3-trained-fp32/parity-cpu.json) | the test's CPU report |
 | [`parity-vulkan-staged.json`](fn3-trained-fp32/parity-vulkan-staged.json) | the test's staged Vulkan report |
-| [`tiny-e2e-cpu.log`](fn3-trained-fp32/tiny-e2e-cpu.log) | tiny-model control |
-| [`reproduce-existing-test.log`](fn3-trained-fp32/reproduce-existing-test.log) | the #68 test reproduction |
-| [`vulkan-resident-failure.log`](fn3-trained-fp32/vulkan-resident-failure.log) | the failing resident `Gather` |
+
+The three logs that earlier revisions of this page linked — `tiny-e2e-cpu.log`,
+`reproduce-existing-test.log` and `vulkan-resident-failure.log` — were produced
+in a scratch directory and never committed, so the links are removed rather
+than left dangling. The first two commands are in §7 and reproduce their
+content; the third is preserved verbatim in §6.2.
 
 Not committed (too large, and model-derived): the raw `.f32`/`.npy` tensors
 (21 MB fn3 + 18 MB ORT + 35 MB float64) under

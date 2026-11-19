@@ -942,7 +942,10 @@ fn print_header(setup: &Setup, out: &mut dyn Write) {
         setup.prompt.len(),
         format_token_list(&setup.prompt)
     );
-    let _ = writeln!(out, "  input: token IDs (this alpha has no text tokenizer)");
+    let _ = writeln!(
+        out,
+        "  input: token IDs (this release has no text tokenizer)"
+    );
 }
 
 fn print_counters(setup: &Setup, session: &Session<'_>, steps: bool, out: &mut dyn Write) {

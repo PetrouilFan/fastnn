@@ -148,7 +148,7 @@ fastnn-infer inference
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
   prompt: 10 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
-  input: token IDs (this alpha has no text tokenizer)
+  input: token IDs (this release has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
   prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=332.14ms
@@ -206,7 +206,7 @@ fastnn-infer inference
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
   prompt: 10 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
-  input: token IDs (this alpha has no text tokenizer)
+  input: token IDs (this release has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
   prefill: seq=10 past=0 cache=10 plan=e6e4191a3d58f621d9f9438e1b6f6cc8 plan-cache=0hit/1miss wall=325.12ms
@@ -243,7 +243,7 @@ fastnn-infer inference
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
   prompt: 10 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
-  input: token IDs (this alpha has no text tokenizer)
+  input: token IDs (this release has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
   timing: wall-clock around each call; the Vulkan backend records per-dispatch gpu_ns, but Session does not aggregate a device time in this build
@@ -287,7 +287,7 @@ fastnn-infer inference
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
   prompt: 13 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 4874, 2402, 257]
-  input: token IDs (this alpha has no text tokenizer)
+  input: token IDs (this release has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: cpu on cpu
   prefill: seq=13 past=0 cache=13 plan=5baea64ce096acaa9aa09e5f6e7caf41 plan-cache=0hit/1miss wall=370.12ms
@@ -362,7 +362,7 @@ fastnn-infer inference
   envelope: batch 1..=1 seq 1..=128 past 0..=1023 total 1..=1024
   kv: capacity=1024 tokens, 2 layers x 2 KV heads x 64 head_dim = 2,097,152 bytes
   prompt: 10 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13]
-  input: token IDs (this alpha has no text tokenizer)
+  input: token IDs (this release has no text tokenizer)
   session: phase=empty cache=0 kv_bytes=2,097,152
   execution: vulkan on vulkan(0)
   prefill: seq=10 past=0 cache=10 plan=bc15e5dfdd8171156113b43736e55066 plan-cache=0hit/1miss wall=183.10ms
@@ -410,6 +410,42 @@ VK_ICD_FILENAMES=/nonexistent/icd.json VK_DRIVER_FILES=/nonexistent/icd.json \
 error: cannot open the requested Vulkan device: device unavailable: requested device vulkan is unavailable: no Vulkan device is usable: Vulkan loader unavailable: vkCreateInstance failed: ERROR_INCOMPATIBLE_DRIVER (-9): requesting Vulkan 1.1 with layers [] and extensions []. Install a Vulkan ICD (`vulkan-icd-loader` and the GPU driver package), or point VK_ICD_FILENAMES at a valid ICD; `vulkaninfo --summary` shows what the loader sees; available devices: [cpu]
 next: install or repair the Vulkan ICD/GPU driver, or run `--device cpu`; `fastnn-infer diagnose` shows the loader's view
 ```
+
+## 9. Quantized weights (opt-in)
+
+Weight-only INT8 is available on top of the same artifact; nothing is repacked
+on disk and the default path is unchanged.
+
+```bash
+./target/release/fastnn-infer run \
+  --model /tmp/opencode/fn3-cli/release/tiny-gpt2.fnn3 \
+  --tokens "$TOKENS" --device vulkan --weight-int8
+```
+
+```text
+  artifact: /tmp/opencode/fn3-artifact-exec/tiny-gpt2.fnn3
+    bytes:  27,879,928  sha256: 33cf409006d9d9538712486d45e9d3cdf1e3cf9176fdfe3c9af477630ca30122
+  source: none (artifact-only: the artifact carries the graph, 50 weight payloads, the geometry and the envelope)
+  device: requested vulkan, resolved vulkan(0), backend vulkan (adapter=NVIDIA GeForce GTX 1080 Ti software=false validation=true)
+  execution: vulkan on vulkan(0)
+  prefill: seq=10 past=0 cache=10 plan=bc15e5dfdd8171156113b43736e55066 plan-cache=0hit/1miss wall=76.85ms
+    weight-int8: packed-matmuls=8/13 fp32-matmuls=5 packed-payload=417792B packed-source=1572864B dense-weight=26260132B shared-weight=0B model-weight=27833180B route/pack/upload=49.84ms
+    weight-int8-traffic: packed-prepare=417792B staged-host-bytes=340B late-persistent=0B
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-0.9510 max=1.0024 mean=0.000426
+  top-3: 46737 (1.0024), 28597 (0.9777), 16571 (0.9145)
+  argmax: 46737 (logit 1.0024)
+```
+
+Each instruction is either wholly packed or wholly FP32, and the report counts
+both sides of that split. On the pinned GPT-2 48 of 73 MatMuls are packed and
+25 stay FP32 (the 24 attention products and the tied LM head). Quantized
+execution is a storage path, not a speedup: packing costs about 1 s for the
+trained model and decode is 7–10% slower. `--device vulkan` with
+`FN3_VK_STAGED=1` and `--weight-int8` is rejected with a typed error instead of
+falling back to CPU. In Python,
+`fastnn.inference.load(artifact, weight_int8=True)` sets the same option and
+`session.weight_int8_report` returns the same fields as a dict. See
+[artifact INT8](quantization/artifact-int8.md).
 
 ## Token IDs
 

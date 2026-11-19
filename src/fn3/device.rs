@@ -290,15 +290,15 @@ impl DeviceResolveError {
     ///
     /// Enumeration and placement are separate questions. A Vulkan device can be
     /// listed by [`available_devices`] and still refuse to own a
-    /// [`Tensor`](crate::inference::Tensor), because alpha tensor storage is host
-    /// memory on every device. The reason therefore reports *why allocation*
+    /// [`Tensor`](crate::inference::Tensor), because this constructor's tensor storage
+    /// is host memory. The reason therefore reports *why allocation*
     /// failed, not merely that the device was missing.
     pub fn unavailable_device(device: DeviceId) -> Self {
         #[cfg(feature = "vulkan")]
         const REASON: &str =
-            "this alpha build allocates tensor storage in host memory only, so only the cpu \
-             device can own a tensor; vulkan devices execute through host staging, and \
-             device-resident storage is FN3-12 (#58)";
+            "the tensor API allocates host storage only, so only the cpu device can own a \
+             tensor through this constructor; a Vulkan session allocates device-resident \
+             storage through its backend";
         #[cfg(not(feature = "vulkan"))]
         const REASON: &str = "no backend for this device is present in this build; rebuild with \
              `--features vulkan` to enable the Vulkan platform layer (FN3-11 / #57)";

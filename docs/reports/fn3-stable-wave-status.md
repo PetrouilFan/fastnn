@@ -1,5 +1,12 @@
 # FastNN 3.0 stable wave — status report
 
+> **Historical record.** This report is frozen at integration HEAD `a3e9723`
+> and is superseded by `docs/reports/fn3-3.0.0-release.md`. Its open items —
+> the trained resident `Reshape → Gather` defect, the trained FP32 tolerance
+> decision, #74–#76, and the version bump — were all resolved after it was
+> written. Read it for the workstream evidence and the alpha baseline; read the
+> release report for what 3.0.0 actually claims.
+
 Status as of integration HEAD **`a3e9723`** on `rewrite/fastnn-3`, pushed to
 `origin`. The alpha review commit **`672cec9`** remains an ancestor and is
 identifiable in every merge. `main` is untouched at `a2c0759`; no tag, release,

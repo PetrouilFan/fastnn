@@ -26,7 +26,7 @@
 //!
 //! Bytes are stored exactly as the file carried them. Nothing here converts a
 //! dtype, reorders elements or normalizes endianness: the ONNX wire format is
-//! little-endian and so is every target this alpha supports, and a byte-order
+//! little-endian and so is every target this release supports, and a byte-order
 //! conversion would be a numerical change disguised as I/O.
 
 use std::collections::BTreeMap;
