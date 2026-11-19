@@ -354,8 +354,13 @@ Known debt, cleared by #67:
   so a new finding fails the lane. Suppressions were kept to two deliberate
   test-helper cases (an 8-argument reference/table helper in the Vulkan tests);
   everything else was fixed.
-- `scripts/ci/check-agents-freshness.py` passes on this tree. The #67 version
-  work added no version literal to any AGENTS.md; the checker is in the CPU lane.
+- `scripts/ci/check-agents-freshness.py` is in the CPU lane. On this tree it
+  reports two guides over its 100-line budget (`src/fn3/AGENTS.md` and
+  `src/fn3/backend/vulkan/AGENTS.md`), so it does **not** pass; an earlier
+  revision of this ledger claimed it did. The #67 version work added no version
+  literal to any AGENTS.md. See the
+  [2.x disposition](../internals/legacy-2x.md#verification-notes) for the gate
+  table kept up to date.
 
 ## Alpha gate status
 

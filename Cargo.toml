@@ -105,6 +105,8 @@ fusion-matmul-add-silu = []
 fusion-residual-add-norm = []
 
 # ── CLI binary ────────────────────────────────────────────────────────
+# Target gate only: `fastnn-infer` declares `required-features = ["cli"]`.
+# The feature enables no dependency.
 cli = []
 
 [[example]]

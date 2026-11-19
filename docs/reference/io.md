@@ -10,25 +10,26 @@ the [inference CLI](../quickstart-fn3.md).
 ```python
 import fastnn as fnn
 
-# Save model (default fnn-v2, f32 parameters)
+model = fnn.Linear(4, 2)
+
+# Save the parameters as v2 (the default, all f32)
 fnn.io.save(model, "model.fnn")
 
-# Save as v3 (dtype-tagged packed tensors)
-fnn.io.save(model, "model.fnn", format="fnn-v3")
+# load() returns {name: tensor}, not a model
+params = fnn.io.load("model.fnn")
+print(sorted(params))  # ['bias', 'weight']
 
-# Load model (auto-detects v2 or v3)
-loaded_model = fnn.io.load("model.fnn")
+restored = fnn.Linear(4, 2)
+restored.set_weight(params["weight"])
+restored.set_bias(params["bias"])
+
+test_input = fnn.tensor([1.0, 2.0, 3.0, 4.0], [1, 4])
+prediction = restored(test_input)
 ```
 
-**`fnn.io.save(model, path, format="fnn-v2")`** serializes a model to the custom `.fnn` binary format. Use `format="fnn-v3"` for dtype-tagged packed tensor support.
+**`fnn.io.save(model, path, format="fnn-v2")`** serializes a model's named parameters to the custom `.fnn` binary format. The default v2 stores f32 tensors. `format="fnn-v3"` writes dtype-tagged tensors, but that path currently writes the magic/version prefix twice, so `fnn.io.load` cannot read the result; use `write_fnn_file_v3` and `read_fnn_header` / `read_fnn_parameters` for v3 payloads (the pattern the v3 tests use).
 
-**`fnn.io.load(path)`** deserializes a `.fnn` model file. The format version is auto-detected (v1, v2, or v3). The model architecture on disk must match the architecture in code.
-
-Use the loaded model for inference:
-
-```python
-prediction = loaded_model(test_input)
-```
+**`fnn.io.load(path)`** returns a `{name: tensor}` dict of parameters; it does not rebuild a model. v1 and v2 files are auto-detected, and a correctly written v3 file loads too. Because the file stores no architecture, construct the model in code and assign the parameters, as the `set_weight` / `set_bias` calls above do. Layer setters are the reliable path on this tree; the top-level `fnn.load_state_dict(model, params)` helper is not usable because it calls `PyTensor.copy_`, which this extension no longer provides.
 
 ## Format Conversion
 
@@ -63,13 +64,17 @@ Custom binary with magic bytes (`b"FNN\x00"`).
 | v2 | Yes | Yes | f32 parameters (gradient flag is read for archived files) |
 | v3 | Yes | Yes | Dtype-tagged packed tensors (F32, F16, U8, U4, I4Codebook) |
 
+"Save" means a writer exists for the layout: `io.save` writes v1 and v2, and
+`write_fnn_file_v3` writes v3. The `format="fnn-v3"` option of `io.save` is the
+broken wrapper noted in [Save / Load](#save-load).
+
 ### Version 2 (fnn-v2)
 
 All parameters stored as float32, with a per-parameter flag byte kept for compatibility with archived files. Suitable for full-precision inference checkpoints.
 
 ### Version 3 (fnn-v3)
 
-Dtype-tagged tensors: each parameter carries a precision tag (F32=0, F16=1, U8=2, U4=3, I4Codebook=4) with per-channel scale and zero-point arrays. I4Codebook additionally stores the 64-byte codebook and per-block scales. Packed U4/U8/F16 data stored as raw bytes, reducing file size by up to 8x. Enables direct loading of quantized models without re-quantization.
+Written with `write_fnn_file_v3`. Dtype-tagged tensors: each parameter carries a precision tag (F32=0, F16=1, U8=2, U4=3, I4Codebook=4) with per-channel scale and zero-point arrays. I4Codebook additionally stores the 64-byte codebook and per-block scales. Packed U4/U8/F16 data stored as raw bytes, reducing file size by up to 8x. Enables direct loading of quantized models without re-quantization.
 
 ## ONNX Import and Export
 

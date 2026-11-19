@@ -24,26 +24,31 @@ deleted in FN3-19 (#65); the pinned 2.x revision `a2c0759` is the archive.
 ## Retained 2.x reference
 
 - [Disposition and Callers](internals/legacy-2x.md) — what remains, who uses it, and what was retired
-- [Tensors](reference/tensors.md) — inference tensor creation, operations, devices and NumPy interop
-- [Neural Network Modules](reference/nn-modules.md) — forward layer reference (Linear, Conv, Normalization, etc.)
+- [Tensors](reference/tensors.md) — 2.x tensor creation, operations, devices and NumPy interop
+- [Neural Network Modules](reference/nn-modules.md) — 2.x forward layer reference (Linear, Conv, Normalization, etc.)
 - [I/O & Serialization](reference/io.md) — `fastnn.io`, `fastnn-convert`, and `.fnn` models
 - [API Reference](reference/api-reference.md) — secondary forward Python API
 - [Models](models/models.md) — legacy MLP, Transformer, and YOLO examples
 - [ONNX Support](models/onnx.md) — legacy ONNX conversion and AOT execution
 - [AOT Architecture](internals/architecture.md) — secondary IR, compiler and CPU executor
 
-## Internals
+## Internals and 2.x engineering notes
 
-- [Development](internals/development.md) — codebase walkthrough and test layout
+Most of these describe the retained 2.x tree or the build/release process; they
+are not 3.0 runtime documentation.
+
+- [Development](internals/development.md) — codebase walkthrough for both trees and test layout
 - [Release Process](internals/release-process.md) — release workflow and checklist
-- [Performance Roadmap](internals/performance-roadmap.md) — CPU/Vulkan performance work
-- [ARM NEON Backend](internals/arm-neon.md) — ARM NEON SIMD kernel documentation
+- [Performance Roadmap](internals/performance-roadmap.md) — 2.x CPU/Vulkan performance work
+- [ARM NEON Backend](internals/arm-neon.md) — 2.x CPU SIMD kernel documentation
 
 ## Roadmap and evidence
 
-- [Roadmap Overview](roadmap/index.md) — current and future development priorities
+- [Roadmap Overview](roadmap/index.md) — historical 2.x planning record
 - [v2.3 Roadmap](roadmap/v2.3-roadmap.md) — historical planning document
-- [2.x Baseline](reports/fn3-01/baseline-2.6.0.md) — preserved comparison evidence
+- [2.x Baseline](reports/fn3-01/baseline-2.6.0.md) — preserved comparison evidence. Its
+  companion `fn3-trained-fp32` report links three logs that were never committed, so
+  `check-doc-truthfulness.py` still names them.
 
 ---
 
