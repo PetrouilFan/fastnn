@@ -721,16 +721,22 @@ the alpha review commit `672cec9` and the audited wave report `7836a65`.
 | `fec9826` | #74 measured support matrix: 64/256/1024-token trained FP32 and INT8, staged control, queue and memory limits |
 | `d9ec36f` | the `3.0.0` changelog section as the release record |
 | `0818348`, `6c1504d`, `59db947`, `a0c5f49`, `b623213` | Python report label parity, automated trained INT8 resident gate, FP32 and INT8 wheel replays, ownership guides, tensor-device diagnostics |
+| `4993011` | the CLI is a source build, not a release artifact; decode figures labelled by context |
+| `7261abb`, `ac389e3`, `8f9d283` | persistent weights keyed by a process-global storage generation and released with the last `Storage` handle; four regressions including dropped-model reuse and address-reuse cycles |
+| `9a86d07` | the device-diagnostic assertions hold under `--features vulkan` |
+| `5fb5a7c`, `03e04b4`, `e3585e0`, `f5fbdb4` | device quarantine for resources whose GPU completion is unknown, with a device-wide reference count for shared buffers, leak-not-free teardown, and eleven pinned cases (one normal, ten injected) in debug and release |
+| `b1618f2` | the GPU session test asserts the resident batching contract instead of the alpha per-op staging one |
 
-Gates at `b623213` are recorded in `docs/reports/fn3-3.0.0-release.md` §9–§11:
-fmt, 705/768/771 library tests, fourteen `fn3_*` binaries, clippy in three
-feature sets, the Python lane (384 passed), eleven physical-Vulkan binaries with
-validation 0/0, the artifact-only FP32/INT8 CLI matrix on CPU and the GTX 1080
-Ti, and the strict packaging lane (wheel
-`34951bba41f3d5b53a50aed63a72eeeb6f6532564af3a2962ec40b6a678def11`, two
-source-free replays).
+Gates on the candidate are recorded in `docs/reports/fn3-3.0.0-release.md`
+§9–§11: fmt, **707/779/782** library tests, fourteen `fn3_*` binaries, clippy in
+four feature sets, the Python lane, fifteen physical-Vulkan binaries with
+validation 0/0 (including quarantine, persistent identity and the three trained
+gates), the artifact-only FP32/INT8 CLI matrix on CPU and the GTX 1080 Ti, and
+the strict packaging lane rebuilt from this tree (wheel
+`ea391d7a3930a3626edb2a95733d0eb95dd55d9b8a39e1d4daf2d4e51e54bc85`, two
+source-free replays, FP32 and INT8).
 
-Hosted CI: run **`44600446938`** on
+Hosted CI on the previous candidate, kept as history: run **`44600446938`** on
 **`7b27493719f6e8ca7b5461e936b45249a80b1e1c`**, all nine jobs green
 (`cpu-rust`, `cpu-python`, `vulkan-build`, `vulkan-software-smoke`,
 `pinned-model`, `gpu-physical`, `packaging/{ubuntu,macos,windows}-latest`,
