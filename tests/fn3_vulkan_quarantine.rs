@@ -50,15 +50,18 @@
 #![cfg(feature = "vulkan")]
 
 use std::sync::Mutex;
+#[cfg(feature = "vulkan-fault-injection")]
 use std::time::{Duration, Instant};
 
 use fastnn::inference::backend::vulkan::instance::validation_counts;
 use fastnn::inference::backend::vulkan::{
-    adapters, destroyed_buffer_total, destroyed_chunk_total, destroyed_instance_total,
-    teardown_totals, BufferDesc, QuarantineStats, VulkanBackend, VulkanConfig,
+    adapters, destroyed_chunk_total, destroyed_instance_total, teardown_totals, BufferDesc,
+    QuarantineStats, VulkanBackend, VulkanConfig,
 };
 use fastnn::inference::device::DeviceRequest;
 
+#[cfg(feature = "vulkan-fault-injection")]
+use fastnn::inference::backend::vulkan::destroyed_buffer_total;
 #[cfg(feature = "vulkan-fault-injection")]
 use fastnn::inference::backend::vulkan::{FaultPoint, ReclaimReport, Submitter};
 #[cfg(feature = "vulkan-fault-injection")]
