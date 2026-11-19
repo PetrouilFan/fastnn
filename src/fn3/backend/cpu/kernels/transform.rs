@@ -17,6 +17,14 @@
 //! ascending row-major order of their own coordinates, and `Concat`/`Split`
 //! visit inputs/outputs in index order.
 //!
+//! One kernel deviates from that write order and not from its result:
+//! [`transpose`] takes a cache-tiled path when the permutation swaps only the
+//! last two axes, both views are contiguous and elements are 4 or 8 bytes
+//! (FN3-25 / #71). It writes a `32 x 32` tile at a time, and each output
+//! element is still written exactly once with the same bytes, so the tensor is
+//! identical; only the order of the stores changes, which no caller can
+//! observe.
+//!
 //! # Shapes and axes
 //!
 //! Attributes come from [`OpParams`]; shapes and sizes that ONNX carries as
@@ -35,9 +43,9 @@ use crate::fn3::shape::Shape;
 use crate::fn3::tensor::{TensorMut, TensorView};
 
 use super::{
-    at, at_mut, checked_product, copy_element, decompose, normalize_axis, out_window_bytes,
-    read_i64_scalar, read_i64_vector, require_dtype, require_output_shape, single_axis,
-    view_window_bytes, Locator,
+    at, at_mut, checked_product, copy_element, decompose, kernel_bounds_error, normalize_axis,
+    out_window_bytes, read_i64_scalar, read_i64_vector, require_dtype, require_output_shape,
+    single_axis, view_window_bytes, Locator,
 };
 
 /// Copy `input`'s elements, in logical row-major order, into `out`.
@@ -282,6 +290,9 @@ pub(crate) fn transpose(
         return Ok(());
     }
     let element_bytes = input.dtype().size_bytes();
+    if let Some(()) = transpose_last_two(op, input, out, &permutation, elements, element_bytes)? {
+        return Ok(());
+    }
     let source = input.storage_bytes();
     let destination = out.storage_slice_mut::<u8>()?;
     let dims = expected.dims().to_vec();
@@ -308,10 +319,175 @@ pub(crate) fn transpose(
     Ok(())
 }
 
+/// Cache-friendly fast path for a transpose that swaps exactly the last two
+/// axes.
+///
+/// # Why
+///
+/// The pinned graph ties `lm_head` to the token-embedding table, so every step
+/// transposes a `[50257, 128]` `f32` weight into `[128, 50257]`. The scalar
+/// loop in [`transpose`] walks the output in row-major order and, for every
+/// element, recomputes a checked index whose source is `50257 * 4` bytes away:
+/// measured at 196 ms for a 10-token prefill and 212 ms for a decode step
+/// (FN3-25 / #71). That is one cache miss plus one full index computation per
+/// element for a pure data movement.
+///
+/// This path finds the corresponding source index with two multiplications and
+/// walks the source ascending, which is the access pattern the prefetcher and
+/// the store buffers handle best (see [`TRANSPOSE_COLUMNS_PER_PASS`] for the
+/// measured comparison with a tiled version).
+///
+/// # Scope and exactness
+///
+/// Only taken when the permutation is the identity on every axis but the last
+/// two, both views are contiguous, and the element is 4 or 8 bytes (`f32`,
+/// `i64`/`f64`/`i32`). It moves each element unchanged and never reorders
+/// *within* an element, so the result is byte-exact by construction; every
+/// other permutation, dtype and non-contiguous view keeps the scalar path.
+/// Returns `Ok(None)` when the shape is not one of those cases.
+fn transpose_last_two(
+    op: OpId,
+    input: &TensorView<'_>,
+    out: &mut TensorMut<'_>,
+    permutation: &[usize],
+    elements: u64,
+    element_bytes: usize,
+) -> Result<Option<()>, Fn3Error> {
+    let rank = permutation.len();
+    if rank < 2 {
+        return Ok(None);
+    }
+    let swapped = permutation[rank - 2] == rank - 1 && permutation[rank - 1] == rank - 2;
+    let prefix_identity = permutation[..rank - 2]
+        .iter()
+        .enumerate()
+        .all(|(axis, &moved)| moved == axis);
+    if !swapped || !prefix_identity {
+        return Ok(None);
+    }
+    if !input.is_contiguous() || !out.is_contiguous() {
+        return Ok(None);
+    }
+    if !matches!(element_bytes, 4 | 8) {
+        return Ok(None);
+    }
+
+    let dims = input.shape().dims();
+    let rows = usize::try_from(dims[rank - 2]).map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu transpose rows",
+        axis: Some(rank - 2),
+        detail: "extent does not fit in usize".to_string(),
+    })?;
+    let columns = usize::try_from(dims[rank - 1]).map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu transpose columns",
+        axis: Some(rank - 1),
+        detail: "extent does not fit in usize".to_string(),
+    })?;
+    let outer = usize::try_from(checked_product(
+        &dims[..rank - 2],
+        "cpu transpose outer slabs",
+    )?)
+    .map_err(|_| Fn3Error::ShapeOverflow {
+        context: "cpu transpose outer slabs",
+        axis: None,
+        detail: "outer slab count does not fit in usize".to_string(),
+    })?;
+    if elements == 0 || rows == 0 || columns == 0 {
+        return Ok(None);
+    }
+
+    let source = view_window_bytes(op, input)?;
+    let destination = out_window_bytes(op, out)?;
+    let expected_bytes =
+        elements
+            .checked_mul(element_bytes as u64)
+            .ok_or_else(|| Fn3Error::ShapeOverflow {
+                context: "cpu transpose byte length",
+                axis: None,
+                detail: "element count times element size overflows u64".to_string(),
+            })?;
+    if source.len() as u64 != expected_bytes || destination.len() as u64 != expected_bytes {
+        return Err(kernel_bounds_error(
+            op,
+            expected_bytes as usize,
+            source.len(),
+        ));
+    }
+
+    if element_bytes == 4 {
+        tiled_swap_last_two(
+            bytemuck::cast_slice::<u8, u32>(source),
+            bytemuck::cast_slice_mut::<u8, u32>(destination),
+            outer,
+            rows,
+            columns,
+        );
+    } else {
+        tiled_swap_last_two(
+            bytemuck::cast_slice::<u8, u64>(source),
+            bytemuck::cast_slice_mut::<u8, u64>(destination),
+            outer,
+            rows,
+            columns,
+        );
+    }
+    Ok(Some(()))
+}
+
+/// How many destination rows one pass writes at a time.
+///
+/// The fastest shape for this transpose (measured in FN3-25 / #71 on the
+/// `[50257, 128]` tied-embedding table) is a **sequential source read** with one
+/// destination stream per source column: 128 streams of `ROWS` growing
+/// elements each, which is 3.2-4.2 ms against 6.0 ms for a squarer tiled
+/// version and 196 ms for the per-element checked loop. The reason is that the
+/// source read can be prefetched as a single ascending stream while each of the
+/// 128 destination streams is still touched in ascending order, so the store
+/// buffers keep every one of them write-combining.
+///
+/// That advantage depends on the stream count staying modest, so the loop caps
+/// it: a transpose of `[128, 50257]` (50 257 destination rows) would otherwise
+/// ask for 50 257 interleaved streams. One pass covers at most this many
+/// columns, and the source read inside a pass is still `columns_per_pass`
+/// contiguous elements of a row.
+const TRANSPOSE_COLUMNS_PER_PASS: usize = 128;
+
+/// `dst[o, c, r] = src[o, r, c]` for every outer slab.
+///
+/// Each pass reads the source in ascending `(row, column)` order and writes the
+/// matching destination rows, so every source cache line is fetched once and
+/// every destination element is written once. See
+/// [`TRANSPOSE_COLUMNS_PER_PASS`] for why this beats a tiled loop here.
+fn tiled_swap_last_two<T: Copy>(
+    source: &[T],
+    destination: &mut [T],
+    outer: usize,
+    rows: usize,
+    columns: usize,
+) {
+    let slab = rows * columns;
+    debug_assert_eq!(source.len(), outer * slab);
+    debug_assert_eq!(destination.len(), outer * slab);
+    for slab_index in 0..outer {
+        let from = &source[slab_index * slab..(slab_index + 1) * slab];
+        let to = &mut destination[slab_index * slab..(slab_index + 1) * slab];
+        let mut column = 0;
+        while column < columns {
+            let column_end = (column + TRANSPOSE_COLUMNS_PER_PASS).min(columns);
+            for row in 0..rows {
+                let source_row = &from[row * columns + column..row * columns + column_end];
+                for (offset, &value) in source_row.iter().enumerate() {
+                    to[(column + offset) * rows + row] = value;
+                }
+            }
+            column = column_end;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reshape / Flatten / Squeeze / Unsqueeze
 // ---------------------------------------------------------------------------
-
 /// Resolve an ONNX `Reshape` target (`allowzero = 0`):
 ///
 /// - a positive value is that extent;
