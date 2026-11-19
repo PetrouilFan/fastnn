@@ -21,7 +21,8 @@ end-to-end proof FN3-16 (#62).
   `kernels/{pointwise,matmul,norm,reduce,attention,quant}.rs` belong to
   #59/#60/#61/#70.
 - `submission.rs`: per-thread `Submitter`, `Recorder`, `Submission` tokens and
-  timestamp queries. `staging.rs`: host-visible lease pool.
+  timestamp queries. `staging.rs`: host-visible lease pool. `quarantine.rs`:
+  owned resources of submissions whose completion is unknown.
 - `residency.rs`: the per-execution evidence ledger #62 consumes; `ledger.rs`:
   create/destroy accounting used by the tests.
 - `shaders/`: GLSL sources, committed SPIR-V and the offline compile script.
@@ -38,9 +39,19 @@ end-to-end proof FN3-16 (#62).
   teardown-only.
 - A batch whose recording failed is discarded (command buffer reset, retained
   staging blocks dropped), never ended and submitted as a partial plan. A
-  fence wait that fails leaves the submission's completion unknown, so the
-  `Device` is poisoned and every later call returns `Error::Lost`; there is no
-  in-place recovery and the backend must be reopened.
+  fence wait that fails, times out, or is refused on a terminal device leaves
+  the submission's completion unknown: every in-flight resource (source and
+  destination buffers with their allocator ranges, staging blocks, command and
+  descriptor pools, descriptor sets, fences) moves into the device quarantine
+  (`quarantine.rs`) and is never dropped, destroyed or recycled. It leaves
+  only when a direct `vkWaitForFences` proves that entry's fence
+  (`Device::reclaim_quarantine`) or at a teardown boundary after
+  `vkDeviceWaitIdle` succeeds. A failed quiesce deliberately leaks and records
+  the reason; it never frees. `Buffer::drop` defers on a terminal device and
+  the staging pool refuses to re-pool a quarantined block, so no in-step path
+  can free or reuse a resource the GPU may still touch. The `Device` is still
+  poisoned and every later call returns `Error::Lost`; there is no in-place
+  recovery and the backend must be reopened.
 - `Device::missing_required_features` (on the adapter) is checked before
   `Device::open`: a device without the kernels' compute geometry, a 32 MiB
   storage range or a 64 MiB allocation gets a `DeviceUnavailable` naming the

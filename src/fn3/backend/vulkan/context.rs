@@ -239,6 +239,8 @@ impl Buffer {
         device.ledger().create(kind);
         device.ledger().allocate_bytes(kind, desc.size);
 
+        let id = device.next_buffer_id();
+        device.register_buffer(id);
         Ok(Buffer {
             device: Arc::clone(device),
             raw,
@@ -247,7 +249,7 @@ impl Buffer {
             usage: desc.usage,
             class: desc.class,
             name: desc.name,
-            id: device.next_buffer_id(),
+            id,
             kind,
         })
     }
@@ -294,6 +296,26 @@ impl Buffer {
     /// Raw handle, for command recording.
     pub fn raw(&self) -> vk::Buffer {
         self.raw
+    }
+
+    /// `true` when the device quarantine owns this buffer's destruction.
+    ///
+    /// The staging pool consults this before re-pooling a released block: a
+    /// block the GPU may still reference must never be leased again.
+    pub(crate) fn is_quarantined(&self) -> bool {
+        self.device.buffer_is_quarantined(self.id)
+    }
+
+    /// The destruction ticket this buffer would hand to the quarantine.
+    pub(crate) fn ticket(&self) -> BufferTicket {
+        BufferTicket {
+            id: self.id,
+            raw: self.raw,
+            allocation: self.allocation,
+            logical_size: self.size,
+            name: self.name,
+            kind: self.kind,
+        }
     }
 
     /// `true` if the buffer has a host mapping.
@@ -386,16 +408,14 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        // SAFETY: the buffer is no longer referenced by any in-flight command
-        // buffer (submitters keep their device and waited before reuse; the
-        // owner drops buffers only after its submission completed). It is
-        // destroyed exactly once, before its memory range is returned.
-        unsafe { self.device.ash().destroy_buffer(self.raw, None) };
-        self.device.ledger().destroy(self.kind);
-        self.device.ledger().free_bytes(self.kind, self.size);
-        if let Err(error) = self.device.free_range(self.allocation) {
-            eprintln!("[fn3vk][warn] returning a buffer range to the allocator failed: {error}");
+        // The device quarantine may already own this handle and range: a fence
+        // wait that failed left completion unknown, and destroying now would
+        // free memory the GPU may still write. The quarantine releases it only
+        // after a proven wait or a successful teardown quiesce.
+        if self.device.defer_buffer_on_drop(self.ticket()) {
+            return;
         }
+        destroy_buffer(&self.device, self.ticket());
     }
 }
 
@@ -495,6 +515,52 @@ pub struct KernelInvocation<'a> {
     pub push_constants: &'a [u8],
     /// Workgroup counts per axis, already derived from the grid function.
     pub workgroups: [u32; 3],
+}
+
+/// Ownership of one buffer as it was recorded into a submission.
+///
+/// A ticket is a snapshot of the handle, the suballocated range and the ledger
+/// kind. It is captured while the buffer is alive (the recorder borrows it), so
+/// it is always safe to use as the *identity* of a resource that a submission
+/// may still touch. Whether the buffer is still live when completion becomes
+/// unknown is decided by the device's id registry: a ticket for a buffer that
+/// already dropped is discarded, never freed twice.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BufferTicket {
+    /// Process-unique buffer id from the device.
+    pub(crate) id: u64,
+    /// Raw Vulkan buffer handle.
+    pub(crate) raw: vk::Buffer,
+    /// The suballocated range to return to the allocator.
+    pub(crate) allocation: MemoryAllocation,
+    /// Logical size used for ledger accounting.
+    pub(crate) logical_size: u64,
+    /// Diagnostic name.
+    pub(crate) name: &'static str,
+    /// Ledger kind (`"device_buffer"` or `"staging_buffer"`).
+    pub(crate) kind: &'static str,
+}
+
+/// Destroy one buffer and return its range to the allocator.
+///
+/// Used by both [`Buffer::drop`] and the device quarantine, so the ledger and
+/// allocator see exactly the same accounting on either path. The caller must
+/// have proven that no submission references the buffer (a completed wait or a
+/// successful device-wide quiesce).
+pub(crate) fn destroy_buffer(device: &Device, ticket: BufferTicket) {
+    // SAFETY: the caller proved no submission references the buffer and the
+    // handle is live exactly once (the registry hands out one destruction
+    // duty per id). It is destroyed before its memory range is returned.
+    unsafe { device.ash().destroy_buffer(ticket.raw, None) };
+    device.ledger().destroy(ticket.kind);
+    device.ledger().free_bytes(ticket.kind, ticket.logical_size);
+    if let Err(error) = device.free_range(ticket.allocation) {
+        eprintln!(
+            "[fn3vk][warn] returning the range of buffer \"{}\" ({}) to the allocator failed: \
+             {error}",
+            ticket.name, ticket.id
+        );
+    }
 }
 
 /// Check `offset..offset+len` against `capacity`.

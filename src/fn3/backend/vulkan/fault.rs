@@ -7,8 +7,8 @@
 //! `tests/fn3_vulkan_faults.rs`, and an environment variable would ship a
 //! failure path in the release binary. The `vulkan-fault-injection` feature is
 //! therefore non-default, additive and compiled out of every shipped
-//! configuration; the only code it changes is a `take()` check at the five
-//! seams the matrix exercises.
+//! configuration; the only code it changes is a `take()` check at the eight
+//! seams the matrix (and the quarantine regression) exercises.
 //!
 //! # Semantics
 //!
@@ -31,9 +31,14 @@ pub enum FaultPoint {
     Allocation,
     /// `vkQueueSubmit`, before the driver sees the submission.
     Submit,
-    /// The fence wait, after the real wait completed (the work is not in
-    /// flight when the failure is reported).
+    /// The fence wait, **after** the real wait completed (the work is not in
+    /// flight when the failure is reported). This is the post-completion
+    /// matrix case; [`FaultPoint::FenceUnknown`] is the pre-wait counterpart.
     Fence,
+    /// The fence wait, **before** the real wait: completion is unknown and the
+    /// submission may still be running. Every in-flight resource must move to
+    /// the device quarantine, never be destroyed or recycled.
+    FenceUnknown,
     /// Device → host readback (the logits download).
     Readback,
     /// Recording one dispatch into the open step batch. The failure happens
@@ -42,17 +47,22 @@ pub enum FaultPoint {
     Record,
     /// A device-to-device region copy (the KV past-prefix refresh and append).
     ResidentCopy,
+    /// `vkDeviceWaitIdle` at a teardown boundary. The failure means the device
+    /// cannot prove quiescence, so teardown must leak, not free.
+    Idle,
 }
 
 impl FaultPoint {
     /// Every point, for exhaustive tests.
-    pub const ALL: [FaultPoint; 6] = [
+    pub const ALL: [FaultPoint; 8] = [
         FaultPoint::Allocation,
         FaultPoint::Submit,
         FaultPoint::Fence,
+        FaultPoint::FenceUnknown,
         FaultPoint::Readback,
         FaultPoint::Record,
         FaultPoint::ResidentCopy,
+        FaultPoint::Idle,
     ];
 
     const fn index(self) -> usize {
@@ -65,9 +75,11 @@ impl FaultPoint {
             FaultPoint::Allocation => "allocation",
             FaultPoint::Submit => "submit",
             FaultPoint::Fence => "fence",
+            FaultPoint::FenceUnknown => "fence-unknown",
             FaultPoint::Readback => "readback",
             FaultPoint::Record => "record",
             FaultPoint::ResidentCopy => "resident-copy",
+            FaultPoint::Idle => "idle",
         }
     }
 }

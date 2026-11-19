@@ -70,6 +70,7 @@ pub mod kernels;
 pub mod ledger;
 pub mod memory;
 pub mod pipeline;
+pub mod quarantine;
 pub mod residency;
 pub mod resident;
 pub mod staging;
@@ -85,6 +86,9 @@ pub use kernels::{BindingKind, BindingSpec, KernelSet, KernelSpec, OpKernel};
 pub use ledger::HandleLedger;
 pub use memory::{MemoryClass, MemoryStats};
 pub use pipeline::Kernel;
+pub use quarantine::{
+    teardown_totals, QuarantineStats, ReclaimReport, TeardownReport, TeardownTotals,
+};
 pub use residency::{ExecutionRecord, ResidencyLedger, ResidencySummary};
 pub use resident::{
     padded_bytes, ResidencyCounters, ResidencyPhase, ResidencyStats, ResidentBuffer,
@@ -679,6 +683,26 @@ impl VulkanBackend {
         self.staging.stats()
     }
 
+    /// What the device quarantine owns right now.
+    pub fn quarantine_stats(&self) -> QuarantineStats {
+        self.device.quarantine_stats()
+    }
+
+    /// `true` while at least one submission's GPU completion is unknown.
+    pub fn has_unknown_completion(&self) -> bool {
+        self.device.has_unknown_completion()
+    }
+
+    /// Release every quarantined entry whose fence is proven signalled.
+    ///
+    /// An explicit proof boundary: nothing is released unless a direct
+    /// `vkWaitForFences` on that entry returns success. A poisoned device with
+    /// a live queue can prove completion; a genuinely lost device cannot and
+    /// releases nothing.
+    pub fn reclaim_quarantine(&self) -> ReclaimReport {
+        self.device.reclaim_quarantine()
+    }
+
     /// Handle ledger report (every Vulkan object created by this backend).
     pub fn handle_report(&self) -> String {
         self.device.ledger().report()
@@ -695,6 +719,61 @@ impl VulkanBackend {
         self.device
             .pipeline_cache_data()
             .map_err(|error| error.to_fn3())
+    }
+}
+
+impl Drop for VulkanBackend {
+    fn drop(&mut self) {
+        // Teardown rule: quiesce first, destroy only after it returns success.
+        // A failed quiesce means the GPU may still read or write something, so
+        // every child that would destroy a Vulkan object is deliberately
+        // leaked and the reason is recorded. Leaking is acceptable; freeing in
+        // use is not.
+        match self.device.quiesce() {
+            Ok(()) => {
+                // The submitters are idle by construction (records borrow
+                // them and every wait succeeded). Destroy them now, after the
+                // device-wide proof.
+                {
+                    let pool = self
+                        .submitters
+                        .get_mut()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let submitters = std::mem::take(&mut pool.by_thread);
+                    pool.active.clear();
+                    drop(submitters);
+                }
+                // Pipelines, layouts and shader modules are device children;
+                // they are destroyed after the same proof.
+                self.kernel_cache
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
+                self.device.finish_teardown(true);
+            }
+            Err(error) => {
+                self.device.refuse_destruction();
+                let pool = self
+                    .submitters
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let submitters = std::mem::take(&mut pool.by_thread);
+                pool.active.clear();
+                std::mem::forget(submitters);
+                std::mem::forget(std::mem::take(
+                    self.kernel_cache
+                        .get_mut()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                ));
+                let report = self.device.finish_teardown(false);
+                eprintln!(
+                    "[fn3vk][warn] backend teardown could not quiesce the device ({error}); \
+                     deliberately leaking the submitter pool, compiled pipelines and {:?} rather \
+                     than freeing resources the GPU may still reference",
+                    report
+                );
+            }
+        }
     }
 }
 
@@ -898,6 +977,11 @@ impl Drop for SubmitterGuard<'_> {
             return;
         };
         pool.active.remove(&self.thread);
+        if submitter.is_quarantined() {
+            // A failed wait moved its handles into the device quarantine; the
+            // submitter must never re-enter the pool.
+            return;
+        }
         pool.by_thread.insert(self.thread, submitter);
     }
 }
