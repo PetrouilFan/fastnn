@@ -1590,7 +1590,7 @@
         "reference_top1_margin": 2.221708297729492,
         "relative_rms": 5.081902354609434e-07,
         "rms_reference": 43.03026114152145,
-        "scale_aware_bound": 0.0001358614261843599,
+        "scale_aware_bound": 0.0002646535654608998,
         "top1": 11,
         "top1_agree": true,
         "top5_overlap": 5
@@ -1622,7 +1622,7 @@
         "reference_top1_margin": 7.560539245605469,
         "relative_rms": 1.5329308517786594e-06,
         "rms_reference": 49.56616787514798,
-        "scale_aware_bound": 0.00014891004506231888,
+        "scale_aware_bound": 0.00029727511265579724,
         "top1": 640,
         "top1_agree": true,
         "top5_overlap": 5
@@ -1644,7 +1644,7 @@
         "reference_top1_margin": 2.221708297729492,
         "relative_rms": 1.614992752747438e-06,
         "rms_reference": 43.03026114152145,
-        "scale_aware_bound": 0.0001358614261843599,
+        "scale_aware_bound": 0.0002646535654608998,
         "top1": 11,
         "top1_agree": true,
         "top5_overlap": 5
@@ -1676,7 +1676,7 @@
         "reference_top1_margin": 7.560539245605469,
         "relative_rms": 2.0780780026087627e-06,
         "rms_reference": 49.56616787514798,
-        "scale_aware_bound": 0.00014891004506231888,
+        "scale_aware_bound": 0.00029727511265579724,
         "top1": 640,
         "top1_agree": true,
         "top5_overlap": 5
