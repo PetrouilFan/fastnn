@@ -413,7 +413,10 @@ pub trait Backend: Send + Sync + fmt::Debug {
     /// every dispatch, which is exactly the behaviour it already had. A backend
     /// that keeps persistent device copies must be idempotent here (the same
     /// tensor may be presented by several sessions) and must not modify the
-    /// tensor: the host storage stays valid for the CPU/fallback path.
+    /// tensor: the host storage stays valid for the CPU/fallback path. A copy
+    /// is keyed by [`crate::inference::Storage::generation`] and released when
+    /// the last handle to that storage drops; it is never keyed by a host
+    /// address, which the allocator may reuse for a different model.
     fn prepare_persistent(
         &self,
         tensors: &[&crate::inference::tensor::Tensor],

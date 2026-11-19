@@ -83,7 +83,10 @@ once by `prepare_persistent` and bound by handle, and a resident step is one
 batched submission. A decode still submits its KV appends and the logits
 download separately, and staging blocks are held to the fence, so batching
 raises the device peak. Kernels that chain work use `alloc_buffer`/`upload`/
-`dispatch`/`download` rather than a per-op round trip.
+`dispatch`/`download` rather than a per-op round trip. The persistent table is
+keyed by a storage generation and each entry is released with the last handle
+to its host allocation (`resident.rs`), so dropping a model cannot leave a
+device copy that a later model with the same geometry resolves by accident.
 
 ## Validation
 
