@@ -174,18 +174,20 @@ def load(
 ) -> Model:
     """Load a prepared artifact and bind it to an explicit device.
 
+    The artifact is the whole input: it carries the graph, the weights, the
+    geometry and the declared window, so one file is enough and no ONNX is read.
+
     Parameters
     ----------
     artifact:
         Path of a ``.fn3prep`` artifact produced by :func:`prepare`.
     source:
-        Path of the ONNX file the artifact was prepared from. **Required at this
-        base**: the session planner consumes the importer's graph, and a
-        prepared artifact does not carry it in a planner-consumable form yet
-        (#62 adds that constructor). The artifact remains the authority — its
-        weights, geometry and window are what run — and the source is validated
-        against it (geometry, values, operations and every weight byte) before
-        anything executes.
+        Optional path of the ONNX file the artifact was prepared from. When
+        given, the two files are proved to describe the same model before
+        anything executes — provenance, geometry, every value, every operation
+        and every weight byte — and a disagreement raises
+        :class:`Fn3ModelError`. When omitted, the artifact alone is planned and
+        run; nothing about the session comes from an ONNX file in either case.
     device:
         ``None``/``"auto"``, ``"cpu"``, ``"vulkan"``, ``"vulkan:<index>"`` or a
         :class:`Device` from :func:`devices`. An explicit request either resolves
