@@ -257,7 +257,18 @@ fn open_session<'a>(setup: &'a Setup, args: &InferArgs) -> Result<Session<'a>, C
             ..SessionOptions::default()
         },
     )
-    .map_err(|error| failure("Session::with_runtime", error, setup.backend.device))
+    .map_err(|error| {
+        let cli = failure("Session::with_runtime", error, setup.backend.device);
+        // A staged Vulkan session cannot host packed weights, and this is a
+        // configuration error, never a reason to move the model to the CPU.
+        if args.weight_int8 && !setup.backend.device.is_cpu() {
+            return cli.with_next(
+                "`--weight-int8` needs a resident session: drop the flag, or unset \
+                 FN3_VK_STAGED; a staged Vulkan session is rejected rather than run on the CPU",
+            );
+        }
+        cli
+    })
 }
 
 fn read_artifact(path: &Path) -> Result<(PreparedArtifact, String, u32, u64), CliError> {
@@ -661,9 +672,10 @@ fn print_quantization(session: &Session<'_>, details: bool, out: &mut dyn Write)
             .iter()
             .filter(|route| route.fallback.is_none())
             .count();
-        let _ = writeln!(out, "    weight-int8: packed-matmuls={packed}/{} fp32-matmuls={} packed-payload={}B dense-weight={}B model-weight={model_bytes}B route/pack/upload={}",
+        let _ = writeln!(out, "    weight-int8: packed-matmuls={packed}/{} fp32-matmuls={} packed-payload={}B dense-weight={}B shared-weight={}B model-weight={model_bytes}B route/pack/upload={}",
             report.routes.len(), report.routes.len() - packed, report.packed_payload_bytes,
-            report.dense_weight_bytes, milliseconds(report.prepare));
+            report.dense_weight_bytes, report.shared_weight_bytes,
+            milliseconds(report.prepare));
         if details {
             for route in &report.routes {
                 let _ = writeln!(

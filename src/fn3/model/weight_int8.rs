@@ -38,6 +38,9 @@ pub struct WeightInt8Report {
     /// Bytes of model weights this session asked the backend to keep dense, because
     /// some live consumer reads them as an FP32 tensor.
     pub dense_weight_bytes: u64,
+    /// Bytes of weights that are both dense and packed, so this session holds an
+    /// FP32 and a packed representation of the same bytes.
+    pub shared_weight_bytes: u64,
 }
 
 pub(super) enum Packed {
@@ -76,22 +79,33 @@ impl WeightInt8 {
         let mut routes = vec![None; plan.instructions().len()];
         let mut dense = BTreeSet::new();
         for (index, instruction) in plan.instructions().iter().enumerate() {
+            // A plan only reaches here after `ExecutionPlan::new` bound every
+            // slot, and a MatMul always binds two inputs and one output; a plan
+            // that broke either would be malformed, not a fallback case.
             let packed = if instruction.op == OpId::MatMul {
-                let rhs = plan.slot(instruction.inputs[1]).expect("valid plan");
+                let (rhs_index, activation_index, out_index) = match (
+                    instruction.inputs.first(),
+                    instruction.inputs.get(1),
+                    instruction.outputs.first(),
+                ) {
+                    (Some(&activation), Some(&rhs), Some(&out)) => (rhs, activation, out),
+                    _ => {
+                        for &slot in &instruction.inputs {
+                            require_dense(plan, slot, &mut dense);
+                        }
+                        routes[index] = None;
+                        continue;
+                    }
+                };
+                let rhs = plan.slot(rhs_index).expect("valid plan");
                 let selected = match *rhs.role() {
                     SlotRole::Weight { id } => self.select(
                         backend,
                         id.index(),
                         rhs.name(),
-                        slots[instruction.inputs[1] as usize]
-                            .as_ref()
-                            .expect("weight slot"),
-                        slots[instruction.inputs[0] as usize]
-                            .as_ref()
-                            .expect("bound activation slot"),
-                        slots[instruction.outputs[0] as usize]
-                            .as_ref()
-                            .expect("output slot"),
+                        present(slots, rhs_index, "MatMul RHS weight")?,
+                        present(slots, activation_index, "MatMul activation")?,
+                        present(slots, out_index, "MatMul output")?,
                     )?,
                     _ => Err("dynamic-rhs".into()),
                 };
@@ -132,6 +146,13 @@ impl WeightInt8 {
         report.dense_weight_bytes = self
             .dense
             .iter()
+            .filter_map(|&id| weights.get(id))
+            .map(|tensor| tensor.storage().len() as u64)
+            .sum();
+        report.shared_weight_bytes = self
+            .dense
+            .iter()
+            .filter(|id| self.packed.get(id).is_some_and(|entry| entry.is_ok()))
             .filter_map(|&id| weights.get(id))
             .map(|tensor| tensor.storage().len() as u64)
             .sum();
@@ -220,6 +241,22 @@ impl WeightInt8 {
                 }
             })
     }
+}
+
+/// A bound slot, or a named error when the session did not bind it.
+fn present<'a>(
+    slots: &'a [Option<Tensor>],
+    slot: u32,
+    what: &'static str,
+) -> Result<&'a Tensor, Fn3Error> {
+    slots
+        .get(slot as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| Fn3Error::SessionState {
+            action: "Session::weight_int8",
+            phase: "running",
+            detail: format!("the {what} slot {slot} is empty before the step"),
+        })
 }
 
 fn require_dense(plan: &Plan, slot: u32, dense: &mut BTreeSet<usize>) {
