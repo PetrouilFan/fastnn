@@ -61,6 +61,7 @@ pub mod error;
 pub mod import;
 pub mod model;
 pub mod ops;
+pub mod quant;
 pub mod shape;
 pub mod storage;
 pub mod tensor;
