@@ -1,0 +1,175 @@
+#version 450
+// FN3-24 (#70): fused W8A16 grouped-INT8 projection for `fn3-quant-format-v1`.
+//
+// # What the shader reads
+//
+// The packed weight is the format's payload layout, `[N, K]` with groups of 64
+// along the contraction axis: signed INT8 codes (`row_stride = align_up(k,16)`
+// bytes per row), an IEEE binary16 scale and an int16 zero-point per
+// `(row, group)`. The activation is FP32 and stays FP32; there is no activation
+// quantization and no Q/DQ pair.
+//
+// # Arithmetic (normative, `docs/quantization/fn3-quant-format-v1.md` §5)
+//
+// ```text
+// y[m, n] = sum_g ( sum_{k in g} x[m, k] * (code[n, k] - zero[n, g]) ) * scale[n, g]
+// ```
+//
+// `code - zero` is exact integer arithmetic, the per-group sum is one FP32
+// accumulator over ascending `k`, and the binary16 scale is applied **once per
+// group** with one FP32 multiply. No dequantized weight is ever materialized:
+// the code byte is unpacked from a `uint` word, the group's partial is formed,
+// and the group is added to the output accumulator. The scale is widened from
+// binary16 by integer bit assembly, so no half-precision arithmetic type (and
+// no Vulkan 8/16-bit storage feature) is required.
+//
+// # Layout
+//
+// Codes are bound as `uint` words (four codes per word) because the payload is
+// 16-byte aligned per row: `row_stride` is a multiple of 16, so a row always
+// starts on a word boundary. Scales and zero-points are bound as `uint` words
+// (two values per word) with the word index `(row * groups + group) >> 1`; the
+// buffers are padded to a multiple of 4 bytes at prepare, and the padding is
+// zero, so the final word is always addressable.
+//
+// One workgroup covers `COLUMNS = 64` output columns (the decode case's
+// output-channel split) and up to `ROWS = 16` activation rows (the prefill
+// case), so every packed weight word is read once per workgroup and reused
+// across the rows it covers. Each invocation owns one output column and walks
+// its own weight row; the activation reads are the same address for all 64
+// invocations in the workgroup, so they broadcast from L1.
+//
+// Bindings, push-constant size and LocalSize are mirrored by
+// `kernels::quant::QUANT_MATMUL`; `kernels::reflect` cross-checks this module
+// against that declaration at registration time.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Codes {
+    uint codes[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer Scales {
+    uint scales[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer Zeros {
+    uint zeros[];
+};
+
+layout(set = 0, binding = 3, std430) readonly buffer Act {
+    float act[];
+};
+
+layout(set = 0, binding = 4, std430) writeonly buffer Out {
+    float outv[];
+};
+
+// 7 x 4 = 28 bytes, below the 128-byte guaranteed maxPushConstantsSize.
+layout(push_constant) uniform Params {
+    uint m;                 // activation rows
+    uint n;                 // output columns (packed weight rows)
+    uint k;                 // contraction length
+    uint groups;            // groups per row, ceil(k / 64)
+    uint row_stride_words;  // codes words per weight row, align_up(k,16)/4
+    uint act_base;          // element offset of the activation window
+    uint out_base;          // element offset of the output window
+} pc;
+
+const uint COLUMNS = 64u;
+const uint ROWS = 16u;
+const uint GROUP = 64u;
+
+// Exact IEEE binary16 -> binary32 widening, by bit assembly.
+float f16_to_f32(uint h) {
+    const uint sign = (h & 0x8000u) << 16u;
+    const uint exponent = (h >> 10u) & 0x1fu;
+    const uint mantissa = h & 0x03ffu;
+    if (exponent == 0u) {
+        if (mantissa == 0u) {
+            return uintBitsToFloat(sign);
+        }
+        // Subnormal half: value = mantissa * 2^-24, exact in binary32.
+        return uintBitsToFloat(sign | floatBitsToUint(float(mantissa) * (1.0 / 16777216.0)));
+    }
+    if (exponent == 0x1fu) {
+        return uintBitsToFloat(sign | 0x7f800000u | (mantissa << 13u));
+    }
+    return uintBitsToFloat(sign | ((exponent + 112u) << 23u) | (mantissa << 13u));
+}
+
+// The half selected by `half_index` inside a packed word, widened.
+float scale_of(uint word, uint half_index) {
+    return f16_to_f32(half_index == 0u ? (word & 0xffffu) : (word >> 16u));
+}
+
+// Sign-extend the byte selected by `byte_index` inside a packed word.
+int code_of(uint word, uint byte_index) {
+    int q = int((word >> (8u * byte_index)) & 0xffu);
+    return q >= 128 ? q - 256 : q;
+}
+
+// Sign-extend the half selected by `half_index` inside a packed word.
+int int16_of(uint word, uint half_index) {
+    int value = half_index == 0u ? int(word & 0xffffu) : int(word >> 16u);
+    return value >= 32768 ? value - 65536 : value;
+}
+
+void main() {
+    const uint column = gl_WorkGroupID.x * COLUMNS + gl_LocalInvocationID.x;
+    const uint row0 = gl_WorkGroupID.y * ROWS;
+    // Every read is clamped to a real row so a partial last workgroup never
+    // addresses outside a buffer; the clamped lanes compute a duplicate of a
+    // live column and simply do not store.
+    const uint safe_column = min(column, pc.n - 1u);
+    const bool live = column < pc.n;
+    const uint row_limit = row0 < pc.m ? min(ROWS, pc.m - row0) : 0u;
+
+    // Constant trip counts keep `acc` in registers; the `r < row_limit` guard
+    // is uniform across the workgroup.
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; ++r) {
+        acc[r] = 0.0;
+    }
+
+    const uint code_row = safe_column * pc.row_stride_words;
+    const uint meta_row = safe_column * pc.groups;
+
+    for (uint g = 0u; g < pc.groups; ++g) {
+        const uint first_k = g * GROUP;
+        const uint valid = min(GROUP, pc.k - first_k);
+        const uint words = (valid + 3u) / 4u;
+        const uint meta = meta_row + g;
+        const uint half_index = meta & 1u;
+        const uint meta_word = meta >> 1u;
+        const int zero = int16_of(zeros[meta_word], half_index);
+        const float scale = scale_of(scales[meta_word], half_index);
+        const uint code_base = code_row + (first_k >> 2u);
+
+        for (uint r = 0u; r < ROWS; ++r) {
+            if (r < row_limit) {
+                const uint act_row = pc.act_base + (row0 + r) * pc.k + first_k;
+                float group_sum = 0.0;
+                for (uint t = 0u; t < words; ++t) {
+                    const uint w = codes[code_base + t];
+                    for (uint b = 0u; b < 4u; ++b) {
+                        const uint j = 4u * t + b;
+                        // The payload's k tail is zero-padded and x beyond k is
+                        // forced to zero: the clamp keeps the address inside the
+                        // activation window and the select discards the value.
+                        const uint kk = j < valid ? j : valid - 1u;
+                        const float x = j < valid ? act[act_row + kk] : 0.0;
+                        group_sum += x * float(code_of(w, b) - zero);
+                    }
+                }
+                acc[r] += group_sum * scale;
+            }
+        }
+    }
+
+    for (uint r = 0u; r < ROWS; ++r) {
+        if (r < row_limit && live) {
+            outv[pc.out_base + (row0 + r) * pc.n + column] = acc[r];
+        }
+    }
+}

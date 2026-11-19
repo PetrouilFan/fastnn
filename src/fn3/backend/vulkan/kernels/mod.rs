@@ -55,6 +55,7 @@ pub(super) mod io;
 pub mod matmul;
 pub mod norm;
 pub mod pointwise;
+pub mod quant;
 pub mod reduce;
 pub mod reflect;
 pub mod smoke;
@@ -358,6 +359,22 @@ impl KernelSet {
         reduce::register(&mut set);
         attention::register(&mut set);
         set
+    }
+
+    /// The quantized projection family's own registration table (FN3-24 / #70).
+    ///
+    /// This is the additive registration seam, and it is deliberately **not** a
+    /// call from [`KernelSet::alpha`]: a [`KernelSet`] holds one kernel per
+    /// [`OpId`], the alpha has no quantized op id, and a second registration for
+    /// `MatMul` would *replace* the FP32 kernel rather than sit beside it. A
+    /// quantized projection is selected by the packed weight a node binds, so
+    /// the family registers in [`quant::QuantKernelSet`], whose
+    /// `register`/`supports`/`admits` semantics mirror this table's.
+    ///
+    /// The consequence is the honest one: `supports(OpId::MatMul)` stays the
+    /// FP32 answer and never becomes a promise about W8A16.
+    pub fn quantized() -> quant::QuantKernelSet {
+        quant::QuantKernelSet::alpha()
     }
 
     /// Register (or replace) the kernel for one op.
