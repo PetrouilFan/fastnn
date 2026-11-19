@@ -68,7 +68,8 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::fmt;
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytemuck::Pod;
 
@@ -395,6 +396,50 @@ pub struct Storage {
     buffer: Arc<AlignedBuffer>,
     residency: Option<Arc<dyn DeviceResidency>>,
     len: usize,
+    /// Monotonic process generation; see [`Storage::generation`].
+    identity: u64,
+    /// Cleanup hooks run when the last handle drops; see
+    /// [`Storage::on_last_handle_dropped`]. Only the Vulkan backend registers
+    /// one today, so the attachment is dead weight without that feature.
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
+    hooks: Arc<StorageHooks>,
+}
+
+/// Cleanup callbacks registered against an allocation.
+///
+/// A backend that keeps a copy of an immutable tensor keyed by
+/// [`Storage::generation`] registers a hook here. The hook runs exactly once,
+/// when the last [`Storage`] handle drops, so a table entry can never outlive
+/// the host bytes it was uploaded from. The callbacks are boxed and hold only
+/// weak backend state, so registering one does not extend any backend's
+/// lifetime.
+#[derive(Default)]
+struct StorageHooks {
+    hooks: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Drop for StorageHooks {
+    fn drop(&mut self) {
+        let hooks = match self.hooks.get_mut() {
+            Ok(hooks) => hooks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for hook in hooks.drain(..) {
+            hook();
+        }
+    }
+}
+
+/// Source of [`Storage::identity`] values.
+///
+/// Starting at one keeps zero available as "no identity" in diagnostics. The
+/// counter is process-global and shared with every backend, so two allocations
+/// can never carry the same generation even when the host allocator hands the
+/// same address back.
+static NEXT_STORAGE_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+fn next_storage_identity() -> u64 {
+    NEXT_STORAGE_IDENTITY.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Storage {
@@ -404,6 +449,8 @@ impl Storage {
             len: buffer.len(),
             buffer: Arc::new(buffer),
             residency: None,
+            identity: next_storage_identity(),
+            hooks: Arc::new(StorageHooks::default()),
         }
     }
 
@@ -427,6 +474,8 @@ impl Storage {
             buffer: Arc::new(AlignedBuffer::zeroed(0)?),
             residency: Some(residency),
             len,
+            identity: next_storage_identity(),
+            hooks: Arc::new(StorageHooks::default()),
         })
     }
 
@@ -468,13 +517,42 @@ impl Storage {
             .unwrap_or("host")
     }
 
-    /// A process-unique identity for the allocation.
+    /// The allocation's full process generation.
     ///
-    /// Two handles with the same identity address the same bytes; a backend
-    /// uses it to key persistent uploads. It is stable for the life of the
-    /// allocation and is never reused for a different buffer.
+    /// Every `Storage` created gets the next value of a process-global
+    /// monotonic counter, so a generation is **never reused**: a backend may
+    /// key a persistent upload by it without pinning the allocation alive to
+    /// keep the key unique. Clones share their parent's generation — they
+    /// address the same bytes — and it is stable for the life of the
+    /// allocation. This is deliberately not an address: once the last handle
+    /// drops, a later allocation may occupy the same host address but can never
+    /// have the same generation.
+    pub fn generation(&self) -> u64 {
+        self.identity
+    }
+
+    /// A process-unique identity for the allocation, as a `usize`.
+    ///
+    /// This is [`Storage::generation`] truncated to `usize`; on the 64-bit
+    /// targets this release supports it is exact. Persistent tables use the
+    /// full `u64` generation so a 32-bit target cannot wrap it.
     pub fn identity(&self) -> usize {
-        Arc::as_ptr(&self.buffer) as *const u8 as usize
+        self.identity as usize
+    }
+
+    /// Register cleanup that runs when the last handle to this allocation drops.
+    ///
+    /// Backends use this to evict a device copy when the host tensor it was
+    /// uploaded from is gone. Hooks run in registration order and exactly once;
+    /// they must not panic. A hook is crate-internal because it is a lifetime
+    /// attachment, not part of the data-model contract.
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
+    pub(crate) fn on_last_handle_dropped(&self, hook: Box<dyn FnOnce() + Send>) {
+        self.hooks
+            .hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(hook);
     }
 
     /// Read the whole buffer as bytes.
@@ -809,6 +887,7 @@ impl fmt::Debug for Storage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Storage")
             .field("len", &self.len())
+            .field("identity", &self.identity)
             .field("handles", &self.handle_count())
             .field("residency", &self.residency_label())
             .finish_non_exhaustive()
@@ -818,6 +897,41 @@ impl fmt::Debug for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identities_are_generations_shared_by_clones_and_never_reused() {
+        let storage = Storage::zeroed(64).unwrap();
+        let first = storage.generation();
+        let clone = storage.clone();
+        assert_eq!(
+            first,
+            clone.generation(),
+            "a clone addresses the same bytes"
+        );
+        drop(storage);
+        assert_eq!(first, clone.generation(), "the clone keeps the generation");
+        // A fresh allocation is a fresh generation even when the allocator
+        // hands the same host block back.
+        for _ in 0..64 {
+            let next = Storage::zeroed(64).unwrap();
+            assert_ne!(first, next.generation(), "a generation was reused");
+        }
+    }
+
+    #[test]
+    fn drop_hooks_run_once_when_the_last_handle_drops() {
+        let storage = Storage::zeroed(8).unwrap();
+        let clone = storage.clone();
+        let seen = Arc::new(AtomicU64::new(0));
+        let hook_seen = Arc::clone(&seen);
+        storage.on_last_handle_dropped(Box::new(move || {
+            hook_seen.fetch_add(1, Ordering::Relaxed);
+        }));
+        drop(storage);
+        assert_eq!(seen.load(Ordering::Relaxed), 0, "a clone is still alive");
+        drop(clone);
+        assert_eq!(seen.load(Ordering::Relaxed), 1, "the hook must run once");
+    }
 
     #[test]
     fn allocation_is_aligned_and_zeroed() {

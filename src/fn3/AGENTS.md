@@ -83,8 +83,12 @@ authority is `docs/roadmap/fn3-architecture.md`.
 - Immutable model data is uploaded once (`Backend::prepare_persistent`) and
   bound by handle afterwards; a prepared tensor reaching a host upload is a
   hard error (`check_staged_input`), and the host tensors stay valid for the
-  CPU/fallback path. Unsafe code lives only in `storage.rs`, each block with a
-  `SAFETY:` comment covering alignment, bounds, aliasing and lifetime.
+  CPU/fallback path. A persistent entry is keyed by the storage's process-unique
+  generation (`Storage::generation`), never by a host address, and is released
+  when the last `Storage` handle drops, so a shared backend cannot serve a
+  dropped model's weights to the next one. Unsafe code lives only in
+  `storage.rs`, each block with a `SAFETY:` comment covering alignment, bounds,
+  aliasing and lifetime.
 
 ## Validation
 

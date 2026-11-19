@@ -108,7 +108,7 @@ pub struct ResidencyStats {
     pub phase: u64,
     /// Persistent tensors in the table.
     pub persistent_tensors: u64,
-    /// Device bytes held for persistent tensors.
+    /// Device bytes held for persistent tensors (cumulative uploads).
     pub persistent_bytes: u64,
     /// Bytes uploaded by `prepare_persistent` over the backend's lifetime.
     pub persistent_prepare_bytes: u64,
@@ -427,9 +427,17 @@ impl DeviceResidency for ResidentBuffer {
 }
 
 /// Identity of one immutable tensor in the persistent table.
+///
+/// `identity` is [`Storage::generation`], a process generation assigned when the
+/// storage is created. It is deliberately not a host address: an address can be
+/// reused by the allocator after the previous model is dropped, while a
+/// generation cannot. `offset` and `len` keep two windows over one storage
+/// distinct.
+///
+/// [`Storage::generation`]: crate::inference::storage::Storage::generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PersistentKey {
-    identity: usize,
+    identity: u64,
     offset: usize,
     len: usize,
 }
@@ -447,7 +455,7 @@ impl PersistentKey {
         }
         let offset = view.meta().byte_offset().ok()?;
         Some(PersistentKey {
-            identity: view.storage().identity(),
+            identity: view.storage().generation(),
             offset,
             len,
         })
@@ -463,17 +471,57 @@ impl PersistentKey {
         }
         let offset = tensor.meta().byte_offset().ok()?;
         Some(PersistentKey {
-            identity: tensor.storage().identity(),
+            identity: tensor.storage().generation(),
             offset,
             len,
         })
     }
 }
 
-/// One device copy per immutable tensor, keyed by allocation identity.
-#[derive(Debug, Default)]
+/// One device copy per immutable tensor, keyed by storage generation.
+///
+/// # Lifetime
+///
+/// An entry is owned by the host allocation it was uploaded from. When the
+/// last [`Storage`] handle for that allocation drops, the hook registered by
+/// [`VulkanBackend::prepare_persistent_tensors`] removes the entry and drops
+/// the device buffer. Several sessions over one loaded model share the model's
+/// weight storages, so the second session still hits the table; a later model
+/// gets fresh storages (fresh generations) and can never resolve an old entry,
+/// even if the host allocator reuses the address.
+///
+/// [`Storage`]: crate::inference::storage::Storage
+/// [`VulkanBackend::prepare_persistent_tensors`]: super::VulkanBackend::prepare_persistent_tensors
+#[derive(Debug, Clone, Default)]
 pub struct PersistentTable {
+    inner: Arc<PersistentEntries>,
+}
+
+#[derive(Debug, Default)]
+struct PersistentEntries {
     entries: Mutex<HashMap<PersistentKey, Arc<Buffer>>>,
+    live_bytes: AtomicU64,
+    releases: AtomicU64,
+}
+
+impl PersistentEntries {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<PersistentKey, Arc<Buffer>>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Remove `key` because its owner dropped, updating the live counters.
+    ///
+    /// `clear` removes entries without counting them as owner releases, so a
+    /// missing key here is normal and must not underflow [`Self::live_bytes`].
+    fn release(&self, key: &PersistentKey) {
+        let removed = self.entries().remove(key);
+        if removed.is_some() {
+            self.live_bytes.fetch_sub(key.len as u64, Ordering::Relaxed);
+            self.releases.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl PersistentTable {
@@ -484,10 +532,7 @@ impl PersistentTable {
 
     /// Number of resident copies.
     pub fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
+        self.inner.entries().len()
     }
 
     /// `true` when nothing is resident.
@@ -495,39 +540,65 @@ impl PersistentTable {
         self.len() == 0
     }
 
+    /// Device bytes currently held for persistent tensors.
+    pub fn live_bytes(&self) -> u64 {
+        self.inner.live_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Entries released because their owning storage dropped.
+    ///
+    /// This counter is not reset by [`VulkanBackend::reset_residency_stats`];
+    /// it is a table lifetime total, so a test can subtract a baseline.
+    ///
+    /// [`VulkanBackend::reset_residency_stats`]: super::VulkanBackend::reset_residency_stats
+    pub fn releases(&self) -> u64 {
+        self.inner.releases.load(Ordering::Relaxed)
+    }
+
     fn get(&self, key: &PersistentKey) -> Option<Arc<Buffer>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned()
+        self.inner.entries().get(key).cloned()
     }
 
     fn contains(&self, key: &PersistentKey) -> bool {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(key)
+        self.inner.entries().contains_key(key)
     }
 
     fn insert(&self, key: PersistentKey, buffer: Arc<Buffer>) -> bool {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entries = self.inner.entries();
         if entries.contains_key(&key) {
             return false;
         }
         entries.insert(key, buffer);
+        self.inner
+            .live_bytes
+            .fetch_add(key.len as u64, Ordering::Relaxed);
         true
     }
 
+    /// A hook that removes `key` when its owning storage drops.
+    ///
+    /// The closure holds a weak reference to the table, so a `Storage` that
+    /// outlives the backend (a model may) does not keep the device alive.
+    fn ownership_hook(&self, key: PersistentKey) -> impl FnOnce() + Send + 'static {
+        let table = Arc::downgrade(&self.inner);
+        move || {
+            if let Some(table) = table.upgrade() {
+                table.release(&key);
+            }
+        }
+    }
+
     /// Forget every entry (the buffers drop when their last `Arc` is released).
+    ///
+    /// This is the explicit diagnostic reset; it does not increment
+    /// [`PersistentTable::releases`], which counts owner-driven evictions only.
     pub fn clear(&self) {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let mut entries = self.inner.entries();
+        if entries.is_empty() {
+            return;
+        }
+        entries.clear();
+        self.inner.live_bytes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -611,6 +682,19 @@ impl super::VulkanBackend {
         self.persistent.len()
     }
 
+    /// Device bytes the persistent table holds right now.
+    pub fn persistent_live_bytes(&self) -> u64 {
+        self.persistent.live_bytes()
+    }
+
+    /// Persistent entries released because their owning storage dropped.
+    ///
+    /// A table-lifetime total; [`VulkanBackend::reset_residency_stats`] does
+    /// not clear it.
+    pub fn persistent_release_count(&self) -> u64 {
+        self.persistent.releases()
+    }
+
     /// Upload immutable tensors once and resolve them by handle afterwards.
     ///
     /// Idempotent: a tensor already in the table is a hit and moves no bytes,
@@ -641,6 +725,12 @@ impl super::VulkanBackend {
             self.upload(&buffer, window)?;
             let buffer = Arc::new(buffer);
             if self.persistent.insert(key, Arc::clone(&buffer)) {
+                // The entry is owned by this allocation: when its last handle
+                // drops, remove the device copy. One hook per entry, exactly
+                // once, and no host address in the key.
+                tensor
+                    .storage()
+                    .on_last_handle_dropped(Box::new(self.persistent.ownership_hook(key)));
                 self.residency_counters.note_persistent(bytes, true);
             }
         }
