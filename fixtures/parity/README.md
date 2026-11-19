@@ -33,12 +33,39 @@ fixtures/parity/
     manifest.json
     model.lock.json
     tensors/<name>.<dtype>
+    gate-reference/decode.step2.logits.f32
 ```
 
 `tensors/` contains only tensors whose manifest entry has `"stored": true`.
 Summary-only tensors still carry the SHA-256 of their full payload so a
 regenerated run can be compared exactly without committing ~200 KB per logit
 position.
+
+### Trained GPT-2 gate reference
+
+`gate-reference/decode.step2.logits.f32` supplies the third ORT logits row
+for `tests/fn3_trained_parity.rs`. The original manifest entry remains
+summary-only for the fixture generator, and its SHA-256 is unchanged. The
+Rust gate requires all three payloads and checks their exact byte lengths and
+manifest digests before unpacking FP32 values. It checks both aggregate bounds
+against ORT on CPU and resident Vulkan for all three phases.
+
+To reproduce the decode-2 payload with the pinned trained ONNX graph, run from
+the repository root. The tested environment used ONNX Runtime `1.23.2` and
+NumPy `2.3.4` on x86-64 Linux. The tool uses the ORT CPU provider, a single
+thread, and graph optimization disabled. It refuses to write if the generated
+bytes do not match the existing manifest digest.
+
+```sh
+python tools/quant/ort_reference.py --parity-step2 \
+  --model /path/to/trained-gpt2/onnx/model.onnx --out /path/to/scratch
+cmp /path/to/scratch/decode.step2.logits.f32 \
+  fixtures/parity/trained-gpt2/gate-reference/decode.step2.logits.f32
+```
+
+The trained gate accepts only unset, `0`, or `1` for `FN3_TRAINED_VULKAN`,
+`FN3_VK_REQUIRE_PHYSICAL`, and `FN3_VK_STAGED`. A physical run requires a
+matching `FN3_VK_DEVICE_UUID` and validation; the gate rejects forced staging.
 
 ## Tensor encoding
 

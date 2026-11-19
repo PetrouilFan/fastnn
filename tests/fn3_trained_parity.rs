@@ -14,9 +14,9 @@
 //!
 //! It is `#[ignore]` because it needs the 498,126,358-byte trained graph. An
 //! explicitly invoked gate fails if its model or required device is missing.
-//! The committed payloads are the authority for prefill and decode step 1;
-//! decode step 2 has no committed payload, so its argmax is checked against the
-//! manifest summary and the full logits are written for the Python comparison.
+//! All three committed ORT payloads are verified against the manifest before
+//! decoding; the decode-step-2 payload lives in `gate-reference/` because its
+//! manifest entry remains summary-only for the fixture generator.
 //!
 //! ```bash
 //! FN3_TRAINED_ONNX=/path/to/onnx/model.onnx \
@@ -191,12 +191,68 @@ fn write_f32(path: &Path, values: &[f32]) {
     std::fs::write(path, bytes).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
-fn load_f32(path: &Path) -> Vec<f32> {
-    std::fs::read(path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+fn load_f32(path: &Path, entry: &serde_json::Value) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    assert_eq!(entry["dtype"], "f32", "{}", path.display());
+    assert_eq!(
+        entry["bytes"].as_u64(),
+        Some((VOCAB * 4) as u64),
+        "{}: manifest byte length",
+        path.display()
+    );
+    assert_eq!(
+        bytes.len(),
+        VOCAB * 4,
+        "{}: payload byte length",
+        path.display()
+    );
+    assert_eq!(
+        Some(sha256(&bytes).as_str()),
+        entry["sha256"].as_str(),
+        "{}: payload SHA-256",
+        path.display()
+    );
+    bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+type References = [Vec<f32>; 3];
+
+fn load_references() -> References {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("manifest.json")).expect("manifest"))
+            .expect("manifest json");
+    [
+        "prefill.p13.last_logits",
+        "decode.step1.logits",
+        "decode.step2.logits",
+    ]
+    .map(|name| {
+        let entry = manifest["tensors"]
+            .as_array()
+            .expect("tensors")
+            .iter()
+            .find(|tensor| tensor["name"] == name)
+            .expect("manifest reference entry");
+        let path = if name == "decode.step2.logits" {
+            root.join("gate-reference/decode.step2.logits.f32")
+        } else {
+            root.join(entry["path"].as_str().expect("manifest payload path"))
+        };
+        let logits = load_f32(&path, entry);
+        let recorded = entry["summary"]["argmax_flat"]
+            .as_u64()
+            .expect("recorded argmax");
+        assert_eq!(
+            argmax(&logits) as u64,
+            recorded,
+            "{name}: reference argmax vs manifest"
+        );
+        logits
+    })
 }
 
 fn argmax(values: &[f32]) -> usize {
@@ -422,10 +478,7 @@ fn report(label: &str, metrics: &Metrics) -> serde_json::Value {
 #[test]
 fn trained_logits_policy_rejects_offset_and_distortion_independently() {
     let reference = [99.0, 99.125, 99.25, 99.375, 99.5, 99.625, 99.75, 99.875];
-    assert_eq!(
-        measure(&reference, &reference).aggregate_passes(),
-        (true, true)
-    );
+    report("exact control", &measure(&reference, &reference));
 
     // Binary fractions give an exactly constant FP32 offset, and a separate
     // zero-mean distortion small enough to pass the mean-absolute bound.
@@ -439,6 +492,15 @@ fn trained_logits_policy_rejects_offset_and_distortion_independently() {
         assert_eq!(metrics.top1, metrics.reference_top1);
         assert_eq!(metrics.top5_overlap, 5);
         assert_eq!(metrics.aggregate_passes(), passes);
+        let panic = std::panic::catch_unwind(|| report("negative control", &metrics))
+            .expect_err("the full report/enforcement path must reject the negative control");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("formatted assertion message");
+        assert!(
+            message.contains("aggregate logits policy failed"),
+            "unexpected panic: {message}"
+        );
     }
 }
 
@@ -464,7 +526,7 @@ fn run(
     device: DeviceId,
     label: &str,
     out_dir: &Path,
-    expected: &[(&str, &Path)],
+    expected: &References,
 ) -> Arm {
     run_with_options(
         import,
@@ -484,7 +546,7 @@ fn run_with_options(
     device: DeviceId,
     label: &str,
     out_dir: &Path,
-    expected: &[(&str, &Path)],
+    expected: &References,
     options: SessionOptions,
 ) -> Arm {
     let (model, _envelope) = prepared(import, device, 32);
@@ -504,7 +566,7 @@ fn run_session(
     backend: &dyn fastnn::fn3::Backend,
     label: &str,
     out_dir: &Path,
-    expected: &[(&str, &Path)],
+    expected: &References,
     options: SessionOptions,
 ) -> Arm {
     let mut session =
@@ -521,19 +583,10 @@ fn run_session(
         &out_dir.join(format!("{label}.prefill.p13.last_logits.f32")),
         &values,
     );
-    if let Some((_, path)) = expected.iter().find(|(name, _)| *name == "prefill") {
-        let reference = load_f32(path);
-        let metrics = measure(&values, &reference);
-        phases.insert(
-            "prefill".to_string(),
-            report(&format!("{label} prefill"), &metrics),
-        );
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2");
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(root.join("manifest.json")).expect("manifest"),
-    )
-    .expect("manifest json");
+    phases.insert(
+        "prefill".to_string(),
+        report(&format!("{label} prefill"), &measure(&values, &expected[0])),
+    );
     for (step, token) in DECODE.iter().enumerate() {
         let step_number = step + 1;
         let logits = run_step(
@@ -550,40 +603,8 @@ fn run_session(
             &values,
         );
         let name = format!("decode.step{step_number}");
-        let reference_path = expected
-            .iter()
-            .find(|(expected, _)| *expected == name)
-            .map(|(_, path)| *path);
-        if let Some(path) = reference_path {
-            let reference = load_f32(path);
-            let metrics = measure(&values, &reference);
-            phases.insert(name.clone(), report(&format!("{label} {name}"), &metrics));
-        } else {
-            let recorded = manifest["tensors"]
-                .as_array()
-                .expect("tensors")
-                .iter()
-                .find(|tensor| tensor["name"] == format!("{name}.logits"))
-                .expect("manifest entry")["summary"]["argmax_flat"]
-                .as_i64()
-                .expect("recorded argmax") as usize;
-            let actual = argmax(&values);
-            println!(
-                "{label} {name}: summary-only reference; argmax {actual} \
-                 (manifest {recorded}), top5 {:?}",
-                top_k(&values, 5)
-            );
-            assert_eq!(actual, recorded, "{label} {name}: argmax vs manifest");
-            phases.insert(
-                name,
-                serde_json::json!({
-                    "argmax": actual,
-                    "recorded_argmax": recorded,
-                    "reference_kind": "summary-only",
-                    "top5": top_k(&values, 5),
-                }),
-            );
-        }
+        let metrics = measure(&values, &expected[step_number]);
+        phases.insert(name.clone(), report(&format!("{label} {name}"), &metrics));
     }
     Arm {
         report: serde_json::Value::Object(phases),
@@ -602,12 +623,17 @@ fn pinned_model_path() -> PathBuf {
     path
 }
 
+fn vulkan_flag(name: &str) -> bool {
+    match std::env::var(name).as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => panic!("{name} must be unset, 0, or 1"),
+    }
+}
+
 fn reject_staged_override() {
     assert!(
-        !matches!(
-            std::env::var("FN3_VK_STAGED").as_deref(),
-            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-        ),
+        !vulkan_flag("FN3_VK_STAGED"),
         "FN3_VK_STAGED is set; it would silently replace the required resident arm"
     );
 }
@@ -644,27 +670,20 @@ fn open_pinned_physical() -> std::sync::Arc<fastnn::fn3::backend::vulkan::Vulkan
 #[test]
 #[ignore = "needs the 498,126,358-byte trained ONNX graph; set FN3_TRAINED_ONNX"]
 fn trained_gpt2_fp32_parity_cpu_and_vulkan() {
-    let vulkan_requested = std::env::var("FN3_TRAINED_VULKAN").as_deref() == Ok("1")
-        || std::env::var("FN3_VK_REQUIRE_PHYSICAL").as_deref() == Ok("1");
+    let trained_vulkan = vulkan_flag("FN3_TRAINED_VULKAN");
+    let require_physical = vulkan_flag("FN3_VK_REQUIRE_PHYSICAL");
+    reject_staged_override();
+    let vulkan_requested = trained_vulkan || require_physical;
+    #[cfg(not(feature = "vulkan"))]
     if vulkan_requested {
-        #[cfg(not(feature = "vulkan"))]
         panic!("the physical gate requires --features vulkan");
-        #[cfg(feature = "vulkan")]
-        reject_staged_override();
     }
     let path = pinned_model_path();
     #[cfg(feature = "vulkan")]
     let gpu = vulkan_requested.then(open_pinned_physical);
     let import = import_onnx_file(&path).expect("trained import");
 
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2/tensors");
-    let prefill = root.join("prefill.p13.last_logits.f32");
-    let step1 = root.join("decode.step1.logits.f32");
-    let expected = [
-        ("prefill", prefill.as_path()),
-        ("decode.step1", step1.as_path()),
-    ];
+    let expected = load_references();
     let out = output_root();
     std::fs::create_dir_all(&out).expect("output root");
     let mut report_json = serde_json::Map::new();
@@ -776,6 +795,8 @@ fn assert_cross_arm_agreement(label: &str, resident: &[f32], staged: &[f32]) {
 #[test]
 #[ignore = "needs the 498,126,358-byte trained ONNX graph and a physical Vulkan device"]
 fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
+    vulkan_flag("FN3_TRAINED_VULKAN");
+    vulkan_flag("FN3_VK_REQUIRE_PHYSICAL");
     reject_staged_override();
 
     #[cfg(not(feature = "vulkan"))]
@@ -843,14 +864,7 @@ fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
             );
         }
 
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parity/trained-gpt2/tensors");
-        let prefill = root.join("prefill.p13.last_logits.f32");
-        let step1 = root.join("decode.step1.logits.f32");
-        let expected = [
-            ("prefill", prefill.as_path()),
-            ("decode.step1", step1.as_path()),
-        ];
+        let expected = load_references();
         let out = output_root().join("resident-vs-staged");
         std::fs::create_dir_all(&out).expect("output root");
 
@@ -981,9 +995,7 @@ fn trained_gpt2_resident_matches_staged_on_physical_vulkan() {
                 resident_logits,
                 staged_logits,
             );
-            // Every decode step's top-1 is asserted against the reference
-            // independently inside `report`; step 2 has no committed payload,
-            // so its reference is the manifest argmax and the staged arm.
+            // Both arms are also checked independently against ORT in `report`.
             let metrics = measure(resident_logits, staged_logits);
             comparison.insert(
                 phase.to_string(),
