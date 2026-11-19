@@ -69,8 +69,8 @@ use std::path::Path;
 use crate::fn3::dtype::DType;
 use crate::fn3::error::Fn3Error;
 use crate::fn3::import::{
-    DecoderGeometry, Dim, KvInterface, ModelImport, OpsetImport, PositionEmbedding, ValueId,
-    ValueInfo, ValueOrigin, ValueShape,
+    DecoderGeometry, Dim, KvInterface, ModelImport, ModelProvenance, OpsetImport,
+    PositionEmbedding, ValueId, ValueInfo, ValueOrigin, ValueShape,
 };
 use crate::fn3::model::weights::{WeightId, WeightSet, WeightSource, WeightTensor};
 use crate::fn3::model::{ModelWeights, MAX_KV_LAYERS};
@@ -549,6 +549,42 @@ impl PreparedArtifact {
             self.geometry,
             self.envelope,
         )
+    }
+
+    /// Turn the artifact into the planner and session input, with no ONNX file.
+    ///
+    /// This is the whole point of the artifact: the graph, the weights, the
+    /// geometry and the envelope in the file are what a plan is built from, so
+    /// a prepared deployment never needs the source it was prepared from.
+    /// Nothing is re-detected and nothing is copied twice: the artifact is
+    /// consumed and its weight bytes move into the import.
+    ///
+    /// The result satisfies the round-trip identity a verifier can check:
+    /// `ArtifactMetadata::from_import(&artifact.to_model_import()) == *artifact.metadata()`,
+    /// and [`Session::with_runtime`](crate::fn3::model::Session::with_runtime)
+    /// produces the same plans as an import of the source ONNX.
+    pub fn into_model_import(self) -> ModelImport {
+        let metadata = self.metadata;
+        ModelImport::from_parts(
+            self.graph.into_graph_ir(),
+            self.weights,
+            self.geometry,
+            ModelProvenance {
+                ir_version: metadata.ir_version,
+                opset: metadata.opset,
+                producer: metadata.producer,
+                producer_version: metadata.producer_version,
+                graph_name: metadata.graph_name,
+            },
+        )
+    }
+
+    /// [`PreparedArtifact::into_model_import`] without consuming the artifact.
+    ///
+    /// Copies the weight bytes once; prefer the consuming form when the
+    /// artifact is not needed afterwards.
+    pub fn to_model_import(&self) -> ModelImport {
+        self.clone().into_model_import()
     }
 
     /// Check every invariant the reader and writer rely on.
