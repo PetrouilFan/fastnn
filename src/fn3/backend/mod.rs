@@ -477,9 +477,24 @@ pub trait Backend: Send + Sync + fmt::Debug {
     ///
     /// Returns the number of queue submissions this call made (0 for a backend
     /// that submits per op). On failure the scope is still closed and every
-    /// resource it owns is released.
+    /// resource it owns is released: a step whose recording failed is
+    /// discarded, never submitted as a partial plan.
     fn end_step(&self) -> Result<u32, Fn3Error> {
         Ok(0)
+    }
+
+    /// A **terminal** backend failure, when the backend can no longer be used.
+    ///
+    /// The default body is `None`: a host backend has no device state that can
+    /// be permanently lost, so every failure it reports is recoverable.
+    ///
+    /// A backend that returns an error here is poisoned: a session must not
+    /// execute another step, because the state of an in-flight fence or
+    /// command buffer is unknown. The caller's only recovery is to drop the
+    /// backend and open a new device. [`crate::fn3::model::Session::recover`]
+    /// returns this error instead of pretending the session can continue.
+    fn terminal_error(&self) -> Option<Fn3Error> {
+        None
     }
 }
 

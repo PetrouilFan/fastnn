@@ -51,7 +51,26 @@
 //! A failure in 1–7 leaves every live extent, `step()`, `tokens_consumed()` and
 //! the phase exactly as they were. Step 8 only writes after
 //! [`KvCacheState::check_append`] and [`KvCacheState::check_present`] passed for
-//! **every** layer, so a multi-layer commit cannot be half-applied.
+//! **every** layer, and it carries an explicit rollback: if a device copy fails
+//! after an earlier layer committed, every layer is restored to its pre-step
+//! extent (bytes past the live extent are unobservable), so a multi-layer
+//! commit cannot be half-applied even when the failure is below the API.
+//!
+//! # Failure contract
+//!
+//! A failed step is **recoverable** unless the backend reports a terminal
+//! failure. After a recoverable failure the session is usable as-is: the
+//! extent, `step`, `tokens_consumed`, phase and plan cache are unchanged, the
+//! failed step's value slots are released, and a retry appends the same
+//! deterministic KV rows once. [`Session::recover`] is the explicit form of
+//! "I have handled this error": it drops the pooled outputs and returns a
+//! terminal error if the device is poisoned.
+//!
+//! A terminal failure is a lost device or a fence whose completion is unknown.
+//! The backend returns [`Fn3Error::DeviceUnavailable`] naming the adapter, and
+//! every later step and [`Session::recover`] return it too. There is no retry
+//! that could execute a partial plan or double-append KV; the caller must drop
+//! the backend and open a new device.
 //!
 //! The work counters (`plan_hits`, `plan_misses`, `slot_allocations`,
 //! `slot_reuses`, `slot_bytes_allocated`) are diagnostics of work actually
@@ -835,6 +854,62 @@ impl<'model> Session<'model> {
         self.phase = SessionPhase::Empty;
     }
 
+    /// The explicit recovery boundary after a failed step.
+    ///
+    /// A failed step already restores everything it is responsible for (see the
+    /// module docs); this method is how a caller *states* that it has handled
+    /// the error and wants the session back. It:
+    ///
+    /// 1. returns the backend's typed terminal error when the device is
+    ///    poisoned — a lost device is not recoverable in place, and no state is
+    ///    touched;
+    /// 2. rejects a session whose layers disagree on the live extent (which the
+    ///    step transaction makes impossible, so this is a refactor guard) and
+    ///    tells the caller to [`Session::reset`];
+    /// 3. drops the previous step's pooled output buffers, so no tensor that a
+    ///    failed step may have touched can be reused;
+    /// 4. repairs a phase left at [`SessionPhase::Prefilling`] (a panic that
+    ///    unwound through a step) to `Empty` before any token was committed, or
+    ///    `Ready` after.
+    ///
+    /// It never re-executes a plan and never appends KV. A session that never
+    /// failed returns `Ok(())` unchanged apart from dropping the pool.
+    pub fn recover(&mut self) -> Result<(), Fn3Error> {
+        if let Some(runtime) = self.runtime.as_ref() {
+            if let Some(error) = runtime.backend.terminal_error() {
+                return Err(error);
+            }
+        }
+        let live = self.caches.first().map(KvCacheState::live_len).unwrap_or(0);
+        if let Some((layer, cache)) = self
+            .caches
+            .iter()
+            .enumerate()
+            .find(|(_, cache)| cache.live_len() != live)
+        {
+            return Err(Fn3Error::SessionState {
+                action: "recover",
+                phase: self.phase.name(),
+                detail: format!(
+                    "layer {layer} has a live KV extent of {} while layer 0 has {live}; the \
+                     session cannot be recovered in place, call reset()",
+                    cache.live_len()
+                ),
+            });
+        }
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.pool.clear();
+        }
+        if self.phase == SessionPhase::Prefilling {
+            self.phase = if self.tokens == 0 {
+                SessionPhase::Empty
+            } else {
+                SessionPhase::Ready
+            };
+        }
+        Ok(())
+    }
+
     fn require_runtime(&self, action: &'static str) -> Result<(), Fn3Error> {
         if self.runtime.is_some() {
             Ok(())
@@ -879,6 +954,15 @@ impl<'model> Session<'model> {
     /// the phase and the `step` counter, because their failure rules differ
     /// between prefill and decode.
     fn run_step(&mut self, tokens: &[u32], past: u64) -> Result<Tensor, Fn3Error> {
+        // A terminal backend (a lost device, or a fence whose outcome is
+        // unknown) refuses every step with the same typed error. Checking here
+        // and not only in `begin_step` means a session never records anything —
+        // not even a plan — against a device that must be recreated.
+        if let Some(runtime) = self.runtime.as_ref() {
+            if let Some(error) = runtime.backend.terminal_error() {
+                return Err(error);
+            }
+        }
         let geometry = self.geometry.ok_or_else(|| Fn3Error::SessionState {
             action: "step",
             phase: self.phase.name(),
@@ -1000,11 +1084,24 @@ impl<'model> Session<'model> {
             cache.check_present(&keys, &values)?;
             presents.push((keys, values));
         }
-        // Commit. Every check above passed for every layer, so these appends
-        // cannot fail; `?` is kept so a refactor that breaks that invariant is
-        // reported rather than ignored.
+        // Commit, with an explicit rollback. Every check above passed for every
+        // layer, but a *device* copy can still fail after an earlier layer
+        // committed (device loss, an allocation in the transfer path). The
+        // extent is the only observable, and bytes past it are unobservable by
+        // contract, so restoring every layer to its pre-step extent makes the
+        // whole multi-layer commit atomic: the retry overwrites the same
+        // deterministic rows and cannot double-append KV.
+        let committed: Vec<u64> = caches.iter().map(KvCacheState::live_len).collect();
         for (cache, (keys, values)) in caches.iter_mut().zip(presents.iter()) {
-            cache.append_with(Some(backend), keys, values)?;
+            if let Err(error) = cache.append_with(Some(backend), keys, values) {
+                for (cache, extent) in caches.iter_mut().zip(committed.iter().copied()) {
+                    // `extent` is the pre-step live length, never larger than
+                    // the current one, so this cannot fail; report it if a
+                    // refactor breaks that.
+                    cache.rollback_to(extent)?;
+                }
+                return Err(error);
+            }
         }
         drop(presents);
 

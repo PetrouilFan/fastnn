@@ -63,6 +63,8 @@ pub mod context;
 pub mod device;
 pub mod device_info;
 pub mod error;
+#[cfg(feature = "vulkan-fault-injection")]
+pub mod fault;
 pub mod instance;
 pub mod kernels;
 pub mod ledger;
@@ -77,6 +79,8 @@ pub use context::{BindingArg, BindingRole, Buffer, BufferDesc, KernelInvocation}
 pub use device::{Device, DeviceConfig};
 pub use device_info::{AdapterInfo, AdapterLimits, HeapInfo, QueueFamilyInfo};
 pub use error::{Error, Result};
+#[cfg(feature = "vulkan-fault-injection")]
+pub use fault::{FaultInjector, FaultPoint};
 pub use kernels::{BindingKind, BindingSpec, KernelSet, KernelSpec, OpKernel};
 pub use ledger::HandleLedger;
 pub use memory::{MemoryClass, MemoryStats};
@@ -274,6 +278,23 @@ impl VulkanBackend {
                      (VulkanConfig::with_software(true) or FN3_VK_ALLOW_SOFTWARE=1)",
                     probed_adapter.name,
                     probed_adapter.uuid_string()
+                ),
+            )));
+        }
+        // Refuse a device that cannot run the registered kernels, naming the
+        // adapter and every missing capability. This is stricter than letting
+        // the first dispatch fail, and it is what makes a partial device a
+        // typed error instead of a validation-layer warning or a panic.
+        let missing = probed_adapter.missing_required_features();
+        if !missing.is_empty() {
+            return Err(Fn3Error::DeviceUnavailable(DeviceResolveError::new(
+                request.to_string(),
+                &available,
+                format!(
+                    "adapter \"{}\" ({}) lacks required FN3 capabilities: {}",
+                    probed_adapter.name,
+                    probed_adapter.uuid_string(),
+                    missing.join("; ")
                 ),
             )));
         }
@@ -544,6 +565,20 @@ impl VulkanBackend {
         if dst.is_empty() {
             return Ok(TransferReport::default());
         }
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self
+            .vulkan_device()
+            .faults()
+            .take(fault::FaultPoint::Readback)
+        {
+            return Err(Fn3Error::Allocation {
+                bytes: dst.len() as u64,
+                detail: format!(
+                    "injected readback failure (FN3-27): {} bytes from a device buffer",
+                    dst.len()
+                ),
+            });
+        }
         let lease = self
             .staging
             .acquire(dst.len() as u64)
@@ -631,6 +666,12 @@ impl VulkanBackend {
     /// Allocator counters (chunk sizes, live/peak bytes, allocation count).
     pub fn memory_stats(&self) -> MemoryStats {
         self.device.memory_stats()
+    }
+
+    /// The deterministic injection seam (`vulkan-fault-injection` builds only).
+    #[cfg(feature = "vulkan-fault-injection")]
+    pub fn faults(&self) -> &FaultInjector {
+        self.device.faults()
     }
 
     /// Staging counters.
@@ -756,6 +797,11 @@ impl Backend for VulkanBackend {
     }
 
     fn begin_step(&self, label: &'static str, batch: bool) -> Fn3Result<()> {
+        // A terminal device refuses every new scope with the same typed error,
+        // including the step after a lost fence wait.
+        self.device
+            .terminal_error()
+            .map_or(Ok(()), |error| Err(error.to_fn3()))?;
         self.set_phase(match label {
             "prefill" => resident::ResidencyPhase::Prefill,
             "decode" => resident::ResidencyPhase::Decode,
@@ -771,6 +817,9 @@ impl Backend for VulkanBackend {
     }
 
     fn end_step(&self) -> Fn3Result<u32> {
+        self.device
+            .terminal_error()
+            .map_or(Ok(0), |error| Err(error.to_fn3()))?;
         let mut submitter = self.checkout_submitter()?;
         let batch_id = submitter.batch_id();
         if !submitter.is_batching() {
@@ -789,6 +838,10 @@ impl Backend for VulkanBackend {
         }
         self.residency_counters.note_batch(report.submissions);
         Ok(report.submissions)
+    }
+
+    fn terminal_error(&self) -> Option<Fn3Error> {
+        self.device.terminal_error().map(|error| error.to_fn3())
     }
 }
 

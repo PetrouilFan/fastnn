@@ -371,6 +371,24 @@ impl DeviceResidency for ResidentBuffer {
         self.buffer
             .check_range(offset as u64, size, "resident download")
             .map_err(|error| error.to_fn3())?;
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self
+            .device
+            .faults()
+            .take(super::fault::FaultPoint::Readback)
+        {
+            // A host-side readback failure is recoverable: the device state is
+            // intact and the caller can retry the step. It is reported at the
+            // same seam as a failed `vkMapMemory`, before any submission.
+            return Err(Fn3Error::Allocation {
+                bytes: size,
+                detail: format!(
+                    "injected readback failure (FN3-27): {size} bytes at offset {offset} from \
+                     \"{}\"",
+                    self.label
+                ),
+            });
+        }
         // One host-visible block, one submission, one wait. A download is an
         // explicit host-side materialisation, not the steady-state path, so a
         // fresh block per call is the honest cost model.
@@ -839,6 +857,25 @@ impl super::VulkanBackend {
     ) -> Fn3Result<()> {
         if regions.is_empty() {
             return Ok(());
+        }
+        #[cfg(feature = "vulkan-fault-injection")]
+        if self
+            .vulkan_device()
+            .faults()
+            .take(super::fault::FaultPoint::ResidentCopy)
+        {
+            // A copy that fails before submission leaves both buffers intact,
+            // so the KV commit this copy belongs to can be rolled back and the
+            // step retried. This is the "failure between the KV append and the
+            // next plan" boundary of the FN3-27 matrix.
+            let bytes: u64 = regions.iter().map(|(_, _, len)| *len).sum();
+            return Err(Fn3Error::Allocation {
+                bytes,
+                detail: format!(
+                    "injected device-copy failure (FN3-27): {} region(s), {bytes} bytes",
+                    regions.len()
+                ),
+            });
         }
         let dst_buffer = self.resident_storage_buffer(dst)?;
         let src_buffer = self.resident_storage_buffer(src)?;

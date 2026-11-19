@@ -39,6 +39,18 @@ FN3-14 (#60) and FN3-15 (#61); the end-to-end proof belongs to FN3-16 (#62).
 - Every submission is fence-based and returns a `Submission` token. `wait`
   before reusing a command buffer or a descriptor set. `vkQueueWaitIdle` is
   teardown-only.
+- A batch whose recording failed is discarded (command buffer reset, retained
+  staging blocks dropped), never ended and submitted as a partial plan. A
+  fence wait that fails leaves the submission's completion unknown, so the
+  `Device` is poisoned and every later call returns `Error::Lost`; there is no
+  in-place recovery and the backend must be reopened.
+- `Device::missing_required_features` (on the adapter) is checked before
+  `Device::open`: a device without the kernels' compute geometry, a 32 MiB
+  storage range or a 64 MiB allocation gets a `DeviceUnavailable` naming the
+  adapter and the missing capability, not a driver failure at first dispatch.
+- `fault.rs` is compiled only with `vulkan-fault-injection` and is the #73
+  test seam for allocation, submit, fence, readback, recording and resident
+  copies. Its results are injected evidence, never hardware evidence.
 - Descriptor set layouts, pipeline layouts, push-constant ranges and dispatch
   geometry are derived from one `KernelSpec`; `kernels/reflect.rs` checks the
   declaration against the committed SPIR-V at registration.

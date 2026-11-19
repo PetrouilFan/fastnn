@@ -39,6 +39,18 @@ pub struct QueueFamilyInfo {
     pub min_image_transfer_granularity: vk::Extent3D,
 }
 
+/// Fixed workgroup invocations required by the registered kernels (16x16 tile).
+pub const MIN_REQUIRED_INVOCATIONS: u32 = 256;
+/// Widest workgroup the shaders declare (`local_size_x`).
+pub const MIN_REQUIRED_WORKGROUP_X: u32 = 64;
+/// Tallest workgroup the shaders declare (the matmul tile's second axis).
+pub const MIN_REQUIRED_WORKGROUP_Y: u32 = 16;
+/// Largest single immutable binding the pinned model needs (25.7 MB), rounded
+/// up to a documented floor.
+pub const MIN_REQUIRED_STORAGE_RANGE: u64 = 32 * 1024 * 1024;
+/// Smallest allocation the chunk allocator will reserve.
+pub const MIN_REQUIRED_ALLOCATION: u64 = 64 * 1024 * 1024;
+
 /// The device limits the platform layer and the kernels plan against.
 #[derive(Debug, Clone)]
 pub struct AdapterLimits {
@@ -357,6 +369,56 @@ impl AdapterInfo {
         )
     }
 
+    /// Capabilities the FN3 kernels require before a device is opened.
+    ///
+    /// Each entry names the capability **and both numbers** where a limit is
+    /// involved, so an unavailable device produces an actionable error instead
+    /// of a driver failure at the first dispatch. The rules are the kernels'
+    /// fixed geometry, not a benchmark: the matmul tile is 16x16 (256
+    /// invocations, 16 rows), every other shader uses 64-wide workgroups, and
+    /// the largest immutable binding in the pinned model is the 25.7 MB
+    /// embedding/lm_head matrix, so a 32 MiB storage range is the floor.
+    pub fn missing_required_features(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        if !self.has_compute_queue() {
+            missing.push(
+                "a COMPUTE queue family (none of the adapter's families has COMPUTE)".to_string(),
+            );
+        }
+        let limits = &self.limits;
+        if limits.max_compute_work_group_invocations < MIN_REQUIRED_INVOCATIONS {
+            missing.push(format!(
+                "maxComputeWorkGroupInvocations >= {MIN_REQUIRED_INVOCATIONS} (adapter reports {})",
+                limits.max_compute_work_group_invocations
+            ));
+        }
+        if limits.max_compute_work_group_size[0] < MIN_REQUIRED_WORKGROUP_X {
+            missing.push(format!(
+                "maxComputeWorkGroupSize[0] >= {MIN_REQUIRED_WORKGROUP_X} (adapter reports {})",
+                limits.max_compute_work_group_size[0]
+            ));
+        }
+        if limits.max_compute_work_group_size[1] < MIN_REQUIRED_WORKGROUP_Y {
+            missing.push(format!(
+                "maxComputeWorkGroupSize[1] >= {MIN_REQUIRED_WORKGROUP_Y} (adapter reports {})",
+                limits.max_compute_work_group_size[1]
+            ));
+        }
+        if u64::from(limits.max_storage_buffer_range) < MIN_REQUIRED_STORAGE_RANGE {
+            missing.push(format!(
+                "maxStorageBufferRange >= {MIN_REQUIRED_STORAGE_RANGE} bytes (adapter reports {})",
+                limits.max_storage_buffer_range
+            ));
+        }
+        if limits.max_memory_allocation_size < MIN_REQUIRED_ALLOCATION {
+            missing.push(format!(
+                "maxMemoryAllocationSize >= {MIN_REQUIRED_ALLOCATION} bytes (adapter reports {})",
+                limits.max_memory_allocation_size
+            ));
+        }
+        missing
+    }
+
     /// Multi-line adapter report for logs and `available_devices` diagnostics.
     pub fn report(&self) -> String {
         let mut text = format!(
@@ -584,5 +646,90 @@ mod tests {
         for op in OpId::ALL {
             assert!(!op_owner(op).is_empty(), "{op}");
         }
+    }
+
+    /// A synthetic adapter that satisfies the kernel requirements.
+    ///
+    /// This is a *simulated* device, not hardware evidence: it exists to pin
+    /// the rule that a missing capability is named with both numbers before a
+    /// device is opened.
+    fn synthetic_adapter() -> AdapterInfo {
+        AdapterInfo {
+            index: 0,
+            name: "FN3 synthetic device".to_string(),
+            vendor_id: 0x10de,
+            device_id: 0x1b06,
+            device_type: vk::PhysicalDeviceType::DISCRETE_GPU,
+            api_version: vk::make_api_version(0, 1, 4, 0),
+            driver_version_raw: 0,
+            driver_id: vk::DriverId::NVIDIA_PROPRIETARY,
+            device_uuid: [0x47; vk::UUID_SIZE],
+            driver_uuid: [0x51; vk::UUID_SIZE],
+            queue_families: vec![QueueFamilyInfo {
+                index: 0,
+                flags: vk::QueueFlags::COMPUTE,
+                queue_count: 1,
+                timestamp_valid_bits: 64,
+                min_image_transfer_granularity: vk::Extent3D {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+            }],
+            limits: AdapterLimits {
+                max_compute_work_group_count: [65535, 65535, 65535],
+                max_compute_work_group_size: [1024, 1024, 64],
+                max_compute_work_group_invocations: 1024,
+                max_compute_shared_memory_size: 49152,
+                max_storage_buffer_range: u32::MAX,
+                max_uniform_buffer_range: 65536,
+                max_memory_allocation_size: 4 * 1024 * 1024 * 1024,
+                min_storage_buffer_offset_alignment: 16,
+                min_uniform_buffer_offset_alignment: 256,
+                min_memory_map_alignment: 64,
+                non_coherent_atom_size: 64,
+                max_memory_allocation_count: 4096,
+                timestamp_period: 1.0,
+                max_push_constants_size: 128,
+                max_descriptor_set_storage_buffers: 16,
+                max_per_stage_descriptor_storage_buffers: 16,
+            },
+            extensions: Vec::new(),
+            memory_heaps: Vec::new(),
+            memory_type_count: 2,
+        }
+    }
+
+    #[test]
+    fn a_fully_capable_adapter_is_accepted() {
+        assert!(synthetic_adapter().missing_required_features().is_empty());
+    }
+
+    #[test]
+    fn a_device_missing_a_capability_names_it_and_both_numbers() {
+        let mut adapter = synthetic_adapter();
+        adapter.queue_families.clear();
+        adapter.limits.max_compute_work_group_invocations = 128;
+        adapter.limits.max_storage_buffer_range = 1024 * 1024;
+        adapter.limits.max_memory_allocation_size = 1024 * 1024;
+        adapter.limits.max_compute_work_group_size = [32, 8, 1];
+        let missing = adapter.missing_required_features();
+        let text = missing.join("; ");
+        assert_eq!(missing.len(), 6, "{text}");
+        assert!(text.contains("COMPUTE queue family"), "{text}");
+        assert!(
+            text.contains("maxComputeWorkGroupInvocations >= 256 (adapter reports 128)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("maxStorageBufferRange >= 33554432 bytes (adapter reports 1048576)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("maxMemoryAllocationSize >= 67108864 bytes (adapter reports 1048576)"),
+            "{text}"
+        );
+        assert!(text.contains("maxComputeWorkGroupSize[0] >= 64"), "{text}");
+        assert!(text.contains("maxComputeWorkGroupSize[1] >= 16"), "{text}");
     }
 }

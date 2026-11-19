@@ -388,6 +388,51 @@ fn auto_may_choose_the_cpu() {
     assert_eq!(DeviceRequest::Auto.resolve_on_host(), Ok(DeviceId::Cpu));
 }
 
+/// FN3-27 (#73): a build with no Vulkan backend refuses an explicit request at
+/// runtime, by name, and never substitutes the CPU.
+///
+/// This test is the `backend-vulkan`-absent lane: it is compiled in the default
+/// and `--no-default-features` configurations and asserts the exact refusal.
+#[test]
+fn a_build_without_the_vulkan_backend_refuses_an_explicit_request() {
+    let available = available_devices();
+    assert_eq!(
+        available.first().map(|info| info.id),
+        Some(DeviceId::Cpu),
+        "the CPU is always enumerated first"
+    );
+    #[cfg(not(feature = "vulkan"))]
+    {
+        assert!(
+            available.iter().all(|info| info.id.is_cpu()),
+            "a build without the feature must enumerate no Vulkan adapter: {available:?}"
+        );
+        let error = DeviceRequest::Vulkan { index: None }
+            .resolve(&available)
+            .expect_err("an explicit Vulkan request must fail without the backend");
+        let text = error.to_string();
+        assert!(text.contains("vulkan"), "{text}");
+        assert!(text.contains("no Vulkan backend"), "{text}");
+        assert!(text.contains("feature is not enabled"), "{text}");
+    }
+    #[cfg(feature = "vulkan")]
+    {
+        // The absent-feature proof is compiled out; an unusable adapter in a
+        // Vulkan-enabled build is covered by fn3_vulkan_smoke and fn3_e2e.
+        assert!(
+            available
+                .iter()
+                .any(|info| info.id.vulkan_index().is_some()),
+            "a Vulkan-enabled build must enumerate its adapters: {available:?}"
+        );
+    }
+    // The invariant that holds in both configurations.
+    assert_ne!(
+        DeviceRequest::Vulkan { index: None }.resolve(&available),
+        Ok(DeviceId::Cpu)
+    );
+}
+
 #[test]
 fn allocation_on_a_missing_device_is_not_substituted() {
     let error = Tensor::zeros(Shape::from_dims([4]), DType::F32, vulkan()).unwrap_err();

@@ -332,6 +332,35 @@ impl KvCacheState {
         self.live_len = 0;
     }
 
+    /// Shrink the live extent back to `extent` after a failed multi-layer
+    /// commit.
+    ///
+    /// This is the rollback half of the step transaction. A session validates
+    /// every layer before appending to any, then commits layer by layer; if a
+    /// device copy fails partway through, the layers that already advanced are
+    /// restored to the extent they had before the step. Bytes written past the
+    /// restored extent are unobservable by contract — [`KvCacheState::live_keys`]
+    /// and every reader stop at `live_len` — so the next step overwrites them
+    /// with the same deterministic `present` values and cannot double-append.
+    ///
+    /// A request to grow the extent is rejected: rollback never invents state.
+    pub fn rollback_to(&mut self, extent: u64) -> Result<(), Fn3Error> {
+        if extent > self.live_len {
+            return Err(Fn3Error::SessionState {
+                action: "KV rollback",
+                phase: "running",
+                detail: format!(
+                    "cannot roll the {} cache back from extent {} to {extent}: a rollback may \
+                     only shrink the committed extent",
+                    self.config.layout.name(),
+                    self.live_len
+                ),
+            });
+        }
+        self.live_len = extent;
+        Ok(())
+    }
+
     /// Check that `additional` more tokens fit, without mutating anything.
     pub fn check_capacity(&self, additional: u64) -> Result<(), Fn3Error> {
         let requested =

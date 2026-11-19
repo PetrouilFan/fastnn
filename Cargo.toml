@@ -67,6 +67,10 @@ default = ["simd", "parallel", "fusion-forward", "python", "prepared-plan"]
 # a device that must be able to allocate and dispatch; the four kernel families
 # are registered and tested on a physical GTX 1080 Ti.
 vulkan = ["dep:ash"]
+# Deterministic fault injection for the FN3-27 (#73) runtime-hardening matrix.
+# Non-default and test-only: it adds no failure path unless a test arms one, and
+# it is compiled out of every shipped configuration.
+vulkan-fault-injection = ["vulkan"]
 # Links the real 3.0 prepared-model adapter into `fn3-bench` (FN3-21 / #67).
 # Off by default: the adapter reads a model manifest and a 28 MB artifact, and a
 # benchmark harness must not imply that it measured a model it was not given.
