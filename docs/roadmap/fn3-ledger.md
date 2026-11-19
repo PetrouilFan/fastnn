@@ -736,15 +736,17 @@ the strict packaging lane rebuilt from this tree (wheel
 `ea391d7a3930a3626edb2a95733d0eb95dd55d9b8a39e1d4daf2d4e51e54bc85`, two
 source-free replays, FP32 and INT8).
 
-Hosted CI on the previous candidate, kept as history: run **`44600446938`** on
-**`7b27493719f6e8ca7b5461e936b45249a80b1e1c`**, all nine jobs green
+Hosted CI on the candidate: run **`44630502589`** on
+**`889bf5670653ea323216ed0ac3cea36f69873861`**, all nine jobs green
 (`cpu-rust`, `cpu-python`, `vulkan-build`, `vulkan-software-smoke`,
 `pinned-model`, `gpu-physical`, `packaging/{ubuntu,macos,windows}-latest`,
-`lane summary`). `gpu-physical` only validates evidence produced on this host;
-the runner has no GPU. An earlier run, `44599276105` on `f013afb`, failed
-`packaging / windows-latest` because two assertions compared a resolved path
-against the runner's 8.3 short `%TEMP%` spelling; `7b27493` fixes those two
-string comparisons and changes nothing else functional.
+`lane summary`). That commit is this entry minus the two paragraphs naming it,
+so the code hosted CI compiled is the code on the branch. `gpu-physical` only
+validates evidence produced on this host; the runner has no GPU. Run
+`44600446938` on the previous candidate `7b27493` was green on the same nine
+jobs, and `44599276105` on `f013afb` failed `packaging / windows-latest` because
+two assertions compared a resolved path against the runner's 8.3 short `%TEMP%`
+spelling; those two string comparisons are the only fix.
 
 The candidate is the tip of this branch. Merging to `main`, tagging, the GitHub
 release and any package publication remain owner actions; `main` is still at
