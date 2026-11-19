@@ -1,0 +1,20 @@
+[fn3-74][meta] artifact=target/fn3-74/artifacts/trained-1024.fnn3 bytes=498075184 device=cpu fn3_vk_staged=unset validation_env=unset allow_software_env=unset loadavg="4.39 4.37 4.52"
+[fn3-74][summary] label=trained-int8-cpu-p1023-d1 device=cpu mode=INT8 weights / FP32 activations prompt=1023 decode=1 iterations=3 warmups=1 envelope_seq=1024 envelope_past=1023 envelope_total=1024 kv_bytes=75497472
+[fn3-74][perf] ttft_ms p50=76035.515 p95=76949.428 min=74975.374 max=76949.428 n=3
+[fn3-74][perf] prefill_ms p50=76035.513 p95=76949.426 min=74975.372 max=76949.426 n=3
+[fn3-74][perf] decode_ms p50=970.692 p95=978.321 min=955.324 max=978.321 n=3
+[fn3-74][perf] session_ms p50=5.893
+[fn3-74][submits] prefill_mean=0.000 decode_mean=0.000 decode_min=0 decode_max=0
+[fn3-74][submits][csv] 0,0,0
+[fn3-74][readback] note_bytes_mean=0 note_calls_mean=0.00 staging_bytes_mean=0
+[fn3-74][residency] decode_staged_upload_calls_mean=0.00 decode_staging_leases_mean=0.00
+[fn3-74][residency] submissions_mean=0 executions_mean=0 readback_mean=0 input_readbacks_mean=0
+[fn3-74][submits][csv] 0,0,0
+[fn3-74][traffic] prefill_upload_mean=0 prefill_readback_mean=0 decode_upload_mean=0 decode_readback_mean=0
+[fn3-74][traffic] prepare_persistent_mean=0 prepare_packed_mean=0 staged_prepare_mean=0 staged_prefill_mean=0
+[fn3-74][memory] host_peak_rss_bytes=7427678208 host_rss_bytes=7015550976
+[fn3-74][validation] errors=0 warnings=0 loadavg="3.83 4.14 4.37"
+[fn3-74][csv] 5.654736,76949.4277,76949.4264,970.6919
+[fn3-74][csv] 5.9090549999999995,76035.5146,76035.5134,978.3213
+[fn3-74][csv] 5.892804,74975.3738,74975.3723,955.3241
+[fn3-74][json] {"label":"trained-int8-cpu-p1023-d1","device":"cpu","mode":"INT8 weights / FP32 activations","prompt":1023,"decode":1,"iterations":3,"warmups":1,"envelope_seq":1024,"envelope_past":1023,"envelope_total":1024,"kv_bytes":75497472,"ttft_ms":{"p50":76035.5146,"p95":76949.4277,"min":74975.3738,"max":76949.4277,"n":3},"prefill_ms":{"p50":76035.5134,"p95":76949.4264,"min":74975.3723,"max":76949.4264,"n":3},"decode_ms":{"p50":970.6919,"p95":978.3213,"min":955.3241,"max":978.3213,"n":3},"submissions":{"prefill_mean":0.0000,"decode_mean":0.0000},"traffic":{"prefill_upload_mean":0,"prefill_readback_mean":0,"decode_upload_mean":0,"decode_readback_mean":0,"prepare_persistent_mean":0,"prepare_packed_mean":0,"staged_prefill_mean":0},"host_peak_rss_bytes":7427678208,"host_rss_bytes":7015550976,"validation":{"errors":0,"warnings":0},"memory":null,"ops":[],"loadavg":"3.83 4.14 4.37"}

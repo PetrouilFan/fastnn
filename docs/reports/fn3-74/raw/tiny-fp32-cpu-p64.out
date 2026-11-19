@@ -1,0 +1,22 @@
+[fn3-74][meta] artifact=target/fn3-74/artifacts/tiny-1024.fnn3 bytes=27879928 device=cpu fn3_vk_staged=unset validation_env=unset allow_software_env=unset loadavg="4.33 4.24 4.40"
+[fn3-74][summary] label=tiny-fp32-cpu-p64 device=cpu mode=FP32 prompt=64 decode=4 iterations=5 warmups=1 envelope_seq=1024 envelope_past=1023 envelope_total=1024 kv_bytes=2097152
+[fn3-74][perf] ttft_ms p50=49.704 p95=50.271 min=48.126 max=50.271 n=5
+[fn3-74][perf] prefill_ms p50=49.704 p95=50.271 min=48.125 max=50.271 n=5
+[fn3-74][perf] decode_ms p50=8.348 p95=9.875 min=7.645 max=11.420 n=20
+[fn3-74][perf] session_ms p50=0.118
+[fn3-74][submits] prefill_mean=0.000 decode_mean=0.000 decode_min=0 decode_max=0
+[fn3-74][submits][csv] 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[fn3-74][readback] note_bytes_mean=0 note_calls_mean=0.00 staging_bytes_mean=0
+[fn3-74][residency] decode_staged_upload_calls_mean=0.00 decode_staging_leases_mean=0.00
+[fn3-74][residency] submissions_mean=0 executions_mean=0 readback_mean=0 input_readbacks_mean=0
+[fn3-74][submits][csv] 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[fn3-74][traffic] prefill_upload_mean=0 prefill_readback_mean=0 decode_upload_mean=0 decode_readback_mean=0
+[fn3-74][traffic] prepare_persistent_mean=0 prepare_packed_mean=0 staged_prepare_mean=0 staged_prefill_mean=0
+[fn3-74][memory] host_peak_rss_bytes=123002880 host_rss_bytes=123002880
+[fn3-74][validation] errors=0 warnings=0 loadavg="4.33 4.24 4.40"
+[fn3-74][csv] 0.11678100000000001,50.2051,50.2047,8.1686
+[fn3-74][csv] 0.11706,50.2710,50.2707,9.1674
+[fn3-74][csv] 0.14281100000000002,49.7039,49.7036,8.5198
+[fn3-74][csv] 0.13364099999999998,48.1257,48.1253,8.5219
+[fn3-74][csv] 0.118291,48.6652,48.6649,8.2729
+[fn3-74][json] {"label":"tiny-fp32-cpu-p64","device":"cpu","mode":"FP32","prompt":64,"decode":4,"iterations":5,"warmups":1,"envelope_seq":1024,"envelope_past":1023,"envelope_total":1024,"kv_bytes":2097152,"ttft_ms":{"p50":49.7039,"p95":50.2710,"min":48.1257,"max":50.2710,"n":5},"prefill_ms":{"p50":49.7036,"p95":50.2707,"min":48.1253,"max":50.2707,"n":5},"decode_ms":{"p50":8.3483,"p95":9.8753,"min":7.6453,"max":11.4200,"n":20},"submissions":{"prefill_mean":0.0000,"decode_mean":0.0000},"traffic":{"prefill_upload_mean":0,"prefill_readback_mean":0,"decode_upload_mean":0,"decode_readback_mean":0,"prepare_persistent_mean":0,"prepare_packed_mean":0,"staged_prefill_mean":0},"host_peak_rss_bytes":123002880,"host_rss_bytes":123002880,"validation":{"errors":0,"warnings":0},"memory":null,"ops":[],"loadavg":"4.33 4.24 4.40"}

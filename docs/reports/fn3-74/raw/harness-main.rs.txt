@@ -1,0 +1,1069 @@
+//! FN3-74 (#74) measurement harness: long-context prefill and cached decode.
+//!
+//! This binary lives outside the repository on purpose. It measures the
+//! integrated `17eee5f` tree through its public API and the prepared `.fnn3`
+//! artifact, and it changes no library, test, version, workflow or packaging
+//! file. The report reproduces every invocation.
+//!
+//! Usage:
+//!   fn3-74-harness --artifact <path> --device cpu|vulkan --prompt 64
+//!                  --decode 8 --iterations 10 --warmups 2 [--weight-int8]
+//!                  [--label <text>] [--duo]
+//!
+//! `--duo` creates one FP32 and one INT8 session on the same backend, keeps
+//! both alive, prefills both, and reports the peak device footprint. That is
+//! the only way to answer "does duplicate FP32+INT8 storage cost device
+//! memory" without guessing.
+
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use fastnn::inference::backend::vulkan::{adapters, instance, VulkanBackend, VulkanConfig};
+use fastnn::inference::device::DeviceRequest;
+use fastnn::inference::model::format::PreparedArtifact;
+use fastnn::inference::model::{ModelWeights, Planner, PreparedModel, Session, SessionOptions};
+use fastnn::inference::{Backend, CpuBackend, DeviceId, LiveDims, Symbol, Tensor, TensorMeta};
+
+/// The exact sequence `target/fn3-74/data/prompt-N.txt` holds, generated the
+/// same way so the harness and the CLI arms measure the same tokens.
+const BASE: [u32; 17] = [
+    464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 4874, 2402, 257, 640, 11, 612, 373,
+];
+
+fn prompt(len: usize) -> Vec<u32> {
+    (0..len).map(|index| BASE[index % BASE.len()]).collect()
+}
+
+struct Args {
+    artifact: PathBuf,
+    device: String,
+    prompt: usize,
+    decode: usize,
+    iterations: usize,
+    warmups: usize,
+    weight_int8: bool,
+    label: Option<String>,
+    duo: bool,
+}
+
+fn usage(message: &str) -> ! {
+    eprintln!("error: {message}");
+    std::process::exit(2);
+}
+
+fn parse_args() -> Args {
+    let mut args = Args {
+        artifact: PathBuf::new(),
+        device: "cpu".to_string(),
+        prompt: 64,
+        decode: 8,
+        iterations: 10,
+        warmups: 2,
+        weight_int8: false,
+        label: None,
+        duo: false,
+    };
+    let mut saw_artifact = false;
+    let mut cursor = env::args().skip(1);
+    while let Some(flag) = cursor.next() {
+        let mut value = |name: &str| -> String {
+            cursor
+                .next()
+                .unwrap_or_else(|| usage(&format!("{name} needs a value")))
+        };
+        match flag.as_str() {
+            "--artifact" => {
+                args.artifact = PathBuf::from(value("--artifact"));
+                saw_artifact = true;
+            }
+            "--device" => args.device = value("--device"),
+            "--prompt" => args.prompt = value("--prompt").parse().expect("--prompt"),
+            "--decode" => args.decode = value("--decode").parse().expect("--decode"),
+            "--iterations" => {
+                args.iterations = value("--iterations").parse().expect("--iterations")
+            }
+            "--warmups" => args.warmups = value("--warmups").parse().expect("--warmups"),
+            "--weight-int8" => args.weight_int8 = true,
+            "--label" => args.label = Some(value("--label")),
+            "--duo" => args.duo = true,
+            "--help" | "-h" => {
+                eprintln!(
+                    "fn3-74-harness --artifact <path> --device cpu|vulkan --prompt N \
+                     --decode N --iterations N --warmups N [--weight-int8] [--duo] [--label s]"
+                );
+                std::process::exit(0);
+            }
+            other => usage(&format!("unknown flag {other}")),
+        }
+    }
+    if !saw_artifact {
+        usage("--artifact is required");
+    }
+    if args.iterations == 0 {
+        usage("--iterations must be at least 1");
+    }
+    args
+}
+
+// ---------------------------------------------------------------------------
+// Device selection
+// ---------------------------------------------------------------------------
+
+enum Device {
+    Cpu(CpuBackend),
+    Vulkan(Arc<VulkanBackend>),
+}
+
+impl Device {
+    fn backend(&self) -> &dyn Backend {
+        match self {
+            Device::Cpu(backend) => backend,
+            Device::Vulkan(backend) => &**backend,
+        }
+    }
+
+    fn vulkan(&self) -> Option<&Arc<VulkanBackend>> {
+        match self {
+            Device::Cpu(_) => None,
+            Device::Vulkan(backend) => Some(backend),
+        }
+    }
+
+    fn name(&self) -> String {
+        match self {
+            Device::Cpu(_) => "cpu".to_string(),
+            Device::Vulkan(backend) => format!(
+                "vulkan({}) {}",
+                backend.device().vulkan_index().unwrap_or(u32::MAX),
+                backend.adapter().name
+            ),
+        }
+    }
+}
+
+fn open_device(kind: &str) -> Device {
+    match kind {
+        "cpu" => Device::Cpu(CpuBackend::new()),
+        "vulkan" => {
+            let uuid = env::var("FN3_VK_DEVICE_UUID").unwrap_or_else(|_| {
+                usage("set FN3_VK_DEVICE_UUID: selection is always by UUID, never by index")
+            });
+            let normalized = |value: &str| -> String {
+                value
+                    .chars()
+                    .filter(|character| *character != '-')
+                    .collect::<String>()
+                    .to_ascii_lowercase()
+            };
+            let wanted = normalized(&uuid);
+            let require_physical = matches!(
+                env::var("FN3_VK_REQUIRE_PHYSICAL").as_deref(),
+                Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+            );
+            let adapter = adapters()
+                .iter()
+                .find(|adapter| {
+                    adapter.has_compute_queue()
+                        && normalized(&adapter.uuid_string()) == wanted
+                })
+                .unwrap_or_else(|| {
+                    usage(&format!(
+                        "no Vulkan adapter with UUID {uuid}; enumerated: {:?}",
+                        adapters()
+                            .iter()
+                            .map(|adapter| (adapter.name.clone(), adapter.uuid_string()))
+                            .collect::<Vec<_>>()
+                    ))
+                });
+            if require_physical && adapter.is_software() {
+                usage("FN3_VK_REQUIRE_PHYSICAL=1 but the pinned adapter is software");
+            }
+            let backend = VulkanBackend::open_with(
+                &DeviceRequest::Vulkan {
+                    index: Some(adapter.index),
+                },
+                VulkanConfig::validated(),
+            )
+            .unwrap_or_else(|error| {
+                usage(&format!("opening the pinned adapter failed: {error}"))
+            });
+            if backend.is_software() {
+                usage("the opened adapter is software, which never satisfies this harness");
+            }
+            Device::Vulkan(backend)
+        }
+        other => usage(&format!("--device must be cpu or vulkan, not {other}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model construction (the CLI's artifact-only path, re-expressed)
+// ---------------------------------------------------------------------------
+
+struct Loaded {
+    model: PreparedModel,
+    import: fastnn::inference::import::ModelImport,
+    kv_bytes: u64,
+    envelope_seq: u64,
+    envelope_total: u64,
+    envelope_past: u64,
+}
+
+fn load(artifact: &std::path::Path, device: DeviceId, backend: &dyn Backend) -> Loaded {
+    let artifact = PreparedArtifact::read_file(artifact)
+        .unwrap_or_else(|error| panic!("reading the artifact failed: {error}"));
+    let envelope = artifact.envelope();
+    let import = artifact.into_model_import();
+    let geometry = import.geometry();
+    let total = envelope.get(Symbol::Total).max();
+    let seq = envelope.get(Symbol::Seq).max();
+    let past = envelope.get(Symbol::Past).max();
+    let kv = geometry.kv_cache_config(total, 1);
+    let weights = import.to_model_weights().expect("host weights");
+    let weights = retag(&weights, device);
+    let fixed_seq = seq.clamp(1, 4);
+    let dims = LiveDims::new(
+        1,
+        fixed_seq,
+        0,
+        u64::from(geometry.query_heads),
+        u64::from(geometry.kv_heads),
+        u64::from(geometry.head_dim),
+    )
+    .expect("head geometry");
+    let plan = Planner::new(&import, backend)
+        .plan(&envelope, dims)
+        .expect("preflight plan")
+        .execution()
+        .clone();
+    let model = PreparedModel::new(plan, weights, device, envelope, Some(kv))
+        .expect("prepared model");
+    let kv_bytes = kv.layers * kv.capacity_tokens * kv.n_kv_heads * kv.head_dim * 4 * 2;
+    Loaded {
+        model,
+        import,
+        kv_bytes,
+        envelope_seq: seq,
+        envelope_total: total,
+        envelope_past: past,
+    }
+}
+
+fn retag(weights: &ModelWeights, device: DeviceId) -> ModelWeights {
+    let mut named = Vec::with_capacity(weights.len());
+    for index in 0..weights.len() {
+        let tensor = weights.get(index).expect("weight index");
+        let meta = TensorMeta::contiguous(tensor.shape().clone(), tensor.dtype(), device)
+            .expect("weight metadata");
+        named.push((
+            weights.name(index).expect("weight name").to_string(),
+            Tensor::from_storage(tensor.storage().clone(), meta).expect("re-tagged weight"),
+        ));
+    }
+    ModelWeights::with_names(named).expect("weights share one device")
+}
+
+// ---------------------------------------------------------------------------
+// Statistics
+// ---------------------------------------------------------------------------
+
+fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let index = ((sorted.len() as f64 - 1.0) * fraction).round() as usize;
+    sorted[index.min(sorted.len() - 1)]
+}
+
+fn ceiling(values: &[f64]) -> (f64, f64, f64, f64) {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite sample"));
+    (
+        percentile(&sorted, 0.5),
+        percentile(&sorted, 0.95),
+        sorted.first().copied().unwrap_or(f64::NAN),
+        sorted.last().copied().unwrap_or(f64::NAN),
+    )
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        f64::NAN
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn peak_rss_bytes() -> u64 {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            if let Some(kib) = rest.split_whitespace().next() {
+                return kib.parse::<u64>().unwrap_or(0) * 1024;
+            }
+        }
+    }
+    0
+}
+
+fn current_rss_bytes() -> u64 {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            if let Some(kib) = rest.split_whitespace().next() {
+                return kib.parse::<u64>().unwrap_or(0) * 1024;
+            }
+        }
+    }
+    0
+}
+
+fn loadavg() -> String {
+    fs::read_to_string("/proc/loadavg")
+        .unwrap_or_default()
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// One measured iteration
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct Sample {
+    session_ms: f64,
+    ttft_ms: f64,
+    prefill_ms: f64,
+    decode_ms: Vec<f64>,
+    submissions_prefill: u64,
+    submissions_decode: Vec<u64>,
+    upload_prefill: u64,
+    readback_prefill: u64,
+    upload_decode: Vec<u64>,
+    readback_decode: Vec<u64>,
+    prepare_persistent_bytes: u64,
+    prepare_packed_bytes: u64,
+    staged_prepare: u64,
+    staged_prefill: u64,
+    staged_decode: u64,
+    summary_submissions: u64,
+    summary_executions: u64,
+    summary_readback: u64,
+    summary_input_readbacks: u64,
+    staged_upload_calls_decode: u64,
+    staging_leases_decode: u64,
+    note_readback_bytes: u64,
+    note_readback_calls: u64,
+    staging_readback_bytes: u64,
+}
+
+fn prefill_and_decode(
+    loaded: &Loaded,
+    backend: &dyn Backend,
+    tokens: &[u32],
+    decode_tokens: &[u32],
+    options: SessionOptions,
+    measure: bool,
+) -> Sample {
+    let mut sample = Sample::default();
+    let summary_start = backend.as_vulkan().map(|v| v.residency().summary());
+    let stats_session_start = backend.as_vulkan().map(|v| v.residency_stats());
+    let staging_session_start = backend.as_vulkan().map(|v| v.staging_stats());
+    let start = Instant::now();
+    let mut session = Session::with_runtime_options(&loaded.model, &loaded.import, backend, options)
+        .expect("session");
+    sample.session_ms = start.elapsed().as_secs_f64() * 1e3;
+
+    let vulkan = backend.as_vulkan();
+    let q_before = vulkan.map(|v| v.queue_submissions()).unwrap_or(0);
+    let summary_before = vulkan.map(|v| v.residency().summary());
+    let stats_before = vulkan.map(|v| v.residency_stats());
+
+    let start = Instant::now();
+    let logits = session.prefill(tokens).expect("prefill");
+    let prefill_ms = start.elapsed().as_secs_f64() * 1e3;
+    // A caller reads the logits; that readback is part of time-to-first-token.
+    let host = logits.as_f32_slice().expect("logits are host-readable");
+    assert_eq!(host.len(), 50_257, "trained/tiny vocabulary");
+    let ttft_ms = start.elapsed().as_secs_f64() * 1e3;
+    let q_after_prefill = vulkan.map(|v| v.queue_submissions()).unwrap_or(0);
+    let summary_after_prefill = vulkan.map(|v| v.residency().summary());
+    let stats_after_prefill = vulkan.map(|v| v.residency_stats());
+
+    let mut decodes = Vec::with_capacity(decode_tokens.len());
+    let mut q_previous = q_after_prefill;
+    let mut summary_previous = summary_after_prefill.clone();
+    let staged_before_decode = vulkan
+        .map(|v| v.residency_stats().staged_upload_bytes.iter().sum::<u64>())
+        .unwrap_or(0);
+    let upload_calls_before_decode = vulkan
+        .map(|v| v.residency_stats().staged_uploads.iter().sum::<u64>())
+        .unwrap_or(0);
+    let leases_before_decode = vulkan
+        .map(|v| v.staging_stats().leases)
+        .unwrap_or(0);
+    for token in decode_tokens {
+        let start = Instant::now();
+        let logits = session.decode(&[*token]).expect("decode");
+        let host = logits.as_f32_slice().expect("logits are host-readable");
+        assert_eq!(host.len(), 50_257);
+        decodes.push(start.elapsed().as_secs_f64() * 1e3);
+        let q = vulkan.map(|v| v.queue_submissions()).unwrap_or(0);
+        if measure {
+            sample.submissions_decode.push(q - q_previous);
+            if let Some(now) = vulkan.map(|v| v.residency().summary()) {
+                if let Some(previous) = summary_previous.as_ref() {
+                    sample.upload_decode.push(now.upload_bytes - previous.upload_bytes);
+                    sample.readback_decode.push(now.readback_bytes - previous.readback_bytes);
+                }
+            } else {
+                // The CPU has no transfer counters: zero, never NaN.
+                sample.upload_decode.push(0);
+                sample.readback_decode.push(0);
+            }
+        }
+        q_previous = q;
+        summary_previous = vulkan.map(|v| v.residency().summary());
+    }
+    if measure {
+        if let Some(vulkan) = vulkan {
+            let after = vulkan
+                .residency_stats()
+                .staged_upload_bytes
+                .iter()
+                .sum::<u64>();
+            sample.staged_decode = after.saturating_sub(staged_before_decode);
+            sample.staged_upload_calls_decode = vulkan
+                .residency_stats()
+                .staged_uploads
+                .iter()
+                .sum::<u64>()
+                .saturating_sub(upload_calls_before_decode);
+            sample.staging_leases_decode = vulkan
+                .staging_stats()
+                .leases
+                .saturating_sub(leases_before_decode);
+            let stats_end = vulkan.residency_stats();
+            if let Some(start) = stats_session_start.as_ref() {
+                sample.note_readback_bytes = stats_end.readback_bytes - start.readback_bytes;
+                sample.note_readback_calls = stats_end.readback_calls - start.readback_calls;
+            }
+            if let Some(start) = staging_session_start.as_ref() {
+                sample.staging_readback_bytes = vulkan
+                    .staging_stats()
+                    .readback_bytes
+                    .saturating_sub(start.readback_bytes);
+            }
+            let end = vulkan.residency().summary();
+            if let Some(start) = summary_start.as_ref() {
+                sample.summary_submissions = end.submissions - start.submissions;
+                sample.summary_executions = end.executions - start.executions;
+                sample.summary_readback = end.readback_bytes - start.readback_bytes;
+                sample.summary_input_readbacks = end.input_readbacks - start.input_readbacks;
+            }
+        }
+    }
+
+    if measure {
+        sample.prefill_ms = prefill_ms;
+        sample.ttft_ms = ttft_ms;
+        sample.decode_ms = decodes;
+        sample.submissions_prefill = q_after_prefill - q_before;
+        if let (Some(before), Some(after)) = (summary_before.as_ref(), summary_after_prefill.as_ref()) {
+            sample.upload_prefill = after.upload_bytes - before.upload_bytes;
+            sample.readback_prefill = after.readback_bytes - before.readback_bytes;
+        }
+        if let (Some(before), Some(after)) = (stats_before.as_ref(), stats_after_prefill.as_ref()) {
+            sample.prepare_persistent_bytes = after
+                .persistent_prepare_bytes
+                .saturating_sub(before.persistent_prepare_bytes);
+            sample.prepare_packed_bytes = after
+                .packed_prepare_bytes
+                .saturating_sub(before.packed_prepare_bytes);
+            sample.staged_prepare = before.staged_upload_bytes.iter().sum();
+            sample.staged_prefill = after.staged_upload_bytes.iter().sum::<u64>()
+                - before.staged_upload_bytes.iter().sum::<u64>();
+        }
+    }
+    let _ = session;
+    sample
+}
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+
+fn report_single(args: &Args, device: &Device, loaded: &Loaded, samples: &[Sample]) {
+    let ttft: Vec<f64> = samples.iter().map(|sample| sample.ttft_ms).collect();
+    let prefill: Vec<f64> = samples.iter().map(|sample| sample.prefill_ms).collect();
+    let decode: Vec<f64> = samples.iter().flat_map(|sample| sample.decode_ms.clone()).collect();
+    let submissions_prefill: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.submissions_prefill as f64)
+        .collect();
+    let submissions_decode: Vec<f64> = samples
+        .iter()
+        .flat_map(|sample| sample.submissions_decode.iter().map(|value| *value as f64))
+        .collect();
+    let upload_prefill: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.upload_prefill as f64)
+        .collect();
+    let readback_prefill: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.readback_prefill as f64)
+        .collect();
+    let upload_decode: Vec<f64> = samples
+        .iter()
+        .flat_map(|sample| sample.upload_decode.iter().map(|value| *value as f64))
+        .collect();
+    let readback_decode: Vec<f64> = samples
+        .iter()
+        .flat_map(|sample| sample.readback_decode.iter().map(|value| *value as f64))
+        .collect();
+
+    let (ttft_p50, ttft_p95, ttft_min, ttft_max) = ceiling(&ttft);
+    let (prefill_p50, prefill_p95, prefill_min, prefill_max) = ceiling(&prefill);
+    let (decode_p50, decode_p95, decode_min, decode_max) = ceiling(&decode);
+    let (session_p50, _, _, _) =
+        ceiling(&samples.iter().map(|sample| sample.session_ms).collect::<Vec<_>>());
+
+    let mut memory = String::from("null");
+    let mut ops = String::from("[]");
+    let (mut validation_errors, mut validation_warnings) = (0, 0);
+    if let Some(vulkan) = device.vulkan() {
+        let stats = vulkan.memory_stats();
+        let device_local_reserved: u64 = stats
+            .chunk_list
+            .iter()
+            .filter(|chunk| !chunk.host_visible)
+            .map(|chunk| chunk.size)
+            .sum();
+        memory = format!(
+            "{{\"total_reserved_bytes\":{},\"device_local_reserved_bytes\":{},\
+             \"device_local_live_bytes\":{},\"host_visible_live_bytes\":{},\
+             \"peak_live_bytes\":{},\"chunks\":{},\"allocation_count\":{}}}",
+            stats.reserved_bytes,
+            device_local_reserved,
+            stats.live_device_local_bytes,
+            stats.live_host_visible_bytes,
+            stats.peak_live_bytes,
+            stats.chunks,
+            stats.allocation_count
+        );
+        let residency = vulkan.residency_stats();
+        println!(
+            "[fn3-74][resident] persistent_tensors={} persistent_bytes={} persistent_prepare_bytes={} \
+             packed_prepare_bytes={} late_persistent_uploads={} late_persistent_bytes={} \
+             resident_tensors={} resident_bytes={}",
+            residency.persistent_tensors,
+            residency.persistent_bytes,
+            residency.persistent_prepare_bytes,
+            residency.packed_prepare_bytes,
+            residency.late_persistent_uploads,
+            residency.late_persistent_bytes,
+            residency.resident_tensors,
+            residency.resident_bytes
+        );
+        let mut by_op: std::collections::BTreeMap<String, (u64, f64)> =
+            std::collections::BTreeMap::new();
+        let (mut batched_records, mut unbatched_records, mut ledger_submissions) = (0u64, 0u64, 0u64);
+        for record in vulkan.residency().records() {
+            if record.batch.is_some() {
+                batched_records += 1;
+            } else {
+                unbatched_records += 1;
+            }
+            ledger_submissions += u64::from(record.submissions);
+            let entry = by_op.entry(record.op.name().to_string()).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += record.gpu_ns.unwrap_or(0) as f64 / 1e6;
+        }
+        println!(
+            "[fn3-74][ledger] batched_records_per_iteration={:.2} \
+             unbatched_records_per_iteration={:.2} record_submissions_per_iteration={:.2}",
+            batched_records as f64 / args.iterations.max(1) as f64,
+            unbatched_records as f64 / args.iterations.max(1) as f64,
+            ledger_submissions as f64 / args.iterations.max(1) as f64
+        );
+        let total_gpu_ms: f64 = by_op.values().map(|(_, gpu_ms)| *gpu_ms).sum();
+        println!(
+            "[fn3-74][gpu] ledger_gpu_ms_per_iteration={:.4}",
+            total_gpu_ms / args.iterations.max(1) as f64
+        );
+        let mut rows: Vec<(String, u64, f64)> = by_op
+            .into_iter()
+            .map(|(name, (count, gpu_ms))| {
+                (name, count, gpu_ms / args.iterations.max(1) as f64)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        for (name, count, gpu_ms) in rows.iter().take(8) {
+            println!(
+                "[fn3-74][op] {name} executions_per_iteration={:.2} gpu_ms_per_iteration={gpu_ms:.4}",
+                *count as f64 / args.iterations.max(1) as f64
+            );
+        }
+        ops = format!(
+            "[{}]",
+            rows.iter()
+                .take(8)
+                .map(|(name, count, gpu_ms)| format!(
+                    "{{\"op\":\"{name}\",\"executions_per_iteration\":{:.3},\
+                     \"gpu_ms_per_iteration\":{gpu_ms:.4}}}",
+                    *count as f64 / args.iterations.max(1) as f64
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        (validation_errors, validation_warnings) = instance::validation_counts();
+    }
+
+    let mode = if args.weight_int8 {
+        "INT8 weights / FP32 activations"
+    } else {
+        "FP32"
+    };
+    println!(
+        "[fn3-74][summary] label={} device={} mode={} prompt={} decode={} iterations={} warmups={} \
+         envelope_seq={} envelope_past={} envelope_total={} kv_bytes={}",
+        args.label.as_deref().unwrap_or("-"),
+        device.name(),
+        mode,
+        args.prompt,
+        args.decode,
+        args.iterations,
+        args.warmups,
+        loaded.envelope_seq,
+        loaded.envelope_past,
+        loaded.envelope_total,
+        loaded.kv_bytes
+    );
+    println!(
+        "[fn3-74][perf] ttft_ms p50={ttft_p50:.3} p95={ttft_p95:.3} min={ttft_min:.3} \
+         max={ttft_max:.3} n={}",
+        ttft.len()
+    );
+    println!(
+        "[fn3-74][perf] prefill_ms p50={prefill_p50:.3} p95={prefill_p95:.3} min={prefill_min:.3} \
+         max={prefill_max:.3} n={}",
+        prefill.len()
+    );
+    println!(
+        "[fn3-74][perf] decode_ms p50={decode_p50:.3} p95={decode_p95:.3} min={decode_min:.3} \
+         max={decode_max:.3} n={}",
+        decode.len()
+    );
+    println!("[fn3-74][perf] session_ms p50={session_p50:.3}");
+    println!(
+        "[fn3-74][submits] prefill_mean={:.3} decode_mean={:.3} decode_min={} decode_max={}",
+        mean(&submissions_prefill),
+        mean(&submissions_decode),
+        submissions_decode.iter().cloned().fold(f64::INFINITY, f64::min),
+        submissions_decode.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    );
+    println!(
+        "[fn3-74][submits][csv] {}",
+        submissions_decode
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    println!(
+        "[fn3-74][readback] note_bytes_mean={:.0} note_calls_mean={:.2} \
+         staging_bytes_mean={:.0}",
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.note_readback_bytes as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.note_readback_calls as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.staging_readback_bytes as f64)
+                .collect::<Vec<_>>()
+        )
+    );
+    println!(
+        "[fn3-74][residency] decode_staged_upload_calls_mean={:.2} \
+         decode_staging_leases_mean={:.2}",
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.staged_upload_calls_decode as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.staging_leases_decode as f64)
+                .collect::<Vec<_>>()
+        )
+    );
+    println!(
+        "[fn3-74][residency] submissions_mean={:.0} executions_mean={:.0} \
+         readback_mean={:.0} input_readbacks_mean={:.0}",
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.summary_submissions as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.summary_executions as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.summary_readback as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.summary_input_readbacks as f64)
+                .collect::<Vec<_>>()
+        )
+    );
+    println!(
+        "[fn3-74][submits][csv] {}",
+        submissions_decode
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    println!(
+        "[fn3-74][traffic] prefill_upload_mean={:.0} prefill_readback_mean={:.0} \
+         decode_upload_mean={:.0} decode_readback_mean={:.0}",
+        mean(&upload_prefill),
+        mean(&readback_prefill),
+        mean(&upload_decode),
+        mean(&readback_decode)
+    );
+    println!(
+        "[fn3-74][traffic] prepare_persistent_mean={:.0} prepare_packed_mean={:.0} \
+         staged_prepare_mean={:.0} staged_prefill_mean={:.0}",
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.prepare_persistent_bytes as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.prepare_packed_bytes as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.staged_prepare as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.staged_prefill as f64)
+                .collect::<Vec<_>>()
+        )
+    );
+    println!(
+        "[fn3-74][memory] host_peak_rss_bytes={} host_rss_bytes={}",
+        peak_rss_bytes(),
+        current_rss_bytes()
+    );
+    println!(
+        "[fn3-74][validation] errors={validation_errors} warnings={validation_warnings} \
+         loadavg=\"{}\"",
+        loadavg()
+    );
+
+    // Raw samples, so the percentiles can be recomputed.
+    for sample in samples {
+        println!(
+            "[fn3-74][csv] {},{:.4},{:.4},{:.4}",
+            sample.session_ms, sample.ttft_ms, sample.prefill_ms, mean(&sample.decode_ms)
+        );
+    }
+
+    let json = format!(
+        "{{\"label\":\"{}\",\"device\":\"{}\",\"mode\":\"{}\",\"prompt\":{},\"decode\":{},\
+         \"iterations\":{},\"warmups\":{},\"envelope_seq\":{},\"envelope_past\":{},\
+         \"envelope_total\":{},\"kv_bytes\":{},\
+         \"ttft_ms\":{{\"p50\":{ttft_p50:.4},\"p95\":{ttft_p95:.4},\"min\":{ttft_min:.4},\
+         \"max\":{ttft_max:.4},\"n\":{}}},\
+         \"prefill_ms\":{{\"p50\":{prefill_p50:.4},\"p95\":{prefill_p95:.4},\
+         \"min\":{prefill_min:.4},\"max\":{prefill_max:.4},\"n\":{}}},\
+         \"decode_ms\":{{\"p50\":{decode_p50:.4},\"p95\":{decode_p95:.4},\"min\":{decode_min:.4},\
+         \"max\":{decode_max:.4},\"n\":{}}},\
+         \"submissions\":{{\"prefill_mean\":{:.4},\"decode_mean\":{:.4}}},\
+         \"traffic\":{{\"prefill_upload_mean\":{:.0},\"prefill_readback_mean\":{:.0},\
+         \"decode_upload_mean\":{:.0},\"decode_readback_mean\":{:.0},\
+         \"prepare_persistent_mean\":{:.0},\"prepare_packed_mean\":{:.0},\
+         \"staged_prefill_mean\":{:.0}}},\
+         \"host_peak_rss_bytes\":{},\"host_rss_bytes\":{},\
+         \"validation\":{{\"errors\":{validation_errors},\"warnings\":{validation_warnings}}},\
+         \"memory\":{memory},\"ops\":{ops},\"loadavg\":\"{}\"}}",
+        args.label.as_deref().unwrap_or("-"),
+        device.name().replace('"', "'"),
+        mode,
+        args.prompt,
+        args.decode,
+        args.iterations,
+        args.warmups,
+        loaded.envelope_seq,
+        loaded.envelope_past,
+        loaded.envelope_total,
+        loaded.kv_bytes,
+        ttft.len(),
+        prefill.len(),
+        decode.len(),
+        mean(&submissions_prefill),
+        mean(&submissions_decode),
+        mean(&upload_prefill),
+        mean(&readback_prefill),
+        mean(&upload_decode),
+        mean(&readback_decode),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.prepare_persistent_bytes as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.prepare_packed_bytes as f64)
+                .collect::<Vec<_>>()
+        ),
+        mean(
+            &samples
+                .iter()
+                .map(|sample| sample.staged_prefill as f64)
+                .collect::<Vec<_>>()
+        ),
+        peak_rss_bytes(),
+        current_rss_bytes(),
+        loadavg()
+    );
+    println!("[fn3-74][json] {json}");
+}
+
+/// Two sessions (FP32 and INT8) alive at the same time on one backend.
+fn report_duo(args: &Args, device: &Device, loaded: &Loaded) {
+    let vulkan = device
+        .vulkan()
+        .unwrap_or_else(|| usage("--duo needs the Vulkan backend"));
+    let tokens = prompt(args.prompt);
+    let decode = prompt(args.decode.max(1));
+
+    let memory_before = vulkan.memory_stats();
+    let fp32 = Session::with_runtime_options(
+        &loaded.model,
+        &loaded.import,
+        device.backend(),
+        SessionOptions::default(),
+    )
+    .expect("FP32 session");
+    let int8 = Session::with_runtime_options(
+        &loaded.model,
+        &loaded.import,
+        device.backend(),
+        SessionOptions {
+            weight_int8: true,
+            ..SessionOptions::default()
+        },
+    )
+    .expect("INT8 session");
+    let memory_both_created = vulkan.memory_stats();
+
+    let mut fp32 = fp32;
+    let mut int8 = int8;
+    let start = Instant::now();
+    let fp32_logits = fp32.prefill(&tokens).expect("FP32 prefill");
+    let fp32_ms = start.elapsed().as_secs_f64() * 1e3;
+    let start = Instant::now();
+    let int8_logits = int8.prefill(&tokens).expect("INT8 prefill");
+    let int8_ms = start.elapsed().as_secs_f64() * 1e3;
+    let fp32_host = fp32_logits.as_f32_slice().expect("FP32 logits");
+    let int8_host = int8_logits.as_f32_slice().expect("INT8 logits");
+    let max_abs = fp32_host
+        .iter()
+        .zip(int8_host)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    let argmax = |values: &[f32]| {
+        values
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                if value > best.1 {
+                    (index, value)
+                } else {
+                    best
+                }
+            })
+            .0
+    };
+    let fp32_argmax = argmax(fp32_host);
+    let int8_argmax = argmax(int8_host);
+
+    let start = Instant::now();
+    let _ = fp32.decode(&decode).expect("FP32 decode");
+    let fp32_decode_ms = start.elapsed().as_secs_f64() * 1e3;
+    let start = Instant::now();
+    let _ = int8.decode(&decode).expect("INT8 decode");
+    let int8_decode_ms = start.elapsed().as_secs_f64() * 1e3;
+
+    let stats = vulkan.memory_stats();
+    let device_local_reserved: u64 = stats
+        .chunk_list
+        .iter()
+        .filter(|chunk| !chunk.host_visible)
+        .map(|chunk| chunk.size)
+        .sum();
+    let (validation_errors, validation_warnings) = instance::validation_counts();
+    println!(
+        "[fn3-74][duo] prompt={} decode={} fp32_prefill_ms={fp32_ms:.3} \
+         int8_prefill_ms={int8_ms:.3} fp32_decode_ms={fp32_decode_ms:.3} \
+         int8_decode_ms={int8_decode_ms:.3} fp32_argmax={fp32_argmax} int8_argmax={int8_argmax} \
+         max_abs_delta={max_abs:.6}",
+        args.prompt, args.decode
+    );
+    println!(
+        "[fn3-74][duo][memory] before_total_reserved={} both_created_total_reserved={} \
+         final_total_reserved={} final_device_local_reserved={} final_device_local_live={} \
+         final_host_visible_live={} final_peak_live={} chunks={} allocations={} \
+         host_peak_rss={}",
+        memory_before.reserved_bytes,
+        memory_both_created.reserved_bytes,
+        stats.reserved_bytes,
+        device_local_reserved,
+        stats.live_device_local_bytes,
+        stats.live_host_visible_bytes,
+        stats.peak_live_bytes,
+        stats.chunks,
+        stats.allocation_count,
+        peak_rss_bytes()
+    );
+    println!(
+        "[fn3-74][duo][validation] errors={validation_errors} warnings={validation_warnings} \
+         loadavg=\"{}\"",
+        loadavg()
+    );
+    let residency = vulkan.residency_stats();
+    println!(
+        "[fn3-74][duo][resident] persistent_bytes={} persistent_prepare_bytes={} \
+         packed_prepare_bytes={} resident_bytes={} late_persistent_bytes={}",
+        residency.persistent_bytes,
+        residency.persistent_prepare_bytes,
+        residency.packed_prepare_bytes,
+        residency.resident_bytes,
+        residency.late_persistent_bytes
+    );
+    println!(
+        "[fn3-74][duo][json] {{\"prompt\":{},\"decode\":{},\
+         \"fp32_prefill_ms\":{fp32_ms:.4},\"int8_prefill_ms\":{int8_ms:.4},\
+         \"fp32_decode_ms\":{fp32_decode_ms:.4},\"int8_decode_ms\":{int8_decode_ms:.4},\
+         \"max_abs_delta\":{max_abs:.6},\"fp32_argmax\":{fp32_argmax},\"int8_argmax\":{int8_argmax},\
+         \"device_local_reserved_bytes\":{device_local_reserved},\
+         \"device_local_live_bytes\":{},\"peak_live_bytes\":{},\"total_reserved_bytes\":{},\
+         \"host_peak_rss_bytes\":{},\"validation_errors\":{validation_errors},\
+         \"validation_warnings\":{validation_warnings},\"loadavg\":\"{}\"}}",
+        args.prompt,
+        args.decode,
+        stats.live_device_local_bytes,
+        stats.peak_live_bytes,
+        stats.reserved_bytes,
+        peak_rss_bytes(),
+        loadavg()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let args = parse_args();
+    let device = open_device(&args.device);
+    // Keep the staging/garbage-free view honest: report how the session was forced.
+    let staged_env = env::var("FN3_VK_STAGED").unwrap_or_else(|_| "unset".to_string());
+    let artifact_bytes = fs::metadata(&args.artifact)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    println!(
+        "[fn3-74][meta] artifact={} bytes={artifact_bytes} device={} fn3_vk_staged={staged_env} \
+         validation_env={} allow_software_env={} loadavg=\"{}\"",
+        args.artifact.display(),
+        device.name(),
+        env::var("FN3_VK_VALIDATION").unwrap_or_else(|_| "unset".to_string()),
+        env::var("FN3_VK_ALLOW_SOFTWARE").unwrap_or_else(|_| "unset".to_string()),
+        loadavg()
+    );
+
+    let loaded = load(&args.artifact, device.backend().device(), device.backend());
+
+    if args.duo {
+        if args.weight_int8 {
+            usage("--duo creates both routes itself; do not pass --weight-int8");
+        }
+        report_duo(&args, &device, &loaded);
+        return;
+    }
+
+    let tokens = prompt(args.prompt);
+    let decode_tokens: Vec<u32> = prompt(args.decode.max(1))
+        .into_iter()
+        .take(args.decode)
+        .collect();
+    let options = SessionOptions {
+        weight_int8: args.weight_int8,
+        ..SessionOptions::default()
+    };
+
+    for _ in 0..args.warmups {
+        let _ = prefill_and_decode(&loaded, device.backend(), &tokens, &decode_tokens, options, false);
+    }
+
+    if let Some(vulkan) = device.vulkan() {
+        vulkan.residency().clear();
+        vulkan.reset_residency_stats();
+    }
+
+    let mut samples = Vec::with_capacity(args.iterations);
+    for _ in 0..args.iterations {
+        samples.push(prefill_and_decode(
+            &loaded,
+            device.backend(),
+            &tokens,
+            &decode_tokens,
+            options,
+            true,
+        ));
+    }
+
+    report_single(&args, &device, &loaded, &samples);
+}

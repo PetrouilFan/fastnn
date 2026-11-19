@@ -1,0 +1,19 @@
+[package]
+name = "fn3-74-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+fastnn = { path = "../../..", default-features = false, features = [
+  "simd",
+  "parallel",
+  "fusion-forward",
+  "prepared-plan",
+  "vulkan",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

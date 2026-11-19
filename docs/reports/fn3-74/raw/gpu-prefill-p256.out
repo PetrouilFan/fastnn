@@ -1,0 +1,30 @@
+[fn3-74][meta] artifact=target/fn3-74/artifacts/trained-1024.fnn3 bytes=498075184 device=vulkan(0) NVIDIA GeForce GTX 1080 Ti fn3_vk_staged=unset validation_env=1 allow_software_env=unset loadavg="4.06 4.18 4.38"
+[fn3-74][resident] persistent_tensors=0 persistent_bytes=0 persistent_prepare_bytes=0 packed_prepare_bytes=0 late_persistent_uploads=0 late_persistent_bytes=0 resident_tensors=1694 resident_bytes=2754179072
+[fn3-74][ledger] batched_records_per_iteration=775.00 unbatched_records_per_iteration=0.00 record_submissions_per_iteration=0.00
+[fn3-74][gpu] ledger_gpu_ms_per_iteration=174.0843
+[fn3-74][op] matmul executions_per_iteration=73.00 gpu_ms_per_iteration=84.3986
+[fn3-74][op] reduce_mean executions_per_iteration=50.00 gpu_ms_per_iteration=47.1543
+[fn3-74][op] transpose executions_per_iteration=61.00 gpu_ms_per_iteration=27.1877
+[fn3-74][op] add executions_per_iteration=159.00 gpu_ms_per_iteration=6.0686
+[fn3-74][op] mul executions_per_iteration=97.00 gpu_ms_per_iteration=2.8808
+[fn3-74][op] reshape executions_per_iteration=146.00 gpu_ms_per_iteration=2.1623
+[fn3-74][op] softmax executions_per_iteration=12.00 gpu_ms_per_iteration=1.2687
+[fn3-74][op] pow executions_per_iteration=37.00 gpu_ms_per_iteration=0.9135
+[fn3-74][summary] label=gpu-prefill-p256 device=vulkan(0) NVIDIA GeForce GTX 1080 Ti mode=FP32 prompt=256 decode=0 iterations=2 warmups=1 envelope_seq=1024 envelope_past=1023 envelope_total=1024 kv_bytes=75497472
+[fn3-74][perf] ttft_ms p50=316.160 p95=316.160 min=309.503 max=316.160 n=2
+[fn3-74][perf] prefill_ms p50=316.158 p95=316.158 min=309.500 max=316.158 n=2
+[fn3-74][perf] decode_ms p50=NaN p95=NaN min=NaN max=NaN n=0
+[fn3-74][perf] session_ms p50=0.221
+[fn3-74][submits] prefill_mean=26.000 decode_mean=NaN decode_min=inf decode_max=-inf
+[fn3-74][submits][csv] 
+[fn3-74][readback] note_bytes_mean=201028 note_calls_mean=1.00 staging_bytes_mean=0
+[fn3-74][residency] decode_staged_upload_calls_mean=0.00 decode_staging_leases_mean=0.00
+[fn3-74][residency] submissions_mean=1 executions_mean=775 readback_mean=0 input_readbacks_mean=0
+[fn3-74][submits][csv] 
+[fn3-74][traffic] prefill_upload_mean=77480 prefill_readback_mean=0 decode_upload_mean=NaN decode_readback_mean=NaN
+[fn3-74][traffic] prepare_persistent_mean=0 prepare_packed_mean=0 staged_prepare_mean=35840 staged_prefill_mean=71680
+[fn3-74][memory] host_peak_rss_bytes=1398521856 host_rss_bytes=1398521856
+[fn3-74][validation] errors=0 warnings=0 loadavg="3.98 4.16 4.37"
+[fn3-74][csv] 0.22093100000000002,316.1597,316.1578,NaN
+[fn3-74][csv] 0.166051,309.5027,309.4997,NaN
+[fn3-74][json] {"label":"gpu-prefill-p256","device":"vulkan(0) NVIDIA GeForce GTX 1080 Ti","mode":"FP32","prompt":256,"decode":0,"iterations":2,"warmups":1,"envelope_seq":1024,"envelope_past":1023,"envelope_total":1024,"kv_bytes":75497472,"ttft_ms":{"p50":316.1597,"p95":316.1597,"min":309.5027,"max":316.1597,"n":2},"prefill_ms":{"p50":316.1578,"p95":316.1578,"min":309.4997,"max":316.1578,"n":2},"decode_ms":{"p50":NaN,"p95":NaN,"min":NaN,"max":NaN,"n":0},"submissions":{"prefill_mean":26.0000,"decode_mean":NaN},"traffic":{"prefill_upload_mean":77480,"prefill_readback_mean":0,"decode_upload_mean":NaN,"decode_readback_mean":NaN,"prepare_persistent_mean":0,"prepare_packed_mean":0,"staged_prefill_mean":71680},"host_peak_rss_bytes":1398521856,"host_rss_bytes":1398521856,"validation":{"errors":0,"warnings":0},"memory":{"total_reserved_bytes":2185232384,"device_local_reserved_bytes":1946157056,"device_local_live_bytes":497770752,"host_visible_live_bytes":0,"peak_live_bytes":2104576512,"chunks":21,"allocation_count":3745},"ops":[{"op":"matmul","executions_per_iteration":73.000,"gpu_ms_per_iteration":84.3986},{"op":"reduce_mean","executions_per_iteration":50.000,"gpu_ms_per_iteration":47.1543},{"op":"transpose","executions_per_iteration":61.000,"gpu_ms_per_iteration":27.1877},{"op":"add","executions_per_iteration":159.000,"gpu_ms_per_iteration":6.0686},{"op":"mul","executions_per_iteration":97.000,"gpu_ms_per_iteration":2.8808},{"op":"reshape","executions_per_iteration":146.000,"gpu_ms_per_iteration":2.1623},{"op":"softmax","executions_per_iteration":12.000,"gpu_ms_per_iteration":1.2687},{"op":"pow","executions_per_iteration":37.000,"gpu_ms_per_iteration":0.9135}],"loadavg":"3.98 4.16 4.37"}

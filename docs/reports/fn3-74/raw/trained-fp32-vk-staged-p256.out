@@ -1,0 +1,33 @@
+[fn3-74][meta] artifact=target/fn3-74/artifacts/trained-1024.fnn3 bytes=498075184 device=vulkan(0) NVIDIA GeForce GTX 1080 Ti fn3_vk_staged=1 validation_env=1 allow_software_env=unset loadavg="4.37 4.88 4.01"
+[fn3-74][resident] persistent_tensors=0 persistent_bytes=0 persistent_prepare_bytes=0 packed_prepare_bytes=0 late_persistent_uploads=0 late_persistent_bytes=0 resident_tensors=0 resident_bytes=0
+[fn3-74][ledger] batched_records_per_iteration=0.00 unbatched_records_per_iteration=6983.00 record_submissions_per_iteration=6983.00
+[fn3-74][gpu] ledger_gpu_ms_per_iteration=1231.7100
+[fn3-74][op] transpose executions_per_iteration=549.00 gpu_ms_per_iteration=422.0303
+[fn3-74][op] matmul executions_per_iteration=657.00 gpu_ms_per_iteration=319.4500
+[fn3-74][op] reduce_mean executions_per_iteration=450.00 gpu_ms_per_iteration=258.0193
+[fn3-74][op] add executions_per_iteration=1431.00 gpu_ms_per_iteration=57.6851
+[fn3-74][op] mul executions_per_iteration=873.00 gpu_ms_per_iteration=56.0110
+[fn3-74][op] reshape executions_per_iteration=1314.00 gpu_ms_per_iteration=37.9033
+[fn3-74][op] concat executions_per_iteration=225.00 gpu_ms_per_iteration=30.1767
+[fn3-74][op] pow executions_per_iteration=333.00 gpu_ms_per_iteration=12.4971
+[fn3-74][summary] label=trained-fp32-vk-staged-p256 device=vulkan(0) NVIDIA GeForce GTX 1080 Ti mode=FP32 prompt=256 decode=8 iterations=5 warmups=1 envelope_seq=1024 envelope_past=1023 envelope_total=1024 kv_bytes=75497472
+[fn3-74][perf] ttft_ms p50=8990.986 p95=9470.815 min=8443.954 max=9470.815 n=5
+[fn3-74][perf] prefill_ms p50=8990.984 p95=9470.813 min=8443.952 max=9470.813 n=5
+[fn3-74][perf] decode_ms p50=1976.358 p95=2147.696 min=1871.935 max=2197.642 n=40
+[fn3-74][perf] session_ms p50=8.868
+[fn3-74][submits] prefill_mean=775.000 decode_mean=776.000 decode_min=776 decode_max=776
+[fn3-74][submits][csv] 776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776
+[fn3-74][readback] note_bytes_mean=2800925592 note_calls_mean=7199.00 staging_bytes_mean=2800925616
+[fn3-74][residency] decode_staged_upload_calls_mean=7496.00 decode_staging_leases_mean=14296.00
+[fn3-74][residency] submissions_mean=6983 executions_mean=6983 readback_mean=2800925616 input_readbacks_mean=0
+[fn3-74][submits][csv] 776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776,776
+[fn3-74][traffic] prefill_upload_mean=1311548072 prefill_readback_mean=1226094592 decode_upload_mean=216327914 decode_readback_mean=196853878
+[fn3-74][traffic] prepare_persistent_mean=0 prepare_packed_mean=0 staged_prepare_mean=6084238272 staged_prefill_mean=1311542272
+[fn3-74][memory] host_peak_rss_bytes=3282923520 host_rss_bytes=3013521408
+[fn3-74][validation] errors=0 warnings=0 loadavg="5.64 5.06 4.20"
+[fn3-74][csv] 8.790579,9470.8147,9470.8130,2046.7204
+[fn3-74][csv] 9.165230999999999,8990.9856,8990.9837,2062.5445
+[fn3-74][csv] 10.651116,8443.9535,8443.9519,1943.8300
+[fn3-74][csv] 8.868399,8711.7460,8711.7434,1971.7045
+[fn3-74][csv] 8.508708,9350.5821,9350.5800,1924.5420
+[fn3-74][json] {"label":"trained-fp32-vk-staged-p256","device":"vulkan(0) NVIDIA GeForce GTX 1080 Ti","mode":"FP32","prompt":256,"decode":8,"iterations":5,"warmups":1,"envelope_seq":1024,"envelope_past":1023,"envelope_total":1024,"kv_bytes":75497472,"ttft_ms":{"p50":8990.9856,"p95":9470.8147,"min":8443.9535,"max":9470.8147,"n":5},"prefill_ms":{"p50":8990.9837,"p95":9470.8130,"min":8443.9519,"max":9470.8130,"n":5},"decode_ms":{"p50":1976.3581,"p95":2147.6960,"min":1871.9354,"max":2197.6416,"n":40},"submissions":{"prefill_mean":775.0000,"decode_mean":776.0000},"traffic":{"prefill_upload_mean":1311548072,"prefill_readback_mean":1226094592,"decode_upload_mean":216327914,"decode_readback_mean":196853878,"prepare_persistent_mean":0,"prepare_packed_mean":0,"staged_prefill_mean":1311542272},"host_peak_rss_bytes":3282923520,"host_rss_bytes":3013521408,"validation":{"errors":0,"warnings":0},"memory":{"total_reserved_bytes":1468006400,"device_local_reserved_bytes":1140850688,"device_local_live_bytes":497770752,"host_visible_live_bytes":15728640,"peak_live_bytes":927756544,"chunks":6,"allocation_count":97984},"ops":[{"op":"transpose","executions_per_iteration":549.000,"gpu_ms_per_iteration":422.0303},{"op":"matmul","executions_per_iteration":657.000,"gpu_ms_per_iteration":319.4500},{"op":"reduce_mean","executions_per_iteration":450.000,"gpu_ms_per_iteration":258.0193},{"op":"add","executions_per_iteration":1431.000,"gpu_ms_per_iteration":57.6851},{"op":"mul","executions_per_iteration":873.000,"gpu_ms_per_iteration":56.0110},{"op":"reshape","executions_per_iteration":1314.000,"gpu_ms_per_iteration":37.9033},{"op":"concat","executions_per_iteration":225.000,"gpu_ms_per_iteration":30.1767},{"op":"pow","executions_per_iteration":333.000,"gpu_ms_per_iteration":12.4971}],"loadavg":"5.64 5.06 4.20"}

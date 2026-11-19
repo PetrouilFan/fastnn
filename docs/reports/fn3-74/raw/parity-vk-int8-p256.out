@@ -1,0 +1,173 @@
+fastnn-infer inference
+  artifact: target/fn3-74/artifacts/trained-1024.fnn3
+    bytes:  498,075,184  sha256: 570ce35b9ed5b5cab9e970e9b7ff7801ba803c8ab92f864504b86faab44abe97
+    payload crc32: 0x0dede5dc
+  source: none (artifact-only: the artifact carries the graph, 852 weight payloads, the geometry and the envelope)
+  device: requested vulkan:471b2bda51e16451e692ff5d1e146f1e, resolved vulkan(0), backend vulkan (adapter=NVIDIA GeForce GTX 1080 Ti software=false validation=true)
+  envelope: batch 1..=1 seq 1..=1024 past 0..=1023 total 1..=1024
+  kv: capacity=1024 tokens, 12 layers x 12 KV heads x 64 head_dim = 75,497,472 bytes
+  prompt: 256 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, … (240 more) …, 4874, 2402, 257, 640, 11, 612, 373, 464]
+  input: token IDs (this alpha has no text tokenizer)
+  session: phase=empty cache=0 kv_bytes=75,497,472
+  execution: vulkan on vulkan(0)
+  timing: wall-clock around each call; the Vulkan backend records per-dispatch gpu_ns, but Session does not aggregate a device time in this build
+  prefill: seq=256 past=0 cache=256 plan=9cfb38e8aa1e66cf7d1a6d1cc1060bd2 plan-cache=0hit/1miss wall=1.67s
+    counters: slot_allocations=800 slot_reuses=0 plan_cache=1 phase=ready
+    weight-int8: packed-matmuls=48/73 fp32-matmuls=25 packed-payload=90243072B packed-source=339738624B dense-weight=158022256B shared-weight=0B model-weight=497764984B route/pack/upload=1.04s
+      matmul[25] transformer.h.0.attn.c_attn.weight: packed
+      matmul[46] /transformer/h.0/attn/Mul_1_output_0: computed-rhs
+      matmul[49] present.0.value: computed-rhs
+      matmul[53] transformer.h.0.attn.c_proj.weight: packed
+      matmul[67] transformer.h.0.mlp.c_fc.weight: packed
+      matmul[79] transformer.h.0.mlp.c_proj.weight: packed
+      matmul[93] transformer.h.1.attn.c_attn.weight: packed
+      matmul[108] /transformer/h.1/attn/Mul_1_output_0: computed-rhs
+      matmul[111] present.1.value: computed-rhs
+      matmul[115] transformer.h.1.attn.c_proj.weight: packed
+      matmul[129] transformer.h.1.mlp.c_fc.weight: packed
+      matmul[141] transformer.h.1.mlp.c_proj.weight: packed
+      matmul[155] transformer.h.2.attn.c_attn.weight: packed
+      matmul[170] /transformer/h.2/attn/Mul_1_output_0: computed-rhs
+      matmul[173] present.2.value: computed-rhs
+      matmul[177] transformer.h.2.attn.c_proj.weight: packed
+      matmul[191] transformer.h.2.mlp.c_fc.weight: packed
+      matmul[203] transformer.h.2.mlp.c_proj.weight: packed
+      matmul[217] transformer.h.3.attn.c_attn.weight: packed
+      matmul[232] /transformer/h.3/attn/Mul_1_output_0: computed-rhs
+      matmul[235] present.3.value: computed-rhs
+      matmul[239] transformer.h.3.attn.c_proj.weight: packed
+      matmul[253] transformer.h.3.mlp.c_fc.weight: packed
+      matmul[265] transformer.h.3.mlp.c_proj.weight: packed
+      matmul[279] transformer.h.4.attn.c_attn.weight: packed
+      matmul[294] /transformer/h.4/attn/Mul_1_output_0: computed-rhs
+      matmul[297] present.4.value: computed-rhs
+      matmul[301] transformer.h.4.attn.c_proj.weight: packed
+      matmul[315] transformer.h.4.mlp.c_fc.weight: packed
+      matmul[327] transformer.h.4.mlp.c_proj.weight: packed
+      matmul[341] transformer.h.5.attn.c_attn.weight: packed
+      matmul[356] /transformer/h.5/attn/Mul_1_output_0: computed-rhs
+      matmul[359] present.5.value: computed-rhs
+      matmul[363] transformer.h.5.attn.c_proj.weight: packed
+      matmul[377] transformer.h.5.mlp.c_fc.weight: packed
+      matmul[389] transformer.h.5.mlp.c_proj.weight: packed
+      matmul[403] transformer.h.6.attn.c_attn.weight: packed
+      matmul[418] /transformer/h.6/attn/Mul_1_output_0: computed-rhs
+      matmul[421] present.6.value: computed-rhs
+      matmul[425] transformer.h.6.attn.c_proj.weight: packed
+      matmul[439] transformer.h.6.mlp.c_fc.weight: packed
+      matmul[451] transformer.h.6.mlp.c_proj.weight: packed
+      matmul[465] transformer.h.7.attn.c_attn.weight: packed
+      matmul[480] /transformer/h.7/attn/Mul_1_output_0: computed-rhs
+      matmul[483] present.7.value: computed-rhs
+      matmul[487] transformer.h.7.attn.c_proj.weight: packed
+      matmul[501] transformer.h.7.mlp.c_fc.weight: packed
+      matmul[513] transformer.h.7.mlp.c_proj.weight: packed
+      matmul[527] transformer.h.8.attn.c_attn.weight: packed
+      matmul[542] /transformer/h.8/attn/Mul_1_output_0: computed-rhs
+      matmul[545] present.8.value: computed-rhs
+      matmul[549] transformer.h.8.attn.c_proj.weight: packed
+      matmul[563] transformer.h.8.mlp.c_fc.weight: packed
+      matmul[575] transformer.h.8.mlp.c_proj.weight: packed
+      matmul[589] transformer.h.9.attn.c_attn.weight: packed
+      matmul[604] /transformer/h.9/attn/Mul_1_output_0: computed-rhs
+      matmul[607] present.9.value: computed-rhs
+      matmul[611] transformer.h.9.attn.c_proj.weight: packed
+      matmul[625] transformer.h.9.mlp.c_fc.weight: packed
+      matmul[637] transformer.h.9.mlp.c_proj.weight: packed
+      matmul[651] transformer.h.10.attn.c_attn.weight: packed
+      matmul[666] /transformer/h.10/attn/Mul_1_output_0: computed-rhs
+      matmul[669] present.10.value: computed-rhs
+      matmul[673] transformer.h.10.attn.c_proj.weight: packed
+      matmul[687] transformer.h.10.mlp.c_fc.weight: packed
+      matmul[699] transformer.h.10.mlp.c_proj.weight: packed
+      matmul[713] transformer.h.11.attn.c_attn.weight: packed
+      matmul[728] /transformer/h.11/attn/Mul_1_output_0: computed-rhs
+      matmul[731] present.11.value: computed-rhs
+      matmul[735] transformer.h.11.attn.c_proj.weight: packed
+      matmul[749] transformer.h.11.mlp.c_fc.weight: packed
+      matmul[761] transformer.h.11.mlp.c_proj.weight: packed
+      matmul[775] transformer.wte.weight_transposed: computed-rhs
+    weight-int8-traffic: packed-prepare=90243072B staged-host-bytes=71680B late-persistent=0B
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-282.3448 max=-223.3006 mean=-248.182929
+  top-5: 2068 (-223.3006), 3049 (-228.6146), 1790 (-228.9631), 2562 (-229.5954), 5801 (-229.6420)
+  argmax: 2068 (logit -223.3006)
+  decode 1: token=640 past=256 seq=1 cache=257 plan=1e4307174b895be7e38a9c5e1c041eb9 plan-cache=0hit/1miss wall=237.01ms slots=1599/1 phase=ready
+    weight-int8: packed-matmuls=48/73 fp32-matmuls=25 packed-payload=90243072B packed-source=339738624B dense-weight=158022256B shared-weight=0B model-weight=497764984B route/pack/upload=0.08ms
+      matmul[25] transformer.h.0.attn.c_attn.weight: packed
+      matmul[46] /transformer/h.0/attn/Mul_1_output_0: computed-rhs
+      matmul[49] present.0.value: computed-rhs
+      matmul[53] transformer.h.0.attn.c_proj.weight: packed
+      matmul[67] transformer.h.0.mlp.c_fc.weight: packed
+      matmul[79] transformer.h.0.mlp.c_proj.weight: packed
+      matmul[93] transformer.h.1.attn.c_attn.weight: packed
+      matmul[108] /transformer/h.1/attn/Mul_1_output_0: computed-rhs
+      matmul[111] present.1.value: computed-rhs
+      matmul[115] transformer.h.1.attn.c_proj.weight: packed
+      matmul[129] transformer.h.1.mlp.c_fc.weight: packed
+      matmul[141] transformer.h.1.mlp.c_proj.weight: packed
+      matmul[155] transformer.h.2.attn.c_attn.weight: packed
+      matmul[170] /transformer/h.2/attn/Mul_1_output_0: computed-rhs
+      matmul[173] present.2.value: computed-rhs
+      matmul[177] transformer.h.2.attn.c_proj.weight: packed
+      matmul[191] transformer.h.2.mlp.c_fc.weight: packed
+      matmul[203] transformer.h.2.mlp.c_proj.weight: packed
+      matmul[217] transformer.h.3.attn.c_attn.weight: packed
+      matmul[232] /transformer/h.3/attn/Mul_1_output_0: computed-rhs
+      matmul[235] present.3.value: computed-rhs
+      matmul[239] transformer.h.3.attn.c_proj.weight: packed
+      matmul[253] transformer.h.3.mlp.c_fc.weight: packed
+      matmul[265] transformer.h.3.mlp.c_proj.weight: packed
+      matmul[279] transformer.h.4.attn.c_attn.weight: packed
+      matmul[294] /transformer/h.4/attn/Mul_1_output_0: computed-rhs
+      matmul[297] present.4.value: computed-rhs
+      matmul[301] transformer.h.4.attn.c_proj.weight: packed
+      matmul[315] transformer.h.4.mlp.c_fc.weight: packed
+      matmul[327] transformer.h.4.mlp.c_proj.weight: packed
+      matmul[341] transformer.h.5.attn.c_attn.weight: packed
+      matmul[356] /transformer/h.5/attn/Mul_1_output_0: computed-rhs
+      matmul[359] present.5.value: computed-rhs
+      matmul[363] transformer.h.5.attn.c_proj.weight: packed
+      matmul[377] transformer.h.5.mlp.c_fc.weight: packed
+      matmul[389] transformer.h.5.mlp.c_proj.weight: packed
+      matmul[403] transformer.h.6.attn.c_attn.weight: packed
+      matmul[418] /transformer/h.6/attn/Mul_1_output_0: computed-rhs
+      matmul[421] present.6.value: computed-rhs
+      matmul[425] transformer.h.6.attn.c_proj.weight: packed
+      matmul[439] transformer.h.6.mlp.c_fc.weight: packed
+      matmul[451] transformer.h.6.mlp.c_proj.weight: packed
+      matmul[465] transformer.h.7.attn.c_attn.weight: packed
+      matmul[480] /transformer/h.7/attn/Mul_1_output_0: computed-rhs
+      matmul[483] present.7.value: computed-rhs
+      matmul[487] transformer.h.7.attn.c_proj.weight: packed
+      matmul[501] transformer.h.7.mlp.c_fc.weight: packed
+      matmul[513] transformer.h.7.mlp.c_proj.weight: packed
+      matmul[527] transformer.h.8.attn.c_attn.weight: packed
+      matmul[542] /transformer/h.8/attn/Mul_1_output_0: computed-rhs
+      matmul[545] present.8.value: computed-rhs
+      matmul[549] transformer.h.8.attn.c_proj.weight: packed
+      matmul[563] transformer.h.8.mlp.c_fc.weight: packed
+      matmul[575] transformer.h.8.mlp.c_proj.weight: packed
+      matmul[589] transformer.h.9.attn.c_attn.weight: packed
+      matmul[604] /transformer/h.9/attn/Mul_1_output_0: computed-rhs
+      matmul[607] present.9.value: computed-rhs
+      matmul[611] transformer.h.9.attn.c_proj.weight: packed
+      matmul[625] transformer.h.9.mlp.c_fc.weight: packed
+      matmul[637] transformer.h.9.mlp.c_proj.weight: packed
+      matmul[651] transformer.h.10.attn.c_attn.weight: packed
+      matmul[666] /transformer/h.10/attn/Mul_1_output_0: computed-rhs
+      matmul[669] present.10.value: computed-rhs
+      matmul[673] transformer.h.10.attn.c_proj.weight: packed
+      matmul[687] transformer.h.10.mlp.c_fc.weight: packed
+      matmul[699] transformer.h.10.mlp.c_proj.weight: packed
+      matmul[713] transformer.h.11.attn.c_attn.weight: packed
+      matmul[728] /transformer/h.11/attn/Mul_1_output_0: computed-rhs
+      matmul[731] present.11.value: computed-rhs
+      matmul[735] transformer.h.11.attn.c_proj.weight: packed
+      matmul[749] transformer.h.11.mlp.c_fc.weight: packed
+      matmul[761] transformer.h.11.mlp.c_proj.weight: packed
+      matmul[775] transformer.wte.weight_transposed: computed-rhs
+    weight-int8-traffic: packed-prepare=90243072B staged-host-bytes=73753B late-persistent=0B
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-53.8147 max=-32.0244 mean=-43.938205
+  top-5: 12 (-32.0244), 618 (-33.1228), 262 (-33.3011), 340 (-33.5824), 290 (-33.6560)
+  argmax: 12 (logit -32.0244)
+  predicted next token: 12 (logit -32.0244)

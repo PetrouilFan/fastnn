@@ -1,0 +1,23 @@
+fastnn-infer inference
+  artifact: target/fn3-74/artifacts/trained-1024.fnn3
+    bytes:  498,075,184  sha256: 570ce35b9ed5b5cab9e970e9b7ff7801ba803c8ab92f864504b86faab44abe97
+    payload crc32: 0x0dede5dc
+  source: none (artifact-only: the artifact carries the graph, 852 weight payloads, the geometry and the envelope)
+  device: requested cpu, resolved cpu, backend cpu (reference implementation)
+  envelope: batch 1..=1 seq 1..=1024 past 0..=1023 total 1..=1024
+  kv: capacity=1024 tokens, 12 layers x 12 KV heads x 64 head_dim = 75,497,472 bytes
+  prompt: 256 token IDs [464, 2068, 7586, 21831, 18045, 625, 262, 16931, … (240 more) …, 4874, 2402, 257, 640, 11, 612, 373, 464]
+  input: token IDs (this alpha has no text tokenizer)
+  session: phase=empty cache=0 kv_bytes=75,497,472
+  execution: cpu on cpu
+  timing: wall-clock around each call; the Vulkan backend records per-dispatch gpu_ns, but Session does not aggregate a device time in this build
+  prefill: seq=256 past=0 cache=256 plan=b6adea245b66cd964008e7232318b593 plan-cache=0hit/1miss wall=4.86s
+    counters: slot_allocations=800 slot_reuses=0 plan_cache=1 phase=ready
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-282.1302 max=-223.2936 mean=-248.081581
+  top-5: 2068 (-223.2936), 3049 (-228.5962), 1790 (-228.9272), 2562 (-229.5917), 5801 (-229.6063)
+  argmax: 2068 (logit -223.2936)
+  decode 1: token=640 past=256 seq=1 cache=257 plan=bc30757f3274b3620aca662cb7624ee2 plan-cache=0hit/1miss wall=335.58ms slots=1599/1 phase=ready
+  logits: shape=[1, 1, 50257] f32 finite=50,257 min=-52.1756 max=-30.3715 mean=-42.285782
+  top-5: 12 (-30.3715), 618 (-31.5692), 262 (-31.6705), 340 (-31.9963), 290 (-32.0398)
+  argmax: 12 (logit -30.3715)
+  predicted next token: 12 (logit -30.3715)

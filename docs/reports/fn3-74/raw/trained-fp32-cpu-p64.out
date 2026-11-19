@@ -1,0 +1,27 @@
+[fn3-74][meta] artifact=target/fn3-74/artifacts/trained-1024.fnn3 bytes=498075184 device=cpu fn3_vk_staged=unset validation_env=unset allow_software_env=unset loadavg="5.29 5.05 4.23"
+[fn3-74][summary] label=trained-fp32-cpu-p64 device=cpu mode=FP32 prompt=64 decode=8 iterations=10 warmups=2 envelope_seq=1024 envelope_past=1023 envelope_total=1024 kv_bytes=75497472
+[fn3-74][perf] ttft_ms p50=1046.110 p95=1088.533 min=1025.950 max=1088.533 n=10
+[fn3-74][perf] prefill_ms p50=1046.108 p95=1088.531 min=1025.949 max=1088.531 n=10
+[fn3-74][perf] decode_ms p50=289.035 p95=313.954 min=269.929 max=327.413 n=80
+[fn3-74][perf] session_ms p50=9.042
+[fn3-74][submits] prefill_mean=0.000 decode_mean=0.000 decode_min=0 decode_max=0
+[fn3-74][submits][csv] 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[fn3-74][readback] note_bytes_mean=0 note_calls_mean=0.00 staging_bytes_mean=0
+[fn3-74][residency] decode_staged_upload_calls_mean=0.00 decode_staging_leases_mean=0.00
+[fn3-74][residency] submissions_mean=0 executions_mean=0 readback_mean=0 input_readbacks_mean=0
+[fn3-74][submits][csv] 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[fn3-74][traffic] prefill_upload_mean=0 prefill_readback_mean=0 decode_upload_mean=0 decode_readback_mean=0
+[fn3-74][traffic] prepare_persistent_mean=0 prepare_packed_mean=0 staged_prepare_mean=0 staged_prefill_mean=0
+[fn3-74][memory] host_peak_rss_bytes=1588453376 host_rss_bytes=1588453376
+[fn3-74][validation] errors=0 warnings=0 loadavg="5.02 5.03 4.26"
+[fn3-74][csv] 8.530348,1088.5327,1088.5309,298.8352
+[fn3-74][csv] 9.00744,1026.5326,1026.5310,297.1809
+[fn3-74][csv] 9.326231,1030.3813,1030.3795,288.2963
+[fn3-74][csv] 8.362428,1063.0671,1063.0655,293.1820
+[fn3-74][csv] 9.25605,1025.9501,1025.9492,278.9343
+[fn3-74][csv] 9.186589999999999,1036.7543,1036.7526,296.8487
+[fn3-74][csv] 8.99091,1056.1184,1056.1170,285.7618
+[fn3-74][csv] 9.04204,1088.2989,1088.2976,292.3463
+[fn3-74][csv] 9.29688,1046.1099,1046.1085,295.1497
+[fn3-74][csv] 8.911719,1037.1883,1037.1872,285.6011
+[fn3-74][json] {"label":"trained-fp32-cpu-p64","device":"cpu","mode":"FP32","prompt":64,"decode":8,"iterations":10,"warmups":2,"envelope_seq":1024,"envelope_past":1023,"envelope_total":1024,"kv_bytes":75497472,"ttft_ms":{"p50":1046.1099,"p95":1088.5327,"min":1025.9501,"max":1088.5327,"n":10},"prefill_ms":{"p50":1046.1085,"p95":1088.5309,"min":1025.9492,"max":1088.5309,"n":10},"decode_ms":{"p50":289.0350,"p95":313.9545,"min":269.9292,"max":327.4129,"n":80},"submissions":{"prefill_mean":0.0000,"decode_mean":0.0000},"traffic":{"prefill_upload_mean":0,"prefill_readback_mean":0,"decode_upload_mean":0,"decode_readback_mean":0,"prepare_persistent_mean":0,"prepare_packed_mean":0,"staged_prefill_mean":0},"host_peak_rss_bytes":1588453376,"host_rss_bytes":1588453376,"validation":{"errors":0,"warnings":0},"memory":null,"ops":[],"loadavg":"5.02 5.03 4.26"}

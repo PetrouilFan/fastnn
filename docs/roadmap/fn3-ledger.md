@@ -16,7 +16,7 @@ release-ready SHA.
 | Work | Release check still owed |
 |---|---|
 | #70 production INT8 | Trained artifact-only FP32 and INT8-weight/FP32-activation runs; CPU and default resident physical Vulkan, staged control; accuracy, coverage, fallback, transfers, submits and peak memory |
-| #74 evaluation | Trained longer-context measurements and evidence-backed platform/device claims |
+| #74 evaluation | Measured at `17eee5f`: trained 64/256/1024-token FP32 and INT8 on CPU and the physical GTX 1080 Ti, staged control, memory, queue and support matrix → `docs/reports/fn3-74-support-matrix.md` |
 | #75 cleanup | Caller-backed legacy classification and retirement, active docs and migration notes |
 | #76 packaging and gates | Actual artifacts, strict source-free clean install, checks and hosted/physical runs on the exact candidate SHA |
 | Vulkan runtime | Persistent transaction is unmerged; discarded-batch and OOM reporting need regression coverage; unknown fence completion can release still-in-use resources and remains deferred, not passed |

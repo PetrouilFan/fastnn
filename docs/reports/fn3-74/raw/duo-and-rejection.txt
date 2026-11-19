@@ -1,0 +1,9 @@
+duo 1023 OOM (pristine 17eee5f worktree)
+nvidia-smi before (used,free): 4272 MiB, 6886 MiB
+nvidia-smi after  (used,free): 4277 MiB, 6881 MiB
+thread 'main' (1754326) panicked at src/main.rs:908:45:
+INT8 prefill: Allocation { bytes: 67108864, detail: "vkAllocateMemory failed: ERROR_OUT_OF_DEVICE_MEMORY (-2): resident: 67108864-byte device-local chunk, memory type 7; live=7121267888 reserved=7419723776 chunks=68" }
+
+rejection (staged INT8)
+error: Session::with_runtime: op matmul (rank-2 f32 matrix product) is unsupported by backend vulkan: INT8 weights need the CPU backend or a resident Vulkan session (the session is host-staged)
+next: `--weight-int8` needs a resident session: drop the flag, or unset FN3_VK_STAGED; a staged Vulkan session is rejected rather than run on the CPU
