@@ -728,8 +728,12 @@ feature sets, the Python lane (384 passed), eleven physical-Vulkan binaries with
 validation 0/0, the artifact-only FP32/INT8 CLI matrix on CPU and the GTX 1080
 Ti, and the strict packaging lane (wheel
 `34951bba41f3d5b53a50aed63a72eeeb6f6532564af3a2962ec40b6a678def11`, two
-source-free replays). Hosted CI is dispatched on `ci.yml` for
-`rewrite/fastnn-3`; the run is recorded below once it completes.
+source-free replays). Hosted CI is dispatched on `ci.yml` for `rewrite/fastnn-3` and resolves to the
+candidate commit; the run's job table is the attachment for that section and its
+`lane summary` job fails unless every required lane reported `passed`.
+One later commit fixes two `str(path)` comparisons in
+`tools/ci/test_packaging_lane.py` to use the resolved spelling (Windows 8.3
+short paths); the packaging unit suite was re-run after it (11 passed).
 
 Deferred and recorded in the release report, not passed: unknown fence
 completion can release resources still in use (owner deferred), concurrent

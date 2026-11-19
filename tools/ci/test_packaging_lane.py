@@ -42,7 +42,9 @@ class PackagingLaneTests(unittest.TestCase):
             report = json.loads((out / "wheel-inference.json").read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "not_run")
             self.assertIs(report["strict"], False)
-            self.assertIn(str(missing), report["reason"])
+            # The lane resolves the path, so compare the resolved form: Windows
+            # temp directories can differ between their 8.3 short and long spellings.
+            self.assertIn(str(missing.resolve()), report["reason"])
 
     def test_unset_model_variable_attempts_no_inference(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,7 +131,7 @@ class PackagingLaneTests(unittest.TestCase):
                 self.assertEqual(lane.main(["--skip-build", "--require-inference", "--out", str(out)]), 1)
             evidence = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(evidence["status"], "failed")
-            self.assertIn(str(missing), evidence["reason"])
+            self.assertIn(str(missing.resolve()), evidence["reason"])
             self.assertIn(lane._pinned_model().sha256, evidence["reason"])
             self.assertEqual(record.call_args.args[1], "failed")
 

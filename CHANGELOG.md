@@ -128,6 +128,9 @@ artifact. The crate is `3.0.0` and the Python wheel is `3.0.0`.
   explicit `--device vulkan` never falls back to CPU.
 - **Linux x86_64 is the only claimed platform.** macOS and Windows are
   exercised for import and packaging only; there is no arm64 build or claim.
+- **The Python wheel is CPU-only.** `[tool.maturin]` builds the default feature
+  set, which does not include `vulkan`; a clean install lists `devices ['cpu']`.
+  Vulkan inference ships in the crate and the `fastnn-infer` CLI.
 - **Quantized execution is not faster.** Packing costs 0.85–1.1 s per session
   on the pinned GPT-2, decode is 2–3% slower on tiny and 7–10% slower on the
   trained model, and long-context prefill is 2.36× slower on Vulkan at 1024
